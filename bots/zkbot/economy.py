@@ -11,8 +11,10 @@ from .models import Task, UnitInfo
 
 class EconomyMixin:
     def economy_step(self) -> None:
+        self.defense_step()
         self.cleanup_tasks()
         self.ensure_mex_tasks()
+        self.ensure_mex_defense_tasks()
         self.ensure_energy_tasks()
         self.ensure_storage_tasks()
         self.ensure_pylon_tasks()
@@ -61,28 +63,50 @@ class EconomyMixin:
     def ensure_mex_tasks(self, limit: int | None = None) -> None:
         if not self.map.spots:
             return
+        self.ensure_strategy()
+        self.update_sector_state()
         if limit is None:
             t = self.frame_time()
             if t < 90:
-                limit = 6
+                limit = 7
             elif t < 240:
-                limit = 10
+                limit = 12
             elif t < 480:
-                limit = 16
+                limit = 20
             else:
                 limit = 32
         bx, bz = self.base_pos
-        free = [s for s in self.map.spots if s.status == "free" and s.task_id is None]
-        if self.combat_count() >= 24:
+        free = [
+            s
+            for s in self.map.spots
+            if s.status == "free"
+            and s.task_id is None
+            and self.blocked_spot_until.get(s.index, -1) < self.frame
+        ]
+        # CircuitAI Hard expands to every safe metal spot almost immediately.
+        # A tiny 1400-elmo comfort circle loses the economy race before the
+        # first fight, so expand by map distance and only pull the radius in
+        # when something is actually attacking the base.
+        t = self.frame_time()
+        if t < 120:
+            safe_radius = 2400.0
+        elif t < 240:
+            safe_radius = 3200.0
+        elif t < 360:
+            safe_radius = 4000.0
+        elif t < 600:
             safe_radius = 5000.0
-        elif self.combat_count() >= 16:
-            safe_radius = 2200.0
         else:
-            safe_radius = 1400.0
+            safe_radius = 6000.0
+        if self.threat_pos is not None and self.frame - self.threat_frame < 300:
+            if self.dist(self.threat_pos, self.base_pos) < 1600.0:
+                safe_radius = min(safe_radius, 2200.0)
+        if self.combat_count() < 4:
+            safe_radius = min(safe_radius, 2600.0)
         free = [s for s in free if math.hypot(s.x - bx, s.z - bz) <= safe_radius]
         pending = sum(1 for t in self.tasks.values() if t.kind == "mex")
         room = max(0, limit - pending)
-        room = min(room, max(4, self.builder_count()) - pending)
+        room = min(room, max(6, self.builder_count() * 2) - pending)
         if room <= 0:
             return
         enemy_base = self.enemy_base or (self.map.width * 0.5, self.map.height * 0.5)
@@ -90,7 +114,28 @@ class EconomyMixin:
         for s in free:
             db = math.hypot(s.x - bx, s.z - bz)
             de = math.hypot(s.x - enemy_base[0], s.z - enemy_base[1])
-            priority = 1450.0 - db * 0.045 + s.income * 20.0
+            # Extractor income compounds; CircuitAI Hard's whole edge is
+            # that it gets all of its safe mexes down first.  Keep extractors
+            # above early turrets and generators, otherwise the opening metal
+            # pool is spent on defense and the expansion stalls at one mex.
+            early = 900.0 if t < 240 else (350.0 if t < 480 else 0.0)
+            priority = 1450.0 + early - db * 0.045 + s.income * 20.0
+            sector = self.sector_of_metal_spot(s.index)
+            if sector is not None:
+                # Sector-aware expansion: a bundle of mexes on defensible
+                # high ground is worth more than a lone spot in a threatened
+                # corridor.  This is the map-general replacement for the old
+                # radius-only expansion rule.
+                if sector.owner == "enemy":
+                    priority -= 500.0
+                if sector.threat > 0:
+                    priority -= min(700.0, sector.threat * 2.5)
+                    if t < 420:
+                        priority -= 250.0
+                if sector.frontier:
+                    priority -= 120.0
+                priority += sector.defense_score * 35.0
+                priority += sector.income * 8.0
             if de < 1100:
                 priority -= 90.0
             scored.append((priority, s))
@@ -101,6 +146,13 @@ class EconomyMixin:
         for priority, s in scored[:room]:
             key = f"mex:{s.index}"
             if key in self.tasks:
+                continue
+            if any(
+                u.name == "staticmex"
+                and u.is_finished
+                and self.dist(u.pos, (s.x, s.z)) < 130.0
+                for u in self.units.values()
+            ):
                 continue
             self.add_task(
                 key,
@@ -115,54 +167,90 @@ class EconomyMixin:
             s.task_id = key
             s.status = "building"
 
-    def energy_anchor(self, kind: str = "energy") -> tuple[float, float]:
-        """Choose a spot next to a metal extractor so overdrive can link."""
-        owned = [
+    def ensure_mex_defense_tasks(self) -> None:
+        """Put a range-appropriate turret on the forward extractors.
+
+        A lone extractor is free metal for the first raider that finds it,
+        but the old version always built a Lotus and built up to nine of
+        them regardless of pressure.  The turret type now follows the range
+        of recently attacking units, and the budget gate keeps static defence
+        from crowding out mobile production.
+        """
+        if self.frame_time() < 150 or self.metal_income() < 8:
+            return
+        mexes = [
             u
             for u in self.units.values()
             if u.name == "staticmex" and u.is_finished
         ]
-        if not owned:
-            fx, fz = self.base_pos
-            # Anchor the first generators on the closest metal spot: that is
-            # where the first extractor will go, so the overdrive grid links
-            # immediately instead of wasting the early energy.
-            spots = sorted(
-                self.map.spots, key=lambda sp: math.hypot(sp.x - fx, sp.z - fz)
-            )
-            if spots and math.hypot(spots[0].x - fx, spots[0].z - fz) < 700.0:
-                spot = spots[min(self.energy_task_seq, min(3, len(spots))) % len(spots)]
-                angle = math.radians((self.energy_task_seq * 137.5 + 20.0) % 360.0)
-                radius = 115.0
-                return (
-                    spot.x + math.cos(angle) * radius,
-                    spot.z + math.sin(angle) * radius,
-                )
-            # Otherwise spread the first few generators around the base.
-            angle = math.radians((self.energy_task_seq * 137.5 + 20.0) % 360.0)
-            radius = 130.0 + 40.0 * (self.energy_task_seq % 3)
-            return fx + math.cos(angle) * radius, fz + math.sin(angle) * radius
-
-        # Prefer mex clusters close to the base: they are safer, their pylon
-        # ranges overlap, and builders do not have to cross the map to link
-        # another generator into the overdrive grid.
-        near_base = [
-            u for u in owned if self.dist(u.pos, self.base_pos) < 1800.0
+        if not mexes:
+            return
+        ex, ez = self.enemy_base or (
+            self.map.width * 0.5,
+            self.map.height * 0.5,
+        )
+        mexes.sort(key=lambda u: math.hypot(u.x - ex, u.z - ez))
+        existing = [
+            u
+            for u in self.units.values()
+            if units.is_defense(u.data) and not u.is_mobile and u.is_finished
         ]
-        if near_base:
-            owned = near_base
+        pending = [t for t in self.tasks.values() if t.kind == "mexdef"]
+        desired = self.desired_defense_share()
+        cap = max(2, min(8, int(2 + desired * 18)))
+        if len(existing) + len(pending) >= cap:
+            return
+        for m in mexes[:6]:
+            if self.frame_time() < 360 and self.dist(m.pos, self.base_pos) > 1500.0:
+                continue
+            if any(self.dist(m.pos, u.pos) < 300 for u in existing):
+                continue
+            if any(t.anchor and self.dist(m.pos, t.anchor) < 300 for t in pending):
+                continue
+            if len(pending) >= 3:
+                break
+            did = self.defense_unit_for(m.pos)
+            if did is None:
+                continue
+            # 2200-metal anti-heavy turrets belong in the base line, not on
+            # every forward extractor.  If enemy artillery is the only thing
+            # that outranges the spot, leave the extractor to the mobile army.
+            if units.name_of(did) == "turretantiheavy":
+                continue
+            cost = units.cost(units.by_id(did))
+            sector = self.sector_for_pos(m.pos)
+            pressure = self.sector_attack_pressure_value(sector) if sector else 0.0
+            urgent = pressure > 0.35 or self.enemy_near(m.pos, 650.0) is not None
+            if not self.defense_budget_ok(cost, urgent=urgent):
+                continue
+            self.log(
+                f"mexdef {units.name_of(did)} at {tuple(round(v) for v in m.pos)} "
+                f"req={self.recent_attacker_range_for(m.pos):.0f} urgent={urgent}"
+            )
+            self.add_task(
+                f"mexdef:{self.frame}:{m.uid}",
+                "mexdef",
+                did,
+                m.x,
+                m.z,
+                1450.0 + min(450.0, pressure * 28.0) if urgent else 1260.0,
+                anchor=m.pos,
+            )
 
-        def score(u: UnitInfo) -> float:
-            density = sum(1 for v in owned if self.dist(u.pos, v.pos) < 450.0)
-            return density * 100.0 - self.dist(u.pos, self.base_pos) * 0.04
+    def energy_anchor(self, kind: str = "energy") -> tuple[float, float]:
+        """Keep new generators inside the base perimeter.
 
-        owned.sort(key=score, reverse=True)
-        top = owned[: min(10, len(owned))]
-        spot = top[self.energy_task_seq % len(top)]
-        radius = 165.0 if kind == "fusion" else 115.0
-        angle = math.radians((self.energy_task_seq * 137.5 + 35.0) % 360.0)
-        x = spot.x + math.cos(angle) * radius
-        z = spot.z + math.sin(angle) * radius
+        The old version chased the nearest extractor cluster.  On a corner
+        start that sent every constructor and every solar across the map,
+        where raiders killed them before they finished.  Generators around
+        the base still link to the first extractors; later pylons can bridge
+        the overdrive grid.
+        """
+        bx, bz = self.base_pos
+        radius = 165.0 if kind == "fusion" else 135.0
+        angle = math.radians((self.energy_task_seq * 137.5 + 20.0) % 360.0)
+        x = bx + math.cos(angle) * radius
+        z = bz + math.sin(angle) * radius
         x = min(max(40.0, x), max(41.0, self.map.width - 40.0))
         z = min(max(40.0, z), max(41.0, self.map.height - 40.0))
         return x, z
@@ -172,16 +260,39 @@ class EconomyMixin:
         einc = self.energy_income()
         ecur = self.energy_current()
         estore = self.effective_storage(self.energy())
-        target = max(8.0, minc * 0.8 + 4.0, self.energy_usage() + 10.0)
+        # Do not overbuild 2-energy solar panels just because the energy bar
+        # is not completely full.  On a 20-metal map 25-30 panels are plenty
+        # for the overdrive grid; every extra pair costs a combat unit.
+        target = max(10.0, minc * 0.7 + 5.0, self.energy_usage() + 8.0)
         deficit = target - einc
         pending = sum(1 for t in self.tasks.values() if t.kind in ("energy", "fusion"))
+        solar_existing = sum(
+            1
+            for u in self.units.values()
+            if u.name == "energysolar" and (u.is_finished or u.is_being_built)
+        )
+        max_solar = int(max(12.0, target * 0.5)) + 4
         max_pending = 3
         usage = self.energy_usage()
         critical = (
             ecur < max(80.0, estore * 0.12)
             or einc < usage
         )
-        energy_priority = 2000.0 if critical else 1000.0
+        # The first couple of generators have to win the task queue.  On a
+        # 350-metal start, assigning every constructor to extractor jobs first
+        # leaves energy at zero for minutes; the factory then cannot replace
+        # losses and the base collapses.  Once two solar exist, mexes take over.
+        if solar_existing < 2:
+            energy_priority = 2600.0
+        elif critical and ecur < max(20.0, estore * 0.05):
+            # Units and construction both consume energy.  With the bar at
+            # zero the factory simply stops producing even when metal is
+            # capped, so an empty bar has to outrank extractor expansion.
+            energy_priority = 2600.0
+        elif critical:
+            energy_priority = 2200.0
+        else:
+            energy_priority = 1000.0
         # Priorities are stored on the task at creation.  Update existing
         # energy jobs so an emergency solar does not keep outranking mexes
         # after the emergency has passed.
@@ -230,11 +341,13 @@ class EconomyMixin:
                 return
         if pending >= max_pending:
             return
+        if solar_existing + pending >= max_solar:
+            return
         did = units.id_of("energysolar")
         if did is None:
             return
         # Create enough jobs to cover the deficit.  Each solar is 2 E/s.
-        count = max(force, min(2, int(math.ceil(max(0.0, deficit) / 2.0))))
+        count = 1
         if pending == 0 and force == 0:
             count = max(count, 1)
         count = min(count, max_pending - pending)
@@ -323,11 +436,12 @@ class EconomyMixin:
             return
         minc = self.metal_income()
         target = 1
-        if minc >= 14 or self.frame_time() > 120:
+        t = self.frame_time()
+        if (minc >= 18 and t > 180) or t > 300:
             target = 2
-        if minc >= 22 or self.frame_time() > 300:
+        if (minc >= 30 and t > 420) or t > 600:
             target = 3
-        if minc >= 28 or self.frame_time() > 420:
+        if (minc >= 45 and t > 720) or t > 900:
             target = 4
         pending = sum(1 for t in self.tasks.values() if t.kind == "factory")
         if len(factories) + pending >= target:
@@ -340,10 +454,17 @@ class EconomyMixin:
         plane_pending = any(
             t.kind == "factory" and t.def_id == plane_def for t in self.tasks.values()
         )
-        # The first extra factory is an air plant.  Air units can chase a
-        # cloaked or cliff-hugging enemy commander that ground units cannot
-        # corner, and they double as scouts.
-        if target >= 2 and plane_def and not has_plane and not plane_pending:
+        # Get a second ground factory first; it turns metal into units much
+        # more efficiently than an early air plant.  Air is useful for
+        # scouting and commander hunting once the economy can support it.
+        want_plane = (
+            target >= 4
+            and minc >= 40
+            and t > 900
+            and not has_plane
+            and not plane_pending
+        )
+        if want_plane:
             did = plane_def
         else:
             did = self.factory_def_id or units.id_of("factorycloak")
@@ -372,14 +493,17 @@ class EconomyMixin:
             int(did),
             anchor[0],
             anchor[1],
-            1480.0,
+            # A second factory is the cheapest way to convert a capped metal
+            # bank into army.  At the old 1480 priority every energy/defence
+            # job outranked it and the bot sat on 500 metal with one factory.
+            2350.0,
             anchor=anchor,
             max_assignees=2,
         )
         self.factory_task_seq += 1
 
     def ensure_strider_tasks(self) -> None:
-        if self.frame_time() < 420 or self.metal_income() < 22:
+        if self.frame_time() < 720 or self.metal_income() < 35:
             return
         did = units.id_of("striderhub")
         if did is None:
@@ -457,7 +581,10 @@ class EconomyMixin:
             if u.name == "staticradar" and (u.is_finished or u.is_being_built)
         ]
         pending = [t for t in self.tasks.values() if t.kind == "radar"]
-        target = 3
+        arty = self.artillery_units() if hasattr(self, "artillery_units") else []
+        # Radar is the target feed for artillery.  Keep a few more towers
+        # when we actually own guns that can use the blips.
+        target = 3 + min(3, len(arty) // 2)
         if len(existing) + len(pending) >= target:
             return
         anchors: list[tuple[float, float]] = [self.base_pos]
@@ -469,12 +596,39 @@ class EconomyMixin:
                 ex, ez = self.enemy_base
                 front = min(ours, key=lambda sp: math.hypot(sp.x - ex, sp.z - ez))
                 anchors.append((front.x, front.z))
+        # With artillery, put a radar near the guns / attack sector so the
+        # next target is already painted before the guns acquire it.
+        if arty:
+            cx = sum(u.x for u in arty) / len(arty)
+            cz = sum(u.z for u in arty) / len(arty)
+            sector = self.sector_for_pos((cx, cz))
+            p = self.best_defense_pos(sector) if sector is not None else None
+            anchors.append(p or (cx, cz))
+            attack = self.best_attack_sector()
+            if attack is not None:
+                p = self.best_defense_pos(attack)
+                if p is not None and self.dist(p, self.base_pos) < 3800.0:
+                    anchors.append(p)
         for a in anchors:
-            if any(self.dist(a, u.pos) < 450 for u in existing):
+            if a is None:
                 continue
-            if any(t.anchor and self.dist(a, t.anchor) < 450 for t in pending):
+            if self.enemy_near(a, 500.0) is not None:
                 continue
-            radar_priority = 1480.0 if not existing else 1300.0
+            # Do not send an unescorted builder to a distant forward point;
+            # radar is useful, but not at the cost of the only constructor.
+            if self.dist(a, self.base_pos) > 1900.0 and not any(
+                self.dist(self.units[uid].pos, a) < 700.0
+                for uid in self.army
+                if uid in self.units
+            ):
+                continue
+            # 2100-elmo radar radius; a tower within ~1900 already covers
+            # this anchor.  Avoid building three redundant towers on one spot.
+            if any(self.dist(a, u.pos) < 1900.0 for u in existing):
+                continue
+            if any(t.anchor and self.dist(a, t.anchor) < 1900.0 for t in pending):
+                continue
+            radar_priority = 1760.0 if arty else (1480.0 if not existing else 1320.0)
             self.add_task(
                 f"radar:{self.frame}:{len(existing)+len(pending)}",
                 "radar",
@@ -542,10 +696,10 @@ class EconomyMixin:
         )
 
     def ensure_front_defense_tasks(self) -> None:
-        if self.frame_time() < 240 or self.combat_count() < 8:
-            return
-        did = units.id_of("turretlaser")
-        if did is None:
+        # Forward turrets are useful once there is an army and an economy to
+        # spare.  Their type follows recent attacker range; the budget gate
+        # prevents a turret line from taking metal from the mobile army.
+        if self.frame_time() < 900 or self.combat_count() < 20:
             return
         mexes = [
             u
@@ -559,65 +713,107 @@ class EconomyMixin:
         existing = [
             u
             for u in self.units.values()
-            if u.name in (
-                "turretlaser",
-                "turretmissile",
-                "turretaalaser",
-                "turretgauss",
-                "turretheavylaser",
-            )
-            and (u.is_finished or u.is_being_built)
+            if units.is_defense(u.data) and not u.is_mobile and u.is_finished
         ]
         pending = [t for t in self.tasks.values() if t.kind == "frontdef"]
+        desired = self.desired_defense_share()
+        cap = max(1, min(5, int(1 + desired * 10)))
+        if len(pending) >= cap:
+            return
         for t in pending:
-            t.priority = 1600.0 if self.enemy_near((t.x, t.z), 650) else 1480.0
-        for m in mexes[:10]:
+            t.priority = 1500.0 if self.enemy_near((t.x, t.z), 650) else 1260.0
+        for m in mexes[:4]:
             if any(self.dist(m.pos, u.pos) < 450 for u in existing):
                 continue
             if any(t.anchor and self.dist(m.pos, t.anchor) < 450 for t in pending):
                 continue
-            if len(pending) >= 8:
+            if len(pending) >= 2:
                 break
+            did = self.defense_unit_for(m.pos)
+            if did is None:
+                continue
+            if units.name_of(did) == "turretantiheavy":
+                continue
+            cost = units.cost(units.by_id(did))
             urgent = self.enemy_near(m.pos, 650) is not None
+            if not self.defense_budget_ok(cost, urgent=urgent):
+                continue
+            self.log(
+                f"frontdef {units.name_of(did)} at {tuple(round(v) for v in m.pos)} "
+                f"req={self.recent_attacker_range_for(m.pos):.0f} urgent={urgent}"
+            )
             self.add_task(
                 f"frontdef:{self.frame}:{m.uid}",
                 "frontdef",
                 did,
                 m.x,
                 m.z,
-                1600.0 if urgent else 1480.0,
+                1520.0 if urgent else 1260.0,
                 anchor=m.pos,
             )
 
     def ensure_defense_tasks(self) -> None:
         threat = self.threat_pos if self.frame - self.threat_frame < 240 else None
-        air_threat = any(u.is_air for u in self.enemies.values())
-        if air_threat:
+        # A distant contact is the mobile army's problem.  Putting a turret
+        # 2 km from home just feeds the builder to the next raider and leaves
+        # the base without a line.
+        if threat is not None and self.dist(threat, self.base_pos) > 1700.0:
+            threat = None
+        # AA is only justified after a real aircraft has been observed.
+        # Commander drones and the radar-tower morph are excluded in
+        # defense.note_air_contact(), so they never trigger this branch.
+        if self.aircraft_seen():
             aa = sum(
                 1
                 for u in self.units.values()
                 if u.name.startswith("turretaa") and (u.is_finished or u.is_being_built)
             )
             if aa == 0 and not any(t.kind == "aa" for t in self.tasks.values()):
-                did = units.id_of("turretaalaser")
-                if did:
-                    self.add_task(
-                        f"aa:{self.frame}",
-                        "aa",
-                        did,
-                        self.base_pos[0],
-                        self.base_pos[1],
-                        1250.0,
-                        anchor=self.base_pos,
-                    )
+                did = self.defense_unit_for(self.base_pos, aa=True)
+                if did is not None:
+                    cost = units.cost(units.by_id(did))
+                    if self.defense_budget_ok(cost, urgent=self.aircraft_seen_recent()):
+                        self.log(f"aa turret {units.name_of(did)} real aircraft seen")
+                        self.add_task(
+                            f"aa:{self.frame}",
+                            "aa",
+                            did,
+                            self.base_pos[0],
+                            self.base_pos[1],
+                            1300.0 if self.aircraft_seen_recent() else 1180.0,
+                            anchor=self.base_pos,
+                        )
         if threat is None and self.frame_time() < 55:
             return
-        defense_cap = 5 if threat else 3
-        if sum(1 for t in self.tasks.values() if t.kind in ("defense", "aa")) >= defense_cap:
+        t = self.frame_time()
+        desired = self.desired_defense_share()
+        # The defence cap now follows the measured pressure instead of a
+        # fixed five-turret quota.
+        defense_cap = max(1, min(8, int(1 + desired * 22)))
+        if t < 120:
+            defense_cap = min(defense_cap, 1)
+        elif t < 240:
+            defense_cap = min(defense_cap, 2)
+        elif t < 420:
+            defense_cap = min(defense_cap, 4)
+        if sum(1 for q in self.tasks.values() if q.kind in ("defense", "aa")) >= defense_cap:
             return
         bx, bz = self.base_pos
         anchors: list[tuple[float, float]] = []
-        if threat:
+        threatened = self.most_threatened_sector()
+        # Only fortify a sector we actually own near home.  Sending
+        # constructors to a far neutral sector just feeds CircuitAI raiders
+        # and leaves the base without turrets.
+        if threatened is not None and (
+            threatened.distance_base >= 2200.0 or threatened.owner != "ours"
+        ):
+            threatened = None
+        sector_anchor = self.best_defense_pos(threatened)
+        if sector_anchor is not None:
+            # Hold the threatened sector's high ground instead of placing
+            # every turret on a fixed ring around the start position.
+            anchors.append(sector_anchor)
+        elif threat:
             # Build the turret on the base side of the threat, not at the
             # threat itself where constructors are easy prey.
             dx, dz = threat[0] - bx, threat[1] - bz
@@ -639,29 +835,71 @@ class EconomyMixin:
                 x = min(max(300.0, x), self.map.width - 300.0)
                 z = min(max(300.0, z), self.map.height - 300.0)
                 anchors.append((x, z))
-        did = None
-        if self.metal_income() >= 22 and self.frame_time() > 360:
-            did = units.id_of("turretgauss")
-        if did is None:
-            did = units.id_of("turretlaser")
-        if did is None:
-            return
+        # With no contact, put one turret on a forward owned sector that is
+        # still close enough to support; distant sectors are left to the army.
+        if not anchors and getattr(self, "sectors", None):
+            owned = [
+                s
+                for s in self.sectors
+                if s.owner == "ours" and 500 < s.distance_base < 2000
+            ]
+            if owned:
+                s = max(owned, key=lambda q: q.distance_enemy)
+                p = self.best_defense_pos(s)
+                if p is not None:
+                    anchors.append(p)
         for a in anchors:
             if any(self.dist(a, p) < 140 for p in self.defense_built_near):
                 continue
             if any(
-                t.anchor and self.dist(a, t.anchor) < 140
-                for t in self.tasks.values()
-                if t.kind == "defense"
+                q.anchor and self.dist(a, q.anchor) < 140
+                for q in self.tasks.values()
+                if q.kind == "defense"
             ):
                 continue
+            did = self.defense_unit_for(a)
+            if did is None:
+                continue
+            if units.name_of(did) == "turretantiheavy":
+                antiheavy = sum(
+                    1
+                    for u in self.units.values()
+                    if u.name == "turretantiheavy" and (u.is_finished or u.is_being_built)
+                ) + sum(
+                    1
+                    for q in self.tasks.values()
+                    if q.kind == "defense" and units.name_of(q.def_id) == "turretantiheavy"
+                )
+                if antiheavy >= 1:
+                    continue
+            cost = units.cost(units.by_id(did))
+            urgent = (
+                sector_anchor is not None
+                and threatened is not None
+            ) or (threat is not None and self.dist(threat, self.base_pos) < 1700.0)
+            if not self.defense_budget_ok(cost, urgent=urgent):
+                continue
+            priority = 1650.0
+            if sector_anchor is not None and threatened is not None:
+                priority = 2500.0
+            elif t < 240:
+                priority = 1900.0
+            elif t < 360 and len(self.defense_built_near) < 3:
+                priority = 2200.0
+            elif threat:
+                priority = 1750.0
+            self.log(
+                f"defense turret {units.name_of(did)} at {tuple(round(v) for v in a)} "
+                f"req={self.recent_attacker_range_for(a):.0f} urgent={urgent} "
+                f"share={self.defense_spend_share():.2f}/{desired:.2f}"
+            )
             self.add_task(
                 f"defense:{self.frame}:{len(self.defense_built_near)}",
                 "defense",
                 did,
                 a[0],
                 a[1],
-                1750.0 if threat else 1650.0,
+                priority,
                 anchor=a,
                 max_assignees=2,
             )
@@ -690,6 +928,8 @@ class EconomyMixin:
             age = self.frame - t.created_frame
             if t.unplaceable and age > 120:
                 self.drop_task(key, "unplaceable")
+            elif t.kind in ("energy", "fusion") and not t.assignees and age > 600:
+                self.drop_task(key, "unassigned")
             elif not t.assignees and age > 6000:
                 # Long walks and a busy constructor queue are normal; dropping
                 # an expansion job after 60 seconds caused constant churn.
@@ -698,15 +938,28 @@ class EconomyMixin:
                 self.drop_task(key, "too old")
 
     def task_completed(self, t: Task) -> bool:
+        # An unassigned energy job cannot be completed by a generator that
+        # happened to finish nearby.  That was creating a stream of "task
+        # done" messages while the solar count and income stayed flat.
+        if t.kind in ("energy", "fusion") and not t.assignees:
+            return False
         if t.kind == "mex" and t.spot_index is not None:
             if self.map.spots[t.spot_index].status == "ours":
                 return True
+            # Also accept an already built extractor at the task position.
+            # This handles the case where the extractor was completed before
+            # the task was created (for example after a status update race).
+            for u in self.units.values():
+                if u.name != "staticmex" or not u.is_finished:
+                    continue
+                if self.dist(u.pos, (t.x, t.z)) < 130.0:
+                    return True
         if not t.placed:
             return False
         if t.kind == "energy":
-            radius = 65.0
+            radius = 40.0
         elif t.kind == "fusion":
-            radius = 150.0
+            radius = 120.0
         elif t.kind == "factory":
             radius = 190.0
         else:
@@ -714,10 +967,14 @@ class EconomyMixin:
         for u in self.units.values():
             if not u.is_finished or u.def_id != t.def_id:
                 continue
-            # Only a building that finished after the task was created can
-            # complete it.  This matters because several energy jobs may be
-            # placed in one cluster.
-            if u.finished_frame < t.created_frame:
+            # Only a building that appeared after the task was created can
+            # complete it.  Using finished_frame here let an old generator
+            # complete a long stream of new energy tasks as soon as its
+            # finish was first observed, so the economy never grew.
+            if t.kind in ("energy", "fusion"):
+                if u.first_seen < t.created_frame:
+                    continue
+            elif u.finished_frame < t.created_frame:
                 continue
             if self.dist(u.pos, (t.x, t.z)) < radius:
                 return True

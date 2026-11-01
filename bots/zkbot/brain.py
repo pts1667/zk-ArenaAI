@@ -9,12 +9,16 @@ from typing import Any
 from . import units
 from .client import Client, QueryError
 from .construction import ConstructionMixin
+from .defense import DefenseMixin
 from .economy import EconomyMixin
 from .intel import IntelMixin
 from .mapdata import MapData
 from .military import MilitaryMixin
 from .models import Task, UnitInfo
 from .production import ProductionMixin
+from .scouting import ScoutingMixin
+from .strategy import StrategyMixin
+from .tactics import TacticsMixin
 
 
 class Brain(
@@ -22,6 +26,10 @@ class Brain(
     EconomyMixin,
     ConstructionMixin,
     ProductionMixin,
+    StrategyMixin,
+    TacticsMixin,
+    DefenseMixin,
+    ScoutingMixin,
     MilitaryMixin,
 ):
     def __init__(self, client: Client, team_id: int, log):
@@ -40,6 +48,10 @@ class Brain(
         self.commander_id: int | None = None
         self.commander: UnitInfo | None = None
         self.base_pos: tuple[float, float] = (0.0, 0.0)
+        self.sectors: list = []
+        self.sector_of_spot: dict[int, int] = {}
+        self.sector_built_frame = -10**9
+        self.sector_update_frame = -10**9
         self.factory_def_id: int | None = None
         self.factory_name = ""
         self.factory_plop_sent = False
@@ -83,6 +95,9 @@ class Brain(
         self.last_query_frame = -10**9
         self.last_assign_frame = -10**9
         self.last_enemy_seen_frame = -10**9
+        self.enemy_peak = 0
+        self.enemy_peak_frame = -10**9
+        self.blocked_spot_until: dict[int, int] = {}
         self.last_attack_frame = -10**9
         self.last_commander_retreat_frame = -10**9
         self.last_threat_frame = -10**9
@@ -97,6 +112,13 @@ class Brain(
         self.stuck_releases = 0
         self.hunt_commander = False
         self.air_counter = 0
+        # Shared raider squad target.  Raiders are much more effective when
+        # two or three arrive together than when they trickle in one by one.
+        self.raid_group_target: tuple[float, float] | None = None
+        self.raid_group_frame = -10**9
+        self.raid_group_size = 0
+        self.last_composition_log_frame = -10**9
+        self.home_guard: set[int] = set()
         self.stride = max(1, int(os.environ.get("ZKBOT_STRIDE", "1")))
         self.observation_setting_sent = False
         self.block_frames = 6
@@ -105,6 +127,24 @@ class Brain(
         self.last_threat_frame = -10**9
         self.last_commander_safe_frame = -10**9
         self.last_feature_frame = -10**9
+        # Defence intelligence state.  Kept on the Brain so it survives all
+        # mixin calls and is cheap to inspect from the economy.
+        self.air_seen_frame = -10**9
+        self.air_seen_defs: set[str] = set()
+        self.recent_attacker_range = 0.0
+        self.recent_attacker_frame = -10**9
+        self.recent_attacker_name = ""
+        self.sector_attack_pressure: dict[int, float] = {}
+        self.sector_last_attack: dict[int, int] = {}
+        self.sector_attacker_range: dict[int, tuple[float, int]] = {}
+        self.sector_artillery_damage: dict[int, float] = {}
+        self.artillery_damage_log: list[tuple[int, float]] = []
+        self._defense_spend_records: list[tuple[int, float, str]] = []
+        self.gremlin_scouts: set[int] = set()
+        self.gremlin_pending = 0
+        self.gremlin_fire_state: set[int] = set()
+        self.gremlin_last_order: dict[int, int] = {}
+        self.last_defense_log_frame = -10**9
         self.last_od_query_frame = -10**9
         self.od_metal = 0.0
         self.od_energy = 0.0
@@ -213,6 +253,8 @@ class Brain(
         if self.first_game_frame:
             self.setup_first_frame(obs)
             self.first_game_frame = False
+        if not self.sectors:
+            self.ensure_strategy()
 
         if not self.observation_setting_sent and self.frame >= 2:
             # Fewer synchronous observations means the engine can run several
@@ -228,6 +270,10 @@ class Brain(
 
         self.read_units(obs)
         self.read_enemies(obs)
+        # Events are delivered with every observation even when processing is
+        # strided; consume them before the stride return so turret damage and
+        # attacker ranges are not lost.
+        self.read_battle_events(obs)
         if self.frame - self.last_spot_frame >= 15:
             self.last_spot_frame = self.frame
             self.update_spot_status()
@@ -249,6 +295,8 @@ class Brain(
         if self.frame - self.last_military_frame >= 15:
             self.last_military_frame = self.frame
             self.military_step()
+            if hasattr(self, "gremlin_step"):
+                self.gremlin_step()
 
         if self.frame - self.last_query_frame >= 60:
             self.last_query_frame = self.frame
@@ -268,6 +316,7 @@ class Brain(
             return
         self.base_pos = self.commander.pos
         self.choose_enemy_base()
+        self.ensure_strategy()
         self.factory_def_id, self.factory_name = self.choose_factory()
         self.log(
             f"start base={tuple(round(v) for v in self.base_pos)} "

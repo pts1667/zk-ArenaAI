@@ -14,29 +14,102 @@ class MilitaryMixin:
         return units.role_of(u.data) in ("raid", "scout")
 
     def army_mode(self) -> str:
-        if self.threat_pos and self.frame - self.threat_frame < 300:
-            return "defend"
         enemy_count = (
             sum(1 for e in self.enemies.values() if self.is_dangerous(e))
             + len(self.radar)
         )
+        combat = self.combat_count()
+        if enemy_count > self.enemy_peak or self.frame - self.enemy_peak_frame > 1800:
+            self.enemy_peak = enemy_count
+            self.enemy_peak_frame = self.frame
+        # Sector threat is the strategic view: a wave moving through a
+        # frontier sector is defended as a group, not chased unit by unit.
+        threatened = self.most_threatened_sector()
         if (
-            enemy_count >= 8
-            and self.combat_count() > 0
-            and enemy_count > self.combat_count() * 1.15
-            and self.enemy_army_pos
-            and self.dist(self.enemy_army_pos, self.base_pos) < 4200
+            threatened is not None
+            and threatened.threat > 0
+            and threatened.distance_base < 1800.0
+            and threatened.owner == "ours"
         ):
+            return "defend"
+        # Defend only a real attack, or enemy units close enough to the base
+        # / turret line.  Previously any distant contact put the whole army in
+        # defend mode forever while CircuitAI freely rebuilt its economy.
+        if self.threat_pos and self.frame - self.threat_frame < 900:
+            near_base = self.dist(self.threat_pos, self.base_pos) < 1800.0
+            if near_base or enemy_count >= max(4, int(combat * 0.60)):
+                return "defend"
+        if enemy_count >= 8 and combat > 0 and enemy_count > combat * 1.15:
             # Do not feed a smaller army into a larger one; mass first.
             return "gather"
-        threshold = 12 + int(self.frame_time() / 300)
-        if self.combat_count() >= threshold:
+        # Attack when we have a decisive mass advantage over the enemy peak,
+        # even if a small raiding party is still visible somewhere.
+        threshold = max(
+            24,
+            int(self.enemy_peak * 0.90) + 2,
+            18 + int(self.frame_time() / 360),
+        )
+        recent_enemy = self.frame - self.last_enemy_seen_frame < 1800
+        # Do not let one small visible raiding party pin a large army at the
+        # rally point forever.  If the contact is clearly smaller than us, go
+        # win the game instead of waiting for the map to become empty.
+        small_contact = enemy_count <= max(6, int(combat * 0.30))
+        if combat >= threshold and (not recent_enemy or small_contact):
             return "attack"
         return "gather"
+
+    def assign_home_guard(self) -> None:
+        """Keep a small defensive force at home while the main army attacks.
+
+        Sector threats are useful, but if every combat unit marches to the
+        enemy base, CircuitAI simply walks into the solar field.  The guard is
+        made of AA / artillery / skirmishers first, then nearby units.
+        """
+        self.home_guard = {uid for uid in self.home_guard if uid in self.army}
+        target = max(2, min(10, len(self.army) // 4))
+        if len(self.home_guard) >= target:
+            return
+        candidates = [
+            UID
+            for UID in self.army
+            if UID not in self.home_guard and UID in self.units
+        ]
+        if not candidates:
+            return
+
+        def priority(uid: int) -> tuple[int, float]:
+            u = self.units[uid]
+            role = units.role_of(u.data)
+            if units.is_aa(u.data) or role == "aa":
+                p = 0
+            elif role == "skirm":
+                p = 1
+            elif role == "riot":
+                p = 2
+            elif role == "assault":
+                p = 3
+            elif role in ("arty", "heavyarty"):
+                # Artillery belongs with the attacking force unless the base
+                # is actually under threat; leaving all of it at home makes
+                # every attack into a turret line fail.
+                p = 4
+            else:
+                p = 6
+            return p, self.dist(u.pos, self.base_pos)
+
+        candidates.sort(key=priority)
+        for uid in candidates[: target - len(self.home_guard)]:
+            self.home_guard.add(uid)
+        if self.home_guard:
+            self.say(
+                "home_guard",
+                f"home guard {len(self.home_guard)}/{len(self.army)}",
+            )
 
     def military_step(self) -> None:
         if not self.army:
             return
+        self.assign_home_guard()
         mode = self.army_mode()
         center = self.army_center()
         enemy_commander = (
@@ -60,14 +133,14 @@ class MilitaryMixin:
             + len(self.radar)
         )
         close_to_base = (
-            focus_pos is not None and self.dist(focus_pos, self.base_pos) < 1800.0
+            focus_pos is not None and self.dist(focus_pos, self.base_pos) < 2000.0
         )
         weak_commander = (
             enemy_commander is not None and enemy_commander.alive_frac < 0.5
         )
         if (
             focus_pos is not None
-            and self.combat_count() >= 12
+            and self.combat_count() >= (7 if close_to_base else 12)
             and (
                 (
                     close_to_base
@@ -76,8 +149,7 @@ class MilitaryMixin:
                         or enemy_count <= 8
                     )
                 )
-                or weak_commander
-                or enemy_count <= self.combat_count() * 1.15
+                or (weak_commander and close_to_base)
             )
         ):
             focus_commander = True
@@ -118,8 +190,26 @@ class MilitaryMixin:
             if e is not None:
                 enemy_army_pos = e.pos
 
-        raiders_sent = 0
-        max_raiders = 2 if mode != "attack" else 0
+        threatened = self.most_threatened_sector()
+        if threatened is not None and (
+            threatened.distance_base >= 2000.0 or threatened.owner != "ours"
+        ):
+            threatened = None
+        defense_anchor = self.best_defense_pos(threatened)
+        if defense_anchor is None:
+            defense_anchor = self.threat_pos
+        attack_sector = self.best_attack_sector()
+        attack_anchor = self.best_defense_pos(attack_sector)
+        home_anchor = defense_anchor or self.base_pos
+        raider_uids = [
+            uid for uid in self.army if uid in self.units and self.is_raider(self.units[uid])
+        ]
+        raider_stage = self.rally_point()
+        if self.enemy_near(raider_stage, 650.0) is not None:
+            raider_stage = self.base_pos
+        raider_group_limit = 3 if self.frame_time() < 420 else 5
+        squad = raider_uids[:raider_group_limit]
+        group_needed = 2 if self.frame_time() < 300 else 3
         # If nothing has been visible for a while, the enemy commander may be
         # cloaked or hiding.  Sweep the enemy half of the map with small groups
         # instead of letting a large army sit on an empty base.
@@ -135,6 +225,46 @@ class MilitaryMixin:
             and enemy_army_pos is None
         )
         search_pts = self.search_points() if search_mode else []
+        group_active = (
+            len(squad) >= group_needed
+            and not focus_commander
+            and not search_mode
+            and mode != "attack"
+            and not (
+                mode == "defend"
+                and self.threat_pos is not None
+                and self.dist(self.threat_pos, self.base_pos) < 2200.0
+            )
+        )
+        raid_target = None
+        ready: list[int] = []
+        if group_active:
+            if (
+                self.raid_group_target is None
+                or self.frame - self.raid_group_frame > 600
+                or self.dist(self.raid_group_target, self.base_pos) < 450.0
+            ):
+                self.raid_group_target = self.choose_raid_group_target(squad)
+                self.raid_group_frame = self.frame
+                if self.raid_group_target is not None:
+                    self.log(
+                        "raid group "
+                        f"{len(squad)} -> {tuple(round(v) for v in self.raid_group_target)}"
+                    )
+            raid_target = self.raid_group_target
+            if raid_target is None:
+                group_active = False
+            else:
+                ready = [
+                    uid
+                    for uid in squad
+                    if uid in self.units
+                    and (
+                        self.dist(self.units[uid].pos, raider_stage) < 900.0
+                        or self.dist(self.units[uid].pos, raid_target) < 1000.0
+                    )
+                ]
+                self.raid_group_size = len(ready)
         for uid in list(self.army):
             u = self.units.get(uid)
             if not u:
@@ -153,13 +283,25 @@ class MilitaryMixin:
                 if target:
                     self.order_move(uid, target)
                 continue
-            # Retreat badly damaged units.
-            if u.alive_frac < 0.30 and self.frame - self.threat_frame < 600:
-                self.retreating.add(uid)
-            elif uid in self.retreating and u.alive_frac > 0.70:
+            # Retreat only when it is actually worth preserving the unit.
+            # Retreat destinations are chosen to avoid enemy contact; a cheap
+            # raider with no clean path home is allowed to trade itself.
+            if uid in self.retreating and u.alive_frac > 0.70:
                 self.retreating.discard(uid)
             if uid in self.retreating:
-                self.order_move(uid, self.retreat_point(u))
+                self.order_move(uid, self.safe_retreat_point(u))
+                continue
+            should_retreat, retreat_dest = self.retreat_decision(u)
+            if should_retreat and retreat_dest is not None:
+                self.retreating.add(uid)
+                self.order_move(uid, retreat_dest)
+                continue
+            self.retreating.discard(uid)
+            if uid in self.home_guard and mode == "attack":
+                # The guard holds the base / threatened owned sector while
+                # the main force is away.  In defend mode everyone converges,
+                # so this branch is intentionally limited to attack/gather.
+                self.order_fight(uid, home_anchor)
                 continue
             if focus_commander and focus_pos is not None:
                 if enemy_commander is not None and enemy_commander.is_finished:
@@ -188,29 +330,54 @@ class MilitaryMixin:
                     idx = (uid + self.frame // 900) % len(search_pts)
                     self.order_fight(uid, search_pts[idx])
                     continue
-            if mode == "defend" and self.threat_pos:
-                self.order_fight(uid, self.threat_pos)
+            if self.is_raider(u):
+                if group_active and raid_target is not None:
+                    if uid in ready:
+                        self.order_fight(uid, raid_target)
+                    else:
+                        self.order_fight(uid, raider_stage)
+                    continue
+                if mode != "attack" and not (
+                    mode == "defend"
+                    and self.threat_pos is not None
+                    and self.dist(self.threat_pos, self.base_pos) < 2200.0
+                ):
+                    self.order_fight(uid, raider_stage)
+                    continue
+            if mode in ("defend", "attack") and not search_mode:
+                local = self.best_local_target(u)
+                if local is not None:
+                    role = units.role_of(u.data)
+                    reach = 520.0
+                    if role in ("arty", "heavyarty"):
+                        reach = max(reach, float(u.data.get("maxWeaponRange") or 0.0) * 0.95)
+                    near = self.dist(u.pos, local.pos) < reach
+                    aa_air = (units.is_aa(u.data) or role == "aa") and local.is_air
+                    if near or aa_air:
+                        # Radar blips have no valid attack target id for most
+                        # weapons; artillery can still shell the location.
+                        if local.uid in self.radar and role in ("arty", "heavyarty"):
+                            self.order_attack_ground(uid, local.pos)
+                        else:
+                            self.order_attack(uid, local.uid)
+                        continue
+            if mode == "defend" and defense_anchor is not None:
+                # If the enemy ball is as large as ours, fall back to the
+                # turret line instead of feeding units into it piecemeal at a
+                # distant extractor.  Smaller raids are met in the field.
+                # Hold a group anchor (high ground / sector centre).  Units
+                # fight what comes to the line instead of each chasing a
+                # different contact and arriving one at a time.
+                self.order_fight(uid, defense_anchor)
                 continue
             if enemy_army_pos and self.dist(u.pos, enemy_army_pos) < 750:
                 self.order_fight(uid, enemy_army_pos)
                 continue
             if mode == "attack":
-                target = self.group_attack_target(center)
+                target = attack_anchor or self.group_attack_target(center)
                 if target:
                     self.order_fight(uid, target)
             else:
-                # Gather at a forward rally point.  A couple of raiders may
-                # poke at exposed enemy extractors, but the rest stay together.
-                if (
-                    self.is_raider(u)
-                    and self.frame_time() > 90
-                    and raiders_sent < max_raiders
-                ):
-                    target = self.pick_raid_target(u)
-                    if target and self.dist(u.pos, target) > 400:
-                        self.order_fight(uid, target)
-                        raiders_sent += 1
-                        continue
                 self.order_fight(uid, self.rally_point())
 
     def army_center(self) -> tuple[float, float] | None:
@@ -230,6 +397,8 @@ class MilitaryMixin:
         return bx + dx / length * 140.0, bz + dz / length * 140.0
 
     def rally_point(self) -> tuple[float, float]:
+        if getattr(self, "sectors", None):
+            return self.frontier_rally()
         bx, bz = self.base_pos
         ex, ez = self.enemy_base or (self.map.width * 0.5, self.map.height * 0.5)
         return bx + (ex - bx) * 0.22, bz + (ez - bz) * 0.22
@@ -354,7 +523,27 @@ class MilitaryMixin:
             if score < best_score:
                 best_score = score
                 best = e.pos
-        return best
+        if best is not None:
+            return best
+        # Nothing is visible yet.  Send the raiders toward the enemy base so
+        # they actually find the expansion/army instead of idling at rally.
+        # This is how CircuitAI uses its opening raiders, and Loss-of-Sight
+        # contacts are exactly what our own FOV/radar need.
+        if self.enemy_base:
+            ex, ez = self.enemy_base
+            # Prefer the enemy-side metal spots.  This sends raiders into the
+            # enemy economy even when no extractor is currently in LOS.
+            side = [
+                s
+                for s in self.map.spots
+                if s.status != "ours"
+                and math.hypot(s.x - ex, s.z - ez) < 1900.0
+            ]
+            if side:
+                side.sort(key=lambda s: math.hypot(s.x - u.x, s.z - u.z))
+                return side[0].x, side[0].z
+            return self.enemy_base
+        return None
 
     def order_fight(self, uid: int, pos: tuple[float, float]) -> None:
         self._order(uid, "fight", pos)
@@ -405,31 +594,46 @@ class MilitaryMixin:
         if not self.commander:
             return
         u = self.commander
+        # Hard-code the safe radius around home, not around "wherever the
+        # commander happens to be".  CircuitAI regularly sends fast shield
+        # raiders around the front to kill constructors and the commander.
+        if self.dist(u.pos, self.base_pos) > 900.0:
+            if self.frame - self.last_commander_retreat_frame < 30:
+                return
+            self.last_commander_retreat_frame = self.frame
+            target = self.retreat_point(u)
+            self.queue(
+                {"type": "move", "unitId": int(u.uid), "pos": [target[0], 0.0, target[1]]}
+            )
+            self.say(
+                "commander_return",
+                f"commander returning home from {tuple(round(v) for v in u.pos)}",
+            )
+            return
         danger = None
         best = 1e18
         for e in self.enemies.values():
             if not self.is_dangerous(e):
                 continue
             d = self.dist(u.pos, e.pos)
-            if d < 650 and d < best:
+            if d < 1000 and d < best:
                 best = d
                 danger = e
-        if danger is not None and best < 550:
+        if danger is not None and best < 900:
             nearby = [
                 e
                 for e in self.enemies.values()
                 if self.is_dangerous(e) and self.dist(u.pos, e.pos) < 900
             ]
             is_enemy_commander = "dyntrainer" in danger.name or "commander" in danger.name
-            if (
-                (not is_enemy_commander and len(nearby) <= 2 and u.alive_frac > 0.55)
+            if best < 450 and (
+                (not is_enemy_commander and len(nearby) <= 1 and u.alive_frac > 0.75)
                 or (
                     is_enemy_commander
-                    and len(nearby) <= 2
-                    and u.alive_frac > 0.6
-                    and u.health > danger.health * 1.15
+                    and len(nearby) <= 1
+                    and u.alive_frac > 0.7
+                    and u.health > danger.health * 1.3
                 )
-                or (is_enemy_commander and danger.alive_frac < 0.35 and u.alive_frac > 0.5)
             ):
                 if self.frame - self.last_commander_retreat_frame < 45:
                     return

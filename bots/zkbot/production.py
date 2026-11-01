@@ -11,12 +11,28 @@ from .models import Task, UnitInfo
 
 class ProductionMixin:
     def desired_builder_count(self) -> int:
+        # CircuitAI's buildpower ratio is about 1.2 buildpower per metal
+        # income, not a fixed number of constructors.  Extra builders are a
+        # liability early: they eat the factory queue and the raiders eat
+        # them.  The commander plus one or two cloakcons is enough while
+        # expanding; add more only once the economy can pay for them.
         t = self.frame_time()
-        if t < 120:
-            return 4
+        minc = self.metal_income()
+        army = len(self.army)
+        # CircuitAI opens with one builder and eight raiders.  Keep the early
+        # factory on combat units until there is a real army, then add the
+        # construction capacity the economy needs.
+        if army < 6:
+            return 3
+        if t < 180:
+            return 3
         if t < 300:
+            return 4
+        if t < 480:
             return 5
-        return 6
+        if minc >= 35:
+            return 6
+        return 5
 
     def next_unit_for_factory(self, factory: UnitInfo) -> int | None:
         fname = factory.name or self.factory_name or "factorycloak"
@@ -71,20 +87,31 @@ class ProductionMixin:
             if did is None:
                 did = units.factory_unit(fname, "fighter" if fname == "factoryplane" else "raid")
             return did
+        if self.should_build_gremlin_scout():
+            did = units.id_of("cloakaa")
+            if did is not None:
+                self.gremlin_pending = int(getattr(self, "gremlin_pending", 0)) + 1
+                self.log("queue gremlin scout for artillery LOS")
+                return did
         force_combat = bool(
             self.threat_pos
             and self.frame - self.threat_frame < 300
             and len(self.army) < 6
         )
         if force_combat:
-            enemy_air_here = any(u.is_air for u in self.enemies.values())
-            if enemy_air_here:
+            air_here = self.enemy_composition().get("air", 0) > 0
+            if air_here and self.aircraft_seen():
                 role = "aa"
             else:
                 role = "riot" if self.production_counter % 2 == 0 else "raid"
             self.production_counter += 1
-        elif builders < self.desired_builder_count() and (
-            len(self.army) >= 2 or builders < 2
+        elif (
+            builders < self.desired_builder_count()
+            and (len(self.army) >= 2 or builders < 2)
+            and not (
+                builders < 2
+                and self.factory_queue.get(factory.uid, 0) > 0
+            )
         ):
             role = "builder"
         elif self.hunt_commander:
@@ -92,8 +119,20 @@ class ProductionMixin:
             self.production_counter += 1
             hunt_roles = ["assault", "riot", "bomb", "skirm", "assault", "snipe", "riot", "skirm"]
             role = hunt_roles[n % len(hunt_roles)]
+        elif (counter := self.counter_role()) is not None:
+            role = counter
+            if self.frame - self.last_composition_log_frame >= 300:
+                self.last_composition_log_frame = self.frame
+                ec = self.enemy_composition()
+                self.log(
+                    "counter "
+                    f"{role} enemy air={ec['air']} raid={ec['raider']} "
+                    f"skirm={ec['skirm']} riot={ec['riot']} "
+                    f"assault={ec['assault']} arty={ec['arty']} "
+                    f"static={ec['static']}"
+                )
         else:
-            enemy_air = any(u.is_air for u in self.enemies.values())
+            enemy_air = self.aircraft_seen()
             enemy_raiders = sum(
                 1 for u in self.enemies.values() if units.role_of(u.data) in ("raid", "scout")
             )
@@ -128,19 +167,32 @@ class ProductionMixin:
             else:
                 n = self.production_counter
                 self.production_counter += 1
-                m = n % 10
-                if m <= 2:
+                # CircuitAI's tier1 army is mostly skirmishers with a solid
+                # riot/assault core.  Bombs (50 HP) and pure raider spam melt
+                # against that, so keep only a small raider screen.
+                m = n % 12
+                if m <= 1:
                     role = "raid"
-                elif m == 3:
-                    role = "bomb"
-                elif m <= 6:
-                    role = "skirm"
-                elif m <= 8:
+                elif m == 2:
                     role = "riot"
-                elif n % 20 == 9:
+                elif m == 3:
+                    role = "skirm"
+                elif m == 4:
                     role = "assault"
+                elif m == 5:
+                    role = "skirm"
+                elif m == 6:
+                    role = "riot"
+                elif m == 7:
+                    role = "skirm"
+                elif m == 8:
+                    role = "assault"
+                elif m == 9:
+                    role = "heavyraid"
+                elif m == 10:
+                    role = "riot"
                 else:
-                    role = "arty"
+                    role = "skirm"
         did = units.factory_unit(fname, role)
         if did is None:
             did = units.factory_unit(fname, "raid")
@@ -244,10 +296,14 @@ class ProductionMixin:
                     t = self.tasks.get(key)
                     if t is not None:
                         building = None
+                        # Energy tasks are created close together around a
+                        # base; a 170-elmo match radius found a generator two
+                        # slots away and declared the new job "occupied".
+                        match_radius = 50.0 if t.kind in ("energy", "fusion") else 170.0
                         for b in self.units.values():
                             if b.def_id != t.def_id:
                                 continue
-                            if self.dist(b.pos, (t.x, t.z)) < 170:
+                            if self.dist(b.pos, (t.x, t.z)) < match_radius:
                                 building = b
                                 break
                         if building is not None and building.is_finished:
@@ -280,8 +336,20 @@ class ProductionMixin:
                             # The command was rejected or the site is unusable.
                             # Re-query next time instead of reusing a bad spot.
                             t.placed = False
+                            t.placement_attempts += 1
                             if t.anchor:
                                 t.x, t.z = t.anchor
+                            if t.placement_attempts >= 3:
+                                if t.kind == "mex" and t.spot_index is not None:
+                                    self.blocked_spot_until[int(t.spot_index)] = (
+                                        self.frame + 1800
+                                    )
+                                self.drop_task(key, "blocked")
+                                self.builder_task.pop(uid, None)
+                                self.builder_idle[uid] = True
+                                self.builder_job_frame.pop(uid, None)
+                                self.stuck_releases += 1
+                                continue
                         t.assignees.discard(uid)
                     self.builder_task.pop(uid, None)
                     self.builder_idle[uid] = True

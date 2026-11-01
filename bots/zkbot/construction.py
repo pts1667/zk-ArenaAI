@@ -65,10 +65,23 @@ class ConstructionMixin:
             if not self.builder_idle.get(u.uid, True) and u.uid in self.builder_task:
                 continue
             if u.uid == self.commander_id:
-                danger = self.enemy_near(self.base_pos, 650)
+                # The commander is the economy engine, not a forward
+                # constructor.  Losing it to a raider at a frontier turret
+                # collapses the whole game.
+                if self.dist(u.pos, self.base_pos) > 900.0:
+                    self.queue(
+                        {
+                            "type": "move",
+                            "unitId": int(u.uid),
+                            "pos": [self.base_pos[0], 0.0, self.base_pos[1]],
+                        }
+                    )
+                    self.log(f"commander returning home from {tuple(round(v) for v in u.pos)}")
+                    continue
+                danger = self.enemy_near(self.base_pos, 900)
                 if danger is not None and danger.is_finished:
                     continue
-            danger = self.enemy_near(u.pos, 550)
+            danger = self.enemy_near(u.pos, 350)
             if danger is not None:
                 self.retreat_builder(u)
                 continue
@@ -85,14 +98,17 @@ class ConstructionMixin:
                 elif t.kind == "seismic":
                     continue
                 elif u.uid == self.commander_id:
-                    limit = 2200.0
+                    # Only base economy / defense jobs.
+                    if t.kind not in ("energy", "fusion", "storage", "radar", "defense"):
+                        continue
+                    limit = 700.0
                 elif t.kind in ("energy", "fusion", "pylon"):
                     limit = 2600.0
                 else:
                     limit = 7000.0
                 if d > limit:
                     continue
-                danger_r = 300.0 if t.kind in ("defense", "frontdef") else 650.0
+                danger_r = 300.0 if t.kind in ("defense", "frontdef", "mexdef") else 500.0
                 if self.enemy_near((t.x, t.z), danger_r) is not None:
                     continue
                 score = t.priority - d * (0.20 if u.uid == self.commander_id else 0.08)
@@ -104,6 +120,40 @@ class ConstructionMixin:
                     break
             if chosen is None:
                 self.builder_fallback(u)
+                continue
+            existing = None
+            # For tightly packed generators this must be the footprint radius,
+            # not 220: base solar rings are 135 apart, so every new energy job
+            # used to be "completed" by the previous solar the moment it was
+            # assigned.  That is what kept energy income flat for minutes.
+            existing_radius = 50.0 if chosen.kind in ("energy", "fusion") else 220.0
+            for b in self.units.values():
+                if b.def_id != chosen.def_id:
+                    continue
+                if self.dist(b.pos, (chosen.x, chosen.z)) < existing_radius:
+                    existing = b
+                    break
+            if existing is not None:
+                if existing.is_finished:
+                    self.finish_task(chosen.key)
+                    continue
+                # Another constructor already started this footprint.  Help
+                # it finish instead of spamming a build order the engine will
+                # reject as occupied.
+                self.queue(
+                    {
+                        "type": "guard",
+                        "unitId": int(u.uid),
+                        "targetId": int(existing.uid),
+                    }
+                )
+                chosen.assignees.add(u.uid)
+                self.builder_task[u.uid] = chosen.key
+                self.builder_idle[u.uid] = False
+                self.builder_job_frame[u.uid] = self.frame
+                self.log(
+                    f"assist existing {u.name}#{u.uid} -> {chosen.key}"
+                )
                 continue
             self.queue(
                 {
@@ -194,6 +244,16 @@ class ConstructionMixin:
                                 break
                     if not linked:
                         return False
+        if t.kind in ("energy", "fusion"):
+            # The same solar/fusion already standing on this anchor is not a
+            # build site.  Previously a task placed on top of an existing
+            # generator was "assisted" forever and the energy income never
+            # actually grew.
+            for u in self.units.values():
+                if u.def_id != t.def_id:
+                    continue
+                if math.hypot(x - u.x, z - u.z) < 82.0:
+                    return False
         # Do not place multiple jobs on the same footprint.
         for other in self.tasks.values():
             if other is t or not other.placed:
@@ -270,6 +330,35 @@ class ConstructionMixin:
             return False
 
         anchor = t.anchor or (t.x, t.z)
+        if t.kind == "mex":
+            # A metal extractor has exactly one legal position: its metal
+            # spot.  Letting closest_build_site search a 900-elmo radius
+            # placed extractors on unrelated spots, after which the task
+            # never completed and the builder re-issued it forever.
+            try:
+                res = self.client.query(
+                    {
+                        "type": "can_build_at",
+                        "unitDefId": int(t.def_id),
+                        "pos": [anchor[0], 0.0, anchor[1]],
+                        "facing": t.facing,
+                    }
+                )
+                self.debug_queries += 1
+                if res and res.get("possible"):
+                    p = res.get("pos") or [anchor[0], 0, anchor[1]]
+                    t.x = float(p[0])
+                    t.z = float(p[2])
+                    t.facing = int(res.get("facing") or 0)
+                    t.placed = True
+                    self.record_placement(t)
+                    return True
+            except QueryError:
+                pass
+            t.placement_attempts += 1
+            if t.placement_attempts >= 5:
+                t.unplaceable = True
+            return False
         if t.kind == "strider":
             radii = (180, 260, 340)
         elif t.kind in ("defense", "frontdef", "aa"):
@@ -367,6 +456,23 @@ class ConstructionMixin:
 
     def builder_fallback(self, u: UnitInfo) -> None:
         if u.name == "staticmissilesilo":
+            return
+        if u.uid == self.commander_id:
+            # Never send the commander wandering after distant wreckage.
+            if self.dist(u.pos, self.base_pos) > 800.0:
+                self.queue(
+                    {
+                        "type": "move",
+                        "unitId": int(u.uid),
+                        "pos": [self.base_pos[0], 0.0, self.base_pos[1]],
+                    }
+                )
+                return
+            factories = self.factory_list()
+            if factories:
+                f = min(factories, key=lambda x: self.dist(u.pos, x.pos))
+                if self.dist(u.pos, f.pos) < 800.0:
+                    self.queue({"type": "guard", "unitId": int(u.uid), "targetId": int(f.uid)})
             return
         # Constructors without a job reclaim nearby wreckage first; debris is a
         # real income stream in Zero-K and CircuitAI reclaims aggressively.

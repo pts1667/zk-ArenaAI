@@ -98,12 +98,16 @@ class IntelMixin:
                 self.builder_job_frame.pop(uid, None)
                 self.log(f"builder #{uid} died; released {key}")
         self.units = new_units
+        self.note_new_units(new_units, old_ids)
         if self.commander_id in self.units:
             self.commander = self.units[self.commander_id]
         for uid in list(self.retreating):
             if uid not in self.units:
                 self.retreating.discard(uid)
         self.army = {uid for uid, u in self.units.items() if u.is_combat and u.is_finished}
+        # Dedicated Gremlin spotters are controlled by scouting.py, not by the
+        # normal army/home-guard logic.
+        self.army -= getattr(self, "gremlin_scouts", set())
         self.raiders = {
             uid
             for uid in self.army
@@ -120,6 +124,7 @@ class IntelMixin:
                 u = self.make_unit(uid, did, raw)
                 enemies[uid] = u
                 self.enemy_memory[uid] = (u, now)
+                self.note_air_contact(u)
                 name = u.name.lower()
                 if "dyntrainer" in name or name.startswith("commander") or "commander" in name:
                     self.enemy_commander_id = uid
@@ -146,6 +151,7 @@ class IntelMixin:
                 u = self.make_unit(uid, did, raw)
                 self.radar[uid] = u
                 self.enemy_memory[uid] = (u, now)
+                self.note_air_contact(u)
                 name = u.name.lower()
                 if "dyntrainer" in name or "commander" in name:
                     hp_raw = raw.get("health")
@@ -176,12 +182,18 @@ class IntelMixin:
         self._feature_cache = obs.get("features") or {}
 
     def update_spot_status(self) -> None:
+        # Rebuild the status from scratch each time.  The old version reset
+        # visible enemy extractors to "free", which made the expander and the
+        # raiders think enemy metal spots were available.
         for s in self.map.spots:
-            if s.status in ("building", "blocked", "enemy"):
-                if s.status in ("blocked", "enemy"):
-                    s.status = "free"
-                continue
             s.status = "free"
+            s.task_id = None
+        for t in self.tasks.values():
+            if t.kind == "mex" and t.spot_index is not None:
+                idx = int(t.spot_index)
+                if 0 <= idx < len(self.map.spots):
+                    self.map.spots[idx].status = "building"
+                    self.map.spots[idx].task_id = t.key
         for u in self.units.values():
             if not u.is_finished or u.name != "staticmex":
                 continue
@@ -212,7 +224,7 @@ class IntelMixin:
             combat = combat or nearest < 1500.0
         if combat:
             self.last_combat_frame = self.frame
-        want = 2 if self.frame - self.last_combat_frame < 1800 else 6
+        want = 2 if self.frame - self.last_combat_frame < 6000 else 6
         if want != self.block_frames:
             self.block_frames = want
             try:
@@ -236,8 +248,13 @@ class IntelMixin:
                 if not u.is_combat:
                     continue
             d = self.dist(u.pos, self.base_pos)
-            near_mex = any(self.dist(u.pos, p) < 420 for p in mexes)
-            if (d < 1300 or near_mex) and d < best:
+            near_mex = any(self.dist(u.pos, p) < 600 for p in mexes)
+            near_army = any(
+                self.dist(u.pos, self.units[uid].pos) < 700
+                for uid in self.army
+                if uid in self.units
+            )
+            if (d < 2600 or near_mex or near_army) and d < best:
                 best = d
                 threat = u.pos
         if threat:
@@ -254,7 +271,7 @@ class IntelMixin:
     def enemy_near(self, pos: tuple[float, float], radius: float) -> UnitInfo | None:
         best = None
         best_d = radius
-        for e in self.enemies.values():
+        for e in list(self.enemies.values()) + list(self.radar.values()):
             if not self.is_dangerous(e):
                 continue
             d = self.dist(pos, e.pos)
@@ -300,10 +317,13 @@ class IntelMixin:
         return sum(1 for u in self.units.values() if u.name == "staticmex" and u.is_finished)
 
     def builder_count(self) -> int:
+        # Count constructors that are still being built too.  Otherwise the
+        # factory keeps seeing a below-target count while two extra builders
+        # are already in its queue.
         return sum(
             1
             for u in self.units.values()
-            if u.is_builder and u.is_mobile and u.is_finished
+            if u.is_builder and u.is_mobile
         )
 
     def factory_list(self) -> list[UnitInfo]:
