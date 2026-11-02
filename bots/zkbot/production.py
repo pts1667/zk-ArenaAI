@@ -53,8 +53,18 @@ class ProductionMixin:
             did = units.id_of("cloakaa")
             if did is not None:
                 self.gremlin_pending = int(getattr(self, "gremlin_pending", 0)) + 1
-                self.log("queue gremlin scout for artillery LOS")
+                self.log("queue gremlin scout for artillery/Phantom LOS")
                 return did
+        # Phantoms: anti-heavy snipers, every other unit while below quota.
+        quota = self.phantom_quota()
+        if quota > 0:
+            have = sum(1 for u in self.units.values() if u.name == "cloaksnipe")
+            if have < quota and self.production_counter % 2 == 0:
+                did = units.id_of("cloaksnipe")
+                if did is not None:
+                    self.production_counter += 1
+                    self.log(f"queue phantom {have + 1}/{quota}")
+                    return did
         # Emergency combat units must not starve expansion completely: an
         # early raider poke used to stop constructor production for minutes
         # (3 builders and 5 extractors from 1:00 to 5:30).

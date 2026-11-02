@@ -45,6 +45,20 @@ class MilitaryMixin:
         if enemy_count > self.enemy_peak or self.frame - self.enemy_peak_frame > 1800:
             self.enemy_peak = enemy_count
             self.enemy_peak_frame = self.frame
+        # Overwhelming strength attacks and leaves raids to the responders
+        # and turrets: with 17x the enemy's power the whole army kept
+        # answering hover raids in defend mode until the game timed out.
+        if "nooverwhelm" not in FLAGS and combat >= 40:
+            peak = getattr(self, "enemy_power_peak", 0.0)
+            cache = getattr(self, "_power_cache", (0, 0.0, 0.0))
+            ours_now = self.army_power()
+            theirs_now = max(self.enemy_army_power(), peak, cache[2])
+            near_threat = 0.0
+            if self.threat_pos is not None and self.frame - self.threat_frame < 900:
+                _o, near_threat = self.local_balance(self.threat_pos, 900.0)
+            if ours_now >= 4.0 * max(1.0, theirs_now) and near_threat < 0.25 * ours_now:
+                self._last_mode = "attack"
+                return "attack"
         # Sector threat is the strategic view: a wave moving through a
         # frontier sector is defended as a group, not chased unit by unit.
         threatened = self.most_threatened_sector()
@@ -287,6 +301,9 @@ class MilitaryMixin:
                 and self.dist(self.threat_pos, self.base_pos) < 2200.0
             )
         )
+        ball = self.enemy_slow_ball()
+        ball_join = self.ball_joiners(raider_uids, ball)
+        squad_raiders = [uid for uid in raider_uids if uid not in ball_join]
         raid_target = None
         ready: list[int] = []
         # uid -> (squad target, member is at the stage/target)
@@ -296,7 +313,7 @@ class MilitaryMixin:
             # (Only the first 3-5 raided before; the rest idled at the rally
             # point while a human held the map with a few Kodachis.)
             group_active = (
-                len(raider_uids) >= group_needed
+                len(squad_raiders) >= group_needed
                 and not focus_commander
                 and not search_mode
                 and mode != "attack"
@@ -307,7 +324,10 @@ class MilitaryMixin:
                 )
             )
             if group_active:
-                self.update_raid_squads(raider_uids, raider_stage, group_needed, raid_orders)
+                if "oldsquads" in FLAGS:
+                    self.update_raid_squads(squad_raiders, raider_stage, group_needed, raid_orders)
+                else:
+                    self.update_raid_squads_v2(squad_raiders, raider_stage, group_needed, raid_orders)
                 group_active = bool(raid_orders)
         elif group_active:
             if (
@@ -341,7 +361,7 @@ class MilitaryMixin:
             uid
             for uid in self.army
             if uid in self.units
-            and not self.is_raider(self.units[uid])
+            and (not self.is_raider(self.units[uid]) or uid in ball_join)
             and units.role_of(self.units[uid].data) != "bomb"
             and not self.units[uid].is_air
             and not (uid in self.home_guard and mode == "attack")
@@ -379,13 +399,37 @@ class MilitaryMixin:
                 and self.dist(t.pos, defense_anchor) < 900.0
             )
             defend_engage = group_power + turret_power >= 0.8 * theirs
+            if ball is not None and self.dist(ball["pos"], defense_anchor) < 1100.0:
+                turret_value = sum(
+                    units.cost(t.data)
+                    for t in self.units.values()
+                    if units.is_defense(t.data)
+                    and not t.is_mobile
+                    and t.is_finished
+                    and self.dist(t.pos, defense_anchor) < 900.0
+                )
+                defend_engage = self.ball_value_of(group) + turret_value >= ball["value"]
         attack_target = None
         mode_eff = mode
+        ball_gather = None
         if mode == "attack":
             attack_target = self.choose_attack_target(group_center, group_power)
             if attack_target is None and "nohunt" not in FLAGS:
                 attack_target = self.hunt_target(group_center, group_power)
             mode_eff = "attack" if attack_target is not None else "gather"
+        if ball is not None and mode in ("attack", "gather") and (
+            self.dist(ball["pos"], group_center) < 2500.0
+            or (attack_target is not None and self.dist(ball["pos"], attack_target) < 1300.0)
+        ):
+            how, where = self.ball_engagement(ball, group, group_center)
+            if how == "commit":
+                attack_target = where
+                mode_eff = "attack"
+            else:
+                ball_gather = where
+                mode_eff = "ballgather"
+        elif ball is None:
+            self._ball_committed = False
         if self.frame - getattr(self, "_last_group_log", -10**9) >= 600:
             self._last_group_log = self.frame
             cache = getattr(self, "_power_cache", (0, 0.0, 0.0))
@@ -398,7 +442,11 @@ class MilitaryMixin:
                 f" comp={self.our_role_counts()}"
             )
         responders = self.assign_responders(mode) if 'noresponse' not in FLAGS else {}
-        if attack_target is not None and self.attack_target_stale(attack_target, group_center):
+        if (
+            attack_target is not None
+            and not (ball is not None and attack_target == ball["pos"])
+            and self.attack_target_stale(attack_target, group_center)
+        ):
             attack_target = self.choose_attack_target(group_center, group_power)
             if attack_target is None and "nohunt" not in FLAGS:
                 attack_target = self.hunt_target(group_center, group_power)
@@ -506,7 +554,7 @@ class MilitaryMixin:
                     self.order_fight(uid, search_pts[idx])
                     br['search'] += 1
                     continue
-            if self.is_raider(u):
+            if self.is_raider(u) and uid not in ball_join:
                 if uid in raid_orders:
                     tgt, at_stage = raid_orders[uid]
                     self.order_fight(uid, tgt if at_stage else raider_stage)
@@ -527,8 +575,21 @@ class MilitaryMixin:
                     self.order_fight(uid, raider_stage)
                     br['raid_stage'] += 1
                     continue
+            if u.name == "cloaksnipe" and "nophantom" not in FLAGS and u.is_finished:
+                if uid not in getattr(self, "phantom_radar_off", set()):
+                    self.note_new_phantom(u)
+                br[self.phantom_order(u, self.phantom_anchor(group_center))] += 1
+                continue
             if 'nokite' not in FLAGS and self.kite(u):
                 br['kite'] += 1
+                continue
+            if mode_eff == "ballgather" and ball_gather is not None and uid in group_set:
+                # Wait out of the ball's reach until the group is big enough.
+                if self.dist(u.pos, ball["pos"]) < ball["range"] + 350.0:
+                    self.order_move(uid, ball_gather)
+                else:
+                    self.order_fight(uid, ball_gather)
+                br['ball_gather'] += 1
                 continue
             if 'nooutrange' not in FLAGS:
                 away = self.outranged_escape(u)

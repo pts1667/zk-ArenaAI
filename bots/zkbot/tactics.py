@@ -183,6 +183,11 @@ class TacticsMixin:
             desired["assault"] += 0.03
         if ec["riot"] >= max(3, int(ground * 0.25)):
             desired["skirm"] += 0.08
+        ball = self.enemy_slow_ball() if hasattr(self, "enemy_slow_ball") else None
+        if ball is not None and "staticmix" not in FLAGS and "noball" not in FLAGS:
+            # Large raider + Ronin groups beat Buoy/Grizzly balls; our own
+            # riots are too slow and outranged there.
+            desired.update(raid=0.40, skirm=0.35, riot=0.07, assault=0.10, arty=0.08)
         for key in list(desired):
             desired[key] = max(0.04, min(0.62, desired[key]))
         if "staticmix" not in FLAGS:
@@ -190,7 +195,9 @@ class TacticsMixin:
             # Skirmishers exist to kite slow units (riots, assaults).  Until
             # some have been seen they are dead weight.
             slow = seen["riot"] + seen["assault"]
-            if slow == 0:
+            if ball is not None:
+                pass
+            elif slow == 0:
                 desired["skirm"] = 0.0
             elif phase < 1.0:
                 desired["skirm"] = max(desired["skirm"], min(0.24, 0.04 * slow))
@@ -327,6 +334,15 @@ class TacticsMixin:
             f *= 0.85
         if units.cost(u.data) >= 600.0:
             f *= 1.1
+        # Against a slow ball a fast unit can leave whenever it likes; stay
+        # in the fight longer.
+        ball = self.enemy_slow_ball() if hasattr(self, "enemy_slow_ball") else None
+        if (
+            ball is not None
+            and float(u.data.get("speed") or 0.0) >= 1.5 * ball["speed"]
+            and self.dist(u.pos, ball["pos"]) < 1200.0
+        ):
+            f *= 0.75
         cache = getattr(self, "_power_cache", (0, 0.0, 0.0))
         if cache[2] > 0 and cache[1] < 0.7 * cache[2]:
             f *= 1.1

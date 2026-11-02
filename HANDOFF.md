@@ -23,8 +23,13 @@ Current status:
 - Weakest matchup historically: CircuitAI amphibious (`amph*`); improved by
   the role overrides but still worth watching.
 
-Next targets: Phantom + Gremlin spotter play and raid-squad merging (designed,
-not implemented; section 9), then CircuitAI:Brutal and other maps.
+Second layer (section 6b.7: raid squads v2, slow-ball engagement, overwhelm
+attack, Phantoms + Gremlin spotters): `h100` **4/4** vs the same code with
+the layer switched off (`h101`) 2/4.
+
+Next targets: radar-blip identification, stage-2 slow-ball play if amph
+balls keep winning, another human game, then CircuitAI:Brutal and other
+maps (section 9).
 
 ## 2. Environment / references
 
@@ -136,8 +141,10 @@ Pitfalls:
 - `client.py` — fast `websockets.sync` + `orjson` client. Important for
   throughput; do not regress to `websocket-client` or JSON.
 - `brain.py` — orchestration, startup, frame loop, state; MRO currently:
-  `IntelMixin, EconomyMixin, ConstructionMixin, ProductionMixin,
-  StrategyMixin, TacticsMixin, DefenseMixin, ScoutingMixin, MilitaryMixin`.
+  `ThreatMixin, IntelMixin, EconomyMixin, ConstructionMixin,
+  ProductionMixin, StrategyMixin, TacticsMixin, DefenseMixin,
+  ScoutingMixin, AirMixin, BurrowMixin, RaidMixin, PhantomMixin,
+  MilitaryMixin`.
 - `models.py` — `UnitInfo`, `Task`.
 - `units.py` — static `units.json` helpers and factory-role tables.
 - `mapdata.py` — map spots, heightmap, water, terrain helpers.
@@ -160,6 +167,11 @@ Pitfalls:
   combat-air budget.
 - `burrow.py` — terraform contested extractor spots ~55 elmos down
   (`CMD_TERRAFORM_INTERNAL=39801`, `CMD_LEVEL=39736`) before building.
+- `raiding.py` — persistent raid squads (join / merge / combine for a
+  prize / route via fresh mexes and builders), slow-ball detection and
+  commit/gather decision.
+- `snipers.py` — Phantom quota, fire-at-radar off, volley targeting,
+  evade/fire/approach/hold orders, Gremlin spotter ring points.
 - `threat.py` — weapon data, `combat_power`, `weapon_range`, `local_balance`.
 - `data/units.json` — 615 unit definitions extracted from the live game;
   `data/weapons.json` — weapon stats (`tools/extract_weapons.py`).
@@ -452,6 +464,21 @@ worse or neutral), `burrowall`, `noburrow`, `nokite`, `noregroup`,
 `oldretreat`, `staticretreat`, `nohold`, `noresponse`, `nohunt`;
 `ZKBOT_SECOND` pins the second factory.
 
+### 6b.7 Second layer (all default on; opt-out flags)
+
+| Change | Flag to disable |
+|---|---|
+| Raid squads v2 (`raiding.py`): persistent squads, raiders join the nearest squad within 1400, squads within 700 merge (≤1.5x cap), cap 4/6/8 by game time, max 3 squads | `oldsquads` |
+| Combine squads for a prize (commander worth 1500, else nearest factory 1000) that no single squad may take: gather 750 out, strike when all gathered or after 30 s | `nocombine` |
+| Route raid squads via a fresh mex (< 2 min) or a mobile con when the detour ≤ min(1.25x, +600) | `noroute` |
+| Slow ball: densest cluster of slow (< 60) enemy combat units, ≥ 800 metal, containing a ≥ 600-cost heavy, ≥ 50% of nearby enemy army value; raiders join the main group; gather out of range and commit when our metal value ≥ 1.0x (0.7x once committed); mix 40% raid / 35% skirm | `noball` (`anyball` drops the heavy requirement) |
+| Overwhelm: army attacks when ≥ 40 combat units, ≥ 4x the enemy's power and no near threat | `nooverwhelm` |
+| Phantoms (`snipers.py`): cloak factory, ≥ 10 min, ≥ 25 income, after ≥ 3 enemy heavies or a ball; fire-at-radar off (38372 [1]); volleys on LOS targets (commander first with ≥ 2), keep enemies outside 335; Gremlin spotters ceil(n/2) circle the target at 330 | `nophantom` |
+
+The broad slow-ball rule (any slow cluster) went 8/12 vs baseline 10/12, so
+it was narrowed to balls with a heavy. Phantoms are rare in practice (only
+built after 3+ enemy heavies); they fired in h98 but are not yet proven.
+
 ## 7. Test evidence from latest changes
 
 ### Hard, session 2026-11-02 (TitanDuel, alternating sides)
@@ -467,7 +494,14 @@ worse or neutral), `burrowall`, `noburrow`, `nokite`, `noregroup`,
 | h91 | 6/6 | role overrides, dynamic retreat, review changes |
 | h92 | 1/4 | lost 3 with 1.4–3x metal: broad `outranged` step-back vs Buoys, heavy bombers vs 1 AA turret |
 | h93 | 3/4 | `outranged` limited to stronger riots/assaults; static AA scales with air threat |
-| h94 | 4/4 | same build (committed) |
+| h94 | 4/4 | same build (committed `ae3c24c`) |
+| h95 | 2/4 | + raid squads v2, broad slow ball |
+| h96 | 4/4 | + overwhelm attack |
+| h97 | 2/4 | Reaper-heavy tank game 25 kills / 405 deaths |
+| h98 | 2/4 | + Phantoms (fired in 2 games) |
+| h99 | 3/4 | baseline: `noball,oldsquads,nooverwhelm,nophantom` |
+| h100 | 4/4 | slow ball narrowed to balls with a heavy (committed) |
+| h101 | 2/4 | baseline flags again (2 losses, one amph) |
 
 Previous session's evidence:
 
@@ -552,6 +586,9 @@ From the previous session (several now addressed):
 
 Current priority order (2026-11-02):
 
+Items 1, 1b (stage 1) and 2 are implemented (section 6b.7); the
+descriptions are kept as design notes.
+
 1. **Raid-squad merging** (agreed with the user): form squads by position;
    merge squads within ~600–800 elmos; combine squads for a valuable target
    (commander, factory, mex cluster) that no single squad may take but their
@@ -568,6 +605,11 @@ Current priority order (2026-11-02):
    the ball's (Ronins weighted up); chase a retreating ball; mix ≈ 40% raid /
    35% skirm, fewer riots. The `combat_power` sqrt(dps·hp) score overrates
    small units here (1.3× power ⇒ only ~13 Glaives vs a Grizzly).
+   **If that is not better, stage 2 (user):** skirmishers, artillery and
+   Phantoms kite the ball first and focus its riot units; raiders wait out
+   of range and go in only when they counter what is left and most of the
+   ball's riot value is dead/heavily damaged. Sumo and Dante (riot/hybrid
+   riot heavies) are never a raider target.
 2. **Phantoms** (cloak factory, from ~10 min once enemy riots/slow assaults
    have been seen; count scaled by those and by metal income):
    fire-at-radar off (`custom cmdId 38372, params [1]`), near max range (700)
@@ -621,3 +663,5 @@ The 2026-11-02 commit contains all bot changes (incl. new `air.py`,
 `report.py`, `demostats.py`, `extract_weapons.py`), the `zk-startup.ps1`
 taskkill fix (a failed kill used to abort multi-game runs) and this file.
 `results/` stays untracked; never commit demos or `results/SKILL.md`.
+Branch `zkbot-hard`: `ae3c24c` (Hard beaten), then the section 6b.7 layer.
+`main` is unchanged (`git merge zkbot-hard` to bring it in).

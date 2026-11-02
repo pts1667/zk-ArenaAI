@@ -9,8 +9,13 @@ for the guns.
 """
 from __future__ import annotations
 
+import math
+import os
+
 from . import units
 from .models import UnitInfo
+
+FLAGS = os.environ.get("ZKBOT_FLAGS", "")
 
 
 class ScoutingMixin:
@@ -32,15 +37,19 @@ class ScoutingMixin:
     def should_build_gremlin_scout(self) -> bool:
         if (self.factory_name or "").lower() != "factorycloak":
             return False
-        if not self.artillery_units():
+        spot = self.phantom_spotters_wanted() if hasattr(self, "phantom_spotters_wanted") else 0
+        if not self.artillery_units() and spot == 0:
             return False
         if self.frame_time() < 180.0 or self.metal_income() < 8.0:
             return False
         # Spotters that keep dying are wasted metal: cap the total.
         built = getattr(self, "gremlin_built", 0)
-        if built >= 2 + int(self.frame_time() / 600):
+        if built >= 2 + int(self.frame_time() / 600) + 2 * spot:
             return False
-        target = 1 if len(self.artillery_units()) < 4 else 2
+        target = 0
+        if self.artillery_units():
+            target = 1 if len(self.artillery_units()) < 4 else 2
+        target = max(target, spot)
         active = len(getattr(self, "gremlin_scouts", set())) + int(
             getattr(self, "gremlin_pending", 0)
         )
@@ -89,10 +98,28 @@ class ScoutingMixin:
         danger_logs = getattr(self, "gremlin_last_danger_log", {})
         self.gremlin_last_danger_log = danger_logs
         target = self._gremlin_target()
+        n_spot = self.phantom_spotters_wanted() if hasattr(self, "phantom_spotters_wanted") else 0
+        spotters = set(sorted(scouts)[:n_spot])
         for uid in scouts:
             u = self.units.get(uid)
             if u is None or not u.is_finished:
                 continue
+            if uid in spotters and "nophantom" not in FLAGS:
+                if uid not in fire_state:
+                    self.queue({"type": "custom", "unitId": int(uid), "cmdId": 45, "params": [0.0]})
+                    fire_state.add(uid)
+                # Phantom spotter: close in front (Gremlin decloak radius is
+                # 125, sight 760), always moving between ring points.
+                danger = self.enemy_near(u.pos, 230.0)
+                if danger is not None:
+                    dx, dz = u.x - danger.x, u.z - danger.z
+                    n = math.hypot(dx, dz) or 1.0
+                    self.order_move(uid, (u.x + dx / n * 260.0, u.z + dz / n * 260.0))
+                    continue
+                p = self.spotter_point(uid)
+                if p is not None:
+                    self.order_move(uid, p)
+                    continue
             # Hold fire permanently.  A Gremlin that shoots a scout or a
             # passing raider immediately loses its cloak and its value as a
             # forward LOS provider.
