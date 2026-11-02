@@ -18,8 +18,10 @@ Current status:
   `h94` **4/4** (metal ratio vs CircuitAI 1.39 / 1.46 / 1.73 at 5 / 10 / 15
   min); 14/18 since the human-review changes (`h91`–`h94`). Before this
   session: 0 wins.
-- Against a human (the user, tank factory): lost in ~7 min (`results/human1`).
-  The review led to the section 6b.4 changes; not re-tested against a human yet.
+- Against a human (the user, tank factory): lost in ~7 min (`results/human1`,
+  review -> section 6b.4) and again in 6.6 min (`results/human2`: 14 Kodachis
+  killed all 36 Glaives, 42 builder flees, never more than 4 mexes; review ->
+  section 6b.9).
 - Weakest matchup historically: CircuitAI amphibious (`amph*`); improved by
   the role overrides but still worth watching.
 
@@ -147,7 +149,7 @@ Pitfalls:
   `ThreatMixin, IntelMixin, EconomyMixin, ConstructionMixin,
   ProductionMixin, StrategyMixin, TacticsMixin, DefenseMixin,
   ScoutingMixin, AirMixin, BurrowMixin, RaidMixin, PhantomMixin,
-  BlipMixin, MilitaryMixin`.
+  BlipMixin, RaiderMicroMixin, MilitaryMixin`.
 - `models.py` — `UnitInfo`, `Task`.
 - `units.py` — static `units.json` helpers and factory-role tables.
 - `mapdata.py` — map spots, heightmap, water, terrain helpers.
@@ -177,6 +179,9 @@ Pitfalls:
   evade/fire/approach/hold orders, Gremlin spotter ring points.
 - `blips.py` — radar blip identification (speed + enemy factories) and
   raid early warning from blip/enemy trajectories.
+- `raidmicro.py` — raider-vs-raider micro: no chasing, evade/detour
+  around enemy raider groups, intercept at the predicted target, pincer,
+  minimum offensive raider squad.
 - `threat.py` — weapon data, `combat_power`, `weapon_range`, `local_balance`.
 - `data/units.json` — 615 unit definitions extracted from the live game;
   `data/weapons.json` — weapon stats (`tools/extract_weapons.py`).
@@ -503,6 +508,28 @@ Flea (`spiderscout`) once many Fleas were seen; the seen-count prior swamps
 the speed evidence when the blip moves slowly. Possible fix: cap the prior,
 or require a higher sustained speed before trusting a fast-unit guess.
 
+### 6b.9 Raider micro after the second human review (default on)
+
+User review: a fleeing raider shoots its chasers, so never chase raiders in
+their range; Glaives are faster than Kodachis (which outrange them), so path
+around them on offence and intercept at their estimated target on defence;
+pincer Kodachis with several raid groups (close range favours Glaives);
+always keep at least one raid squad on offence after ~2 min (the user never
+saw our raiders hit their mexes).
+
+| Change | Flag to disable |
+|---|---|
+| Enemy raider groups (cluster 450, seen in last 5 s, power/range/velocity). A raider near a group it cannot beat locally (1.3x) or that outranges it moves away (fire at will) toward its destination; a stronger raider never follows a group moving away | `oldmicro` |
+| Offence: waypoint around the first enemy raider group within range+350 of the path | `oldmicro` |
+| Defence: hold 120 short of the asset the group is heading for (early-warning trajectory, else our nearest mex/con); collapse once the group is within 380 of the asset and local power ≥ 0.9x | `oldmicro` |
+| Pincer: groups of ≥ 2 near our base/assets; ≥ 4 raiders with ≥ 1.4x power split by side, stage at ±70° at range+260, strike when in place or after 15 s; abort < 3 raiders or < 0.9x | `nopincer` |
+| Offensive reserve: from 2 min, max(squad size, 35%) raiders keep raid squads even in defend mode | `nooffense` |
+
+Results: h104+h106 6/8 vs `oldmicro` h105+h107 7/8 (noise), metal ratio at
+15 min 1.75 / 2.02 vs 1.47 / 1.30. CircuitAI rarely plays tank raiders, so
+the Kodachi case needs the next human game. Pincers rarely trigger vs
+CircuitAI.
+
 ## 7. Test evidence from latest changes
 
 ### Hard, session 2026-11-02 (TitanDuel, alternating sides)
@@ -528,6 +555,11 @@ or require a higher sustained speed before trusting a fast-unit guess.
 | h101 | 2/4 | baseline flags again (2 losses, one amph) |
 | h102 | 4/4 | + radar-blip identification and raid early warning (committed) |
 | h103 | 2/4 | same with `noblipid,noblipwarn,noblipcount` |
+| human2 | loss | vs the user (tank), 6.6 min |
+| h104 | 3/4 | raider micro (section 6b.9); loss = amph ball |
+| h105 | 4/4 | `oldmicro` |
+| h106 | 3/4 | micro + pincer fix (committed); loss vs vehicles |
+| h107 | 3/4 | `oldmicro` |
 
 Previous session's evidence:
 
@@ -691,4 +723,5 @@ The 2026-11-02 commit contains all bot changes (incl. new `air.py`,
 taskkill fix (a failed kill used to abort multi-game runs) and this file.
 `results/` stays untracked; never commit demos or `results/SKILL.md`.
 Branch `zkbot-hard`: `ae3c24c` (Hard beaten), the section 6b.7 layer,
-then radar blips (6b.8); merged into `main` and pushed.
+then radar blips (6b.8) and raider micro (6b.9); `main` is fast-forwarded
+to `zkbot-hard` and pushed.

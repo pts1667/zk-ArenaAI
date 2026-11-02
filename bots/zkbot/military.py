@@ -329,6 +329,14 @@ class MilitaryMixin:
                 else:
                     self.update_raid_squads_v2(squad_raiders, raider_stage, group_needed, raid_orders)
                 group_active = bool(raid_orders)
+            elif not focus_commander and not search_mode and mode != "attack":
+                # At least one squad keeps raiding while the rest defend.
+                offense = self.offensive_raiders(squad_raiders, self.threat_pos)
+                if len(offense) >= group_needed:
+                    if "oldsquads" in FLAGS:
+                        self.update_raid_squads(offense, raider_stage, group_needed, raid_orders)
+                    else:
+                        self.update_raid_squads_v2(offense, raider_stage, group_needed, raid_orders)
         elif group_active:
             if (
                 self.raid_group_target is None
@@ -442,6 +450,10 @@ class MilitaryMixin:
                 f" comp={self.our_role_counts()}"
             )
         responders = self.assign_responders(mode) if 'noresponse' not in FLAGS else {}
+        self.update_pincer([
+            uid for uid in raider_uids
+            if uid not in raid_orders and uid not in ball_join
+        ] if mode != "attack" and not focus_commander else [])
         if (
             attack_target is not None
             and not (ball is not None and attack_target == ball["pos"])
@@ -517,6 +529,24 @@ class MilitaryMixin:
                 self.order_fight(uid, home_anchor)
                 br['guard'] += 1
                 continue
+            if (
+                'oldmicro' not in FLAGS
+                and self.is_raider(u)
+                and uid not in ball_join
+                and not focus_commander
+                and not search_mode
+                and mode != "attack"
+            ):
+                if uid in raid_orders:
+                    tgt, at_stage = raid_orders[uid]
+                    b = self.raider_offense_order(u, tgt if at_stage else raider_stage)
+                else:
+                    b = self.raider_defense_order(
+                        u, responders.get(uid) or (defense_anchor if mode == "defend" else None)
+                    )
+                if b is not None:
+                    br[b] += 1
+                    continue
             if uid in responders and not focus_commander:
                 local = self.best_local_target(u)
                 if local is not None and self.dist(u.pos, local.pos) < weapon_range(u) + 80.0:
