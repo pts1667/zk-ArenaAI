@@ -149,7 +149,7 @@ Pitfalls:
   `ThreatMixin, IntelMixin, EconomyMixin, ConstructionMixin,
   ProductionMixin, StrategyMixin, TacticsMixin, DefenseMixin,
   ScoutingMixin, AirMixin, BurrowMixin, RaidMixin, PhantomMixin,
-  BlipMixin, RaiderMicroMixin, MilitaryMixin`.
+  BlipMixin, RaiderMicroMixin, ResignMixin, MilitaryMixin`.
 - `models.py` — `UnitInfo`, `Task`.
 - `units.py` — static `units.json` helpers and factory-role tables.
 - `mapdata.py` — map spots, heightmap, water, terrain helpers.
@@ -182,6 +182,8 @@ Pitfalls:
 - `raidmicro.py` — raider-vs-raider micro: no chasing, evade/detour
   around enemy raider groups, intercept at the predicted target, pincer,
   minimum offensive raider squad.
+- `resign.py` — resign (self-destruct everything) when extraction income
+  collapses.
 - `threat.py` — weapon data, `combat_power`, `weapon_range`, `local_balance`.
 - `data/units.json` — 615 unit definitions extracted from the live game;
   `data/weapons.json` — weapon stats (`tools/extract_weapons.py`).
@@ -530,6 +532,37 @@ Results: h104+h106 6/8 vs `oldmicro` h105+h107 7/8 (noise), metal ratio at
 the Kodachi case needs the next human game. Pincers rarely trigger vs
 CircuitAI.
 
+### 6b.10 Emergency turrets (opt-in: `emergency`)
+
+User idea: when a builder flees, check whether its refuge has enough
+turrets / nearby raiders to beat the raid; if not, build an emergency turret
+at high priority. Implemented in `construction.emergency_turret_check`
+(called from `retreat_builder`): raider-led threats ≤ 900 power only, refuge
+near base (1800) or one of our extractors, turret at the refuge pulled 100
+toward base, priority 1900, max 2 builders, one pending, ≥ 15 s apart,
+bypasses the defence budget.
+
+- First version (turret toward the danger, any threat, anywhere): h108 1/4,
+  builder flees 232–980 per game (builders walked back into the raid to
+  build it; 19–25 emergency turrets per game).
+- Narrowed version: h110 3/4 + h111 2/4 = 5/8 vs off (h109 4/4 + h112 3/4)
+  7/8, lower metal ratio, so it is **off by default**. CircuitAI does not
+  raid like a human; worth enabling for the next human game.
+
+### 6b.11 Resign (default on; `noresign`)
+
+User rule: resign when metal extraction income (2-min average, reclaim and
+overdrive excluded) is below 30% of its peak 2-min average for 1–2 min.
+Extraction = summed `income` of the spots holding our finished extractors.
+There is no resign command; Zero-K disables its "self-D everything ⇒ resign"
+blocker in 1v1, so the bot self-destructs every unit and then stops issuing
+orders (game ends normally, scored as a loss). Guards: not before 6 min,
+peak ≥ 4 m/s, low for 90 s, and not while our army power ≥ 1.5x the
+enemy estimate (h113 g2 resigned at 67 min with 5x the enemy's army power
+because the map's extractors were gone; the guard was added after that).
+`ZKBOT_RESIGN="share,frames,min_s,min_peak"` overrides for testing (`r1`:
+forced resign at 2:22 ended the game as a CircuitAI win).
+
 ## 7. Test evidence from latest changes
 
 ### Hard, session 2026-11-02 (TitanDuel, alternating sides)
@@ -560,6 +593,12 @@ CircuitAI.
 | h105 | 4/4 | `oldmicro` |
 | h106 | 3/4 | micro + pincer fix (committed); loss vs vehicles |
 | h107 | 3/4 | `oldmicro` |
+| h108 | 1/4 | emergency turrets v1 (dropped) |
+| h109 | 4/4 | `noemergency` |
+| h110 | 3/4 | emergency turrets narrowed |
+| h111 | 2/4 | emergency turrets narrowed |
+| h112 | 3/4 | `noemergency` → emergency made opt-in |
+| h113 | 2/4 | resign on: resigned in both losses (g2 at 5x army power → army guard added) |
 
 Previous session's evidence:
 
@@ -723,5 +762,6 @@ The 2026-11-02 commit contains all bot changes (incl. new `air.py`,
 taskkill fix (a failed kill used to abort multi-game runs) and this file.
 `results/` stays untracked; never commit demos or `results/SKILL.md`.
 Branch `zkbot-hard`: `ae3c24c` (Hard beaten), the section 6b.7 layer,
-then radar blips (6b.8) and raider micro (6b.9); `main` is fast-forwarded
+then radar blips (6b.8), raider micro (6b.9), emergency turrets (opt-in)
+and resign (6b.10–11); `main` is fast-forwarded
 to `zkbot-hard` and pushed.

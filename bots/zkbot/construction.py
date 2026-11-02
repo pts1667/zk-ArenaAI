@@ -58,6 +58,72 @@ class ConstructionMixin:
         self.builder_fallback_until[u.uid] = self.frame + 150
         self.builder_flee_count = getattr(self, "builder_flee_count", 0) + 1
         self.log(f"builder {u.name}#{u.uid} fleeing to {tuple(round(v) for v in target)}")
+        if danger_pos is not None and "emergency" in FLAGS:
+            self.emergency_turret_check(target, danger_pos)
+
+    def emergency_turret_check(
+        self, refuge: tuple[float, float], danger_pos: tuple[float, float]
+    ) -> None:
+        """A builder fled to `refuge` from a raid: if turrets and nearby
+        army/raiders there cannot beat the raiders, queue an emergency turret
+        at the refuge (slightly toward home) at top priority.
+
+        Only raider-led threats an LLT can matter against (<= 900 power),
+        only near our base or extractors, one pending turret at a time.
+        """
+        from .threat import combat_power
+        if self.frame - getattr(self, "_emerg_frame", -10**9) < 450:
+            return
+        theirs = 0.0
+        raid = 0.0
+        for e in self.contacts().values():
+            if not (e.is_mobile and not e.is_air and self.is_dangerous(e)):
+                continue
+            if self.dist(e.pos, danger_pos) >= 500.0:
+                continue
+            p = combat_power(e)
+            theirs += p
+            if units.role_of(e.data) in ("raid", "scout") or units.cost(e.data) < 250.0:
+                raid += p
+        if theirs <= 0.0 or theirs > 900.0 or raid < 0.6 * theirs:
+            return
+        near_home = self.dist(refuge, self.base_pos) < 1800.0 or any(
+            u.name == "staticmex" and u.is_finished and self.dist(u.pos, refuge) < 500.0
+            for u in self.units.values()
+        )
+        if not near_home:
+            return
+        ours, _t = self.local_balance(refuge, 650.0)
+        if ours >= 1.2 * theirs:
+            return
+        for t in self.tasks.values():
+            if t.key.startswith("emergdef:"):
+                if t.anchor is not None and self.dist(t.anchor, refuge) < 450.0:
+                    t.priority = max(t.priority, 1900.0)
+                return
+        if any(
+            units.is_defense(u.data) and not u.is_mobile and self.dist(u.pos, refuge) < 350.0
+            for u in self.units.values()
+        ):
+            return
+        did = self.defense_unit_for(refuge)
+        if did is None or units.cost(units.by_id(did)) > 300.0:
+            did = units.id_of("turretlaser")
+        if did is None:
+            return
+        dx, dz = self.base_pos[0] - refuge[0], self.base_pos[1] - refuge[1]
+        n = math.hypot(dx, dz) or 1.0
+        off = min(100.0, n * 0.5)
+        x, z = refuge[0] + dx / n * off, refuge[1] + dz / n * off
+        self._emerg_frame = self.frame
+        self.log(
+            f"emergency {units.name_of(did)} at ({x:.0f},{z:.0f}): refuge power "
+            f"{ours:.0f} vs raid {theirs:.0f}"
+        )
+        self.add_task(
+            f"emergdef:{self.frame}", "defense", did, x, z, 1900.0,
+            anchor=refuge, max_assignees=2,
+        )
 
     def site_safe_for_builder(self, pos: tuple[float, float], kind: str = "") -> bool:
         """A build site is usable if enemy DPS there is covered by our own."""

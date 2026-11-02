@@ -26,6 +26,7 @@ from .raiding import RaidMixin
 from .snipers import PhantomMixin
 from .blips import BlipMixin
 from .raidmicro import RaiderMicroMixin
+from .resign import ResignMixin
 
 
 class Brain(
@@ -44,6 +45,7 @@ class Brain(
     PhantomMixin,
     BlipMixin,
     RaiderMicroMixin,
+    ResignMixin,
     MilitaryMixin,
 ):
     def __init__(self, client: Client, team_id: int, log):
@@ -295,6 +297,8 @@ class Brain(
                 pass
 
         self.read_units(obs)
+        if self.resign_step():
+            return
         self.read_enemies(obs)
         if self.frame - self.last_spot_frame >= 15:
             self.last_spot_frame = self.frame
