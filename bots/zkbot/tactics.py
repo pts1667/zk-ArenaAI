@@ -7,12 +7,17 @@ raiders trickling in one at a time).
 """
 from __future__ import annotations
 
+import collections
 import math
+import os
 from typing import Any
 
 from . import units
 from .defense import _is_real_aircraft
 from .models import UnitInfo
+from .threat import ground_dps, weapon_range
+
+FLAGS = os.environ.get("ZKBOT_FLAGS", "")
 
 
 class TacticsMixin:
@@ -23,6 +28,19 @@ class TacticsMixin:
         out = dict(self.enemies)
         for uid, u in self.radar.items():
             out.setdefault(uid, u)
+        return out
+
+    def seen_enemy_roles(self) -> "collections.Counter[str]":
+        """Distinct enemy units ever seen, by coarse role."""
+        out: collections.Counter[str] = collections.Counter()
+        for name, ids in getattr(self, "enemy_seen_ids", {}).items():
+            role = units.role_of(units.by_name(name))
+            if role in ("raid", "scout"):
+                out["raider"] += len(ids)
+            elif role in ("assault", "heavy", "antiheavy"):
+                out["assault"] += len(ids)
+            else:
+                out[role] += len(ids)
         return out
 
     def enemy_composition(self) -> dict[str, int]:
@@ -121,20 +139,37 @@ class TacticsMixin:
         ec = self.enemy_composition()
         oc = self.our_role_counts()
         combat = max(1, len(self.army))
-        desired = {
+        late = {
             "raid": 0.24,
             "skirm": 0.24,
             "riot": 0.20,
             "assault": 0.20,
             "arty": 0.08,
         }
+        # Early game is about map control: lots of raiders, a little riot
+        # and assault, no artillery.  (A human review: too few Glaives, and
+        # the bot lost the map to a handful of Kodachis.)  Blend toward the
+        # mid-game mix between 5 and 15 minutes.
+        early = {"raid": 0.62, "skirm": 0.08, "riot": 0.14, "assault": 0.12, "arty": 0.0}
+        phase = min(1.0, max(0.0, (self.frame_time() - 300.0) / 600.0))
+        if "staticmix" in FLAGS:
+            phase = 1.0
+        desired = {k: early[k] * (1.0 - phase) + late[k] * phase for k in late}
         ground = ec["raider"] + ec["skirm"] + ec["riot"] + ec["assault"] + ec["arty"] + ec["other"]
         air_active = ec["air"] >= 1 or self.aircraft_seen()
-        if air_active:
-            desired["aa"] = 0.12
-        if ec["raider"] >= max(3, int(ground * 0.30)):
-            desired["riot"] += 0.10
-            desired["raid"] -= 0.03
+        want_aa = self.desired_aa_count()
+        if air_active and want_aa > 0:
+            desired["aa"] = min(0.12, want_aa / combat)
+        seen = self.seen_enemy_roles()
+        if "staticmix" in FLAGS:
+            if ec["raider"] >= max(3, int(ground * 0.30)):
+                desired["riot"] += 0.10
+                desired["raid"] -= 0.03
+        else:
+            # Riots scale with the raider threat instead of jumping: a few
+            # raiders killing a constructor used to flip production to riots
+            # and hand over the map.
+            desired["riot"] += min(0.14, 0.015 * max(ec["raider"], seen["raider"] // 3))
         if ec["skirm"] >= max(3, int(ground * 0.30)):
             desired["raid"] += 0.12
             desired["riot"] -= 0.04
@@ -149,11 +184,20 @@ class TacticsMixin:
         if ec["riot"] >= max(3, int(ground * 0.25)):
             desired["skirm"] += 0.08
         for key in list(desired):
-            desired[key] = max(0.04, min(0.42, desired[key]))
+            desired[key] = max(0.04, min(0.62, desired[key]))
+        if "staticmix" not in FLAGS:
+            desired["arty"] = desired["arty"] if phase > 0.2 or ec["static"] >= 3 else 0.0
+            # Skirmishers exist to kite slow units (riots, assaults).  Until
+            # some have been seen they are dead weight.
+            slow = seen["riot"] + seen["assault"]
+            if slow == 0:
+                desired["skirm"] = 0.0
+            elif phase < 1.0:
+                desired["skirm"] = max(desired["skirm"], min(0.24, 0.04 * slow))
         # Explicit AA minimum: no ground army can shoot down an air wave.
         # The historical aircraft-seen flag, rather than a commander drone,
         # is what makes this active.
-        if air_active and oc["aa"] < max(1, combat // 6):
+        if air_active and oc["aa"] < self.desired_aa_count():
             return "aa"
         current = {
             "raid": oc["raider"],
@@ -161,6 +205,9 @@ class TacticsMixin:
             "riot": oc["riot"],
             "assault": oc["assault"],
             "arty": oc["arty"],
+            # Missing before: the AA deficit never shrank, so AA won every
+            # tie once aircraft had been seen.
+            "aa": oc["aa"],
         }
         best_role = None
         best_deficit = 0.0
@@ -216,6 +263,13 @@ class TacticsMixin:
             elif own.name == "staticmex" and own.is_finished:
                 if self.dist(own.pos, self.base_pos) < 1800.0:
                     candidates.append(own.pos)
+        # Caretakers sit next to factories and repair what comes home.
+        repair_spots = [
+            own.pos
+            for own in self.units.values()
+            if own.name == "staticcon" and own.is_finished
+        ]
+        candidates.extend(repair_spots)
         ex, ez = self.enemy_base or (self.map.width * 0.5, self.map.height * 0.5)
         dx, dz = bx - ex, bz - ez
         length = math.hypot(dx, dz) or 1.0
@@ -233,6 +287,9 @@ class TacticsMixin:
             enemy_at_dest = self.enemy_near((cx, cz), 320.0)
             conflict = self.path_conflicted(u.pos, (cx, cz))
             score = self.dist(u.pos, (cx, cz))
+            if c in repair_spots:
+                score -= 600.0
+            score += self.threat_at((cx, cz)) * 20.0
             if conflict:
                 score += 1800.0
             if enemy_at_dest is not None:
@@ -241,6 +298,39 @@ class TacticsMixin:
                 best_score = score
                 best = (cx, cz)
         return best or self.retreat_point(u)
+
+    def retreat_threshold(self, u: UnitInfo, cheap: bool) -> float:
+        """HP fraction below which a unit pulls back, from the game state.
+
+        A fixed 30%/45% either fed damaged units into lost fights or walked
+        them out of won ones (lowering it everywhere lost 5 of 7 games): stay
+        while the local fight is clearly won, leave earlier when it is lost,
+        when the unit is expensive, or when our whole army is behind.
+        """
+        base = 0.30 if cheap else 0.45
+        if "staticretreat" in FLAGS:
+            return base
+        ours, theirs = self.local_balance(u.pos, 700.0)
+        ratio = ours / max(1.0, theirs)
+        if ratio >= 3.0:
+            f = 0.55
+        elif ratio >= 1.8:
+            f = 0.75
+        elif ratio < 0.6:
+            f = 1.25
+        else:
+            f = 1.0
+        # Deep in enemy territory the walk home rarely survives; while the
+        # fight there is even or better, keep shooting a little longer.
+        span = self.dist(self.base_pos, self.enemy_base or self.map.center)
+        if span > 0 and ratio >= 1.0 and self.dist(u.pos, self.base_pos) > 0.6 * span:
+            f *= 0.85
+        if units.cost(u.data) >= 600.0:
+            f *= 1.1
+        cache = getattr(self, "_power_cache", (0, 0.0, 0.0))
+        if cache[2] > 0 and cache[1] < 0.7 * cache[2]:
+            f *= 1.1
+        return min(0.60, max(0.12, base * f))
 
     def retreat_decision(
         self, u: UnitInfo
@@ -253,7 +343,9 @@ class TacticsMixin:
         """
         role = units.role_of(u.data)
         cheap = units.cost(u.data) <= 120.0 or role in ("raid", "scout", "bomb")
-        threshold = 0.30 if cheap else 0.45
+        if u.alive_frac >= 0.60:
+            return False, None
+        threshold = self.retreat_threshold(u, cheap)
         if u.alive_frac >= threshold:
             return False, None
         recent_threat = self.frame - self.threat_frame < 600
@@ -278,6 +370,15 @@ class TacticsMixin:
         )
         if own_near >= max(2, int(enemy_near * 1.5)) and u.alive_frac > 0.18:
             return False, None
+        # Running from something faster that already has us in range only
+        # stops our own fire; stand and shoot instead.
+        my_speed = float(u.data.get("speed") or 0.0)
+        for e in self.contacts().values():
+            if not self.is_dangerous(e) or not e.is_mobile:
+                continue
+            e_speed = float(e.data.get("speed") or 0.0)
+            if e_speed > my_speed * 1.15 and self.dist(e.pos, u.pos) < weapon_range(e) + 120.0:
+                return False, None
         destination = self.safe_retreat_point(u)
         conflict = self.path_conflicted(u.pos, destination)
         dangerous_dest = self.enemy_near(destination, 260.0) is not None
@@ -313,6 +414,8 @@ class TacticsMixin:
             else None
         )
         reach = max(900.0, float(u.data.get("maxWeaponRange") or 0.0) + 600.0)
+        my_range = weapon_range(u)
+        my_dps = ground_dps(u) if not is_aa else 0.0
         best = None
         best_score = -1e18
         sources = self.contacts().values() if use_radar else self.enemies.values()
@@ -323,6 +426,11 @@ class TacticsMixin:
             if not e.is_finished and e.uid not in self.radar:
                 continue
             d = self.dist(u.pos, e.pos)
+            # Never trade an army for a reactor: only shoot one from
+            # outside its death blast.
+            blast = units.BLAST_RADIUS.get(e.name)
+            if blast is not None and weapon_range(u) < blast:
+                continue
             if d > reach:
                 continue
             score = -d * 0.25
@@ -353,12 +461,147 @@ class TacticsMixin:
             if threat is not None:
                 td = self.dist(e.pos, threat)
                 score += max(0.0, 350.0 - td * 0.15)
+            if "focus" in FLAGS and (not e.is_air or is_aa):
+                score += self._focus_score(u, e, d, my_range, my_dps)
             if score > best_score:
                 best_score = score
                 best = e
+        if best is not None:
+            focus = self._focus_assigned()
+            focus[best.uid] = focus.get(best.uid, 0.0) + my_dps
         return best
 
-    def choose_raid_group_target(self, ready: list[int]) -> tuple[float, float] | None:
+    def _focus_assigned(self) -> dict[int, float]:
+        """DPS already assigned to each enemy during this decision step."""
+        if getattr(self, "_focus_frame", -1) != self.frame:
+            self._focus_frame = self.frame
+            self._focus = {}
+        return self._focus
+
+    def _focus_score(self, u: UnitInfo, e: UnitInfo, d: float, my_range: float, my_dps: float) -> float:
+        """Shoot what is in range, what dies fastest per damage dealt, and
+        what the rest of the army is already shooting (until overkill)."""
+        s = 0.0
+        if d <= my_range + 20.0:
+            s += 220.0
+        hp = max(30.0, e.health if e.health > 0 else e.max_health)
+        e_dps = ground_dps(e)
+        s += min(260.0, 1800.0 * e_dps / hp)
+        if e.max_health > 0:
+            s += (1.0 - min(1.0, hp / e.max_health)) * 200.0
+        cur = getattr(self, "unit_order", {}).get(u.uid)
+        if cur and cur[0] == "attack" and cur[3] == e.uid:
+            s += 150.0  # keep shooting the current target; retargeting costs time
+        assigned = self._focus_assigned().get(e.uid, 0.0)
+        if assigned > 0.0:
+            # About two seconds of assigned fire kills it: pile on; more
+            # than that is overkill, spread out.
+            if assigned < hp / 2.0:
+                s += 180.0
+            elif assigned > hp:
+                s -= 160.0
+        return s
+
+    # ------------------------------------------------------- raid squads
+
+    def raid_defense_value(self, pos: tuple[float, float], radius: float = 520.0) -> float:
+        """Estimated metal value of what protects a raid target.  Riots and
+        turrets are what raiders lose to, so they count extra."""
+        r2 = radius * radius
+        total = 0.0
+        seen: set[int] = set()
+        for e in self.contacts().values():
+            seen.add(e.uid)
+            if e.is_air or not self.is_dangerous(e):
+                continue
+            if (e.x - pos[0]) ** 2 + (e.z - pos[1]) ** 2 > r2:
+                continue
+            c = units.cost(e.data)
+            role = units.role_of(e.data)
+            if "dyntrainer" in e.name or "commander" in e.name:
+                c = 900.0
+            elif role == "riot" or (not e.is_mobile and units.is_defense(e.data)):
+                c *= 1.5
+            total += c
+        for uid, (e, _f) in getattr(self, "enemy_structures", {}).items():
+            if uid in seen or not units.is_defense(e.data):
+                continue
+            if (e.x - pos[0]) ** 2 + (e.z - pos[1]) ** 2 <= r2:
+                total += units.cost(e.data) * 1.5
+        return total
+
+    def raid_accept_value(self, squad: list[int]) -> float:
+        """Defence a squad will raid through: half its own metal value, so a
+        big group ignores a lone turret or riot while a pair of raiders
+        does not."""
+        value = sum(units.cost(self.units[uid].data) for uid in squad if uid in self.units)
+        return 0.5 * value
+
+    def update_raid_squads(
+        self,
+        raider_uids: list[int],
+        stage: tuple[float, float],
+        group_needed: int,
+        out: dict[int, tuple[tuple[float, float], bool]],
+    ) -> None:
+        t = self.frame_time()
+        size_cap = 4 if t < 300 else (6 if t < 900 else 8)
+        uids = sorted(raider_uids)
+        n = min(3, max(1, math.ceil(len(uids) / size_cap)))
+        while n > 1 and len(uids) // n < group_needed:
+            n -= 1
+        per = math.ceil(len(uids) / n)
+        squads = [uids[i * per:(i + 1) * per] for i in range(n)]
+        state = self.__dict__.setdefault("raid_squad_state", {})
+        black = self.__dict__.setdefault("raid_blacklist", {})
+        for k, until in list(black.items()):
+            if until < self.frame:
+                black.pop(k, None)
+        taken: list[tuple[float, float]] = []
+        for i, squad in enumerate(squads):
+            if len(squad) < group_needed:
+                continue
+            tgt, tframe = state.get(i, (None, -10**9))
+            if tgt is not None:
+                defended = self.raid_defense_value(tgt)
+                accept = self.raid_accept_value(squad)
+                hot = defended > accept
+                if hot:
+                    black[(int(tgt[0] // 250), int(tgt[1] // 250))] = self.frame + 2400
+                    self.log(
+                        f"raid squad {i} target {tuple(round(v) for v in tgt)} too well "
+                        f"defended ({defended:.0f} vs {accept:.0f}); retargeting"
+                    )
+                if (
+                    hot
+                    or self.frame - tframe > 600
+                    or self.dist(tgt, self.base_pos) < 450.0
+                ):
+                    tgt = None
+            if tgt is None:
+                old = state.get(i, (None, 0))[0]
+                tgt = self.choose_raid_group_target(squad, exclude=taken)
+                state[i] = (tgt, self.frame)
+                if tgt is not None and (old is None or self.dist(old, tgt) > 200.0):
+                    self.log(f"raid squad {i} ({len(squad)}) -> {tuple(round(v) for v in tgt)}")
+            if tgt is None:
+                continue
+            taken.append(tgt)
+            for uid in squad:
+                u = self.units.get(uid)
+                if u is None:
+                    continue
+                at = self.dist(u.pos, stage) < 900.0 or self.dist(u.pos, tgt) < 1000.0
+                # Members already on the way keep going: waiting at the stage
+                # for stragglers stalled whole squads.
+                out[uid] = (tgt, at or self.dist(u.pos, tgt) < self.dist(stage, tgt))
+        for i in list(state):
+            if i >= len(squads):
+                state.pop(i, None)
+
+    def choose_raid_group_target(
+        self, ready: list[int], exclude: list[tuple[float, float]] | None = None
+    ) -> tuple[float, float] | None:
         """One target for the whole raider squad, not one per raider."""
         rep = self.units.get(ready[0]) if ready else None
         if rep is None:
@@ -366,9 +609,38 @@ class TacticsMixin:
         # Prefer visible economy near the squad.
         best = None
         best_score = 1e18
-        for e in self.enemies.values():
-            if not e.is_finished:
+        squad_dps = 0.0
+        for uid in ready:
+            su = self.units.get(uid)
+            if su is not None:
+                squad_dps += ground_dps(su)
+        remembered = [e for e, _f in getattr(self, "enemy_structures", {}).values()]
+        seen_ids = set(self.enemies)
+        pool = list(self.enemies.values()) + [e for e in remembered if e.uid not in seen_ids]
+        new = "oldraid" not in FLAGS
+        exclude = exclude or []
+        black = getattr(self, "raid_blacklist", {})
+        accept = self.raid_accept_value(ready)
+        for e in pool:
+            if not e.is_finished and e.uid in seen_ids:
                 continue
+            if new:
+                if (int(e.x // 250), int(e.z // 250)) in black:
+                    continue
+                if any(self.dist(e.pos, q) < 600.0 for q in exclude):
+                    continue
+                # Compare the metal value guarding the target with the
+                # squad's own (big squads may ignore some defence).
+                defended = self.raid_defense_value(e.pos)
+                if defended > accept:
+                    continue
+                guard = defended / 40.0
+            else:
+                # Raiders win by hitting what is not defended: the enemy DPS
+                # covering the target must be small compared with the squad.
+                guard = self.threat_at(e.pos)
+                if guard > squad_dps * 0.6:
+                    continue
             value = 0.0
             if e.name in ("staticmex", "staticcon"):
                 value = 420.0
@@ -380,11 +652,13 @@ class TacticsMixin:
                 value = 300.0
             else:
                 continue
-            score = self.dist(rep.pos, e.pos) - value
+            score = self.dist(rep.pos, e.pos) - value + guard * 8.0
             if score < best_score:
                 best_score = score
                 best = e.pos
         if best is not None:
             return best
         # Nothing visible: head for the enemy-side extractors/base.
+        if new:
+            return self.pick_raid_target(rep, exclude=exclude) or self.enemy_base
         return self.pick_raid_target(rep) or self.enemy_base

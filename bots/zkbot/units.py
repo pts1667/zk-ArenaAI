@@ -97,8 +97,29 @@ def value(d: dict[str, Any] | None) -> float:
     return max(float(d.get("costM") or 0.0), 1.0)
 
 
+# units.json leaves several mainline units as a generic "combat" role, which
+# the composition counters ignore.  Buoy alone dealt most of the damage in
+# our amphibious losses while counting as nothing.
+ROLE_OVERRIDES = {
+    "amphfloater": "skirm",
+    "amphimpulse": "riot",
+    "amphlaunch": "arty",
+    "shieldfelon": "skirm",
+    "spideremp": "raid",
+    "jumpsumo": "assault",
+    "spidercrabe": "assault",
+    "hoverdepthcharge": "riot",
+    "gunshipkrow": "assault",
+}
+
+
 def role_of(d: dict[str, Any] | None) -> str:
-    return (d or {}).get("role") or "other"
+    if not d:
+        return "other"
+    r = d.get("role") or "other"
+    if r == "combat":
+        return ROLE_OVERRIDES.get(d.get("name") or "", r)
+    return r
 
 
 # Factory unit preferences.  These names are from the standard Zero-K factories.
@@ -209,6 +230,11 @@ FACTORY_UNITS = {
         "aa": "amphaa",
     },
 }
+
+
+# Reactors that explode on death: Singularity areaOfEffect 1280 (radius 640,
+# 9500 damage); Fusion's atomic blast is smaller.  Radii include a margin.
+BLAST_RADIUS = {"energysingu": 720.0, "energyfusion": 380.0}
 
 
 def factory_unit(factory_name: str, role: str) -> int | None:

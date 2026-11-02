@@ -112,6 +112,7 @@ class IntelMixin:
             uid
             for uid in self.army
             if units.role_of(self.units[uid].data) in ("raid", "scout")
+            and not self.units[uid].is_air
         }
 
     def read_enemies(self, obs: dict[str, Any]) -> None:
@@ -124,6 +125,10 @@ class IntelMixin:
                 u = self.make_unit(uid, did, raw)
                 enemies[uid] = u
                 self.enemy_memory[uid] = (u, now)
+                seen = getattr(self, "enemy_seen_ids", None)
+                if seen is None:
+                    seen = self.enemy_seen_ids = {}
+                seen.setdefault(u.name, set()).add(uid)
                 self.note_air_contact(u)
                 name = u.name.lower()
                 if "dyntrainer" in name or name.startswith("commander") or "commander" in name:
@@ -132,7 +137,14 @@ class IntelMixin:
                         self.enemy_commander_dead = True
                         self.enemy_commander_id = None
                         self.enemy_memory.pop(uid, None)
-                if u.is_factory or "dyntrainer" in name or "commander" in name:
+                # A roaming commander only stands in for the base until an
+                # enemy factory has been seen.
+                if u.is_factory or (
+                    ("dyntrainer" in name or "commander" in name)
+                    and not getattr(self, "enemy_factory_seen", False)
+                ):
+                    if u.is_factory:
+                        self.enemy_factory_seen = True
                     if self.dist(u.pos, self.base_pos) > 700:
                         if now - self.enemy_base_seen_frame > 300 or self.enemy_base is None:
                             self.enemy_base = u.pos
@@ -161,7 +173,8 @@ class IntelMixin:
                         self.enemy_memory.pop(uid, None)
                     else:
                         self.enemy_commander_id = uid
-                if u.is_factory:
+                if u.is_factory and self.dist(u.pos, self.base_pos) > 700:
+                    self.enemy_factory_seen = True
                     self.enemy_base = u.pos
                     self.enemy_base_seen_frame = now
                 if not u.is_builder:
@@ -201,7 +214,8 @@ class IntelMixin:
                 if self.dist((s.x, s.z), u.pos) <= 105:
                     s.status = "ours"
                     break
-        for u in self.enemies.values():
+        remembered = [e for e, _f in getattr(self, "enemy_structures", {}).values()]
+        for u in list(self.enemies.values()) + remembered:
             if u.name != "staticmex":
                 continue
             for s in self.map.spots:
@@ -224,7 +238,12 @@ class IntelMixin:
             combat = combat or nearest < 1500.0
         if combat:
             self.last_combat_frame = self.frame
-        want = 2 if self.frame - self.last_combat_frame < 6000 else 6
+        # 30 frames per second: 6 frames (0.2 s) is plenty for fights and
+        # 10 for quiet periods.  The old 2-frame combat setting, which was
+        # active most of the game, made the engine wait for Python 15 times
+        # per game second and dominated wall time in long games.
+        fight_n, calm_n = getattr(self, "block_setting", (6, 10))
+        want = fight_n if self.frame - self.last_combat_frame < 6000 else calm_n
         if want != self.block_frames:
             self.block_frames = want
             try:

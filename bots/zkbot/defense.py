@@ -18,6 +18,7 @@ per-cell simulation is necessary for the few dozen sectors involved.
 from __future__ import annotations
 
 import math
+import os
 from typing import Any
 
 from . import units
@@ -46,17 +47,70 @@ def _is_real_aircraft(u: UnitInfo) -> bool:
     return True
 
 
+FLAGS = os.environ.get("ZKBOT_FLAGS", "")
+
 class DefenseMixin:
     # ------------------------------------------------------------ air intel
 
     def aircraft_seen(self) -> bool:
         return getattr(self, "air_seen_frame", -10**9) > -10**8
 
+    def recent_air_damage(self, window: int = 5400) -> float:
+        """Damage real aircraft dealt to us in the last `window` frames."""
+        log = getattr(self, "air_damage_log", [])
+        cutoff = self.frame - window
+        if log and log[0][0] < cutoff - 1800:
+            self.air_damage_log = log = [e for e in log if e[0] >= cutoff]
+        return sum(d for f, d, _p in log if f >= cutoff)
+
+    def air_damage_hotspot(self, window: int = 5400) -> tuple[float, float] | None:
+        """Where aircraft hurt us most recently (300-elmo cells)."""
+        cells: dict[tuple[int, int], float] = {}
+        cutoff = self.frame - window
+        for f, d, p in getattr(self, "air_damage_log", []):
+            if f >= cutoff:
+                k = (int(p[0] // 300), int(p[1] // 300))
+                cells[k] = cells.get(k, 0.0) + d
+        if not cells:
+            return None
+        k = max(cells, key=cells.get)
+        return k[0] * 300.0 + 150.0, k[1] * 300.0 + 150.0
+
+    def desired_static_aa(self) -> int:
+        """Static AA follows the air threat.  One base turret (the old cap)
+        let heavy bombers deal 200k damage in a game we led 3:1 on metal."""
+        if not self.aircraft_seen():
+            return 0
+        if "oldaa" in FLAGS:
+            return 1
+        contacts = getattr(self, "air_contacts", {})
+        recent = sum(1 for f in contacts.values() if self.frame - f <= 5400)
+        want = 1 + recent // 4 + int(self.recent_air_damage() // 2500)
+        return min(6, want)
+
+    def desired_aa_count(self) -> int:
+        """Mobile AA scaled to enemy aircraft seen in the last 3 minutes.
+
+        The old rule (one AA per six units whenever any aircraft had ever
+        been seen) spent 34k metal on Gremlins against a few bombers."""
+        contacts = getattr(self, "air_contacts", {})
+        recent = sum(1 for f in contacts.values() if self.frame - f <= 5400)
+        if recent == 0:
+            return 0
+        share = 6
+        if "oldaa" not in FLAGS and self.recent_air_damage() > 5000:
+            share = 4
+        return min(max(1, len(self.army) // share), math.ceil(recent * 0.8))
+
     def aircraft_seen_recent(self, window: int = 2700) -> bool:
         return self.aircraft_seen() and self.frame - self.air_seen_frame <= window
 
     def note_air_contact(self, u: UnitInfo) -> None:
         if _is_real_aircraft(u):
+            contacts = getattr(self, "air_contacts", None)
+            if contacts is None:
+                contacts = self.air_contacts = {}
+            contacts[u.uid] = self.frame
             self.air_seen_frame = self.frame
             self.air_seen_defs = getattr(self, "air_seen_defs", set())
             self.air_seen_defs.add(u.name)
@@ -139,6 +193,22 @@ class DefenseMixin:
                 paralyzer = bool(event.get("paralyzer") or False)
                 attacker_id = int(event.get("attackerId") or -1)
                 a = self._attacker(attacker_id)
+                if damage > 0.0 and not paralyzer:
+                    led = getattr(self, "dmg_from", None)
+                    if led is None:
+                        led = self.dmg_from = {}
+                    if a is not None:
+                        an = a.name
+                    elif attacker_id <= 0:
+                        an = "?noid"
+                    elif attacker_id in self.units:
+                        an = "?own"
+                    else:
+                        an = "?unseen"
+                    led[an] = led.get(an, 0.0) + damage
+                    if a is not None and a.is_air and _is_real_aircraft(a):
+                        log = self.__dict__.setdefault("air_damage_log", [])
+                        log.append((self.frame, damage, u.pos))
                 sid = self._battle_sector_id(u.pos)
                 turret = units.is_defense(u.data) and not u.is_mobile
                 mex = u.name == "staticmex"
@@ -175,8 +245,34 @@ class DefenseMixin:
                 except Exception:
                     uid = -1
                 u = self.units.get(uid)
-                if u is None:
+                if u is None or u.name == "terraunit":
                     continue
+                lost = getattr(self, "lost_by_name", None)
+                if lost is None:
+                    lost = self.lost_by_name = {}
+                dead = getattr(self, "_dead_counted", None)
+                if dead is None:
+                    dead = self._dead_counted = set()
+                if (uid, u.name) in dead:
+                    self.duplicate_death_events = getattr(self, "duplicate_death_events", 0) + 1
+                    continue
+                dead.add((uid, u.name))
+                self.own_lost_value = getattr(self, "own_lost_value", 0.0) + (
+                    units.cost(u.data) * max(0.05, min(1.0, u.build_progress or 1.0))
+                )
+                lost[u.name] = lost.get(u.name, 0.0) + units.cost(u.data)
+                if u.is_combat and u.is_mobile:
+                    lb = getattr(self, "lost_by_branch", None)
+                    if lb is None:
+                        lb = self.lost_by_branch = {}
+                    bname = getattr(self, "unit_branch", {}).get(uid, "none")
+                    lb[bname] = lb.get(bname, 0.0) + units.cost(u.data)
+                if u.name == "staticmex" and hasattr(self, "note_mex_lost"):
+                    self.note_mex_lost(u)
+                if u.is_builder and u.is_mobile:
+                    self.builder_death_count = getattr(self, "builder_death_count", 0) + 1
+                if hasattr(self, "note_own_death"):
+                    self.note_own_death(u, event)
                 sid = self._battle_sector_id(u.pos)
                 if u.name == "staticmex" or units.is_defense(u.data):
                     self._note_attack_pressure(sid, 2.0)
@@ -352,9 +448,16 @@ class DefenseMixin:
         else:
             req = self.recent_attacker_range_for(pos)
             if req <= 0.0:
-                # No attack range evidence yet: a Picket is a better default
-                # than a Lotus because it already reaches T1 skirmishers.
-                req = 500.0
+                # No attack range evidence yet: mostly Lotus (LLT), the
+                # solid answer to early raiders, with an occasional Picket
+                # for reach.  (Picket-only defence was a human reviewer's
+                # complaint; it loses to the raiders it is meant to stop.)
+                n = int(getattr(self, "_default_turret_n", 0))
+                self._default_turret_n = n + 1
+                if "oldturret" in os.environ.get("ZKBOT_FLAGS", ""):
+                    req = 500.0
+                else:
+                    req = 500.0 if n % 3 == 2 else 400.0
             options = [
                 ("turretlaser", 460.0),
                 ("turretgauss", 560.0),
@@ -372,6 +475,12 @@ class DefenseMixin:
             if name == "turretgauss" and units.by_name("turretmissile") is not None:
                 continue
             if name == "turretaaflak" and units.by_name("turretaalaser") is not None:
+                continue
+            # Out-ranged by artillery: a 2200-metal Desolator is no answer
+            # to it early on; mobile units are.
+            if name == "turretantiheavy" and (
+                self.metal_income() < 60.0 or self.frame_time() < 1200
+            ):
                 continue
             return int(d["id"])
         return None
@@ -414,6 +523,8 @@ class DefenseMixin:
         for uid, u in new_units.items():
             if uid in old_ids:
                 continue
+            if u.is_air and hasattr(self, "note_new_air_unit"):
+                self.note_new_air_unit(u)
             if u.name == "cloakaa" and getattr(self, "gremlin_pending", 0) > 0:
                 # A Gremlin explicitly queued for artillery spotting.
                 if hasattr(self, "note_new_gremlin"):
@@ -423,9 +534,22 @@ class DefenseMixin:
             # the turret-versus-mobile budget.
             if self.frame < 10:
                 continue
-            cost = units.cost(u.data)
-            if cost <= 0.0:
+            # Count every unit once: some (bombers) drop out of the
+            # observation and reappear, which inflated the ledger ~14x.
+            counted = getattr(self, "_spend_counted", None)
+            if counted is None:
+                counted = self._spend_counted = set()
+            if (uid, u.name) in counted:
                 continue
+            counted.add((uid, u.name))
+            cost = units.cost(u.data)
+            if cost <= 0.0 or u.name == "terraunit":
+                continue
+            ledger = getattr(self, "spend_by_name", None)
+            if ledger is None:
+                ledger = {}
+                self.spend_by_name = ledger
+            ledger[u.name] = ledger.get(u.name, 0.0) + cost
             if units.is_defense(u.data):
                 self._record_spending("defense", cost)
             elif u.is_mobile and not u.is_factory and (u.is_combat or u.is_builder):

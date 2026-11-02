@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import os
 from typing import Any
 
 from . import units
@@ -16,23 +17,19 @@ class ProductionMixin:
         # liability early: they eat the factory queue and the raiders eat
         # them.  The commander plus one or two cloakcons is enough while
         # expanding; add more only once the economy can pay for them.
+        # Mobile build power follows metal income (CircuitAI Brutal uses
+        # 1.25 BP per metal/s).  The count includes the commander (12 BP);
+        # each cloakcon adds 5.  Builders are cheap compared with the
+        # extractors they claim, and dead ones must be replaced quickly.
         t = self.frame_time()
         minc = self.metal_income()
-        army = len(self.army)
-        # CircuitAI opens with one builder and eight raiders.  Keep the early
-        # factory on combat units until there is a real army, then add the
-        # construction capacity the economy needs.
-        if army < 6:
-            return 3
-        if t < 180:
-            return 3
-        if t < 300:
-            return 4
-        if t < 480:
-            return 5
-        if minc >= 35:
-            return 6
-        return 5
+        bp_con = 5.0
+        want_cons = math.ceil(max(0.0, 1.25 * minc - 12.0) / bp_con)
+        lo = 2 if t < 60 else 3
+        if len(self.army) < 3 and t > 90:
+            lo = 2
+        cons = max(lo, min(9, want_cons))
+        return 1 + cons
 
     def next_unit_for_factory(self, factory: UnitInfo) -> int | None:
         fname = factory.name or self.factory_name or "factorycloak"
@@ -51,59 +48,47 @@ class ProductionMixin:
                 self.log(f"queue strider {units.name_of(did)}")
             return did
         if fname in ("factoryplane", "factorygunship"):
-            # Air is for hunting and scouting; do not spend its queue on
-            # builders while the ground economy already has constructors.
-            n = self.air_counter
-            self.air_counter += 1
-            if self.hunt_commander:
-                ec = (
-                    self.enemies.get(self.enemy_commander_id)
-                    if self.enemy_commander_id is not None
-                    else None
-                )
-                low = ec is not None and ec.alive_frac < 0.5
-                if fname == "factoryplane":
-                    if low:
-                        roles = ["assault", "heavy", "bomb", "assault", "heavy", "bomb"]
-                    else:
-                        roles = [
-                            "scout",
-                            "bomb",
-                            "heavyfighter",
-                            "heavy",
-                            "bomb",
-                            "assault",
-                            "bomb",
-                        ]
-                else:
-                    roles = ["emp", "assault", "skirm", "emp", "raid"]
-            else:
-                if fname == "factoryplane":
-                    roles = ["fighter", "scout", "bomb", "heavyfighter", "bomb"]
-                else:
-                    roles = ["raid", "skirm", "aa"]
-            role = roles[n % len(roles)]
-            did = units.factory_unit(fname, role)
-            if did is None:
-                did = units.factory_unit(fname, "fighter" if fname == "factoryplane" else "raid")
-            return did
+            return self.next_air_unit(factory)
         if self.should_build_gremlin_scout():
             did = units.id_of("cloakaa")
             if did is not None:
                 self.gremlin_pending = int(getattr(self, "gremlin_pending", 0)) + 1
                 self.log("queue gremlin scout for artillery LOS")
                 return did
+        # Emergency combat units must not starve expansion completely: an
+        # early raider poke used to stop constructor production for minutes
+        # (3 builders and 5 extractors from 1:00 to 5:30).
+        flags = os.environ.get("ZKBOT_FLAGS", "")
+        # Lost constructors come back first: after a raid killed both cons
+        # the bot ran on the commander alone with 1-3 extractors for five
+        # minutes while it built combat units.
+        min_builders = 1 if "staticmix" in flags else min(3, self.desired_builder_count())
         force_combat = bool(
             self.threat_pos
             and self.frame - self.threat_frame < 300
             and len(self.army) < 6
+            and (
+                "buildfirst" not in flags
+                or builders >= min(4, self.desired_builder_count())
+            )
+            and not (builders < min_builders and len(self.army) >= 2)
         )
         if force_combat:
-            air_here = self.enemy_composition().get("air", 0) > 0
-            if air_here and self.aircraft_seen():
+            ec = self.enemy_composition()
+            if ec.get("air", 0) > 0 and self.aircraft_seen():
                 role = "aa"
-            else:
+            elif "staticmix" in flags:
                 role = "riot" if self.production_counter % 2 == 0 else "raid"
+            else:
+                # Raiders answer raiders while the numbers are small; a riot
+                # only once several enemy raiders are around and we have
+                # fewer than one riot per three of them.
+                our_riot = sum(
+                    1 for uid in self.army
+                    if units.role_of(self.units[uid].data) == "riot"
+                )
+                many = ec.get("raider", 0) >= 4 and our_riot * 3 < ec.get("raider", 0)
+                role = "riot" if many else "raid"
             self.production_counter += 1
         elif (
             builders < self.desired_builder_count()
@@ -154,7 +139,7 @@ class ProductionMixin:
             our_arty = sum(
                 1 for uid in self.army if units.role_of(self.units[uid].data) == "arty"
             )
-            if enemy_air and our_aa < max(1, len(self.army) // 6):
+            if enemy_air and our_aa < self.desired_aa_count():
                 role = "aa"
             elif enemy_raiders >= 4 and our_riot < 2:
                 role = "riot"
@@ -202,9 +187,23 @@ class ProductionMixin:
         factories = self.factory_list()
         if not factories:
             return
+        # Opening metal priority: while metal is empty and constructors are
+        # walking to extractors, do not queue more combat units beyond a
+        # small screen; an 85-metal extractor pays back in ~45 s.
+        hold_army = (
+            'nohold' not in os.environ.get('ZKBOT_FLAGS', '')
+            and self.frame_time() < 300
+            and self.metal_current() < 40.0
+            and len(self.army) >= 4
+            and not (self.threat_pos is not None and self.frame - self.threat_frame < 300)
+            and any(t.kind == "mex" and t.assignees for t in self.tasks.values())
+            and self.builder_count() >= self.desired_builder_count()
+        )
         for f in factories:
             q = self.factory_queue.get(f.uid, 0)
-            if q >= 2:
+            if q >= 2 or (hold_army and q >= 1):
+                continue
+            if hold_army and f.name not in ("factoryplane", "factorygunship") and q == 0:
                 continue
             did = self.next_unit_for_factory(f)
             if did is None:
@@ -287,6 +286,12 @@ class ProductionMixin:
                 continue
             if key not in self.tasks:
                 continue
+            # Once a second per builder is enough to notice an idle one; this
+            # check used to run on every observation for every builder.
+            bq = self.__dict__.setdefault("builder_query_frame", {})
+            if self.frame - bq.get(uid, -10**9) < 30:
+                continue
+            bq[uid] = self.frame
             try:
                 res = self.client.query(
                     {"type": "unit_queue_state", "unitId": int(uid)}, timeout=5.0
@@ -337,6 +342,9 @@ class ProductionMixin:
                             # Re-query next time instead of reusing a bad spot.
                             t.placed = False
                             t.placement_attempts += 1
+                            # The cached "site is free" answer is now known
+                            # to be wrong; re-probe for real.
+                            self.client._cache.clear()
                             if t.anchor:
                                 t.x, t.z = t.anchor
                             if t.placement_attempts >= 3:

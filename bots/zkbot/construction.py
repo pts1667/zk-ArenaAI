@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import math
+import os
 from typing import Any
 
 from . import units
 from .client import QueryError
 from .models import Task, UnitInfo
+
+FLAGS = os.environ.get("ZKBOT_FLAGS", "")
 
 
 class ConstructionMixin:
@@ -34,19 +37,79 @@ class ConstructionMixin:
                 self.builder_task.pop(u.uid, None)
             if self.frame < self.builder_fallback_until.get(u.uid, -1):
                 continue
-            if self.builder_idle.get(u.uid, True):
-                out.append(u)
+            # Invariant: a builder without a live task is available once its
+            # fallback/flee timer has expired.  (The old builder_idle flag was
+            # set False by retreat_builder and never reset, which orphaned
+            # every builder that had fled once.)
+            self.builder_idle[u.uid] = True
+            out.append(u)
         return out
 
-    def retreat_builder(self, u: UnitInfo) -> None:
-        target = self.retreat_point(u)
+    def retreat_builder(self, u: UnitInfo, danger_pos: tuple[float, float] | None = None) -> None:
+        target = self.builder_safe_point(u, danger_pos)
         self.queue(
             {"type": "move", "unitId": int(u.uid), "pos": [target[0], 0.0, target[1]]}
         )
-        self.builder_task.pop(u.uid, None)
-        self.builder_idle[u.uid] = False
+        key = self.builder_task.pop(u.uid, None)
+        if key and key in self.tasks:
+            self.tasks[key].assignees.discard(u.uid)
+        self.builder_idle[u.uid] = True
+        self.builder_job_frame.pop(u.uid, None)
         self.builder_fallback_until[u.uid] = self.frame + 150
-        self.log(f"builder {u.name}#{u.uid} fleeing to base")
+        self.builder_flee_count = getattr(self, "builder_flee_count", 0) + 1
+        self.log(f"builder {u.name}#{u.uid} fleeing to {tuple(round(v) for v in target)}")
+
+    def site_safe_for_builder(self, pos: tuple[float, float], kind: str = "") -> bool:
+        """A build site is usable if enemy DPS there is covered by our own."""
+        threat = self.threat_at(pos)
+        if threat <= 0.0:
+            return True
+        own = self.own_power_at(pos)
+        # Turrets are exactly what a contested site needs, so tolerate a bit
+        # more risk for them when our army is present.
+        factor = 1.0 if kind in ("defense", "mexdef", "frontdef") else 1.4
+        return own >= threat * factor and threat < 400.0
+
+    def builder_safety_step(self) -> None:
+        """Pull constructors out of enemy weapon reach before they die.
+
+        Runs for every mobile constructor, including ones walking to or
+        working on a job.  A builder whose position (or job site) is under
+        uncovered enemy fire drops the job and moves to the safest nearby
+        point toward home; the job stays open for later.
+        """
+        for u in list(self.units.values()):
+            if not (u.is_builder and u.is_mobile and u.is_finished):
+                continue
+            if u.uid == self.commander_id:
+                continue
+            if self.frame < self.builder_fallback_until.get(u.uid, -1):
+                continue
+            here = self.threat_at(u.pos)
+            own = self.own_power_at(u.pos)
+            key = self.builder_task.get(u.uid)
+            t = self.tasks.get(key) if key else None
+            site_bad = False
+            if t is not None and self.dist(u.pos, (t.x, t.z)) < 900.0:
+                site_bad = not self.site_safe_for_builder((t.x, t.z), t.kind)
+            if (here > 20.0 and own < here * 1.2) or site_bad:
+                danger = self.enemy_near(u.pos, 1000.0)
+                self.retreat_builder(u, danger.pos if danger is not None else None)
+
+    def builder_safe_point(
+        self, u: UnitInfo, danger_pos: tuple[float, float] | None = None
+    ) -> tuple[float, float]:
+        """Run away from the danger toward home, not across the enemy."""
+        if hasattr(self, "safest_point_near"):
+            p = self.safest_point_near(u.pos, toward=self.base_pos, radius=700.0)
+            # A nearby point is only useful if it is genuinely quiet;
+            # otherwise go all the way home instead of oscillating mid-map.
+            if p is not None and self.threat_in_radius(p, 250.0) <= 0.0:
+                return p
+            home = self.safest_point_near(self.base_pos, toward=self.base_pos, radius=300.0)
+            if home is not None:
+                return home
+        return self.retreat_point(u)
 
     def assign_builders(self) -> None:
         if self.frame - self.last_assign_frame < 5:
@@ -68,7 +131,7 @@ class ConstructionMixin:
                 # The commander is the economy engine, not a forward
                 # constructor.  Losing it to a raider at a frontier turret
                 # collapses the whole game.
-                if self.dist(u.pos, self.base_pos) > 900.0:
+                if self.dist(u.pos, self.base_pos) > self.commander_radius() + 150.0:
                     self.queue(
                         {
                             "type": "move",
@@ -78,12 +141,14 @@ class ConstructionMixin:
                     )
                     self.log(f"commander returning home from {tuple(round(v) for v in u.pos)}")
                     continue
-                danger = self.enemy_near(self.base_pos, 900)
+                # Only an enemy close to the commander itself stops work; a
+                # raider lingering at the base edge used to idle it for minutes.
+                danger = self.enemy_near(u.pos, 600)
                 if danger is not None and danger.is_finished:
                     continue
             danger = self.enemy_near(u.pos, 350)
-            if danger is not None:
-                self.retreat_builder(u)
+            if danger is not None and u.uid != self.commander_id:
+                self.retreat_builder(u, danger.pos)
                 continue
             chosen = None
             candidates: list[tuple[float, Task]] = []
@@ -98,20 +163,36 @@ class ConstructionMixin:
                 elif t.kind == "seismic":
                     continue
                 elif u.uid == self.commander_id:
-                    # Only base economy / defense jobs.
-                    if t.kind not in ("energy", "fusion", "storage", "radar", "defense"):
+                    # Any job inside the home perimeter.  The commander is the
+                    # strongest constructor (12 BP); keeping it off the
+                    # nearby extractors made the opening far too slow.
+                    if t.kind in ("frontdef", "silo"):
                         continue
-                    limit = 700.0
+                    reach = self.commander_radius()
+                    # Expansion first: extractors anywhere in its working
+                    # radius, everything else only near home.
+                    if self.dist((t.x, t.z), self.base_pos) > (reach if t.kind == "mex" else 850.0):
+                        continue
+                    limit = reach + 300.0
                 elif t.kind in ("energy", "fusion", "pylon"):
                     limit = 2600.0
                 else:
                     limit = 7000.0
                 if d > limit:
                     continue
-                danger_r = 300.0 if t.kind in ("defense", "frontdef", "mexdef") else 500.0
-                if self.enemy_near((t.x, t.z), danger_r) is not None:
+                if not self.site_safe_for_builder((t.x, t.z), t.kind):
+                    continue
+                path_risk = self.path_threat(u.pos, (t.x, t.z))
+                if path_risk > 60.0 and u.uid != self.commander_id:
                     continue
                 score = t.priority - d * (0.20 if u.uid == self.commander_id else 0.08)
+                if (
+                    u.uid == self.commander_id
+                    and t.kind == "mex"
+                    and "staticcomm" not in FLAGS
+                ):
+                    score += 250.0
+                score -= path_risk * 4.0
                 candidates.append((score, t))
             candidates.sort(key=lambda p: p[0], reverse=True)
             for _score, t in candidates:
@@ -155,15 +236,16 @@ class ConstructionMixin:
                     f"assist existing {u.name}#{u.uid} -> {chosen.key}"
                 )
                 continue
-            self.queue(
-                {
-                    "type": "build",
-                    "unitId": int(u.uid),
-                    "defId": int(chosen.def_id),
-                    "pos": [float(chosen.x), 0.0, float(chosen.z)],
-                    "facing": int(chosen.facing),
-                }
-            )
+            if not (chosen.kind == "mex" and self.try_burrow_mex(u, chosen)):
+                self.queue(
+                    {
+                        "type": "build",
+                        "unitId": int(u.uid),
+                        "defId": int(chosen.def_id),
+                        "pos": [float(chosen.x), 0.0, float(chosen.z)],
+                        "facing": int(chosen.facing),
+                    }
+                )
             chosen.assignees.add(u.uid)
             self.builder_task[u.uid] = chosen.key
             self.builder_idle[u.uid] = False
@@ -359,6 +441,46 @@ class ConstructionMixin:
             if t.placement_attempts >= 5:
                 t.unplaceable = True
             return False
+        if t.kind == "caretaker":
+            # A caretaker only helps a factory within its ~500-elmo build
+            # range.  closest_build_site used to drift 600-1100 elmos away in
+            # crowded bases, so the caretakers never assisted production and
+            # metal sat at the cap.  Try a ring of explicit spots instead and
+            # keep the factory's exit lane (south, facing 0) free.
+            fx, fz = anchor
+            for radius in (130, 180, 240, 300, 360, 420):
+                for k in range(16):
+                    a = 2.0 * math.pi * k / 16.0
+                    x = fx + math.cos(a) * radius
+                    z = fz + math.sin(a) * radius
+                    if z > fz and abs(x - fx) < 110.0:
+                        continue
+                    if not self.site_ok(t, x, z):
+                        continue
+                    try:
+                        res = self.client.query(
+                            {
+                                "type": "can_build_at",
+                                "unitDefId": int(t.def_id),
+                                "pos": [x, 0.0, z],
+                                "facing": 0,
+                            }
+                        )
+                        self.debug_queries += 1
+                    except QueryError:
+                        continue
+                    if res and res.get("possible"):
+                        q = res.get("pos") or [x, 0, z]
+                        t.x = float(q[0])
+                        t.z = float(q[2])
+                        t.facing = 0
+                        t.placed = True
+                        self.record_placement(t)
+                        return True
+            t.placement_attempts += 1
+            if t.placement_attempts >= 5:
+                t.unplaceable = True
+            return False
         if t.kind == "strider":
             radii = (180, 260, 340)
         elif t.kind in ("defense", "frontdef", "aa"):
@@ -493,6 +615,8 @@ class ConstructionMixin:
                 d = self.dist(u.pos, (float(pos[0]), float(pos[2])))
                 if d > 1600.0:
                     continue
+                if self.threat_in_radius((float(pos[0]), float(pos[2])), 200.0) > 0.0:
+                    continue
                 if metal > best_metal * 1.3 or d < best_d:
                     if metal >= best_metal * 0.7:
                         best_fid = int(fid)
@@ -532,7 +656,58 @@ class ConstructionMixin:
                 continue
             if u.uid in self.caretaker_guarded:
                 continue
+            if self.frame < getattr(self, "caretaker_repair_until", {}).get(u.uid, -1):
+                continue
             f = min(factories, key=lambda x: self.dist(u.pos, x.pos))
             if self.dist(u.pos, f.pos) < 700:
                 self.queue({"type": "guard", "unitId": int(u.uid), "targetId": int(f.uid)})
                 self.caretaker_guarded.add(u.uid)
+
+    def repair_step(self) -> None:
+        """Caretakers repair damaged combat units and turrets in range.
+
+        Retreating units otherwise only heal through slow idle regeneration
+        and come back to the fight at partial health.  A caretaker on a
+        repair job is un-guarded; ensure_caretakers_guarding re-guards it
+        once the repair window has passed.
+        """
+        until = getattr(self, "caretaker_repair_until", {})
+        self.caretaker_repair_until = until
+        damaged = [
+            u
+            for u in self.units.values()
+            if u.is_finished
+            and u.alive_frac < 0.75
+            and (u.is_combat or units.is_defense(u.data))
+        ]
+        if not damaged:
+            return
+        taken: set[int] = set()
+        caretakers = [c for c in self.units.values() if c.name == "staticcon" and c.is_finished]
+        # Production comes first: at most half the caretakers repair.
+        budget = len(caretakers) // 2
+        busy = sum(1 for c in caretakers if self.frame < until.get(c.uid, -1))
+        for c in caretakers:
+            if busy >= budget:
+                break
+            if self.frame < until.get(c.uid, -1):
+                continue
+            best = None
+            best_score = 1e18
+            for d in damaged:
+                if d.uid in taken:
+                    continue
+                dist = self.dist(c.pos, d.pos)
+                if dist > 480.0:
+                    continue
+                score = d.alive_frac * 1000.0 + dist * 0.2
+                if score < best_score:
+                    best_score = score
+                    best = d
+            if best is None:
+                continue
+            taken.add(best.uid)
+            busy += 1
+            self.queue({"type": "repair", "unitId": int(c.uid), "targetId": int(best.uid)})
+            until[c.uid] = self.frame + 120
+            self.caretaker_guarded.discard(c.uid)

@@ -156,7 +156,45 @@ class Client:
         return None
 
     # ------------------------------------------------------------------ query
+    query_time = 0.0
+    query_counts: dict = {}
+    # Game frame of the current observation; set by the brain each step.
+    frame = 0
+    # Results of these queries change slowly (terrain, build-site occupancy),
+    # so identical queries within the TTL (in frames) reuse the answer instead
+    # of a blocking round trip.  Placement loops repeat the same probes on
+    # every retry, which made them the bulk of all queries.
+    CACHE_TTL = {"elevation_at": 300, "can_build_at": 90, "closest_build_site": 90}
+    _cache: dict = {}
+    cache_hits = 0
+
     def query(self, query: dict, timeout: float = 10.0) -> Any:
+        ttl = self.CACHE_TTL.get(query.get("type"))
+        key = None
+        if ttl:
+            key = _dumps(query)
+            hit = self._cache.get(key)
+            if hit is not None and self.frame - hit[0] < ttl:
+                self.cache_hits += 1
+                return hit[1]
+        t0 = time.time()
+        try:
+            res = self._query(query, timeout)
+            if key is not None:
+                if len(self._cache) > 20000:
+                    self._cache = {
+                        k: v for k, v in self._cache.items() if self.frame - v[0] < 300
+                    }
+                self._cache[key] = (self.frame, res)
+            return res
+        finally:
+            dt = time.time() - t0
+            self.query_time += dt
+            k = str(query.get("type"))
+            n, t = self.query_counts.get(k, (0, 0.0))
+            self.query_counts[k] = (n + 1, t + dt)
+
+    def _query(self, query: dict, timeout: float = 10.0) -> Any:
         self._query_seq += 1
         request_id = f"zkbot-{self._query_seq}"
         message = {"type": "query", "requestId": request_id, "query": query}

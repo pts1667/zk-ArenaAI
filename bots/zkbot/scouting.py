@@ -36,6 +36,10 @@ class ScoutingMixin:
             return False
         if self.frame_time() < 180.0 or self.metal_income() < 8.0:
             return False
+        # Spotters that keep dying are wasted metal: cap the total.
+        built = getattr(self, "gremlin_built", 0)
+        if built >= 2 + int(self.frame_time() / 600):
+            return False
         target = 1 if len(self.artillery_units()) < 4 else 2
         active = len(getattr(self, "gremlin_scouts", set())) + int(
             getattr(self, "gremlin_pending", 0)
@@ -44,6 +48,7 @@ class ScoutingMixin:
 
     def note_new_gremlin(self, u: UnitInfo) -> None:
         self.gremlin_pending = max(0, int(getattr(self, "gremlin_pending", 0)) - 1)
+        self.gremlin_built = getattr(self, "gremlin_built", 0) + 1
         scouts = getattr(self, "gremlin_scouts", set())
         scouts.add(u.uid)
         self.gremlin_scouts = scouts

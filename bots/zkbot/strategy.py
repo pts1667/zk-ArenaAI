@@ -366,9 +366,19 @@ class StrategyMixin:
     def frontier_rally(self) -> tuple[float, float]:
         self.update_sector_state()
         if getattr(self, "sectors", None):
-            owned = [s for s in self.sectors if s.owner == "ours" and s.distance_base > 400]
+            span = self.dist(self.base_pos, self.enemy_base or self.map.center)
+            # The front-most owned sector that is still on our half of the
+            # map.  (Previously max(distance_enemy) chose the rear-most one,
+            # so the army and raiders staged behind the base.)
+            owned = [
+                s
+                for s in self.sectors
+                if s.owner == "ours"
+                and s.distance_base > 400
+                and s.distance_base < span * 0.5
+            ]
             if owned:
-                s = max(owned, key=lambda q: q.distance_enemy)
+                s = min(owned, key=lambda q: q.distance_enemy)
                 p = self.best_defense_pos(s)
                 if p is not None:
                     return p

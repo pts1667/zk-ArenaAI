@@ -19,9 +19,13 @@ from .production import ProductionMixin
 from .scouting import ScoutingMixin
 from .strategy import StrategyMixin
 from .tactics import TacticsMixin
+from .threat import ThreatMixin
+from .air import AirMixin
+from .burrow import BurrowMixin
 
 
 class Brain(
+    ThreatMixin,
     IntelMixin,
     EconomyMixin,
     ConstructionMixin,
@@ -30,6 +34,8 @@ class Brain(
     TacticsMixin,
     DefenseMixin,
     ScoutingMixin,
+    AirMixin,
+    BurrowMixin,
     MilitaryMixin,
 ):
     def __init__(self, client: Client, team_id: int, log):
@@ -122,6 +128,11 @@ class Brain(
         self.stride = max(1, int(os.environ.get("ZKBOT_STRIDE", "1")))
         self.observation_setting_sent = False
         self.block_frames = 6
+        try:
+            _f, _c = (int(v) for v in os.environ.get("ZKBOT_BLOCK", "6,10").split(","))
+            self.block_setting = (max(1, _f), max(1, _c))
+        except ValueError:
+            self.block_setting = (6, 10)
         self.last_combat_frame = -10**9
         self.last_spot_frame = -10**9
         self.last_threat_frame = -10**9
@@ -141,6 +152,8 @@ class Brain(
         self.artillery_damage_log: list[tuple[int, float]] = []
         self._defense_spend_records: list[tuple[int, float, str]] = []
         self.gremlin_scouts: set[int] = set()
+        self.air_scout_id: int | None = None
+        self.air_scout_pending = False
         self.gremlin_pending = 0
         self.gremlin_fire_state: set[int] = set()
         self.gremlin_last_order: dict[int, int] = {}
@@ -237,7 +250,12 @@ class Brain(
 
     def on_frame(self, obs: dict[str, Any]) -> None:
         self.frame = int(obs.get("frame") or 0)
+        self.client.frame = self.frame
         self.store_economy(obs)
+        # Events arrive with every observation; consume them before the
+        # stride return so damage/destroyed events are never lost.
+        if self.units:
+            self.read_battle_events(obs)
         # Synchronous ControllerAI blocks the engine for every observation.
         # Processing every Nth observation (while still acknowledging every
         # frame) roughly halves the Python work without meaningfully changing
@@ -270,20 +288,22 @@ class Brain(
 
         self.read_units(obs)
         self.read_enemies(obs)
-        # Events are delivered with every observation even when processing is
-        # strided; consume them before the stride return so turret damage and
-        # attacker ranges are not lost.
-        self.read_battle_events(obs)
         if self.frame - self.last_spot_frame >= 15:
             self.last_spot_frame = self.frame
             self.update_spot_status()
         if self.frame - self.last_threat_frame >= 5:
             self.last_threat_frame = self.frame
             self.update_threat()
+        if self.frame - getattr(self, "threat_frame_built", -10**9) >= 15:
+            self.update_threat_map()
+            self.builder_safety_step()
 
         if self.frame - self.last_commander_safe_frame >= 3:
             self.last_commander_safe_frame = self.frame
             self.ensure_commander_safe()
+        if self.frame - getattr(self, "_last_repair_frame", -10**9) >= 30:
+            self._last_repair_frame = self.frame
+            self.repair_step()
         self.ensure_caretakers_guarding()
 
         if self.frame - self.last_economy_frame >= 15:
@@ -305,6 +325,24 @@ class Brain(
         if self.frame - self.last_summary_frame >= 300:
             self.last_summary_frame = self.frame
             self.summary()
+            self.write_metrics()
+            self.burrow_check()
+            self.builder_watchdog()
+            if self.frame % 5400 < 300 and getattr(self, "spend_by_name", None):
+                top = sorted(self.spend_by_name.items(), key=lambda kv: -kv[1])[:14]
+                total = sum(self.spend_by_name.values())
+                self.log(
+                    "spend " + f"total={total:.0f} dup_deaths={getattr(self, 'duplicate_death_events', 0)} "
+                    + " ".join(f"{k}={v:.0f}" for k, v in top)
+                )
+                for label, led in (
+                    ("lost", getattr(self, "lost_by_name", {})),
+                    ("lost_branch", getattr(self, "lost_by_branch", {})),
+                    ("dmg_from", getattr(self, "dmg_from", {})),
+                    ("enemy_seen", {k: len(v) for k, v in getattr(self, "enemy_seen_ids", {}).items()}),
+                ):
+                    top = sorted(led.items(), key=lambda kv: -kv[1])[:14]
+                    self.log(f"{label} " + " ".join(f"{k}={v:.0f}" for k, v in top))
 
     # ------------------------------------------------------------- first frame
 
@@ -350,8 +388,14 @@ class Brain(
             self.enemy_base = (bx, bz)
             return
         if candidates:
+            # The ally-team key of the spawn boxes does not always match ours
+            # (swapped sides): our own start box then became the "enemy
+            # base" and raids, scouting and burrowing all aimed at home.
             real = [
-                p for p in candidates if self.dist(p, (w * 0.5, h * 0.5)) > min(w, h) * 0.1
+                p
+                for p in candidates
+                if self.dist(p, (w * 0.5, h * 0.5)) > min(w, h) * 0.1
+                and self.dist(p, self.base_pos) > min(w, h) * 0.3
             ]
             if real:
                 self.enemy_base = max(real, key=lambda p: self.dist(p, self.base_pos))
@@ -481,3 +525,80 @@ class Brain(
                 sum(1 for u in self.units.values() if units.role_of(u.data) == "bomb"),
             )
         )
+
+    # ---------------------------------------------------------------- metrics
+
+    _METRIC_COLS = (
+        "t", "m_income", "e_income", "m_cur", "e_cur", "mex", "builders",
+        "builders_tasked", "army", "army_value", "factories", "caretakers",
+        "turrets", "radar", "enemy_vis", "enemy_mex_known", "tasks", "mode",
+        "flees", "builder_deaths", "own_lost_value", "enemy_killed_value",
+    )
+
+    def write_metrics(self) -> None:
+        """Append one row of the per-game timeline (every 10 s game time)."""
+        if not hasattr(self, "_metrics_file"):
+            out = os.environ.get("ZK_ARENA_OUT", ".")
+            try:
+                path = os.path.join(out, f"metrics-team{self.team_id}.csv")
+                self._metrics_file = open(path, "w", encoding="utf8", buffering=1)
+                self._metrics_file.write(",".join(self._METRIC_COLS) + "\n")
+            except Exception:
+                self._metrics_file = None
+        f = self._metrics_file
+        if f is None:
+            return
+        mobile_builders = [u for u in self.units.values() if u.is_builder and u.is_mobile and u.is_finished]
+        tasked = sum(1 for u in mobile_builders if self.builder_task.get(u.uid) in self.tasks)
+        row = (
+            f"{self.frame_time():.0f}",
+            f"{self.metal_income():.1f}",
+            f"{self.energy_income():.1f}",
+            f"{self.metal_current():.0f}",
+            f"{self.energy_current():.0f}",
+            str(self.mex_count()),
+            str(len(mobile_builders)),
+            str(tasked),
+            str(len(self.army)),
+            f"{sum(units.cost(self.units[u].data) for u in self.army if u in self.units):.0f}",
+            str(len(self.factory_list())),
+            str(sum(1 for u in self.units.values() if u.name == "staticcon" and u.is_finished)),
+            str(sum(1 for u in self.units.values() if units.is_defense(u.data) and not u.is_mobile and u.is_finished)),
+            str(sum(1 for u in self.units.values() if u.name == "staticradar" and u.is_finished)),
+            str(len(self.enemies)),
+            str(sum(1 for s in self.map.spots if s.status == "enemy")),
+            str(len(self.tasks)),
+            self.army_mode() if self.army else "none",
+            str(getattr(self, "builder_flee_count", 0)),
+            str(getattr(self, "builder_death_count", 0)),
+            f"{getattr(self, 'own_lost_value', 0.0):.0f}",
+            f"{getattr(self, 'enemy_killed_value', 0.0):.0f}",
+        )
+        try:
+            f.write(",".join(row) + "\n")
+        except Exception:
+            pass
+
+    def builder_watchdog(self) -> None:
+        """Flag constructors that have had no job for a long time while
+        unassigned jobs exist.  A healthy bot should never print this."""
+        since = getattr(self, "_builder_free_since", {})
+        self._builder_free_since = since
+        open_tasks = [t for t in self.tasks.values() if not t.assignees and not t.unplaceable]
+        for u in self.units.values():
+            if not (u.is_builder and u.is_mobile and u.is_finished):
+                continue
+            if self.builder_task.get(u.uid) in self.tasks:
+                since.pop(u.uid, None)
+                continue
+            start = since.setdefault(u.uid, self.frame)
+            if open_tasks and self.frame - start > 1800:
+                self.log(
+                    f"WATCHDOG builder {u.name}#{u.uid} without a job for "
+                    f"{(self.frame - start) / 30:.0f}s at {tuple(round(v) for v in u.pos)}; "
+                    f"open tasks={len(open_tasks)} fallback_until={self.builder_fallback_until.get(u.uid)}"
+                )
+                since[u.uid] = self.frame
+        for uid in list(since):
+            if uid not in self.units:
+                since.pop(uid, None)

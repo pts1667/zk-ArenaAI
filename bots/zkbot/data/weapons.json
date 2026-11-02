@@ -1,0 +1,5175 @@
+{
+"amphaa": {
+"aoe": 48.0,
+"dps_air": 500.3,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 820.0,
+"weapons": [
+{
+"air": true,
+"aoe": 48.0,
+"dps": 50.0,
+"ground": false,
+"name": "missile",
+"paralyzer": false,
+"range": 820.0,
+"type": "MissileLauncher"
+}
+]
+},
+"amphassault": {
+"aoe": 14.0,
+"dps_air": 250.0,
+"dps_ground": 250.0,
+"paralyzer": false,
+"range": 600.0,
+"weapons": [
+{
+"air": true,
+"aoe": 14.0,
+"dps": 250.0,
+"ground": true,
+"name": "laser",
+"paralyzer": false,
+"range": 600.0,
+"type": "BeamLaser"
+}
+]
+},
+"amphbomb": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"amphcon": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"amphfloater": {
+"aoe": 32.0,
+"dps_air": 83.4,
+"dps_ground": 83.4,
+"paralyzer": false,
+"range": 450.0,
+"weapons": [
+{
+"air": true,
+"aoe": 32.0,
+"dps": 83.4,
+"ground": true,
+"name": "cannon",
+"paralyzer": false,
+"range": 450.0,
+"type": "Cannon"
+}
+]
+},
+"amphimpulse": {
+"aoe": 128.0,
+"dps_air": 132.9,
+"dps_ground": 132.9,
+"paralyzer": false,
+"range": 255.0,
+"weapons": [
+{
+"air": true,
+"aoe": 128.0,
+"dps": 132.9,
+"ground": true,
+"name": "sonic",
+"paralyzer": false,
+"range": 255.0,
+"type": "Cannon"
+}
+]
+},
+"amphlaunch": {
+"aoe": 224.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 620.0,
+"weapons": [
+{
+"air": true,
+"aoe": 224.0,
+"dps": 0.0,
+"ground": true,
+"name": "teleport_gun",
+"paralyzer": false,
+"range": 620.0,
+"type": "Cannon"
+}
+]
+},
+"amphraid": {
+"aoe": 32.0,
+"dps_air": 130.0,
+"dps_ground": 65.0,
+"paralyzer": false,
+"range": 232.0,
+"weapons": [
+{
+"air": true,
+"aoe": 32.0,
+"dps": 65.0,
+"ground": true,
+"name": "torpmissile",
+"paralyzer": false,
+"range": 232.0,
+"type": "MissileLauncher"
+},
+{
+"air": true,
+"aoe": 32.0,
+"dps": 65.0,
+"ground": false,
+"name": "torpedo",
+"paralyzer": false,
+"range": 160.0,
+"type": "TorpedoLauncher"
+}
+]
+},
+"amphriot": {
+"aoe": 64.0,
+"dps_air": 260.9,
+"dps_ground": 260.9,
+"paralyzer": false,
+"range": 285.0,
+"weapons": [
+{
+"air": true,
+"aoe": 64.0,
+"dps": 260.9,
+"ground": true,
+"name": "flechette",
+"paralyzer": false,
+"range": 285.0,
+"type": "Cannon"
+},
+{
+"air": false,
+"aoe": 32.0,
+"dps": 36.9,
+"ground": false,
+"name": "torpedo",
+"paralyzer": false,
+"range": 270.0,
+"type": "TorpedoLauncher"
+}
+]
+},
+"amphsupport": {
+"aoe": 40.0,
+"dps_air": 86.9,
+"dps_ground": 86.9,
+"paralyzer": false,
+"range": 645.0,
+"weapons": [
+{
+"air": true,
+"aoe": 40.0,
+"dps": 86.9,
+"ground": true,
+"name": "cannon",
+"paralyzer": false,
+"range": 645.0,
+"type": "Cannon"
+}
+]
+},
+"amphtele": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"armcom1": {
+"aoe": 48.0,
+"dps_air": 100149.6,
+"dps_ground": 100149.6,
+"paralyzer": false,
+"range": 300.0,
+"weapons": [
+{
+"air": true,
+"aoe": 12.0,
+"dps": 150.6,
+"ground": true,
+"name": "laser",
+"paralyzer": false,
+"range": 300.0,
+"type": "BeamLaser"
+},
+{
+"air": true,
+"aoe": 48.0,
+"dps": 99999.0,
+"ground": true,
+"name": "disintegrator",
+"paralyzer": false,
+"range": 250.0,
+"type": "DGun"
+}
+]
+},
+"assaultcruiser": {
+"aoe": 48.0,
+"dps_air": 520.0,
+"dps_ground": 520.0,
+"paralyzer": false,
+"range": 450.0,
+"weapons": [
+{
+"air": true,
+"aoe": 16.0,
+"dps": 80.0,
+"ground": true,
+"name": "gauss",
+"paralyzer": false,
+"range": 450.0,
+"type": "Cannon"
+},
+{
+"air": true,
+"aoe": 16.0,
+"dps": 80.0,
+"ground": true,
+"name": "gauss",
+"paralyzer": false,
+"range": 450.0,
+"type": "Cannon"
+},
+{
+"air": true,
+"aoe": 16.0,
+"dps": 80.0,
+"ground": true,
+"name": "gauss",
+"paralyzer": false,
+"range": 450.0,
+"type": "Cannon"
+},
+{
+"air": true,
+"aoe": 16.0,
+"dps": 80.0,
+"ground": true,
+"name": "gauss",
+"paralyzer": false,
+"range": 450.0,
+"type": "Cannon"
+},
+{
+"air": true,
+"aoe": 48.0,
+"dps": 100.0,
+"ground": true,
+"name": "missile",
+"paralyzer": false,
+"range": 420.0,
+"type": "MissileLauncher"
+},
+{
+"air": true,
+"aoe": 48.0,
+"dps": 100.0,
+"ground": true,
+"name": "missile",
+"paralyzer": false,
+"range": 420.0,
+"type": "MissileLauncher"
+}
+]
+},
+"asteroid": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"athena": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"benzcom1": {
+"aoe": 32.0,
+"dps_air": 180.0,
+"dps_ground": 180.0,
+"paralyzer": false,
+"range": 360.0,
+"weapons": [
+{
+"air": true,
+"aoe": 32.0,
+"dps": 180.0,
+"ground": true,
+"name": "assault_cannon",
+"paralyzer": false,
+"range": 360.0,
+"type": "Cannon"
+}
+]
+},
+"bomberassault": {
+"aoe": 100.0,
+"dps_air": 2501.0,
+"dps_ground": 2501.0,
+"paralyzer": false,
+"range": 3000.0,
+"weapons": [
+{
+"air": true,
+"aoe": 100.0,
+"dps": 2500.0,
+"ground": true,
+"name": "zeppelin_bomb",
+"paralyzer": false,
+"range": 180.0,
+"type": "AircraftBomb"
+},
+{
+"air": true,
+"aoe": 40.0,
+"dps": 1.0,
+"ground": true,
+"name": "thermite_bomb",
+"paralyzer": false,
+"range": 3000.0,
+"type": "Cannon"
+},
+{
+"air": true,
+"aoe": 8.0,
+"dps": 0.0,
+"ground": true,
+"name": "deploy_shield",
+"paralyzer": false,
+"range": 500.0,
+"type": "Cannon"
+}
+]
+},
+"bomberdisarm": {
+"aoe": 160.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": [
+{
+"air": false,
+"aoe": 160.0,
+"dps": 26000.0,
+"ground": false,
+"name": "armbomblightning",
+"paralyzer": false,
+"range": 730.0,
+"type": "BeamLaser"
+}
+]
+},
+"bomberheavy": {
+"aoe": 192.0,
+"dps_air": 2000.1,
+"dps_ground": 2000.1,
+"paralyzer": false,
+"range": 500.0,
+"weapons": [
+{
+"air": true,
+"aoe": 192.0,
+"dps": 2000.1,
+"ground": true,
+"name": "arm_pidr",
+"paralyzer": false,
+"range": 500.0,
+"type": "MissileLauncher"
+}
+]
+},
+"bomberheavyold": {
+"aoe": 192.0,
+"dps_air": 2000.1,
+"dps_ground": 2000.1,
+"paralyzer": false,
+"range": 500.0,
+"weapons": [
+{
+"air": true,
+"aoe": 192.0,
+"dps": 2000.1,
+"ground": true,
+"name": "arm_pidr",
+"paralyzer": false,
+"range": 500.0,
+"type": "MissileLauncher"
+}
+]
+},
+"bomberprec": {
+"aoe": 32.0,
+"dps_air": 100.0,
+"dps_ground": 100.0,
+"paralyzer": false,
+"range": 180.0,
+"weapons": [
+{
+"air": true,
+"aoe": 32.0,
+"dps": 100.0,
+"ground": true,
+"name": "bombsabot",
+"paralyzer": false,
+"range": 180.0,
+"type": "MissileLauncher"
+}
+]
+},
+"bomberriot": {
+"aoe": 320.0,
+"dps_air": 720.0,
+"dps_ground": 720.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": [
+{
+"air": true,
+"aoe": 320.0,
+"dps": 720.0,
+"ground": true,
+"name": "napalm",
+"paralyzer": false,
+"range": 0.0,
+"type": "AircraftBomb"
+}
+]
+},
+"bomberstrike": {
+"aoe": 48.0,
+"dps_air": 360.0,
+"dps_ground": 360.0,
+"paralyzer": false,
+"range": 660.0,
+"weapons": [
+{
+"air": true,
+"aoe": 48.0,
+"dps": 360.0,
+"ground": true,
+"name": "missile",
+"paralyzer": false,
+"range": 660.0,
+"type": "MissileLauncher"
+}
+]
+},
+"chicken": {
+"aoe": 0.0,
+"dps_air": 66.7,
+"dps_ground": 66.7,
+"paralyzer": false,
+"range": 80.0,
+"weapons": [
+{
+"air": true,
+"aoe": 0.0,
+"dps": 66.7,
+"ground": true,
+"name": "weapon",
+"paralyzer": false,
+"range": 80.0,
+"type": "Cannon"
+}
+]
+},
+"chicken_blimpy": {
+"aoe": 1.0,
+"dps_air": 0.1,
+"dps_ground": 0.2,
+"paralyzer": false,
+"range": 900.0,
+"weapons": [
+{
+"air": false,
+"aoe": 1.0,
+"dps": 0.1,
+"ground": true,
+"name": "bombtrigger",
+"paralyzer": false,
+"range": 900.0,
+"type": "BeamLaser"
+},
+{
+"air": true,
+"aoe": 1.0,
+"dps": 0.1,
+"ground": true,
+"name": "dodobomb",
+"paralyzer": false,
+"range": 900.0,
+"type": "AircraftBomb"
+}
+]
+},
+"chicken_digger": {
+"aoe": 8.0,
+"dps_air": 0.0,
+"dps_ground": 33.3,
+"paralyzer": false,
+"range": 60.0,
+"weapons": [
+{
+"air": false,
+"aoe": 8.0,
+"dps": 33.3,
+"ground": true,
+"name": "weapon",
+"paralyzer": false,
+"range": 60.0,
+"type": "Cannon"
+}
+]
+},
+"chicken_dodo": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"chicken_dragon": {
+"aoe": 300.0,
+"dps_air": 180.0,
+"dps_ground": 1090.0,
+"paralyzer": false,
+"range": 700.0,
+"weapons": [
+{
+"air": false,
+"aoe": 32.0,
+"dps": 400.0,
+"ground": true,
+"name": "melee",
+"paralyzer": false,
+"range": 160.0,
+"type": "Cannon"
+},
+{
+"air": true,
+"aoe": 24.0,
+"dps": 60.0,
+"ground": true,
+"name": "spores",
+"paralyzer": false,
+"range": 600.0,
+"type": "MissileLauncher"
+},
+{
+"air": true,
+"aoe": 24.0,
+"dps": 60.0,
+"ground": true,
+"name": "spores",
+"paralyzer": false,
+"range": 600.0,
+"type": "MissileLauncher"
+},
+{
+"air": true,
+"aoe": 24.0,
+"dps": 60.0,
+"ground": true,
+"name": "spores",
+"paralyzer": false,
+"range": 600.0,
+"type": "MissileLauncher"
+},
+{
+"air": false,
+"aoe": 160.0,
+"dps": 500.0,
+"ground": true,
+"name": "goo",
+"paralyzer": false,
+"range": 700.0,
+"type": "Cannon"
+},
+{
+"air": false,
+"aoe": 300.0,
+"dps": 10.0,
+"ground": true,
+"name": "queencrush",
+"paralyzer": false,
+"range": 384.0,
+"type": "Cannon"
+}
+]
+},
+"chicken_drone": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"chicken_drone_starter": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"chicken_leaper": {
+"aoe": 8.0,
+"dps_air": 0.0,
+"dps_ground": 250.0,
+"paralyzer": false,
+"range": 100.0,
+"weapons": [
+{
+"air": false,
+"aoe": 8.0,
+"dps": 250.0,
+"ground": true,
+"name": "weapon",
+"paralyzer": false,
+"range": 100.0,
+"type": "LaserCannon"
+}
+]
+},
+"chicken_listener": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"chicken_pigeon": {
+"aoe": 24.0,
+"dps_air": 18.8,
+"dps_ground": 18.8,
+"paralyzer": false,
+"range": 600.0,
+"weapons": [
+{
+"air": true,
+"aoe": 24.0,
+"dps": 18.8,
+"ground": true,
+"name": "spores",
+"paralyzer": false,
+"range": 600.0,
+"type": "MissileLauncher"
+}
+]
+},
+"chicken_rafflesia": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 10.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": [
+{
+"air": false,
+"aoe": 0.0,
+"dps": 10.0,
+"ground": true,
+"name": "shield",
+"paralyzer": false,
+"range": 0.0,
+"type": "Shield"
+}
+]
+},
+"chicken_roc": {
+"aoe": 96.0,
+"dps_air": 278.0,
+"dps_ground": 150.0,
+"paralyzer": false,
+"range": 500.0,
+"weapons": [
+{
+"air": true,
+"aoe": 96.0,
+"dps": 150.0,
+"ground": true,
+"name": "goo",
+"paralyzer": false,
+"range": 500.0,
+"type": "Cannon"
+},
+{
+"air": true,
+"aoe": 24.0,
+"dps": 64.0,
+"ground": false,
+"name": "aerospores",
+"paralyzer": false,
+"range": 500.0,
+"type": "MissileLauncher"
+},
+{
+"air": true,
+"aoe": 24.0,
+"dps": 64.0,
+"ground": false,
+"name": "aerospores",
+"paralyzer": false,
+"range": 500.0,
+"type": "MissileLauncher"
+}
+]
+},
+"chicken_shield": {
+"aoe": 24.0,
+"dps_air": 72.0,
+"dps_ground": 10.0,
+"paralyzer": false,
+"range": 700.0,
+"weapons": [
+{
+"air": false,
+"aoe": 0.0,
+"dps": 10.0,
+"ground": true,
+"name": "shield",
+"paralyzer": false,
+"range": 0.0,
+"type": "Shield"
+},
+{
+"air": true,
+"aoe": 24.0,
+"dps": 72.0,
+"ground": false,
+"name": "aerospores",
+"paralyzer": false,
+"range": 700.0,
+"type": "MissileLauncher"
+}
+]
+},
+"chicken_spidermonkey": {
+"aoe": 0.0,
+"dps_air": 90.0,
+"dps_ground": 90.0,
+"paralyzer": false,
+"range": 600.0,
+"weapons": [
+{
+"air": true,
+"aoe": 0.0,
+"dps": 90.0,
+"ground": true,
+"name": "web",
+"paralyzer": false,
+"range": 600.0,
+"type": "MissileLauncher"
+}
+]
+},
+"chicken_sporeshooter": {
+"aoe": 24.0,
+"dps_air": 100.0,
+"dps_ground": 100.0,
+"paralyzer": false,
+"range": 600.0,
+"weapons": [
+{
+"air": true,
+"aoe": 24.0,
+"dps": 100.0,
+"ground": true,
+"name": "spores",
+"paralyzer": false,
+"range": 600.0,
+"type": "MissileLauncher"
+}
+]
+},
+"chicken_tiamat": {
+"aoe": 64.0,
+"dps_air": 423.6,
+"dps_ground": 433.6,
+"paralyzer": false,
+"range": 600.0,
+"weapons": [
+{
+"air": true,
+"aoe": 8.0,
+"dps": 200.0,
+"ground": true,
+"name": "jaws",
+"paralyzer": false,
+"range": 160.0,
+"type": "Cannon"
+},
+{
+"air": true,
+"aoe": 24.0,
+"dps": 133.3,
+"ground": true,
+"name": "spores",
+"paralyzer": false,
+"range": 600.0,
+"type": "MissileLauncher"
+},
+{
+"air": true,
+"aoe": 64.0,
+"dps": 90.2,
+"ground": true,
+"name": "flamethrower",
+"paralyzer": false,
+"range": 267.0,
+"type": "LaserCannon"
+},
+{
+"air": false,
+"aoe": 0.0,
+"dps": 10.0,
+"ground": true,
+"name": "shield",
+"paralyzer": false,
+"range": 0.0,
+"type": "Shield"
+}
+]
+},
+"chickena": {
+"aoe": 8.0,
+"dps_air": 242.9,
+"dps_ground": 242.9,
+"paralyzer": false,
+"range": 140.0,
+"weapons": [
+{
+"air": true,
+"aoe": 8.0,
+"dps": 242.9,
+"ground": true,
+"name": "weapon",
+"paralyzer": false,
+"range": 140.0,
+"type": "Cannon"
+}
+]
+},
+"chickenblobber": {
+"aoe": 96.0,
+"dps_air": 0.0,
+"dps_ground": 247.5,
+"paralyzer": false,
+"range": 1350.0,
+"weapons": [
+{
+"air": false,
+"aoe": 96.0,
+"dps": 247.5,
+"ground": true,
+"name": "weapon",
+"paralyzer": false,
+"range": 1350.0,
+"type": "Cannon"
+}
+]
+},
+"chickenbroodqueen": {
+"aoe": 32.0,
+"dps_air": 220.0,
+"dps_ground": 220.0,
+"paralyzer": false,
+"range": 240.0,
+"weapons": [
+{
+"air": true,
+"aoe": 32.0,
+"dps": 100.0,
+"ground": true,
+"name": "melee",
+"paralyzer": false,
+"range": 120.0,
+"type": "Cannon"
+},
+{
+"air": true,
+"aoe": 24.0,
+"dps": 40.0,
+"ground": true,
+"name": "spores",
+"paralyzer": false,
+"range": 240.0,
+"type": "MissileLauncher"
+},
+{
+"air": true,
+"aoe": 24.0,
+"dps": 40.0,
+"ground": true,
+"name": "spores",
+"paralyzer": false,
+"range": 240.0,
+"type": "MissileLauncher"
+},
+{
+"air": true,
+"aoe": 24.0,
+"dps": 40.0,
+"ground": true,
+"name": "spores",
+"paralyzer": false,
+"range": 240.0,
+"type": "MissileLauncher"
+}
+]
+},
+"chickenc": {
+"aoe": 128.0,
+"dps_air": 186.7,
+"dps_ground": 186.7,
+"paralyzer": false,
+"range": 400.0,
+"weapons": [
+{
+"air": true,
+"aoe": 128.0,
+"dps": 186.7,
+"ground": true,
+"name": "weapon",
+"paralyzer": false,
+"range": 400.0,
+"type": "Cannon"
+}
+]
+},
+"chickend": {
+"aoe": 96.0,
+"dps_air": 20.0,
+"dps_ground": 20.0,
+"paralyzer": false,
+"range": 460.0,
+"weapons": [
+{
+"air": true,
+"aoe": 96.0,
+"dps": 20.0,
+"ground": true,
+"name": "spores",
+"paralyzer": false,
+"range": 460.0,
+"type": "MissileLauncher"
+}
+]
+},
+"chickenf": {
+"aoe": 16.0,
+"dps_air": 106.7,
+"dps_ground": 106.7,
+"paralyzer": false,
+"range": 400.0,
+"weapons": [
+{
+"air": true,
+"aoe": 16.0,
+"dps": 106.7,
+"ground": true,
+"name": "weapon",
+"paralyzer": false,
+"range": 400.0,
+"type": "Cannon"
+}
+]
+},
+"chickenflyerqueen": {
+"aoe": 200.0,
+"dps_air": 2900.0,
+"dps_ground": 2450.0,
+"paralyzer": false,
+"range": 500.0,
+"weapons": [
+{
+"air": true,
+"aoe": 200.0,
+"dps": 2000.0,
+"ground": true,
+"name": "goo",
+"paralyzer": false,
+"range": 500.0,
+"type": "Cannon"
+},
+{
+"air": true,
+"aoe": 24.0,
+"dps": 150.0,
+"ground": true,
+"name": "spores",
+"paralyzer": false,
+"range": 500.0,
+"type": "MissileLauncher"
+},
+{
+"air": true,
+"aoe": 24.0,
+"dps": 150.0,
+"ground": true,
+"name": "spores",
+"paralyzer": false,
+"range": 500.0,
+"type": "MissileLauncher"
+},
+{
+"air": true,
+"aoe": 24.0,
+"dps": 150.0,
+"ground": true,
+"name": "spores",
+"paralyzer": false,
+"range": 500.0,
+"type": "MissileLauncher"
+},
+{
+"air": false,
+"aoe": 1.0,
+"dps": 0.1,
+"ground": false,
+"name": "dodobomb",
+"paralyzer": false,
+"range": 500.0,
+"type": "AircraftBomb"
+},
+{
+"air": false,
+"aoe": 48.0,
+"dps": 18.0,
+"ground": false,
+"name": "basiliskbomb",
+"paralyzer": false,
+"range": 500.0,
+"type": "AircraftBomb"
+},
+{
+"air": false,
+"aoe": 72.0,
+"dps": 35.0,
+"ground": false,
+"name": "tiamatbomb",
+"paralyzer": false,
+"range": 500.0,
+"type": "AircraftBomb"
+}
+]
+},
+"chickenlandqueen": {
+"aoe": 400.0,
+"dps_air": 900.0,
+"dps_ground": 1993.3,
+"paralyzer": false,
+"range": 1200.0,
+"weapons": [
+{
+"air": false,
+"aoe": 32.0,
+"dps": 1000.0,
+"ground": true,
+"name": "melee",
+"paralyzer": false,
+"range": 200.0,
+"type": "Cannon"
+},
+{
+"air": false,
+"aoe": 256.0,
+"dps": 533.3,
+"ground": true,
+"name": "firegoo",
+"paralyzer": false,
+"range": 1200.0,
+"type": "Cannon"
+},
+{
+"air": true,
+"aoe": 24.0,
+"dps": 150.0,
+"ground": true,
+"name": "spores",
+"paralyzer": false,
+"range": 600.0,
+"type": "MissileLauncher"
+},
+{
+"air": true,
+"aoe": 24.0,
+"dps": 150.0,
+"ground": true,
+"name": "spores",
+"paralyzer": false,
+"range": 600.0,
+"type": "MissileLauncher"
+},
+{
+"air": true,
+"aoe": 24.0,
+"dps": 150.0,
+"ground": true,
+"name": "spores",
+"paralyzer": false,
+"range": 600.0,
+"type": "MissileLauncher"
+},
+{
+"air": false,
+"aoe": 400.0,
+"dps": 10.0,
+"ground": true,
+"name": "queencrush",
+"paralyzer": false,
+"range": 512.0,
+"type": "Cannon"
+},
+{
+"air": false,
+"aoe": 1.0,
+"dps": 0.1,
+"ground": false,
+"name": "dodobomb",
+"paralyzer": false,
+"range": 500.0,
+"type": "AircraftBomb"
+},
+{
+"air": false,
+"aoe": 48.0,
+"dps": 18.0,
+"ground": false,
+"name": "basiliskbomb",
+"paralyzer": false,
+"range": 500.0,
+"type": "AircraftBomb"
+},
+{
+"air": false,
+"aoe": 72.0,
+"dps": 35.0,
+"ground": false,
+"name": "tiamatbomb",
+"paralyzer": false,
+"range": 500.0,
+"type": "AircraftBomb"
+}
+]
+},
+"chickenr": {
+"aoe": 32.0,
+"dps_air": 0.0,
+"dps_ground": 40.0,
+"paralyzer": false,
+"range": 950.0,
+"weapons": [
+{
+"air": false,
+"aoe": 32.0,
+"dps": 40.0,
+"ground": true,
+"name": "weapon",
+"paralyzer": false,
+"range": 950.0,
+"type": "Cannon"
+}
+]
+},
+"chickens": {
+"aoe": 16.0,
+"dps_air": 60.0,
+"dps_ground": 60.0,
+"paralyzer": false,
+"range": 460.0,
+"weapons": [
+{
+"air": true,
+"aoe": 16.0,
+"dps": 60.0,
+"ground": true,
+"name": "weapon",
+"paralyzer": false,
+"range": 460.0,
+"type": "Cannon"
+}
+]
+},
+"chickenspire": {
+"aoe": 160.0,
+"dps_air": 0.0,
+"dps_ground": 285.7,
+"paralyzer": false,
+"range": 6300.0,
+"weapons": [
+{
+"air": false,
+"aoe": 160.0,
+"dps": 285.7,
+"ground": true,
+"name": "slamspore",
+"paralyzer": false,
+"range": 6300.0,
+"type": "MissileLauncher"
+}
+]
+},
+"chickenwurm": {
+"aoe": 128.0,
+"dps_air": 50.0,
+"dps_ground": 91.7,
+"paralyzer": false,
+"range": 300.0,
+"weapons": [
+{
+"air": true,
+"aoe": 128.0,
+"dps": 8.3,
+"ground": true,
+"name": "napalm",
+"paralyzer": false,
+"range": 300.0,
+"type": "Cannon"
+},
+{
+"air": true,
+"aoe": 128.0,
+"dps": 41.7,
+"ground": true,
+"name": "uwgoo",
+"paralyzer": false,
+"range": 300.0,
+"type": "Cannon"
+},
+{
+"air": false,
+"aoe": 128.0,
+"dps": 41.7,
+"ground": true,
+"name": "uwgoo",
+"paralyzer": false,
+"range": 300.0,
+"type": "Cannon"
+}
+]
+},
+"cloakaa": {
+"aoe": 12.0,
+"dps_air": 66.7,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 720.0,
+"weapons": [
+{
+"air": true,
+"aoe": 12.0,
+"dps": 6.7,
+"ground": false,
+"name": "aa_laser",
+"paralyzer": false,
+"range": 720.0,
+"type": "BeamLaser"
+}
+]
+},
+"cloakarty": {
+"aoe": 16.0,
+"dps_air": 23.3,
+"dps_ground": 23.3,
+"paralyzer": false,
+"range": 860.0,
+"weapons": [
+{
+"air": true,
+"aoe": 16.0,
+"dps": 23.3,
+"ground": true,
+"name": "hammer_weapon",
+"paralyzer": false,
+"range": 860.0,
+"type": "Cannon"
+}
+]
+},
+"cloakassault": {
+"aoe": 8.0,
+"dps_air": 104.5,
+"dps_ground": 104.5,
+"paralyzer": false,
+"range": 340.0,
+"weapons": [
+{
+"air": true,
+"aoe": 8.0,
+"dps": 104.5,
+"ground": true,
+"name": "lightning",
+"paralyzer": false,
+"range": 340.0,
+"type": "LightningCannon"
+}
+]
+},
+"cloakbomb": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"cloakcon": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"cloakheavyraid": {
+"aoe": 8.0,
+"dps_air": 142.9,
+"dps_ground": 142.9,
+"paralyzer": false,
+"range": 100.0,
+"weapons": [
+{
+"air": true,
+"aoe": 8.0,
+"dps": 142.9,
+"ground": true,
+"name": "blade",
+"paralyzer": false,
+"range": 100.0,
+"type": "BeamLaser"
+}
+]
+},
+"cloakjammer": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"cloakraid": {
+"aoe": 8.0,
+"dps_air": 105.0,
+"dps_ground": 105.0,
+"paralyzer": false,
+"range": 185.0,
+"weapons": [
+{
+"air": true,
+"aoe": 8.0,
+"dps": 105.0,
+"ground": true,
+"name": "emg",
+"paralyzer": false,
+"range": 185.0,
+"type": "Cannon"
+}
+]
+},
+"cloakriot": {
+"aoe": 96.0,
+"dps_air": 270.0,
+"dps_ground": 270.0,
+"paralyzer": false,
+"range": 270.0,
+"weapons": [
+{
+"air": true,
+"aoe": 96.0,
+"dps": 270.0,
+"ground": true,
+"name": "warrior_weapon",
+"paralyzer": false,
+"range": 270.0,
+"type": "Cannon"
+}
+]
+},
+"cloakskirm": {
+"aoe": 48.0,
+"dps_air": 51.4,
+"dps_ground": 51.4,
+"paralyzer": false,
+"range": 455.0,
+"weapons": [
+{
+"air": true,
+"aoe": 48.0,
+"dps": 51.4,
+"ground": true,
+"name": "bot_rocket",
+"paralyzer": false,
+"range": 455.0,
+"type": "MissileLauncher"
+}
+]
+},
+"cloaksnipe": {
+"aoe": 16.0,
+"dps_air": 88.2,
+"dps_ground": 88.2,
+"paralyzer": false,
+"range": 700.0,
+"weapons": [
+{
+"air": true,
+"aoe": 16.0,
+"dps": 88.2,
+"ground": true,
+"name": "shockrifle",
+"paralyzer": false,
+"range": 700.0,
+"type": "Cannon"
+}
+]
+},
+"commander_egg": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"commrecon1": {
+"aoe": 8.0,
+"dps_air": 90.0,
+"dps_ground": 90.0,
+"paralyzer": false,
+"range": 400.0,
+"weapons": [
+{
+"air": true,
+"aoe": 8.0,
+"dps": 90.0,
+"ground": true,
+"name": "slowbeam",
+"paralyzer": false,
+"range": 400.0,
+"type": "BeamLaser"
+}
+]
+},
+"commstrike1": {
+"aoe": 12.0,
+"dps_air": 150.6,
+"dps_ground": 150.6,
+"paralyzer": false,
+"range": 300.0,
+"weapons": [
+{
+"air": true,
+"aoe": 12.0,
+"dps": 150.6,
+"ground": true,
+"name": "laser",
+"paralyzer": false,
+"range": 300.0,
+"type": "BeamLaser"
+}
+]
+},
+"commsupport1": {
+"aoe": 16.0,
+"dps_air": 56.0,
+"dps_ground": 56.0,
+"paralyzer": false,
+"range": 420.0,
+"weapons": [
+{
+"air": true,
+"aoe": 16.0,
+"dps": 56.0,
+"ground": true,
+"name": "gauss",
+"paralyzer": false,
+"range": 420.0,
+"type": "Cannon"
+}
+]
+},
+"corcom1": {
+"aoe": 144.0,
+"dps_air": 100108.1,
+"dps_ground": 100108.1,
+"paralyzer": false,
+"range": 270.0,
+"weapons": [
+{
+"air": true,
+"aoe": 144.0,
+"dps": 109.1,
+"ground": true,
+"name": "shock_cannon",
+"paralyzer": false,
+"range": 270.0,
+"type": "Cannon"
+},
+{
+"air": true,
+"aoe": 48.0,
+"dps": 99999.0,
+"ground": true,
+"name": "disintegrator",
+"paralyzer": false,
+"range": 250.0,
+"type": "DGun"
+}
+]
+},
+"cremcom1": {
+"aoe": 12.0,
+"dps_air": 165.0,
+"dps_ground": 165.0,
+"paralyzer": false,
+"range": 300.0,
+"weapons": [
+{
+"air": true,
+"aoe": 12.0,
+"dps": 165.0,
+"ground": true,
+"name": "laser",
+"paralyzer": false,
+"range": 300.0,
+"type": "BeamLaser"
+}
+]
+},
+"damagesink": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"dbg_m0r0": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"dbg_m0r1": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"dbg_m1r0": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"dbg_m1r1": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"dbg_moire": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"dronecarry": {
+"aoe": 0.0,
+"dps_air": 360.0,
+"dps_ground": 360.0,
+"paralyzer": false,
+"range": 250.0,
+"weapons": [
+{
+"air": true,
+"aoe": 0.0,
+"dps": 360.0,
+"ground": true,
+"name": "captureray",
+"paralyzer": false,
+"range": 250.0,
+"type": "BeamLaser"
+}
+]
+},
+"dronefighter": {
+"aoe": 0.0,
+"dps_air": 165.0,
+"dps_ground": 165.0,
+"paralyzer": false,
+"range": 500.0,
+"weapons": [
+{
+"air": true,
+"aoe": 0.0,
+"dps": 165.0,
+"ground": true,
+"name": "laser",
+"paralyzer": false,
+"range": 500.0,
+"type": "BeamLaser"
+}
+]
+},
+"droneheavyslow": {
+"aoe": 24.0,
+"dps_air": 100.0,
+"dps_ground": 100.0,
+"paralyzer": false,
+"range": 200.0,
+"weapons": [
+{
+"air": true,
+"aoe": 24.0,
+"dps": 100.0,
+"ground": true,
+"name": "disruptor",
+"paralyzer": false,
+"range": 200.0,
+"type": "BeamLaser"
+}
+]
+},
+"dronelight": {
+"aoe": 0.0,
+"dps_air": 40.0,
+"dps_ground": 40.0,
+"paralyzer": false,
+"range": 150.0,
+"weapons": [
+{
+"air": true,
+"aoe": 0.0,
+"dps": 40.0,
+"ground": true,
+"name": "laser",
+"paralyzer": false,
+"range": 150.0,
+"type": "BeamLaser"
+}
+]
+},
+"dynassault1": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"dynknight1": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"dynrecon1": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"dynstrike1": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"dynsupport1": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"empiricaldpser": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"empiricaldpsersmall": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"empmissile": {
+"aoe": 280.0,
+"dps_air": 5000.4,
+"dps_ground": 5000.4,
+"paralyzer": true,
+"range": 3500.0,
+"weapons": [
+{
+"air": true,
+"aoe": 280.0,
+"dps": 5000.4,
+"ground": true,
+"name": "emp_weapon",
+"paralyzer": true,
+"range": 3500.0,
+"type": "StarburstLauncher"
+}
+]
+},
+"energyfusion": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"energygeo": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"energyheavygeo": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"energypylon": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"energysingu": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"energysolar": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"energywind": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"factoryamph": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"factorycloak": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"factorygunship": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"factoryhover": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"factoryjump": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"factoryplane": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"factoryshield": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"factoryship": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"factoryspider": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"factorytank": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"factoryveh": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"fakeunit": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"fakeunit_aatarget": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"fakeunit_los": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"grebe": {
+"aoe": 96.0,
+"dps_air": 160.0,
+"dps_ground": 160.0,
+"paralyzer": false,
+"range": 360.0,
+"weapons": [
+{
+"air": true,
+"aoe": 96.0,
+"dps": 160.0,
+"ground": true,
+"name": "grenade",
+"paralyzer": false,
+"range": 360.0,
+"type": "Cannon"
+}
+]
+},
+"gunshipaa": {
+"aoe": 48.0,
+"dps_air": 166.8,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 750.0,
+"weapons": [
+{
+"air": true,
+"aoe": 48.0,
+"dps": 16.7,
+"ground": false,
+"name": "aa_missile",
+"paralyzer": false,
+"range": 750.0,
+"type": "StarburstLauncher"
+}
+]
+},
+"gunshipassault": {
+"aoe": 96.0,
+"dps_air": 189.4,
+"dps_ground": 189.4,
+"paralyzer": false,
+"range": 270.0,
+"weapons": [
+{
+"air": true,
+"aoe": 96.0,
+"dps": 189.4,
+"ground": true,
+"name": "vtol_salvo",
+"paralyzer": false,
+"range": 270.0,
+"type": "MissileLauncher"
+}
+]
+},
+"gunshipbomb": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"gunshipcon": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"gunshipemp": {
+"aoe": 8.0,
+"dps_air": 291.7,
+"dps_ground": 291.7,
+"paralyzer": true,
+"range": 160.0,
+"weapons": [
+{
+"air": true,
+"aoe": 8.0,
+"dps": 291.7,
+"ground": true,
+"name": "paralyzer",
+"paralyzer": true,
+"range": 160.0,
+"type": "LightningCannon"
+}
+]
+},
+"gunshipheavyskirm": {
+"aoe": 40.0,
+"dps_air": 184.8,
+"dps_ground": 184.8,
+"paralyzer": false,
+"range": 600.0,
+"weapons": [
+{
+"air": true,
+"aoe": 40.0,
+"dps": 184.8,
+"ground": true,
+"name": "emg",
+"paralyzer": false,
+"range": 600.0,
+"type": "Cannon"
+}
+]
+},
+"gunshipheavytrans": {
+"aoe": 12.0,
+"dps_air": 150.0,
+"dps_ground": 100.0,
+"paralyzer": false,
+"range": 450.0,
+"weapons": [
+{
+"air": true,
+"aoe": 8.0,
+"dps": 50.0,
+"ground": true,
+"name": "laser",
+"paralyzer": false,
+"range": 312.0,
+"type": "LaserCannon"
+},
+{
+"air": true,
+"aoe": 8.0,
+"dps": 50.0,
+"ground": true,
+"name": "laser",
+"paralyzer": false,
+"range": 312.0,
+"type": "LaserCannon"
+},
+{
+"air": true,
+"aoe": 12.0,
+"dps": 5.0,
+"ground": false,
+"name": "aalaser",
+"paralyzer": false,
+"range": 450.0,
+"type": "BeamLaser"
+}
+]
+},
+"gunshipkrow": {
+"aoe": 128.0,
+"dps_air": 825.0,
+"dps_ground": 1450.0,
+"paralyzer": false,
+"range": 395.0,
+"weapons": [
+{
+"air": true,
+"aoe": 14.0,
+"dps": 275.0,
+"ground": true,
+"name": "krowlaser",
+"paralyzer": false,
+"range": 395.0,
+"type": "BeamLaser"
+},
+{
+"air": true,
+"aoe": 14.0,
+"dps": 275.0,
+"ground": true,
+"name": "krowlaser",
+"paralyzer": false,
+"range": 395.0,
+"type": "BeamLaser"
+},
+{
+"air": false,
+"aoe": 128.0,
+"dps": 625.0,
+"ground": true,
+"name": "clusterbomb",
+"paralyzer": false,
+"range": 200.0,
+"type": "Cannon"
+},
+{
+"air": true,
+"aoe": 14.0,
+"dps": 275.0,
+"ground": true,
+"name": "krowlaser",
+"paralyzer": false,
+"range": 395.0,
+"type": "BeamLaser"
+}
+]
+},
+"gunshipraid": {
+"aoe": 8.0,
+"dps_air": 60.8,
+"dps_ground": 60.8,
+"paralyzer": false,
+"range": 260.0,
+"weapons": [
+{
+"air": true,
+"aoe": 8.0,
+"dps": 60.8,
+"ground": true,
+"name": "laser",
+"paralyzer": false,
+"range": 260.0,
+"type": "BeamLaser"
+}
+]
+},
+"gunshipskirm": {
+"aoe": 16.0,
+"dps_air": 44.0,
+"dps_ground": 44.0,
+"paralyzer": false,
+"range": 360.0,
+"weapons": [
+{
+"air": true,
+"aoe": 16.0,
+"dps": 44.0,
+"ground": true,
+"name": "vtol_rocket",
+"paralyzer": false,
+"range": 360.0,
+"type": "MissileLauncher"
+}
+]
+},
+"gunshiptrans": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"hoveraa": {
+"aoe": 64.0,
+"dps_air": 88.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 820.0,
+"weapons": [
+{
+"air": true,
+"aoe": 64.0,
+"dps": 8.8,
+"ground": false,
+"name": "weapon",
+"paralyzer": false,
+"range": 820.0,
+"type": "StarburstLauncher"
+}
+]
+},
+"hoverarty": {
+"aoe": 20.0,
+"dps_air": 130.4,
+"dps_ground": 130.4,
+"paralyzer": false,
+"range": 980.0,
+"weapons": [
+{
+"air": true,
+"aoe": 20.0,
+"dps": 130.4,
+"ground": true,
+"name": "ata",
+"paralyzer": false,
+"range": 980.0,
+"type": "BeamLaser"
+}
+]
+},
+"hoverassault": {
+"aoe": 48.0,
+"dps_air": 133.4,
+"dps_ground": 133.4,
+"paralyzer": false,
+"range": 200.0,
+"weapons": [
+{
+"air": true,
+"aoe": 48.0,
+"dps": 133.4,
+"ground": true,
+"name": "dew",
+"paralyzer": false,
+"range": 200.0,
+"type": "LaserCannon"
+}
+]
+},
+"hovercon": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"hoverdepthcharge": {
+"aoe": 160.0,
+"dps_air": 167.8,
+"dps_ground": 167.8,
+"paralyzer": false,
+"range": 300.0,
+"weapons": [
+{
+"air": true,
+"aoe": 160.0,
+"dps": 167.8,
+"ground": true,
+"name": "depthcharge",
+"paralyzer": false,
+"range": 300.0,
+"type": "TorpedoLauncher"
+}
+]
+},
+"hoverheavyraid": {
+"aoe": 24.0,
+"dps_air": 96.9,
+"dps_ground": 96.9,
+"paralyzer": false,
+"range": 225.0,
+"weapons": [
+{
+"air": true,
+"aoe": 24.0,
+"dps": 96.9,
+"ground": true,
+"name": "disruptor",
+"paralyzer": false,
+"range": 225.0,
+"type": "BeamLaser"
+}
+]
+},
+"hoverminer": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 4.0,
+"paralyzer": false,
+"range": 300.0,
+"weapons": [
+{
+"air": false,
+"aoe": 0.0,
+"dps": 4.0,
+"ground": true,
+"name": "mine",
+"paralyzer": false,
+"range": 300.0,
+"type": "Cannon"
+}
+]
+},
+"hoverraid": {
+"aoe": 16.0,
+"dps_air": 38.8,
+"dps_ground": 38.8,
+"paralyzer": false,
+"range": 212.0,
+"weapons": [
+{
+"air": true,
+"aoe": 16.0,
+"dps": 38.8,
+"ground": true,
+"name": "gauss",
+"paralyzer": false,
+"range": 212.0,
+"type": "Cannon"
+}
+]
+},
+"hoverriot": {
+"aoe": 8.0,
+"dps_air": 326.5,
+"dps_ground": 326.5,
+"paralyzer": false,
+"range": 345.0,
+"weapons": [
+{
+"air": true,
+"aoe": 8.0,
+"dps": 326.5,
+"ground": true,
+"name": "laser1",
+"paralyzer": false,
+"range": 345.0,
+"type": "BeamLaser"
+}
+]
+},
+"hovershotgun": {
+"aoe": 32.0,
+"dps_air": 170.7,
+"dps_ground": 170.7,
+"paralyzer": false,
+"range": 235.0,
+"weapons": [
+{
+"air": true,
+"aoe": 32.0,
+"dps": 170.7,
+"ground": true,
+"name": "shotgun",
+"paralyzer": false,
+"range": 235.0,
+"type": "LaserCannon"
+}
+]
+},
+"hoverskirm": {
+"aoe": 80.0,
+"dps_air": 64.0,
+"dps_ground": 64.0,
+"paralyzer": false,
+"range": 440.0,
+"weapons": [
+{
+"air": true,
+"aoe": 80.0,
+"dps": 64.0,
+"ground": true,
+"name": "missile",
+"paralyzer": false,
+"range": 440.0,
+"type": "MissileLauncher"
+}
+]
+},
+"hoverskirm2": {
+"aoe": 32.0,
+"dps_air": 90.0,
+"dps_ground": 90.0,
+"paralyzer": false,
+"range": 360.0,
+"weapons": [
+{
+"air": true,
+"aoe": 32.0,
+"dps": 90.0,
+"ground": true,
+"name": "scatter_laser",
+"paralyzer": false,
+"range": 360.0,
+"type": "BeamLaser"
+}
+]
+},
+"hoversonic": {
+"aoe": 70.0,
+"dps_air": 159.1,
+"dps_ground": 159.1,
+"paralyzer": false,
+"range": 303.0,
+"weapons": [
+{
+"air": true,
+"aoe": 70.0,
+"dps": 159.1,
+"ground": true,
+"name": "sonicgun",
+"paralyzer": false,
+"range": 303.0,
+"type": "LaserCannon"
+}
+]
+},
+"jumpaa": {
+"aoe": 12.0,
+"dps_air": 241.6,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 1040.0,
+"weapons": [
+{
+"air": true,
+"aoe": 12.0,
+"dps": 16.4,
+"ground": false,
+"name": "laser",
+"paralyzer": false,
+"range": 850.0,
+"type": "BeamLaser"
+},
+{
+"air": true,
+"aoe": 8.0,
+"dps": 7.8,
+"ground": false,
+"name": "emg",
+"paralyzer": false,
+"range": 1040.0,
+"type": "Cannon"
+}
+]
+},
+"jumparty": {
+"aoe": 128.0,
+"dps_air": 0.0,
+"dps_ground": 56.7,
+"paralyzer": false,
+"range": 900.0,
+"weapons": [
+{
+"air": false,
+"aoe": 128.0,
+"dps": 56.7,
+"ground": true,
+"name": "napalm_sprayer",
+"paralyzer": false,
+"range": 900.0,
+"type": "Cannon"
+}
+]
+},
+"jumpassault": {
+"aoe": 8.0,
+"dps_air": 300.1,
+"dps_ground": 300.1,
+"paralyzer": false,
+"range": 122.0,
+"weapons": [
+{
+"air": true,
+"aoe": 8.0,
+"dps": 300.1,
+"ground": true,
+"name": "spike",
+"paralyzer": false,
+"range": 122.0,
+"type": "BeamLaser"
+}
+]
+},
+"jumpblackhole": {
+"aoe": 300.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 475.0,
+"weapons": [
+{
+"air": true,
+"aoe": 300.0,
+"dps": 0.0,
+"ground": true,
+"name": "black_hole",
+"paralyzer": false,
+"range": 475.0,
+"type": "Cannon"
+}
+]
+},
+"jumpbomb": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"jumpcon": {
+"aoe": 8.0,
+"dps_air": 7.5,
+"dps_ground": 7.5,
+"paralyzer": false,
+"range": 240.0,
+"weapons": [
+{
+"air": true,
+"aoe": 8.0,
+"dps": 7.5,
+"ground": true,
+"name": "slowbeam",
+"paralyzer": false,
+"range": 240.0,
+"type": "BeamLaser"
+}
+]
+},
+"jumpraid": {
+"aoe": 64.0,
+"dps_air": 69.2,
+"dps_ground": 69.2,
+"paralyzer": false,
+"range": 240.0,
+"weapons": [
+{
+"air": true,
+"aoe": 64.0,
+"dps": 69.2,
+"ground": true,
+"name": "flamethrower",
+"paralyzer": false,
+"range": 240.0,
+"type": "LaserCannon"
+}
+]
+},
+"jumpscout": {
+"aoe": 40.0,
+"dps_air": 273.4,
+"dps_ground": 273.4,
+"paralyzer": false,
+"range": 168.0,
+"weapons": [
+{
+"air": true,
+"aoe": 40.0,
+"dps": 273.4,
+"ground": true,
+"name": "missile",
+"paralyzer": false,
+"range": 168.0,
+"type": "MissileLauncher"
+}
+]
+},
+"jumpskirm": {
+"aoe": 32.0,
+"dps_air": 46.0,
+"dps_ground": 46.0,
+"paralyzer": false,
+"range": 420.0,
+"weapons": [
+{
+"air": true,
+"aoe": 32.0,
+"dps": 46.0,
+"ground": true,
+"name": "disruptor_beam",
+"paralyzer": false,
+"range": 420.0,
+"type": "BeamLaser"
+}
+]
+},
+"jumpsumo": {
+"aoe": 340.0,
+"dps_air": 0.1,
+"dps_ground": 0.1,
+"paralyzer": false,
+"range": 440.0,
+"weapons": [
+{
+"air": true,
+"aoe": 8.0,
+"dps": 0.0,
+"ground": true,
+"name": "gravity_neg",
+"paralyzer": false,
+"range": 440.0,
+"type": "LaserCannon"
+},
+{
+"air": true,
+"aoe": 8.0,
+"dps": 0.0,
+"ground": true,
+"name": "gravity_neg",
+"paralyzer": false,
+"range": 440.0,
+"type": "LaserCannon"
+},
+{
+"air": true,
+"aoe": 8.0,
+"dps": 0.0,
+"ground": true,
+"name": "gravity_pos",
+"paralyzer": false,
+"range": 440.0,
+"type": "LaserCannon"
+},
+{
+"air": true,
+"aoe": 8.0,
+"dps": 0.0,
+"ground": true,
+"name": "gravity_pos",
+"paralyzer": false,
+"range": 440.0,
+"type": "LaserCannon"
+},
+{
+"air": false,
+"aoe": 340.0,
+"dps": 77.0,
+"ground": false,
+"name": "landing",
+"paralyzer": false,
+"range": 5.0,
+"type": "Cannon"
+}
+]
+},
+"mahlazer": {
+"aoe": 140.0,
+"dps_air": -0.0,
+"dps_ground": -0.0,
+"paralyzer": false,
+"range": 10000.0,
+"weapons": [
+{
+"air": true,
+"aoe": 56.0,
+"dps": -0.0,
+"ground": true,
+"name": "targeter",
+"paralyzer": false,
+"range": 10000.0,
+"type": "BeamLaser"
+},
+{
+"air": false,
+"aoe": 140.0,
+"dps": 1200.0,
+"ground": false,
+"name": "relaylazer",
+"paralyzer": false,
+"range": 10000.0,
+"type": "BeamLaser"
+},
+{
+"air": false,
+"aoe": 140.0,
+"dps": 4501.0,
+"ground": false,
+"name": "relaycutter",
+"paralyzer": false,
+"range": 10000.0,
+"type": "BeamLaser"
+}
+]
+},
+"missileslow": {
+"aoe": 0.0,
+"dps_air": 300.0,
+"dps_ground": 300.0,
+"paralyzer": false,
+"range": 6000.0,
+"weapons": [
+{
+"air": true,
+"aoe": 0.0,
+"dps": 300.0,
+"ground": true,
+"name": "weapon",
+"paralyzer": false,
+"range": 6000.0,
+"type": "StarburstLauncher"
+}
+]
+},
+"napalmmissile": {
+"aoe": 512.0,
+"dps_air": 15.1,
+"dps_ground": 15.1,
+"paralyzer": false,
+"range": 3500.0,
+"weapons": [
+{
+"air": true,
+"aoe": 512.0,
+"dps": 15.1,
+"ground": true,
+"name": "weapon",
+"paralyzer": false,
+"range": 3500.0,
+"type": "StarburstLauncher"
+}
+]
+},
+"nebula": {
+"aoe": 32.0,
+"dps_air": 400.0,
+"dps_ground": 410.0,
+"paralyzer": false,
+"range": 450.0,
+"weapons": [
+{
+"air": true,
+"aoe": 32.0,
+"dps": 100.0,
+"ground": true,
+"name": "cannon",
+"paralyzer": false,
+"range": 450.0,
+"type": "Cannon"
+},
+{
+"air": true,
+"aoe": 32.0,
+"dps": 100.0,
+"ground": true,
+"name": "cannon",
+"paralyzer": false,
+"range": 450.0,
+"type": "Cannon"
+},
+{
+"air": true,
+"aoe": 32.0,
+"dps": 100.0,
+"ground": true,
+"name": "cannon",
+"paralyzer": false,
+"range": 450.0,
+"type": "Cannon"
+},
+{
+"air": true,
+"aoe": 32.0,
+"dps": 100.0,
+"ground": true,
+"name": "cannon",
+"paralyzer": false,
+"range": 450.0,
+"type": "Cannon"
+},
+{
+"air": false,
+"aoe": 0.0,
+"dps": 10.0,
+"ground": true,
+"name": "shield",
+"paralyzer": false,
+"range": 0.0,
+"type": "Shield"
+}
+]
+},
+"neebcomm": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"obj_artefact": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"planecon": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"planefighter": {
+"aoe": 48.0,
+"dps_air": 61.5,
+"dps_ground": 35.5,
+"paralyzer": false,
+"range": 667.0,
+"weapons": [
+{
+"air": true,
+"aoe": 8.0,
+"dps": 35.5,
+"ground": true,
+"name": "swift_gun",
+"paralyzer": false,
+"range": 667.0,
+"type": "LaserCannon"
+},
+{
+"air": true,
+"aoe": 48.0,
+"dps": 2.6,
+"ground": false,
+"name": "missile",
+"paralyzer": false,
+"range": 530.0,
+"type": "MissileLauncher"
+}
+]
+},
+"planeheavyfighter": {
+"aoe": 12.0,
+"dps_air": 100.0,
+"dps_ground": 10.0,
+"paralyzer": false,
+"range": 800.0,
+"weapons": [
+{
+"air": true,
+"aoe": 12.0,
+"dps": 10.0,
+"ground": true,
+"name": "laser",
+"paralyzer": false,
+"range": 800.0,
+"type": "BeamLaser"
+}
+]
+},
+"planelightscout": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"planescout": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"planesupport": {
+"aoe": 24.0,
+"dps_air": 60.0,
+"dps_ground": 60.0,
+"paralyzer": false,
+"range": 580.0,
+"weapons": [
+{
+"air": true,
+"aoe": 24.0,
+"dps": 60.0,
+"ground": true,
+"name": "disruptor_cannon",
+"paralyzer": false,
+"range": 580.0,
+"type": "Cannon"
+}
+]
+},
+"plateamph": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"platecloak": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"plategunship": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"platehover": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"platejump": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"plateplane": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"plateshield": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"plateship": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"platespider": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"platetank": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"plateveh": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"pw_generic": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"pw_hq_attacker": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"pw_hq_attacker_extra": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"pw_hq_defender": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"pw_hq_defender_extra": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"raveparty": {
+"aoe": 800.0,
+"dps_air": 5957.6,
+"dps_ground": 5957.6,
+"paralyzer": true,
+"range": 9600.0,
+"weapons": [
+{
+"air": true,
+"aoe": 192.0,
+"dps": 1000.0,
+"ground": true,
+"name": "red_killer",
+"paralyzer": false,
+"range": 9600.0,
+"type": "Cannon"
+},
+{
+"air": true,
+"aoe": 800.0,
+"dps": 71.5,
+"ground": true,
+"name": "orange_roaster",
+"paralyzer": false,
+"range": 9600.0,
+"type": "Cannon"
+},
+{
+"air": true,
+"aoe": 384.0,
+"dps": 286.0,
+"ground": true,
+"name": "yellow_slammer",
+"paralyzer": false,
+"range": 9600.0,
+"type": "Cannon"
+},
+{
+"air": true,
+"aoe": 384.0,
+"dps": 171.5,
+"ground": true,
+"name": "green_stamper",
+"paralyzer": false,
+"range": 9600.0,
+"type": "Cannon"
+},
+{
+"air": true,
+"aoe": 320.0,
+"dps": 4285.7,
+"ground": true,
+"name": "blue_shocker",
+"paralyzer": true,
+"range": 9600.0,
+"type": "Cannon"
+},
+{
+"air": true,
+"aoe": 720.0,
+"dps": 142.9,
+"ground": true,
+"name": "violet_slugger",
+"paralyzer": false,
+"range": 9600.0,
+"type": "Cannon"
+}
+]
+},
+"rocksink": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"roost": {
+"aoe": 24.0,
+"dps_air": 106.7,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 600.0,
+"weapons": [
+{
+"air": true,
+"aoe": 24.0,
+"dps": 106.7,
+"ground": false,
+"name": "aerospores",
+"paralyzer": false,
+"range": 600.0,
+"type": "MissileLauncher"
+}
+]
+},
+"seismic": {
+"aoe": 640.0,
+"dps_air": 0.0,
+"dps_ground": 2.0,
+"paralyzer": false,
+"range": 6000.0,
+"weapons": [
+{
+"air": false,
+"aoe": 640.0,
+"dps": 2.0,
+"ground": true,
+"name": "seismic_weapon",
+"paralyzer": false,
+"range": 6000.0,
+"type": "StarburstLauncher"
+}
+]
+},
+"shieldaa": {
+"aoe": 48.0,
+"dps_air": 36.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 900.0,
+"weapons": [
+{
+"air": true,
+"aoe": 48.0,
+"dps": 3.6,
+"ground": false,
+"name": "armkbot_missile",
+"paralyzer": false,
+"range": 900.0,
+"type": "MissileLauncher"
+}
+]
+},
+"shieldarty": {
+"aoe": 24.0,
+"dps_air": 125.0,
+"dps_ground": 125.0,
+"paralyzer": false,
+"range": 940.0,
+"weapons": [
+{
+"air": true,
+"aoe": 24.0,
+"dps": 125.0,
+"ground": true,
+"name": "emp_rocket",
+"paralyzer": false,
+"range": 940.0,
+"type": "StarburstLauncher"
+}
+]
+},
+"shieldassault": {
+"aoe": 36.0,
+"dps_air": 46.2,
+"dps_ground": 56.2,
+"paralyzer": false,
+"range": 280.0,
+"weapons": [
+{
+"air": true,
+"aoe": 36.0,
+"dps": 46.2,
+"ground": true,
+"name": "thud_weapon",
+"paralyzer": false,
+"range": 280.0,
+"type": "Cannon"
+},
+{
+"air": false,
+"aoe": 0.0,
+"dps": 10.0,
+"ground": true,
+"name": "shield",
+"paralyzer": false,
+"range": 0.0,
+"type": "Shield"
+}
+]
+},
+"shieldbomb": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"shieldcon": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 10.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": [
+{
+"air": false,
+"aoe": 0.0,
+"dps": 10.0,
+"ground": true,
+"name": "shield",
+"paralyzer": false,
+"range": 0.0,
+"type": "Shield"
+}
+]
+},
+"shieldfelon": {
+"aoe": 8.0,
+"dps_air": 566.3,
+"dps_ground": 576.1,
+"paralyzer": false,
+"range": 435.0,
+"weapons": [
+{
+"air": true,
+"aoe": 8.0,
+"dps": 566.3,
+"ground": true,
+"name": "shieldgun",
+"paralyzer": false,
+"range": 435.0,
+"type": "LightningCannon"
+},
+{
+"air": false,
+"aoe": 0.0,
+"dps": 9.8,
+"ground": true,
+"name": "shield",
+"paralyzer": false,
+"range": 0.0,
+"type": "Shield"
+}
+]
+},
+"shieldraid": {
+"aoe": 8.0,
+"dps_air": 84.8,
+"dps_ground": 84.8,
+"paralyzer": false,
+"range": 232.0,
+"weapons": [
+{
+"air": true,
+"aoe": 8.0,
+"dps": 84.8,
+"ground": true,
+"name": "laser",
+"paralyzer": false,
+"range": 232.0,
+"type": "LaserCannon"
+}
+]
+},
+"shieldriot": {
+"aoe": 550.0,
+"dps_air": 32.2,
+"dps_ground": 32.2,
+"paralyzer": false,
+"range": 300.0,
+"weapons": [
+{
+"air": true,
+"aoe": 550.0,
+"dps": 32.2,
+"ground": true,
+"name": "blast",
+"paralyzer": false,
+"range": 300.0,
+"type": "Cannon"
+}
+]
+},
+"shieldscout": {
+"aoe": 0.0,
+"dps_air": 25.3,
+"dps_ground": 25.3,
+"paralyzer": false,
+"range": 50.0,
+"weapons": [
+{
+"air": true,
+"aoe": 0.0,
+"dps": 25.3,
+"ground": true,
+"name": "headbutt",
+"paralyzer": false,
+"range": 50.0,
+"type": "BeamLaser"
+}
+]
+},
+"shieldshield": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 10.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": [
+{
+"air": false,
+"aoe": 0.0,
+"dps": 10.0,
+"ground": true,
+"name": "cor_shield_small",
+"paralyzer": false,
+"range": 0.0,
+"type": "Shield"
+}
+]
+},
+"shieldskirm": {
+"aoe": 96.0,
+"dps_air": 0.0,
+"dps_ground": 47.1,
+"paralyzer": false,
+"range": 530.0,
+"weapons": [
+{
+"air": false,
+"aoe": 96.0,
+"dps": 47.1,
+"ground": true,
+"name": "storm_rocket",
+"paralyzer": false,
+"range": 530.0,
+"type": "MissileLauncher"
+}
+]
+},
+"shipaa": {
+"aoe": 48.0,
+"dps_air": 217.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 1000.0,
+"weapons": [
+{
+"air": true,
+"aoe": 48.0,
+"dps": 9.0,
+"ground": false,
+"name": "aa_missile",
+"paralyzer": false,
+"range": 1000.0,
+"type": "MissileLauncher"
+},
+{
+"air": true,
+"aoe": 8.0,
+"dps": 13.0,
+"ground": false,
+"name": "aalaser",
+"paralyzer": false,
+"range": 1000.0,
+"type": "LaserCannon"
+}
+]
+},
+"shiparty": {
+"aoe": 96.0,
+"dps_air": 164.4,
+"dps_ground": 164.4,
+"paralyzer": false,
+"range": 1200.0,
+"weapons": [
+{
+"air": true,
+"aoe": 96.0,
+"dps": 164.4,
+"ground": true,
+"name": "plasma",
+"paralyzer": false,
+"range": 1200.0,
+"type": "Cannon"
+}
+]
+},
+"shipassault": {
+"aoe": 200.0,
+"dps_air": 154.6,
+"dps_ground": 179.6,
+"paralyzer": false,
+"range": 800.0,
+"weapons": [
+{
+"air": true,
+"aoe": 200.0,
+"dps": 154.6,
+"ground": true,
+"name": "sonic",
+"paralyzer": false,
+"range": 290.0,
+"type": "Cannon"
+},
+{
+"air": false,
+"aoe": 48.0,
+"dps": 25.0,
+"ground": true,
+"name": "missile",
+"paralyzer": false,
+"range": 800.0,
+"type": "StarburstLauncher"
+}
+]
+},
+"shipcarrier": {
+"aoe": 280.0,
+"dps_air": 1500.0,
+"dps_ground": 1500.0,
+"paralyzer": false,
+"range": 3000.0,
+"weapons": [
+{
+"air": false,
+"aoe": 8.0,
+"dps": 0.0,
+"ground": true,
+"name": "carriertargeting",
+"paralyzer": false,
+"range": 1000.0,
+"type": "StarburstLauncher"
+},
+{
+"air": true,
+"aoe": 280.0,
+"dps": 1500.0,
+"ground": true,
+"name": "disarm_rocket",
+"paralyzer": false,
+"range": 3000.0,
+"type": "StarburstLauncher"
+}
+]
+},
+"shipcon": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"shipheavyarty": {
+"aoe": 96.0,
+"dps_air": 360.8,
+"dps_ground": 360.8,
+"paralyzer": false,
+"range": 1600.0,
+"weapons": [
+{
+"air": true,
+"aoe": 96.0,
+"dps": 120.3,
+"ground": true,
+"name": "plasma",
+"paralyzer": false,
+"range": 1600.0,
+"type": "Cannon"
+},
+{
+"air": true,
+"aoe": 96.0,
+"dps": 120.3,
+"ground": true,
+"name": "plasma",
+"paralyzer": false,
+"range": 1600.0,
+"type": "Cannon"
+},
+{
+"air": true,
+"aoe": 96.0,
+"dps": 120.3,
+"ground": true,
+"name": "plasma",
+"paralyzer": false,
+"range": 1600.0,
+"type": "Cannon"
+}
+]
+},
+"shipriot": {
+"aoe": 48.0,
+"dps_air": 276.0,
+"dps_ground": 276.0,
+"paralyzer": false,
+"range": 300.0,
+"weapons": [
+{
+"air": true,
+"aoe": 48.0,
+"dps": 138.0,
+"ground": true,
+"name": "shotgun",
+"paralyzer": false,
+"range": 300.0,
+"type": "Cannon"
+},
+{
+"air": true,
+"aoe": 48.0,
+"dps": 138.0,
+"ground": true,
+"name": "shotgun",
+"paralyzer": false,
+"range": 300.0,
+"type": "Cannon"
+}
+]
+},
+"shipscout": {
+"aoe": 8.0,
+"dps_air": 8.8,
+"dps_ground": 8.8,
+"paralyzer": false,
+"range": 265.0,
+"weapons": [
+{
+"air": true,
+"aoe": 8.0,
+"dps": 8.8,
+"ground": true,
+"name": "missile",
+"paralyzer": false,
+"range": 265.0,
+"type": "MissileLauncher"
+}
+]
+},
+"shipskirm": {
+"aoe": 75.0,
+"dps_air": 106.7,
+"dps_ground": 106.7,
+"paralyzer": false,
+"range": 610.0,
+"weapons": [
+{
+"air": true,
+"aoe": 75.0,
+"dps": 106.7,
+"ground": true,
+"name": "rocket",
+"paralyzer": false,
+"range": 610.0,
+"type": "MissileLauncher"
+}
+]
+},
+"shiptorpraider": {
+"aoe": 64.0,
+"dps_air": 84.7,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 240.0,
+"weapons": [
+{
+"air": true,
+"aoe": 64.0,
+"dps": 84.7,
+"ground": false,
+"name": "torpedo",
+"paralyzer": false,
+"range": 240.0,
+"type": "TorpedoLauncher"
+}
+]
+},
+"slicer": {
+"aoe": 20.0,
+"dps_air": 0.0,
+"dps_ground": 1002.0,
+"paralyzer": false,
+"range": 80.0,
+"weapons": [
+{
+"air": false,
+"aoe": 8.0,
+"dps": 2.0,
+"ground": true,
+"name": "punch",
+"paralyzer": false,
+"range": 80.0,
+"type": "Cannon"
+},
+{
+"air": false,
+"aoe": 20.0,
+"dps": 1000.0,
+"ground": true,
+"name": "laserblade",
+"paralyzer": false,
+"range": 55.0,
+"type": "BeamLaser"
+}
+]
+},
+"spideraa": {
+"aoe": 48.0,
+"dps_air": 163.2,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 1000.0,
+"weapons": [
+{
+"air": true,
+"aoe": 48.0,
+"dps": 16.3,
+"ground": false,
+"name": "aa",
+"paralyzer": false,
+"range": 1000.0,
+"type": "MissileLauncher"
+}
+]
+},
+"spideranarchid": {
+"aoe": 8.0,
+"dps_air": 50.0,
+"dps_ground": 50.0,
+"paralyzer": false,
+"range": 270.0,
+"weapons": [
+{
+"air": true,
+"aoe": 8.0,
+"dps": 50.0,
+"ground": true,
+"name": "laser",
+"paralyzer": false,
+"range": 270.0,
+"type": "BeamLaser"
+}
+]
+},
+"spiderantiheavy": {
+"aoe": 8.0,
+"dps_air": 114.3,
+"dps_ground": 114.3,
+"paralyzer": true,
+"range": 120.0,
+"weapons": [
+{
+"air": true,
+"aoe": 8.0,
+"dps": 114.3,
+"ground": true,
+"name": "spy",
+"paralyzer": true,
+"range": 120.0,
+"type": "LightningCannon"
+}
+]
+},
+"spiderassault": {
+"aoe": 36.0,
+"dps_air": 54.2,
+"dps_ground": 54.2,
+"paralyzer": false,
+"range": 350.0,
+"weapons": [
+{
+"air": true,
+"aoe": 36.0,
+"dps": 54.2,
+"ground": true,
+"name": "thud_weapon",
+"paralyzer": false,
+"range": 350.0,
+"type": "Cannon"
+}
+]
+},
+"spidercon": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"spidercrabe": {
+"aoe": 200.0,
+"dps_air": 150.1,
+"dps_ground": 150.1,
+"paralyzer": false,
+"range": 600.0,
+"weapons": [
+{
+"air": true,
+"aoe": 200.0,
+"dps": 150.1,
+"ground": true,
+"name": "arm_crabe_gauss",
+"paralyzer": false,
+"range": 600.0,
+"type": "Cannon"
+}
+]
+},
+"spideremp": {
+"aoe": 128.0,
+"dps_air": 54.2,
+"dps_ground": 54.2,
+"paralyzer": false,
+"range": 240.0,
+"weapons": [
+{
+"air": true,
+"aoe": 128.0,
+"dps": 54.2,
+"ground": true,
+"name": "spider",
+"paralyzer": false,
+"range": 240.0,
+"type": "LightningCannon"
+}
+]
+},
+"spiderriot": {
+"aoe": 0.0,
+"dps_air": 266.7,
+"dps_ground": 266.7,
+"paralyzer": false,
+"range": 310.0,
+"weapons": [
+{
+"air": true,
+"aoe": 0.0,
+"dps": 266.7,
+"ground": true,
+"name": "particlebeam",
+"paralyzer": false,
+"range": 310.0,
+"type": "BeamLaser"
+}
+]
+},
+"spiderscout": {
+"aoe": 8.0,
+"dps_air": 51.5,
+"dps_ground": 51.5,
+"paralyzer": false,
+"range": 150.0,
+"weapons": [
+{
+"air": true,
+"aoe": 8.0,
+"dps": 51.5,
+"ground": true,
+"name": "laser",
+"paralyzer": false,
+"range": 150.0,
+"type": "BeamLaser"
+}
+]
+},
+"spiderskirm": {
+"aoe": 48.0,
+"dps_air": 101.2,
+"dps_ground": 101.2,
+"paralyzer": false,
+"range": 570.0,
+"weapons": [
+{
+"air": true,
+"aoe": 48.0,
+"dps": 101.2,
+"ground": true,
+"name": "adv_rocket",
+"paralyzer": false,
+"range": 570.0,
+"type": "MissileLauncher"
+}
+]
+},
+"starlight_satellite": {
+"aoe": 140.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": [
+{
+"air": false,
+"aoe": 140.0,
+"dps": 1200.0,
+"ground": false,
+"name": "lazer",
+"paralyzer": false,
+"range": 10500.0,
+"type": "BeamLaser"
+},
+{
+"air": false,
+"aoe": 140.0,
+"dps": 7.5,
+"ground": false,
+"name": "cutter",
+"paralyzer": false,
+"range": 10500.0,
+"type": "BeamLaser"
+},
+{
+"air": false,
+"aoe": 140.0,
+"dps": 7.5,
+"ground": false,
+"name": "non_cutter",
+"paralyzer": false,
+"range": 10500.0,
+"type": "BeamLaser"
+}
+]
+},
+"staticantinuke": {
+"aoe": 420.0,
+"dps_air": 0.0,
+"dps_ground": 250.0,
+"paralyzer": false,
+"range": 3800.0,
+"weapons": [
+{
+"air": false,
+"aoe": 420.0,
+"dps": 250.0,
+"ground": true,
+"name": "amd_rocket",
+"paralyzer": false,
+"range": 3800.0,
+"type": "StarburstLauncher"
+}
+]
+},
+"staticarty": {
+"aoe": 192.0,
+"dps_air": 180.3,
+"dps_ground": 180.3,
+"paralyzer": false,
+"range": 1850.0,
+"weapons": [
+{
+"air": true,
+"aoe": 192.0,
+"dps": 180.3,
+"ground": true,
+"name": "plasma",
+"paralyzer": false,
+"range": 1850.0,
+"type": "Cannon"
+}
+]
+},
+"staticcon": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"staticheavyarty": {
+"aoe": 176.0,
+"dps_air": 250.3,
+"dps_ground": 250.3,
+"paralyzer": false,
+"range": 5600.0,
+"weapons": [
+{
+"air": true,
+"aoe": 176.0,
+"dps": 250.3,
+"ground": true,
+"name": "plasma",
+"paralyzer": false,
+"range": 5600.0,
+"type": "Cannon"
+}
+]
+},
+"staticheavyradar": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"staticjammer": {
+"aoe": 800.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 72000.0,
+"weapons": [
+{
+"air": true,
+"aoe": 800.0,
+"dps": 0.0,
+"ground": true,
+"name": "bogus_cloak_target",
+"paralyzer": false,
+"range": 72000.0,
+"type": "StarburstLauncher"
+}
+]
+},
+"staticmex": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"staticmissilesilo": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"staticnuke": {
+"aoe": 1920.0,
+"dps_air": 0.0,
+"dps_ground": 1150.1,
+"paralyzer": false,
+"range": 72000.0,
+"weapons": [
+{
+"air": false,
+"aoe": 1920.0,
+"dps": 1150.1,
+"ground": true,
+"name": "crblmssl",
+"paralyzer": false,
+"range": 72000.0,
+"type": "StarburstLauncher"
+}
+]
+},
+"staticradar": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"staticrearm": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"staticshield": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 10.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": [
+{
+"air": false,
+"aoe": 0.0,
+"dps": 10.0,
+"ground": true,
+"name": "cor_shield_small",
+"paralyzer": false,
+"range": 0.0,
+"type": "Shield"
+}
+]
+},
+"staticsonar": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"staticstorage": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"statictele": {
+"aoe": 800.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 72000.0,
+"weapons": [
+{
+"air": true,
+"aoe": 800.0,
+"dps": 0.0,
+"ground": true,
+"name": "bogus_cloak_target",
+"paralyzer": false,
+"range": 72000.0,
+"type": "StarburstLauncher"
+}
+]
+},
+"statictempshield": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 10.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": [
+{
+"air": false,
+"aoe": 0.0,
+"dps": 10.0,
+"ground": true,
+"name": "shield",
+"paralyzer": false,
+"range": 0.0,
+"type": "Shield"
+}
+]
+},
+"striderantiheavy": {
+"aoe": 48.0,
+"dps_air": 1000.0,
+"dps_ground": 1000.0,
+"paralyzer": false,
+"range": 250.0,
+"weapons": [
+{
+"air": true,
+"aoe": 48.0,
+"dps": 1000.0,
+"ground": true,
+"name": "disintegrator",
+"paralyzer": false,
+"range": 250.0,
+"type": "DGun"
+}
+]
+},
+"striderarty": {
+"aoe": 128.0,
+"dps_air": 294.0,
+"dps_ground": 294.0,
+"paralyzer": false,
+"range": 1450.0,
+"weapons": [
+{
+"air": true,
+"aoe": 128.0,
+"dps": 294.0,
+"ground": true,
+"name": "rocket",
+"paralyzer": false,
+"range": 1450.0,
+"type": "MissileLauncher"
+}
+]
+},
+"striderbantha": {
+"aoe": 128.0,
+"dps_air": 870.0,
+"dps_ground": 870.0,
+"paralyzer": true,
+"range": 1200.0,
+"weapons": [
+{
+"air": true,
+"aoe": 20.0,
+"dps": 300.0,
+"ground": true,
+"name": "ata",
+"paralyzer": false,
+"range": 950.0,
+"type": "BeamLaser"
+},
+{
+"air": true,
+"aoe": 8.0,
+"dps": 320.0,
+"ground": true,
+"name": "lightning",
+"paralyzer": false,
+"range": 465.0,
+"type": "LightningCannon"
+},
+{
+"air": true,
+"aoe": 128.0,
+"dps": 250.0,
+"ground": true,
+"name": "emp_missile",
+"paralyzer": true,
+"range": 1200.0,
+"type": "MissileLauncher"
+}
+]
+},
+"striderdante": {
+"aoe": 168.0,
+"dps_air": 1409.5,
+"dps_ground": 1409.5,
+"paralyzer": false,
+"range": 485.0,
+"weapons": [
+{
+"air": true,
+"aoe": 168.0,
+"dps": 166.7,
+"ground": true,
+"name": "napalm_rockets",
+"paralyzer": false,
+"range": 485.0,
+"type": "MissileLauncher"
+},
+{
+"air": true,
+"aoe": 20.0,
+"dps": 980.0,
+"ground": true,
+"name": "heatray",
+"paralyzer": false,
+"range": 417.0,
+"type": "LaserCannon"
+},
+{
+"air": true,
+"aoe": 168.0,
+"dps": 150.0,
+"ground": true,
+"name": "napalm_rockets_salvo",
+"paralyzer": false,
+"range": 460.0,
+"type": "MissileLauncher"
+},
+{
+"air": true,
+"aoe": 96.0,
+"dps": 112.8,
+"ground": true,
+"name": "dante_flamer",
+"paralyzer": false,
+"range": 340.0,
+"type": "LaserCannon"
+}
+]
+},
+"striderdetriment": {
+"aoe": 500.0,
+"dps_air": 1355.3,
+"dps_ground": 1150.3,
+"paralyzer": false,
+"range": 820.0,
+"weapons": [
+{
+"air": true,
+"aoe": 16.0,
+"dps": 225.1,
+"ground": true,
+"name": "gauss",
+"paralyzer": false,
+"range": 550.0,
+"type": "Cannon"
+},
+{
+"air": true,
+"aoe": 16.0,
+"dps": 225.1,
+"ground": true,
+"name": "gauss",
+"paralyzer": false,
+"range": 550.0,
+"type": "Cannon"
+},
+{
+"air": true,
+"aoe": 212.0,
+"dps": 300.0,
+"ground": true,
+"name": "obliteration_blaster",
+"paralyzer": false,
+"range": 700.0,
+"type": "LaserCannon"
+},
+{
+"air": true,
+"aoe": 12.0,
+"dps": 20.5,
+"ground": false,
+"name": "aalaser",
+"paralyzer": false,
+"range": 820.0,
+"type": "BeamLaser"
+},
+{
+"air": true,
+"aoe": 14.0,
+"dps": 400.1,
+"ground": true,
+"name": "trilaser",
+"paralyzer": false,
+"range": 550.0,
+"type": "BeamLaser"
+},
+{
+"air": false,
+"aoe": 500.0,
+"dps": 16.7,
+"ground": false,
+"name": "landing",
+"paralyzer": false,
+"range": 400.0,
+"type": "Cannon"
+}
+]
+},
+"striderdozer": {
+"aoe": 256.0,
+"dps_air": 0.0,
+"dps_ground": 50.0,
+"paralyzer": false,
+"range": 800.0,
+"weapons": [
+{
+"air": false,
+"aoe": 256.0,
+"dps": 50.0,
+"ground": true,
+"name": "terra_spray",
+"paralyzer": false,
+"range": 800.0,
+"type": "Cannon"
+}
+]
+},
+"striderfunnelweb": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 10.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": [
+{
+"air": false,
+"aoe": 0.0,
+"dps": 10.0,
+"ground": true,
+"name": "shield",
+"paralyzer": false,
+"range": 0.0,
+"type": "Shield"
+}
+]
+},
+"striderhub": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"striderscorpion": {
+"aoe": 160.0,
+"dps_air": 933.4,
+"dps_ground": 933.4,
+"paralyzer": true,
+"range": 490.0,
+"weapons": [
+{
+"air": true,
+"aoe": 8.0,
+"dps": 180.0,
+"ground": true,
+"name": "lightning",
+"paralyzer": false,
+"range": 490.0,
+"type": "LightningCannon"
+},
+{
+"air": true,
+"aoe": 160.0,
+"dps": 333.3,
+"ground": true,
+"name": "multilightning",
+"paralyzer": true,
+"range": 490.0,
+"type": "LightningCannon"
+},
+{
+"air": true,
+"aoe": 0.0,
+"dps": 210.0,
+"ground": true,
+"name": "particlebeam",
+"paralyzer": false,
+"range": 420.0,
+"type": "BeamLaser"
+},
+{
+"air": true,
+"aoe": 0.0,
+"dps": 210.0,
+"ground": true,
+"name": "particlebeam",
+"paralyzer": false,
+"range": 420.0,
+"type": "BeamLaser"
+}
+]
+},
+"subraider": {
+"aoe": 16.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": [
+{
+"air": false,
+"aoe": 16.0,
+"dps": 108.4,
+"ground": false,
+"name": "torpedo",
+"paralyzer": false,
+"range": 220.0,
+"type": "TorpedoLauncher"
+}
+]
+},
+"subscout": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"subtacmissile": {
+"aoe": 256.0,
+"dps_air": 0.0,
+"dps_ground": 3502.4,
+"paralyzer": false,
+"range": 3000.0,
+"weapons": [
+{
+"air": false,
+"aoe": 256.0,
+"dps": 3502.4,
+"ground": true,
+"name": "tacnuke",
+"paralyzer": false,
+"range": 3000.0,
+"type": "StarburstLauncher"
+}
+]
+},
+"tacnuke": {
+"aoe": 192.0,
+"dps_air": 350.2,
+"dps_ground": 350.2,
+"paralyzer": false,
+"range": 3500.0,
+"weapons": [
+{
+"air": true,
+"aoe": 192.0,
+"dps": 350.2,
+"ground": true,
+"name": "weapon",
+"paralyzer": false,
+"range": 3500.0,
+"type": "StarburstLauncher"
+}
+]
+},
+"tankaa": {
+"aoe": 64.0,
+"dps_air": 225.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 900.0,
+"weapons": [
+{
+"air": true,
+"aoe": 64.0,
+"dps": 22.5,
+"ground": false,
+"name": "flak",
+"paralyzer": false,
+"range": 900.0,
+"type": "Cannon"
+}
+]
+},
+"tankarty": {
+"aoe": 84.0,
+"dps_air": 0.0,
+"dps_ground": 85.8,
+"paralyzer": false,
+"range": 1150.0,
+"weapons": [
+{
+"air": false,
+"aoe": 84.0,
+"dps": 85.8,
+"ground": true,
+"name": "core_artillery",
+"paralyzer": false,
+"range": 1150.0,
+"type": "Cannon"
+}
+]
+},
+"tankassault": {
+"aoe": 32.0,
+"dps_air": 160.1,
+"dps_ground": 160.1,
+"paralyzer": false,
+"range": 360.0,
+"weapons": [
+{
+"air": true,
+"aoe": 32.0,
+"dps": 160.1,
+"ground": true,
+"name": "cor_reap",
+"paralyzer": false,
+"range": 360.0,
+"type": "Cannon"
+}
+]
+},
+"tankcon": {
+"aoe": 8.0,
+"dps_air": 43.2,
+"dps_ground": 43.2,
+"paralyzer": false,
+"range": 235.0,
+"weapons": [
+{
+"air": true,
+"aoe": 8.0,
+"dps": 43.2,
+"ground": true,
+"name": "laser",
+"paralyzer": false,
+"range": 235.0,
+"type": "LaserCannon"
+}
+]
+},
+"tankheavyarty": {
+"aoe": 140.0,
+"dps_air": 0.0,
+"dps_ground": 435.4,
+"paralyzer": false,
+"range": 1160.0,
+"weapons": [
+{
+"air": false,
+"aoe": 140.0,
+"dps": 435.4,
+"ground": true,
+"name": "plasma",
+"paralyzer": false,
+"range": 1160.0,
+"type": "Cannon"
+}
+]
+},
+"tankheavyassault": {
+"aoe": 32.0,
+"dps_air": 525.7,
+"dps_ground": 525.7,
+"paralyzer": false,
+"range": 450.0,
+"weapons": [
+{
+"air": true,
+"aoe": 32.0,
+"dps": 285.7,
+"ground": true,
+"name": "cor_gol",
+"paralyzer": false,
+"range": 450.0,
+"type": "Cannon"
+},
+{
+"air": true,
+"aoe": 8.0,
+"dps": 240.0,
+"ground": true,
+"name": "slowbeam",
+"paralyzer": false,
+"range": 440.0,
+"type": "BeamLaser"
+}
+]
+},
+"tankheavyraid": {
+"aoe": 8.0,
+"dps_air": 69.2,
+"dps_ground": 69.2,
+"paralyzer": false,
+"range": 245.0,
+"weapons": [
+{
+"air": true,
+"aoe": 8.0,
+"dps": 69.2,
+"ground": true,
+"name": "armlatnk_weapon",
+"paralyzer": false,
+"range": 245.0,
+"type": "LightningCannon"
+}
+]
+},
+"tankraid": {
+"aoe": 96.0,
+"dps_air": 80.0,
+"dps_ground": 80.0,
+"paralyzer": false,
+"range": 210.0,
+"weapons": [
+{
+"air": true,
+"aoe": 96.0,
+"dps": 80.0,
+"ground": true,
+"name": "napalm_bomblet",
+"paralyzer": false,
+"range": 210.0,
+"type": "Cannon"
+}
+]
+},
+"tankriot": {
+"aoe": 160.0,
+"dps_air": 800.3,
+"dps_ground": 800.3,
+"paralyzer": false,
+"range": 320.0,
+"weapons": [
+{
+"air": true,
+"aoe": 160.0,
+"dps": 800.3,
+"ground": true,
+"name": "tawf_banisher",
+"paralyzer": false,
+"range": 320.0,
+"type": "MissileLauncher"
+}
+]
+},
+"tele_beacon": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"terraunit": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"tiptest": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"turretaaclose": {
+"aoe": 24.0,
+"dps_air": 3500.5,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 490.0,
+"weapons": [
+{
+"air": true,
+"aoe": 24.0,
+"dps": 350.5,
+"ground": false,
+"name": "missile",
+"paralyzer": false,
+"range": 490.0,
+"type": "MissileLauncher"
+}
+]
+},
+"turretaafar": {
+"aoe": 24.0,
+"dps_air": 225.1,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 1800.0,
+"weapons": [
+{
+"air": true,
+"aoe": 24.0,
+"dps": 22.5,
+"ground": false,
+"name": "missile",
+"paralyzer": false,
+"range": 1800.0,
+"type": "MissileLauncher"
+}
+]
+},
+"turretaaflak": {
+"aoe": 128.0,
+"dps_air": 264.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 1000.0,
+"weapons": [
+{
+"air": true,
+"aoe": 128.0,
+"dps": 26.4,
+"ground": false,
+"name": "armflak_gun",
+"paralyzer": false,
+"range": 1000.0,
+"type": "Cannon"
+}
+]
+},
+"turretaaheavy": {
+"aoe": 240.0,
+"dps_air": 1114.8,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 2400.0,
+"weapons": [
+{
+"air": true,
+"aoe": 240.0,
+"dps": 89.0,
+"ground": false,
+"name": "advsam",
+"paralyzer": false,
+"range": 2400.0,
+"type": "MissileLauncher"
+},
+{
+"air": true,
+"aoe": 24.0,
+"dps": 22.5,
+"ground": false,
+"name": "fudge_aim_weapon",
+"paralyzer": false,
+"range": 2400.0,
+"type": "MissileLauncher"
+}
+]
+},
+"turretaalaser": {
+"aoe": 8.0,
+"dps_air": 149.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 1000.0,
+"weapons": [
+{
+"air": true,
+"aoe": 8.0,
+"dps": 14.9,
+"ground": false,
+"name": "aagun",
+"paralyzer": false,
+"range": 1000.0,
+"type": "LaserCannon"
+}
+]
+},
+"turretantiheavy": {
+"aoe": 20.0,
+"dps_air": 400.0,
+"dps_ground": 400.0,
+"paralyzer": false,
+"range": 1200.0,
+"weapons": [
+{
+"air": true,
+"aoe": 20.0,
+"dps": 400.0,
+"ground": true,
+"name": "ata",
+"paralyzer": false,
+"range": 1200.0,
+"type": "BeamLaser"
+}
+]
+},
+"turretemp": {
+"aoe": 160.0,
+"dps_air": 189.7,
+"dps_ground": 189.7,
+"paralyzer": true,
+"range": 460.0,
+"weapons": [
+{
+"air": true,
+"aoe": 160.0,
+"dps": 189.7,
+"ground": true,
+"name": "arm_det_weapon",
+"paralyzer": true,
+"range": 460.0,
+"type": "LightningCannon"
+}
+]
+},
+"turretgauss": {
+"aoe": 16.0,
+"dps_air": 95.3,
+"dps_ground": 95.3,
+"paralyzer": false,
+"range": 560.0,
+"weapons": [
+{
+"air": true,
+"aoe": 16.0,
+"dps": 95.3,
+"ground": true,
+"name": "gauss",
+"paralyzer": false,
+"range": 560.0,
+"type": "Cannon"
+}
+]
+},
+"turretheavy": {
+"aoe": 192.0,
+"dps_air": 1450.6,
+"dps_ground": 1450.6,
+"paralyzer": false,
+"range": 650.0,
+"weapons": [
+{
+"air": true,
+"aoe": 192.0,
+"dps": 428.6,
+"ground": true,
+"name": "plasma",
+"paralyzer": false,
+"range": 650.0,
+"type": "Cannon"
+},
+{
+"air": true,
+"aoe": 20.0,
+"dps": 1022.0,
+"ground": true,
+"name": "heatray",
+"paralyzer": false,
+"range": 417.0,
+"type": "LaserCannon"
+}
+]
+},
+"turretheavylaser": {
+"aoe": 14.0,
+"dps_air": 188.9,
+"dps_ground": 188.9,
+"paralyzer": false,
+"range": 620.0,
+"weapons": [
+{
+"air": true,
+"aoe": 14.0,
+"dps": 188.9,
+"ground": true,
+"name": "laser",
+"paralyzer": false,
+"range": 620.0,
+"type": "BeamLaser"
+}
+]
+},
+"turretimpulse": {
+"aoe": 8.0,
+"dps_air": 0.1,
+"dps_ground": 0.1,
+"paralyzer": false,
+"range": 440.0,
+"weapons": [
+{
+"air": true,
+"aoe": 8.0,
+"dps": 0.0,
+"ground": true,
+"name": "gravity_pos",
+"paralyzer": false,
+"range": 440.0,
+"type": "LaserCannon"
+},
+{
+"air": true,
+"aoe": 8.0,
+"dps": 0.0,
+"ground": true,
+"name": "gravity_neg",
+"paralyzer": false,
+"range": 440.0,
+"type": "LaserCannon"
+}
+]
+},
+"turretlaser": {
+"aoe": 8.0,
+"dps_air": 75.0,
+"dps_ground": 75.0,
+"paralyzer": false,
+"range": 460.0,
+"weapons": [
+{
+"air": true,
+"aoe": 8.0,
+"dps": 75.0,
+"ground": true,
+"name": "laser",
+"paralyzer": false,
+"range": 460.0,
+"type": "BeamLaser"
+}
+]
+},
+"turretmissile": {
+"aoe": 8.0,
+"dps_air": 86.7,
+"dps_ground": 86.7,
+"paralyzer": false,
+"range": 610.0,
+"weapons": [
+{
+"air": true,
+"aoe": 8.0,
+"dps": 86.7,
+"ground": true,
+"name": "armrl_missile",
+"paralyzer": false,
+"range": 610.0,
+"type": "MissileLauncher"
+}
+]
+},
+"turretriot": {
+"aoe": 96.0,
+"dps_air": 450.0,
+"dps_ground": 450.0,
+"paralyzer": false,
+"range": 410.0,
+"weapons": [
+{
+"air": true,
+"aoe": 96.0,
+"dps": 450.0,
+"ground": true,
+"name": "turretriot_weapon",
+"paralyzer": false,
+"range": 410.0,
+"type": "Cannon"
+}
+]
+},
+"turretsunlance": {
+"aoe": 48.0,
+"dps_air": 350.0,
+"dps_ground": 350.0,
+"paralyzer": false,
+"range": 750.0,
+"weapons": [
+{
+"air": true,
+"aoe": 48.0,
+"dps": 350.0,
+"ground": true,
+"name": "disruptor",
+"paralyzer": false,
+"range": 750.0,
+"type": "BeamLaser"
+}
+]
+},
+"turrettorp": {
+"aoe": 64.0,
+"dps_air": 59.4,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 550.0,
+"weapons": [
+{
+"air": true,
+"aoe": 64.0,
+"dps": 59.4,
+"ground": false,
+"name": "torpedo",
+"paralyzer": false,
+"range": 550.0,
+"type": "TorpedoLauncher"
+}
+]
+},
+"vehaa": {
+"aoe": 32.0,
+"dps_air": 72.5,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 730.0,
+"weapons": [
+{
+"air": true,
+"aoe": 32.0,
+"dps": 7.3,
+"ground": false,
+"name": "missile",
+"paralyzer": false,
+"range": 730.0,
+"type": "MissileLauncher"
+}
+]
+},
+"veharty": {
+"aoe": 96.0,
+"dps_air": 0.0,
+"dps_ground": 3.6,
+"paralyzer": false,
+"range": 750.0,
+"weapons": [
+{
+"air": false,
+"aoe": 96.0,
+"dps": 3.6,
+"ground": true,
+"name": "mine",
+"paralyzer": false,
+"range": 750.0,
+"type": "Cannon"
+}
+]
+},
+"vehassault": {
+"aoe": 32.0,
+"dps_air": 105.0,
+"dps_ground": 105.0,
+"paralyzer": false,
+"range": 320.0,
+"weapons": [
+{
+"air": true,
+"aoe": 32.0,
+"dps": 105.0,
+"ground": true,
+"name": "plasma",
+"paralyzer": false,
+"range": 320.0,
+"type": "Cannon"
+}
+]
+},
+"vehcapture": {
+"aoe": 0.0,
+"dps_air": 660.0,
+"dps_ground": 660.0,
+"paralyzer": false,
+"range": 450.0,
+"weapons": [
+{
+"air": true,
+"aoe": 0.0,
+"dps": 660.0,
+"ground": true,
+"name": "captureray",
+"paralyzer": false,
+"range": 450.0,
+"type": "BeamLaser"
+}
+]
+},
+"vehcon": {
+"aoe": 0.0,
+"dps_air": 0.0,
+"dps_ground": 0.0,
+"paralyzer": false,
+"range": 0.0,
+"weapons": []
+},
+"vehheavyarty": {
+"aoe": 24.0,
+"dps_air": 0.0,
+"dps_ground": 80.0,
+"paralyzer": false,
+"range": 1500.0,
+"weapons": [
+{
+"air": false,
+"aoe": 24.0,
+"dps": 80.0,
+"ground": true,
+"name": "cortruck_rocket",
+"paralyzer": false,
+"range": 1500.0,
+"type": "StarburstLauncher"
+}
+]
+},
+"vehraid": {
+"aoe": 20.0,
+"dps_air": 300.0,
+"dps_ground": 300.0,
+"paralyzer": false,
+"range": 262.0,
+"weapons": [
+{
+"air": true,
+"aoe": 20.0,
+"dps": 300.0,
+"ground": true,
+"name": "heatray",
+"paralyzer": false,
+"range": 262.0,
+"type": "LaserCannon"
+}
+]
+},
+"vehriot": {
+"aoe": 144.0,
+"dps_air": 141.6,
+"dps_ground": 141.6,
+"paralyzer": false,
+"range": 285.0,
+"weapons": [
+{
+"air": true,
+"aoe": 144.0,
+"dps": 141.6,
+"ground": true,
+"name": "vehriot_weapon",
+"paralyzer": false,
+"range": 285.0,
+"type": "Cannon"
+}
+]
+},
+"vehscout": {
+"aoe": 24.0,
+"dps_air": 32.0,
+"dps_ground": 32.0,
+"paralyzer": false,
+"range": 150.0,
+"weapons": [
+{
+"air": true,
+"aoe": 24.0,
+"dps": 32.0,
+"ground": true,
+"name": "disruptor",
+"paralyzer": false,
+"range": 150.0,
+"type": "BeamLaser"
+}
+]
+},
+"vehsupport": {
+"aoe": 48.0,
+"dps_air": 52.2,
+"dps_ground": 52.2,
+"paralyzer": false,
+"range": 600.0,
+"weapons": [
+{
+"air": true,
+"aoe": 48.0,
+"dps": 52.2,
+"ground": true,
+"name": "cortruck_missile",
+"paralyzer": false,
+"range": 600.0,
+"type": "MissileLauncher"
+}
+]
+},
+"wolverine_mine": {
+"aoe": 16.0,
+"dps_air": 8.5,
+"dps_ground": 8.5,
+"paralyzer": false,
+"range": 115.0,
+"weapons": [
+{
+"air": true,
+"aoe": 16.0,
+"dps": 8.5,
+"ground": true,
+"name": "bomblet",
+"paralyzer": false,
+"range": 115.0,
+"type": "MissileLauncher"
+}
+]
+},
+"zenith": {
+"aoe": 256.0,
+"dps_air": 1333.3,
+"dps_ground": 1333.3,
+"paralyzer": false,
+"range": 8800.0,
+"weapons": [
+{
+"air": true,
+"aoe": 256.0,
+"dps": 1333.3,
+"ground": true,
+"name": "meteor",
+"paralyzer": false,
+"range": 8800.0,
+"type": "MissileLauncher"
+},
+{
+"air": false,
+"aoe": 0.0,
+"dps": 0.0,
+"ground": false,
+"name": "gravity_neg",
+"paralyzer": false,
+"range": 20000.0,
+"type": "LaserCannon"
+}
+]
+}
+}

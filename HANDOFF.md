@@ -1,30 +1,30 @@
 # HANDOFF — zk-ArenaAI / zkbot
 
-Date: 2026-11-01  
+Date: 2026-11-02 (updated; the previous handoff was 2026-11-01)  
 Working directory: `C:/Users/Thoma/Documents/sources/zk-ArenaAI`
 
 ## 1. Goal and current status
 
 Build a from-scratch Zero-K AI (`bots/zkbot`) that can beat CircuitAI at every
 difficulty, starting with **CircuitAI:Normal**, then **CircuitAI:Hard**, then
-**CircuitAI:Brutal**. Primary test map: **TitanDuel 2.2**.
+**CircuitAI:Brutal**. Primary test map: **TitanDuel 2.2**. The user (an
+experienced Zero-K player) also plays the bot and reviews it; their gameplay
+guidance is a design requirement, see section 6b.
 
 Current status:
 
-- **CircuitAI:Normal**: consistently beaten. Recent wins: `n28` (wall 117s,
-  sim ~1090s), `n29` (wall 115s, sim ~1030s).
-- **CircuitAI:Hard**: **not beaten yet**. Recent losses:
-  - `h58`: game ~1320s, wall 186s
-  - `h59`: game ~1340s, wall 149s (no demo captured)
-  - `h60`: game ~1220s, wall 124s
-  - `h61`: game ~1240s, wall 112s
-- The latest Hard failure mode remains mid/late-game attrition: the army
-  shrinks under CircuitAI’s ball, builders die, extractors go to zero, and the
-  base collapses. Turret and air/artillery decision logic is now much more
-  deliberate, but the economy/army cannot yet hold against Hard.
+- **CircuitAI:Normal**: consistently beaten (n28, n29).
+- **CircuitAI:Hard**: now beaten consistently. Committed build: `h93` 3/4,
+  `h94` **4/4** (metal ratio vs CircuitAI 1.39 / 1.46 / 1.73 at 5 / 10 / 15
+  min); 14/18 since the human-review changes (`h91`–`h94`). Before this
+  session: 0 wins.
+- Against a human (the user, tank factory): lost in ~7 min (`results/human1`).
+  The review led to the section 6b.4 changes; not re-tested against a human yet.
+- Weakest matchup historically: CircuitAI amphibious (`amph*`); improved by
+  the role overrides but still worth watching.
 
-Do not claim Hard is solved. The next session should diagnose the Hard
-attrition, not merely tune turret counts.
+Next targets: Phantom + Gremlin spotter play and raid-squad merging (designed,
+not implemented; section 9), then CircuitAI:Brutal and other maps.
 
 ## 2. Environment / references
 
@@ -38,6 +38,8 @@ attrition, not merely tune turret counts.
   `C:/Users/Thoma/Documents/sources/RecoilEngine`
 - CircuitAI source:
   `C:/Users/Thoma/Documents/sources/RecoilEngine/AI/Skirmish/CircuitAI`
+- Zero-K source:
+  `C:\Users\Thoma\Documents\sources\Zero-K`
 - zkscraper:
   `C:/Users/Thoma/Documents/sources/zkscraper`
 - ControllerAI docs: `results/SKILL.md` (also `GET /SKILL.md` from a live team)
@@ -61,7 +63,29 @@ Useful game facts:
 
 Headless at max speed; do not use windowed mode unless the user asks.
 
-Typical command:
+**Preferred (this session):** `tools/run.sh` + `tools/report.py`.
+
+```bash
+bash tools/run.sh h93 Hard 8 "TitanDuel 2.2" 22   # tag diff games map wall-minutes
+python tools/report.py results/h93                # per-game WIN/LOSS, metal, mex/builders/army
+ZKBOT_FLAGS=staticmix bash tools/run.sh ...        # A/B an opt-out flag
+ZKBOT_PY=pypy3 bash tools/run.sh ...               # other interpreter (not installed; not worth it)
+```
+
+`run.sh` kills stray engines first (so never run it while a human game is
+open), uses `-AlternateSides` for >1 game and blocks until done. The CSV
+`outcome` column is not ours-vs-theirs; trust `report.py`, which finds our
+team from `script.txt`. A 22-min wall cap is a "timeout" (often a win we
+could not finish). Games now take ~1.5–3 min wall each.
+
+Human game: `.\zk-startup.ps1 ControllerAI Player -Map 'TitanDuel 2.2'
+-NoDownload -OutDir 'results/humanN' -Client 'python bots\zkbot\main.py {team}'`.
+
+Bot log lines worth grepping: `profile wall=` (engine/brain/query wall-time
+split each minute), `spend` / `lost` / `lost_branch` / `dmg_from` /
+`enemy_seen` ledgers (every ~3 min), `raid squad`, `army mode`, `burrow`.
+
+Older manual command:
 
 ```bash
 cd "C:/Users/Thoma/Documents/sources/zk-ArenaAI"
@@ -129,9 +153,26 @@ Pitfalls:
   expansion/defense/attack/rally decisions.
 - `tactics.py` — composition counters, retreat decisions, local target
   selection, raid group target selection.
-- `defense.py` — **new** defence intelligence and spending model.
-- `scouting.py` — **new** Gremlin forward observers.
-- `data/units.json` — 615 unit definitions extracted from the live game.
+- `defense.py` — defence intelligence and spending model, damage/death
+  ledgers (dedup by `(uid, name)`), `desired_aa_count`.
+- `scouting.py` — Gremlin forward observers.
+- `air.py` — air factory play: Swift scouting with boost, Owl caps, bomber /
+  combat-air budget.
+- `burrow.py` — terraform contested extractor spots ~55 elmos down
+  (`CMD_TERRAFORM_INTERNAL=39801`, `CMD_LEVEL=39736`) before building.
+- `threat.py` — weapon data, `combat_power`, `weapon_range`, `local_balance`.
+- `data/units.json` — 615 unit definitions extracted from the live game;
+  `data/weapons.json` — weapon stats (`tools/extract_weapons.py`).
+- `units.ROLE_OVERRIDES` — roles for units that `units.json` leaves as
+  generic `combat` (Buoy, Felon, Sumo, Crab, ...).
+
+`tools/`: `run.sh` (batch runner), `report.py` (batch report),
+`demostats.py` (demo reader), `extract_weapons.py`.
+
+Zero-K source of truth for command IDs: the rapid pool in the portable
+install (`packages/*.sdp` → `pool/xx/<md5>.gz`, e.g.
+`luarules/configs/customcmds.lua`: `DONT_FIRE_AT_RADAR = 38372`, param 1 =
+don't fire at radar).
 
 `results/` is gitignored. `results/SKILL.md` is a local copy of ControllerAI
 docs, not part of the bot package.
@@ -339,7 +380,96 @@ Tracks:
 - Gremlin production is checked before emergency AA/combat production.
 - Air factory roles still hunt/scout; not a current focus.
 
+## 6b. Session 2026-11-02 — Hard beaten
+
+### 6b.1 User guidance (design requirements)
+
+No commander morph. Second factory at ~40–45 metal/s or 20–25 min (usually
+plane, else gunship); no 3 factories by 20 min. Swifts scout (1 s boost
+through AA); Owls are mid/late radar/LOS for artillery. Burrow contested mexes
+~50–60 elmos. Early game: many Glaives and aggressive raiding; gradual riot
+transition; skirmishers only against slow kitable units; LLT + occasional
+Picket vs early tanks; commander expands and fights small raider groups; don't
+engage units that outrange you; raid squads retarget off defended spots and
+merge when close / for a valuable target. Phantoms (mid game): cloaked,
+fragile, stay cloaked when firing, 2 volleys kill an unupgraded commander,
+good vs slow heavies; need **LOS** (not just radar) for mobile targets, so
+pair them with Gremlin spotters (ceil(phantoms/2), at least 1); turn
+fire-at-radar **off** for Phantoms.
+
+### 6b.2 Economy / build fixes
+
+- Energy target follows metal income (construction drains E 1:1); energy
+  priority rises when metal floats because energy is short.
+- Caretakers placed on a ring within build range of the factory (not via
+  `closest_build_site`, which drifted out of range); dynamic priority.
+- Second factory rule per 6b.1; also when metal floats for ~90 s.
+- Lost factories are rebuilt at rotating anchors (two fixed anchors were both
+  blocked → 30 min of capped metal).
+- Burrowing of contested mexes (`burrow.py`).
+- Enemy base guess ignores spawn boxes near our own base (side-key mismatch
+  made "enemy base" = our base in about half the swapped games); a roaming
+  commander only stands in for the base until a factory is seen.
+
+### 6b.3 Military
+
+- Reactor (singularity/fusion) blast avoidance for targets and attack points.
+- AA quota from recent air contacts (`desired_aa_count`) and AA escorts.
+- `hunt_target`: with overwhelming power and no attack target, go for any
+  known ground enemy, else sweep unvisited points (army used to sit at rally
+  for 25 min at 20x power).
+- Dynamic retreat threshold (`tactics.retreat_threshold`): base 30%/45%
+  scaled by local balance, depth in enemy territory, unit cost, global army
+  balance. A flat lower threshold (`lowretreat`, removed) lost 5/7.
+
+### 6b.4 After the human review (all default on; opt-out flags)
+
+| Change | Flag to disable |
+|---|---|
+| Phase-based unit mix (≈60% raiders early → mid mix by 15 min); riots scale with enemy raiders seen; skirms only after enemy riots/assaults seen; no early arty | `staticmix` |
+| Emergency production builds raiders, riots only vs 4+ raiders; dead cons rebuilt first (≥3 builders) | `staticmix` |
+| Commander takes mexes up to ~1600 elmos early (+mex score), fights raider groups it outpowers | `staticcomm` |
+| All raiders raid in up to 3 squads; targets judged by defending metal value (riots/turrets ×1.5) vs half the squad's value; too-defended targets blacklisted 80 s and retargeted | `oldraid` |
+| Units outranged by a stronger enemy step out of range unless locally ≥1.5x | `nooutrange` |
+| Default turret without attacker evidence: LLT, every 3rd a Picket | `oldturret` |
+| Outranged step-back only vs stronger (≥1.3x) riot/assault/heavy units | `nooutrange` |
+| Static AA count scales with recent air contacts and air damage (max 6), placed at air-damage hotspots; more mobile AA under air damage | `oldaa` |
+
+### 6b.5 Speed
+
+- `block_n_frames` 6 in combat, 10 when calm (was 2 most of the game);
+  `ZKBOT_BLOCK=fight,calm` overrides.
+- `client.query` caches `elevation_at` (300 frames), `can_build_at` /
+  `closest_build_site` (90 frames); cache cleared when a build is rejected.
+- Builder idle checks once per second per builder.
+- Profile: the engine is ~77–82% of wall time, bot compute 10–16%, so PyPy
+  was not pursued (it also lacks `orjson`). Whole games now take 77–176 s wall.
+
+### 6b.6 Other opt-in flags kept for experiments
+
+`focus`, `sticky`, `buildfirst`, `defregroup`, `mexdefprio` (each tested
+worse or neutral), `burrowall`, `noburrow`, `nokite`, `noregroup`,
+`oldretreat`, `staticretreat`, `nohold`, `noresponse`, `nohunt`;
+`ZKBOT_SECOND` pins the second factory.
+
 ## 7. Test evidence from latest changes
+
+### Hard, session 2026-11-02 (TitanDuel, alternating sides)
+
+| Run | Result | Notes |
+|---|---|---|
+| h72–h78 | 11/19 | energy fix, caretaker ring |
+| h79–h85 | 6/31 | h79 defend-regroup + mexdef priority hurt → now opt-in |
+| h86 | 3/6 | 2 timeouts (factory never rebuilt; army idle at rally) |
+| h87 | 5/6 | hunt target, factory anchors, enemy-base guess |
+| h88 | 3/6 | block 6/10 + query cache; 2 amph losses |
+| h89 | 2/7 | `lowretreat` (dropped) |
+| h91 | 6/6 | role overrides, dynamic retreat, review changes |
+| h92 | 1/4 | lost 3 with 1.4–3x metal: broad `outranged` step-back vs Buoys, heavy bombers vs 1 AA turret |
+| h93 | 3/4 | `outranged` limited to stronger riots/assaults; static AA scales with air threat |
+| h94 | 4/4 | same build (committed) |
+
+Previous session's evidence:
 
 ### Normal wins
 
@@ -371,6 +501,18 @@ Tracks:
   army still collapsed.
 
 ## 8. Known issues / traps to investigate next
+
+New (2026-11-02):
+
+- Editing bot files while a batch runs changes the code for every game that
+  starts afterwards; finish or stop batches before editing.
+- `run.sh` kills all spring processes at start, including a human game.
+- Long games (40–90 min) still show 20–50 builder deaths and `retreating` as
+  the largest loss branch; Hard losses are now mostly these grinds.
+- `report.py` marks games with an empty demo as LOSS "(no demo)": those are
+  wall-limit timeouts, check `results.csv`.
+
+From the previous session (several now addressed):
 
 1. **Hard army attrition**: current Hard games survive 20+ minutes but lose
    the army and then the base. Investigate:
@@ -408,7 +550,52 @@ Tracks:
 
 ## 9. Suggested next work
 
-Priority order:
+Current priority order (2026-11-02):
+
+1. **Raid-squad merging** (agreed with the user): form squads by position;
+   merge squads within ~600–800 elmos; combine squads for a valuable target
+   (commander, factory, mex cluster) that no single squad may take but their
+   combined value may; gather outside the defence range, then strike together.
+   **Routing:** if a squad's path to its target passes near one of our
+   builders or a recently built mex (detour ≤ ~25% or ~600 elmos), go
+   through it first, so a raid squad is likely near new expansions when an
+   enemy raid arrives; clear the waypoint once the squad centre is within ~350.
+1b. **Slow-ball engagement** (user: large raider + Ronin groups beat Buoy +
+   Grizzly; a Grizzly needs ~30 raiders mixed with Ronins to die before it
+   retreats): detect enemy armies dominated by slow units (< ~60 speed);
+   then raiders mostly join the main group (only extras raid), Ronins too;
+   gather ~650 out of range and commit only when group metal value ≥ ~1.0×
+   the ball's (Ronins weighted up); chase a retreating ball; mix ≈ 40% raid /
+   35% skirm, fewer riots. The `combat_power` sqrt(dps·hp) score overrates
+   small units here (1.3× power ⇒ only ~13 Glaives vs a Grizzly).
+2. **Phantoms** (cloak factory, from ~10 min once enemy riots/slow assaults
+   have been seen; count scaled by those and by metal income):
+   fire-at-radar off (`custom cmdId 38372, params [1]`), near max range (700)
+   behind the army, keep enemies outside 155 (decloak), synchronized volleys
+   on one target, commander first when ≥2 Phantoms reach it, then slow heavies.
+   Gremlin spotters: `ceil(phantoms/2)`, at least one; in front, outside
+   decloak radius, constantly moving between ring points; hold fire.
+3. **Radar-blip raider early warning**: estimate blip speed from successive
+   positions (first log raw blip fields to see whether `defId` / `vel` are
+   present); ground blips > ~85 elmos/s are raiders (Glaive 115, Kodachi 106);
+   group co-moving blips, extrapolate 10–15 s; if the path passes within ~400
+   of our mex/builder, raise an early threat there: nearest raid squad /
+   responders intercept ahead of it, builders step aside, commander responds
+   if inside its radius and the raid is small.
+   **Generalize to blip identification:** candidates = build options
+   (`units.json` `buildOptions`) of the enemy's known factories / inferred
+   faction whose top `speed` ≥ the blip's max sustained speed (2-s windows,
+   radar error jitters positions), ranked by closeness and by types already
+   seen from that enemy. Feed weighted candidates into the composition
+   counters (riots/skirms/anti-heavy before contact), the threat/local-balance
+   estimates, slow-push warnings and artillery detection (e.g. tankheavyarty
+   38). Log guess vs. real type when a blip enters LOS to measure accuracy.
+4. Play the user again (tank opener) and take the next review.
+5. CircuitAI:Brutal; then other maps (`maps.md`).
+6. Builder survival in long games (20–50 builder deaths), friendly fire
+   (`?own` damage up to 40k).
+
+Older list (2026-11-01, mostly done):
 
 1. Reproduce a Hard loss with current code (`h62+`) and analyze army
    composition/casualties using zkscraper or log summaries.
@@ -427,16 +614,10 @@ Priority order:
    `build_delay`).
 7. Test other maps from `maps.md` once TitanDuel is stable.
 
-## 10. Current git state before handoff commit
+## 10. Git state
 
-Modified/untracked bot files:
-
-- Modified: `bots/zkbot/brain.py`, `construction.py`, `economy.py`,
-  `intel.py`, `military.py`, `production.py`
-- New: `bots/zkbot/defense.py`, `scouting.py`, `strategy.py`, `tactics.py`
-- Existing commit before this work: `4913701 Add zkbot AI with modular brain
-  and fast websocket transport`
-
-The handoff commit should include all bot changes plus this file. `results/`
-must remain untracked. Do not include local demos or `results/SKILL.md` in the
-commit.
+The 2026-11-02 commit contains all bot changes (incl. new `air.py`,
+`burrow.py`, `threat.py`, `data/weapons.json`), `tools/` (`run.sh`,
+`report.py`, `demostats.py`, `extract_weapons.py`), the `zk-startup.ps1`
+taskkill fix (a failed kill used to abort multi-game runs) and this file.
+`results/` stays untracked; never commit demos or `results/SKILL.md`.

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import math
+import os
+import random
 from typing import Any
 
 from . import units
@@ -20,6 +22,7 @@ class EconomyMixin:
         self.ensure_pylon_tasks()
         self.ensure_factory_tasks()
         self.ensure_strider_tasks()
+        self.ensure_airpad_tasks()
         self.ensure_caretaker_tasks()
         self.ensure_radar_tasks()
         self.ensure_defense_tasks()
@@ -138,6 +141,10 @@ class EconomyMixin:
                 priority += sector.income * 8.0
             if de < 1100:
                 priority -= 90.0
+            # Uncovered enemy DPS on the spot (including remembered turrets).
+            risk = self.threat_in_radius((s.x, s.z), 160.0) - self.own_power_at((s.x, s.z))
+            if risk > 0:
+                priority -= min(900.0, 120.0 + risk * 4.0)
             scored.append((priority, s))
         scored.sort(key=lambda p: p[0], reverse=True)
         did = units.id_of("staticmex")
@@ -227,13 +234,26 @@ class EconomyMixin:
                 f"mexdef {units.name_of(did)} at {tuple(round(v) for v in m.pos)} "
                 f"req={self.recent_attacker_range_for(m.pos):.0f} urgent={urgent}"
             )
+            # A spot that has already lost an extractor will be raided again:
+            # its turret must beat new expansion, or it never gets built
+            # (unsafe while raiders are there, outranked once they leave).
+            idx = self.spot_index_at(m.pos) if hasattr(self, "spot_index_at") else None
+            contested = idx is not None and getattr(self, "spot_mex_losses", {}).get(idx, 0) >= 1
+            if "mexdefprio" not in os.environ.get("ZKBOT_FLAGS", ""):
+                prio = 1450.0 + min(450.0, pressure * 28.0) if urgent else 1260.0
+            elif urgent:
+                prio = 1650.0 + min(450.0, pressure * 28.0)
+            elif contested:
+                prio = 1550.0
+            else:
+                prio = 1260.0
             self.add_task(
                 f"mexdef:{self.frame}:{m.uid}",
                 "mexdef",
                 did,
                 m.x,
                 m.z,
-                1450.0 + min(450.0, pressure * 28.0) if urgent else 1260.0,
+                prio,
                 anchor=m.pos,
             )
 
@@ -249,8 +269,38 @@ class EconomyMixin:
         bx, bz = self.base_pos
         radius = 165.0 if kind == "fusion" else 135.0
         angle = math.radians((self.energy_task_seq * 137.5 + 20.0) % 360.0)
-        x = bx + math.cos(angle) * radius
-        z = bz + math.sin(angle) * radius
+        cx, cz = bx, bz
+        if kind == "energy":
+            # Pack solars around safe owned extractors near home so they join
+            # the overdrive grid directly (an isolated base ring could not be
+            # placed once the base mexes were gone).
+            mexes = [
+                u
+                for u in self.units.values()
+                if u.name == "staticmex"
+                and u.is_finished
+                and self.dist(u.pos, self.base_pos) < 1600.0
+                and self.threat_at(u.pos) <= 0.0
+            ]
+            best = None
+            best_score = 1e18
+            for m in mexes:
+                crowd = sum(
+                    1
+                    for g in self.units.values()
+                    if g.name == "energysolar" and self.dist(g.pos, m.pos) < 200.0
+                )
+                if crowd >= 6:
+                    continue
+                score = self.dist(m.pos, self.base_pos) + crowd * 250.0
+                if score < best_score:
+                    best_score = score
+                    best = m
+            if best is not None:
+                cx, cz = best.pos
+                radius = 95.0
+        x = cx + math.cos(angle) * radius
+        z = cz + math.sin(angle) * radius
         x = min(max(40.0, x), max(41.0, self.map.width - 40.0))
         z = min(max(40.0, z), max(41.0, self.map.height - 40.0))
         return x, z
@@ -263,7 +313,20 @@ class EconomyMixin:
         # Do not overbuild 2-energy solar panels just because the energy bar
         # is not completely full.  On a 20-metal map 25-30 panels are plenty
         # for the overdrive grid; every extra pair costs a combat unit.
-        target = max(10.0, minc * 0.7 + 5.0, self.energy_usage() + 8.0)
+        # Overdrive turns surplus energy into metal, so the energy target
+        # grows with time like CircuitAI's income factor (0.15 -> 7 over an
+        # hour): ~0.7x metal income at 5 min, ~1.3x at 10, ~1.9x at 15.
+        factor = 0.15 + 6.85 * min(1.0, self.frame_time() / 3600.0)
+        # Overdrive pays per extractor with diminishing returns, so surplus
+        # energy is only worth it with enough mexes to spread it over.
+        mexes = self.mex_count()
+        # Zero-K construction drains energy 1:1 with metal, so energy below
+        # metal income caps spending and the rest of the metal piles up.
+        base_e = minc * 1.1 + 4.0
+        od_cap = base_e + 6.0 * mexes
+        target = max(10.0, base_e, min(minc * factor, od_cap), self.energy_usage() + 8.0)
+        m_float = self.metal_current() > 0.5 * self.effective_storage(self.metal())
+        energy_bound = m_float and einc < minc and ecur < estore * 0.5
         deficit = target - einc
         pending = sum(1 for t in self.tasks.values() if t.kind in ("energy", "fusion"))
         solar_existing = sum(
@@ -272,7 +335,7 @@ class EconomyMixin:
             if u.name == "energysolar" and (u.is_finished or u.is_being_built)
         )
         max_solar = int(max(12.0, target * 0.5)) + 4
-        max_pending = 3
+        max_pending = 5 if energy_bound else 3
         usage = self.energy_usage()
         critical = (
             ecur < max(80.0, estore * 0.12)
@@ -282,14 +345,19 @@ class EconomyMixin:
         # 350-metal start, assigning every constructor to extractor jobs first
         # leaves energy at zero for minutes; the factory then cannot replace
         # losses and the base collapses.  Once two solar exist, mexes take over.
-        if solar_existing < 2:
+        if solar_existing < 2 and (self.mex_count() >= 2 or ecur < 120.0):
             energy_priority = 2600.0
+        elif solar_existing < 2:
+            # Extractors first while the starting energy lasts.
+            energy_priority = 1300.0
         elif critical and ecur < max(20.0, estore * 0.05):
             # Units and construction both consume energy.  With the bar at
             # zero the factory simply stops producing even when metal is
             # capped, so an empty bar has to outrank extractor expansion.
             energy_priority = 2600.0
-        elif critical:
+        elif critical or energy_bound:
+            # Energy-bound with metal floating: every solar converts idle
+            # metal into build power, so it outranks expansion.
             energy_priority = 2200.0
         else:
             energy_priority = 1000.0
@@ -302,8 +370,7 @@ class EconomyMixin:
         if (
             force == 0
             and ecur > estore * 0.85
-            and self.od_waste < 2.0
-            and einc >= usage * 0.8
+            and (self.od_waste >= 2.0 or einc >= target)
         ):
             # The bar is full, nothing is being wasted, and construction is
             # covered.  More generators would only starve metal expansion.
@@ -314,8 +381,12 @@ class EconomyMixin:
         # economy can actually pay for it, otherwise it stalls all expansion.
         if (
             minc >= 20
-            and einc < max(minc * 1.02, self.energy_usage() + 6.0)
-            and (self.metal_current() > 600 or minc > 35)
+            and einc < max(target, self.energy_usage() + 6.0)
+            and mexes >= 8 + 4 * sum(
+                1 for u in self.units.values() if u.name == "energyfusion"
+            )
+            and (self.metal_current() > 400 or minc >= 25)
+            and self.threat_at(self.base_pos) <= 0.0
             and not any(t.kind == "fusion" for t in self.tasks.values())
             and len(self.factory_list()) > 0
         ):
@@ -348,8 +419,8 @@ class EconomyMixin:
             return
         # Create enough jobs to cover the deficit.  Each solar is 2 E/s.
         count = 1
-        if pending == 0 and force == 0:
-            count = max(count, 1)
+        if energy_bound:
+            count = max(1, math.ceil(deficit / 2.0))
         count = min(count, max_pending - pending)
         if count <= 0:
             return
@@ -435,37 +506,34 @@ class EconomyMixin:
         if self.factory_plop_sent and not factories:
             return
         minc = self.metal_income()
-        target = 1
         t = self.frame_time()
-        if (minc >= 18 and t > 180) or t > 300:
+        # One ground factory plus caretakers carries the game for a long
+        # time.  The second factory comes at ~42 metal/s, or at 20-25 min
+        # depending on map size, and it is an air plant (scouting and fire
+        # support).  More factories only on a much bigger economy.
+        t2 = self.second_factory_time()
+        target = 1
+        # Metal that keeps piling up despite extra caretakers means build
+        # power is short: bring the second factory forward.
+        floating = t >= 420 and getattr(self, "metal_float_frames", 0) >= 2700
+        if minc >= 42 or t >= t2 or floating:
             target = 2
-        if (minc >= 30 and t > 420) or t > 600:
+        if minc >= 75 and t >= t2:
             target = 3
-        if (minc >= 45 and t > 720) or t > 900:
+        if minc >= 110:
             target = 4
-        pending = sum(1 for t in self.tasks.values() if t.kind == "factory")
-        if len(factories) + pending >= target:
+        pending = sum(1 for q in self.tasks.values() if q.kind == "factory")
+        # The strider hub is a factory too, but has its own rule.
+        counted = [f for f in factories if f.name != "striderhub"]
+        if len(counted) + pending >= target:
             return
-        plane_def = units.id_of("factoryplane")
-        has_plane = any(
-            u.name == "factoryplane" and (u.is_finished or u.is_being_built)
-            for u in self.units.values()
+        air_names = ("factorygunship", "factoryplane")
+        has_air = any(f.name in air_names for f in factories) or any(
+            q.kind == "factory" and units.name_of(q.def_id) in air_names
+            for q in self.tasks.values()
         )
-        plane_pending = any(
-            t.kind == "factory" and t.def_id == plane_def for t in self.tasks.values()
-        )
-        # Get a second ground factory first; it turns metal into units much
-        # more efficiently than an early air plant.  Air is useful for
-        # scouting and commander hunting once the economy can support it.
-        want_plane = (
-            target >= 4
-            and minc >= 40
-            and t > 900
-            and not has_plane
-            and not plane_pending
-        )
-        if want_plane:
-            did = plane_def
+        if not has_air:
+            did = units.id_of(self.air_factory_choice())
         else:
             did = self.factory_def_id or units.id_of("factorycloak")
         if did is None:
@@ -476,12 +544,14 @@ class EconomyMixin:
         length = math.hypot(dx, dz) or 1.0
         # Build inland, not into the map corner: several factory sites near the
         # edge are rejected by the engine and leave a builder reissuing forever.
-        side = 1.0 if (self.factory_task_seq % 2 == 0) else -1.0
-        px, pz = -dz / length, dx / length
-        anchor = (
-            bx + dx / length * 260.0 + side * px * 200.0,
-            bz + dz / length * 260.0 + side * pz * 200.0,
-        )
+        # Rotate through several sites: a crowded base (dozens of solars) or a
+        # wreck on the old factory site left the two fixed anchors blocked and
+        # a lost ground factory was never rebuilt (30 min of capped metal).
+        k = self.factory_task_seq
+        offs = (35.0, -35.0, 70.0, -70.0, 0.0, 110.0, -110.0)
+        ang = math.atan2(dz, dx) + math.radians(offs[k % len(offs)])
+        dist = min(1400.0, 330.0 + 220.0 * (k // len(offs)) + 60.0 * (k % 3))
+        anchor = (bx + math.cos(ang) * dist, bz + math.sin(ang) * dist)
         margin = 360.0
         anchor = (
             min(max(margin, anchor[0]), self.map.width - margin),
@@ -502,8 +572,63 @@ class EconomyMixin:
         )
         self.factory_task_seq += 1
 
+    def second_factory_time(self) -> float:
+        """20 min on small maps, up to 25 min on large ones (seconds)."""
+        side = math.sqrt(max(1.0, self.map.width * self.map.height)) / 512.0
+        if side <= 12.0:
+            return 1200.0
+        if side >= 18.0:
+            return 1500.0
+        return 1200.0 + (side - 12.0) / 6.0 * 300.0
+
+    def air_factory_choice(self) -> str:
+        """Second factory, chosen once per game: usually an airplane plant,
+        often a gunship plant, occasionally a second ground factory.
+        Enemy air forces planes (fighters).  ZKBOT_SECOND=<factory> pins it
+        for tests."""
+        forced = os.environ.get("ZKBOT_SECOND")
+        if forced:
+            return forced
+        comp = self.enemy_composition()
+        if self.aircraft_seen() and comp.get("air", 0) >= 4:
+            return "factoryplane"
+        choice = getattr(self, "second_factory_choice", None)
+        if choice is None:
+            r = random.random()
+            if r < 0.55:
+                choice = "factoryplane"
+            elif r < 0.90:
+                choice = "factorygunship"
+            else:
+                choice = self.factory_name or "factorycloak"
+            self.second_factory_choice = choice
+            self.log(f"second factory choice: {choice} (roll {r:.2f})")
+        return choice
+
+    def ensure_airpad_tasks(self) -> None:
+        """Bombers rearm on pads; one pad per ~6 planes, at home."""
+        if not any(f.name == "factoryplane" for f in self.factory_list()):
+            return
+        did = units.id_of("staticrearm")
+        if did is None:
+            return
+        planes = sum(1 for u in self.units.values() if u.is_air and u.is_combat)
+        target = 1 + planes // 6
+        have = sum(
+            1 for u in self.units.values() if u.name == "staticrearm" and (u.is_finished or u.is_being_built)
+        ) + sum(1 for q in self.tasks.values() if q.kind == "airpad")
+        if have >= min(3, target):
+            return
+        bx, bz = self.base_pos
+        cx, cz = self.map.center
+        d = math.hypot(cx - bx, cz - bz) or 1.0
+        anchor = (bx + (cx - bx) / d * 120.0, bz + (cz - bz) / d * 120.0)
+        self.add_task(
+            f"airpad:{self.frame}", "airpad", did, anchor[0], anchor[1], 1300.0, anchor=anchor
+        )
+
     def ensure_strider_tasks(self) -> None:
-        if self.frame_time() < 720 or self.metal_income() < 35:
+        if self.frame_time() < self.second_factory_time() or self.metal_income() < 80:
             return
         did = units.id_of("striderhub")
         if did is None:
@@ -529,23 +654,45 @@ class EconomyMixin:
     def ensure_caretaker_tasks(self) -> None:
         minc = self.metal_income()
         factories = self.factory_list()
-        if not factories or minc < 7:
+        # 180 metal of caretaker is two extractors in the opening; wait until
+        # the expansion is under way.
+        if not factories or minc < 12 or self.frame_time() < 150:
             return
         did = units.id_of("staticcon")
         if did is None:
             return
-        target_per_factory = 1
-        if minc >= 25:
-            target_per_factory = 2
-        if minc >= 45:
-            target_per_factory = 3
+        # Factories + caretakers should be able to spend ~70% of income; a
+        # lone factory is only 10 BP, so at 45 metal/s it left 30/s unspent.
+        want_bp = 0.7 * minc / max(1, len(factories))
+        target_per_factory = max(1, math.ceil((want_bp - 10.0) / 10.0))
+        # Metal piling up means production build power is short: add
+        # caretakers (CircuitAI allows up to 6 per factory).
+        m = self.metal()
+        float_frac = self.metal_current() / max(1.0, self.effective_storage(m))
+        if float_frac > 0.5:
+            self.metal_float_frames = getattr(self, "metal_float_frames", 0) + 15
+        else:
+            self.metal_float_frames = max(0, getattr(self, "metal_float_frames", 0) - 30)
+        extra = min(4, getattr(self, "metal_float_frames", 0) // 900)
+        target_per_factory = min(6, target_per_factory + extra)
+        # Unspent metal outranks expansion: more extractors only add to the
+        # pile while the army starves.
+        if float_frac > 0.5:
+            care_priority = 2050.0
+        elif float_frac > 0.25:
+            care_priority = 1600.0
+        else:
+            care_priority = 1250.0
+        for t in self.tasks.values():
+            if t.kind == "caretaker":
+                t.priority = care_priority
         for f in factories:
             existing = [
                 u
                 for u in self.units.values()
                 if u.name == "staticcon"
                 and (u.is_finished or u.is_being_built)
-                and self.dist(u.pos, f.pos) < 750
+                and self.dist(u.pos, f.pos) < 480
             ]
             pending = [
                 t
@@ -565,12 +712,12 @@ class EconomyMixin:
                 did,
                 f.x + 70.0,
                 f.z + 70.0,
-                1040.0,
+                care_priority,
                 anchor=f.pos,
             )
 
     def ensure_radar_tasks(self) -> None:
-        if self.frame_time() < 20:
+        if self.frame_time() < 120 and self.threat_pos is None:
             return
         did = units.id_of("staticradar")
         if did is None:
@@ -641,7 +788,7 @@ class EconomyMixin:
             return
 
     def ensure_silo_tasks(self) -> None:
-        if self.frame_time() < 600 or self.metal_income() < 40:
+        if self.frame_time() < 900 or self.metal_income() < 60:
             return
         did = units.id_of("staticmissilesilo")
         if did is None:
@@ -768,20 +915,35 @@ class EconomyMixin:
                 for u in self.units.values()
                 if u.name.startswith("turretaa") and (u.is_finished or u.is_being_built)
             )
-            if aa == 0 and not any(t.kind == "aa" for t in self.tasks.values()):
-                did = self.defense_unit_for(self.base_pos, aa=True)
+            want_aa = self.desired_static_aa()
+            pending_aa = sum(1 for t in self.tasks.values() if t.kind == "aa")
+            if aa + pending_aa < want_aa and pending_aa == 0:
+                # First turret at home; further ones where aircraft actually
+                # hurt us (fusions, factories, the army's staging area).
+                anchor = self.base_pos
+                if aa >= 1:
+                    hot = self.air_damage_hotspot()
+                    if hot is not None and self.dist(hot, self.base_pos) < 2600.0:
+                        anchor = hot
+                did = self.defense_unit_for(anchor, aa=True)
                 if did is not None:
                     cost = units.cost(units.by_id(did))
-                    if self.defense_budget_ok(cost, urgent=self.aircraft_seen_recent()):
-                        self.log(f"aa turret {units.name_of(did)} real aircraft seen")
+                    hurt = self.recent_air_damage() > 1500.0
+                    urgent = self.aircraft_seen_recent() or hurt
+                    if self.defense_budget_ok(cost, urgent=urgent):
+                        self.log(
+                            f"aa turret {units.name_of(did)} #{aa + 1}/{want_aa} at "
+                            f"{tuple(round(v) for v in anchor)} "
+                            f"air_dmg={self.recent_air_damage():.0f}"
+                        )
                         self.add_task(
                             f"aa:{self.frame}",
                             "aa",
                             did,
-                            self.base_pos[0],
-                            self.base_pos[1],
-                            1300.0 if self.aircraft_seen_recent() else 1180.0,
-                            anchor=self.base_pos,
+                            anchor[0],
+                            anchor[1],
+                            1650.0 if hurt else (1300.0 if self.aircraft_seen_recent() else 1180.0),
+                            anchor=anchor,
                         )
         if threat is None and self.frame_time() < 55:
             return
@@ -844,7 +1006,7 @@ class EconomyMixin:
                 if s.owner == "ours" and 500 < s.distance_base < 2000
             ]
             if owned:
-                s = max(owned, key=lambda q: q.distance_enemy)
+                s = min(owned, key=lambda q: q.distance_enemy)
                 p = self.best_defense_pos(s)
                 if p is not None:
                     anchors.append(p)

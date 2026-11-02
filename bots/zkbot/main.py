@@ -52,6 +52,10 @@ def main() -> int:
         "settings",
     }
     last_heartbeat = time.time()
+    # Wall-time profile: engine (waiting for the next observation), brain
+    # compute (excluding queries) and synchronous query round trips.
+    prof = {"wait": 0.0, "brain": 0.0, "frames": 0, "t0": time.time(), "f0": None}
+    t_wait = time.time()
     try:
         client.connect()
         log("connected")
@@ -86,6 +90,8 @@ def main() -> int:
                         except Exception:
                             pass
                     continue
+                t_start = time.time()
+                prof["wait"] += t_start - t_wait
                 try:
                     brain.on_frame(data)
                 except Exception:
@@ -94,6 +100,27 @@ def main() -> int:
                     client.send_commands(brain.take_commands())
                 finally:
                     client.finish_frame()
+                t_wait = time.time()
+                prof["brain"] += t_wait - t_start
+                prof["frames"] += 1
+                if prof["f0"] is None and frame is not None:
+                    prof["f0"] = int(frame)
+                span = t_wait - prof["t0"]
+                if span >= 60.0 and frame is not None:
+                    q = client.query_time
+                    games = (int(frame) - (prof["f0"] or 0)) / 30.0
+                    top = sorted(client.query_counts.items(), key=lambda kv: -kv[1][1])[:6]
+                    log(
+                        f"profile wall={span:.0f}s game={games:.0f}s speed={games / span:.2f}x "
+                        f"obs={prof['frames']} engine={prof['wait']:.1f}s "
+                        f"brain={prof['brain'] - q:.1f}s queries={q:.1f}s "
+                        f"units={len(brain.units)} block={brain.block_frames} cache_hits={client.cache_hits} q_top="
+                        + " ".join(f"{k}:{n}/{t:.1f}s" for k, (n, t) in top)
+                    )
+                    prof.update(wait=0.0, brain=0.0, frames=0, t0=t_wait, f0=int(frame))
+                    client.query_time = 0.0
+                    client.query_counts = {}
+                    client.cache_hits = 0
                 continue
             if mtype in ("error", "command_error", "query_error", "settings_error"):
                 log(f"{mtype}: {data}")

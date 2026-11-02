@@ -412,7 +412,14 @@ function Start-ClientProcess([string]$command, [hashtable]$vars, [string]$logBas
 function Stop-ProcessTree($p) {
     if (-not $p -or $p.HasExited) { return }
     if ($onLinux) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
-    else { & taskkill.exe /T /F /PID $p.Id 2>&1 | Out-Null }
+    else {
+        # taskkill writes to stderr when a child already exited; under
+        # ErrorActionPreference=Stop that aborted the whole multi-game run.
+        $eap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try { & taskkill.exe /T /F /PID $p.Id 2>&1 | Out-Null } catch { }
+        finally { $ErrorActionPreference = $eap }
+    }
 }
 
 function Get-LogTail([string]$path, [int]$lines = 8) {
