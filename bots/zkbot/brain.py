@@ -24,6 +24,7 @@ from .air import AirMixin
 from .burrow import BurrowMixin
 from .raiding import RaidMixin
 from .snipers import PhantomMixin
+from .blips import BlipMixin
 
 
 class Brain(
@@ -40,6 +41,7 @@ class Brain(
     BurrowMixin,
     RaidMixin,
     PhantomMixin,
+    BlipMixin,
     MilitaryMixin,
 ):
     def __init__(self, client: Client, team_id: int, log):

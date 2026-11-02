@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import os
 from typing import Any
 
 from . import units
@@ -117,6 +118,8 @@ class IntelMixin:
 
     def read_enemies(self, obs: dict[str, Any]) -> None:
         now = self.frame
+        self.blip_state()
+        self.enemy_vel = {}
         enemies: dict[int, UnitInfo] = {}
         for uid_s, raw in (obs.get("enemies") or {}).items():
             try:
@@ -124,6 +127,9 @@ class IntelMixin:
                 did = int(raw.get("defId") or 0)
                 u = self.make_unit(uid, did, raw)
                 enemies[uid] = u
+                self.note_enemy_velocity(uid, raw)
+                if did:
+                    self.check_blip_guess(uid, u)
                 self.enemy_memory[uid] = (u, now)
                 seen = getattr(self, "enemy_seen_ids", None)
                 if seen is None:
@@ -156,11 +162,20 @@ class IntelMixin:
                 continue
         self.enemies = enemies
         self.radar = {}
-        for uid_s, raw in (obs.get("radarBlips") or {}).items():
+        blips = obs.get("radarBlips") or {}
+        if blips and "blipdump" in os.environ.get("ZKBOT_FLAGS", "") and now % 300 < 12:
+            self.log(f"blipdump {list(blips.items())[:3]}")
+        for uid_s, raw in blips.items():
             try:
                 uid = int(uid_s)
                 did = int(raw.get("defId") or 0)
                 u = self.make_unit(uid, did, raw)
+                self.note_enemy_velocity(uid, raw)
+                self.track_blip(uid, raw, u)
+                if not did:
+                    g = self.guess_blip(uid)
+                    if g is not None:
+                        u = self.make_unit(uid, int(g["id"]), raw)
                 self.radar[uid] = u
                 self.enemy_memory[uid] = (u, now)
                 self.note_air_contact(u)
@@ -184,6 +199,7 @@ class IntelMixin:
                 continue
         if enemies or self.radar:
             self.last_enemy_seen_frame = now
+        self.prune_blip_tracks()
         cutoff = now - 1800
         for uid in list(self.enemy_memory):
             if self.enemy_memory[uid][1] < cutoff:

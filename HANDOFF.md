@@ -27,8 +27,11 @@ Second layer (section 6b.7: raid squads v2, slow-ball engagement, overwhelm
 attack, Phantoms + Gremlin spotters): `h100` **4/4** vs the same code with
 the layer switched off (`h101`) 2/4.
 
-Next targets: radar-blip identification, stage-2 slow-ball play if amph
-balls keep winning, another human game, then CircuitAI:Brutal and other
+Radar-blip identification + raid early warning (section 6b.8): `h102`
+**4/4** (metal ratio 1.37 / 1.62 / 2.06) vs the same code with it off
+(`h103`) 2/4 (1.36 / 1.39 / 1.40).
+
+Next targets: stage-2 slow-ball play if amph balls keep winning, another human game, then CircuitAI:Brutal and other
 maps (section 9).
 
 ## 2. Environment / references
@@ -144,7 +147,7 @@ Pitfalls:
   `ThreatMixin, IntelMixin, EconomyMixin, ConstructionMixin,
   ProductionMixin, StrategyMixin, TacticsMixin, DefenseMixin,
   ScoutingMixin, AirMixin, BurrowMixin, RaidMixin, PhantomMixin,
-  MilitaryMixin`.
+  BlipMixin, MilitaryMixin`.
 - `models.py` — `UnitInfo`, `Task`.
 - `units.py` — static `units.json` helpers and factory-role tables.
 - `mapdata.py` — map spots, heightmap, water, terrain helpers.
@@ -172,6 +175,8 @@ Pitfalls:
   commit/gather decision.
 - `snipers.py` — Phantom quota, fire-at-radar off, volley targeting,
   evade/fire/approach/hold orders, Gremlin spotter ring points.
+- `blips.py` — radar blip identification (speed + enemy factories) and
+  raid early warning from blip/enemy trajectories.
 - `threat.py` — weapon data, `combat_power`, `weapon_range`, `local_balance`.
 - `data/units.json` — 615 unit definitions extracted from the live game;
   `data/weapons.json` — weapon stats (`tools/extract_weapons.py`).
@@ -479,6 +484,25 @@ The broad slow-ball rule (any slow cluster) went 8/12 vs baseline 10/12, so
 it was narrowed to balls with a heavy. Phantoms are rare in practice (only
 built after 3+ enemy heavies); they fired in h98 but are not yet proven.
 
+### 6b.8 Radar blips (all default on; opt-out flags)
+
+Blip fields (logged with `ZKBOT_FLAGS=blipdump`): `allyTeam`, `inLos`,
+`isRadarBlip`, `pos`, `vel` (exact, elmos/frame). `defId` / `name` only when
+the engine already knows the type from earlier LOS; never-seen blips used to
+be `def0` contacts that counted for nothing.
+
+| Change | Flag to disable |
+|---|---|
+| Identify unknown moving blips: sustained top speed (min over 2 s, max over life) ≤ candidate's speed; candidates = mobile build options of the enemy's known/inferred factories, air vs ground by height above ground; weighted by times seen, speed closeness, cheapness; adopt the top type of the dominant role (≥ 45%). Checked on LOS entry (`blip check ... acc a/b role c/b` in the log) | `noblipid` |
+| Raid early warning: seen/guessed raiders and ground blips > 85 elmos/s whose straight track passes within 450 of our mex or constructor in 4/8/12 s; constructors there step aside (eta ≤ 10 s, local power < 1.2x), responders go to the warned asset | `noblipwarn` |
+| Guessed (never-seen) units count in `seen_enemy_roles` for the unit-mix counters | `noblipcount` |
+
+Accuracy (h102, logged sample): 9/9, 8/9, 431/600 exact (487/600 role) in a
+long Cloakbot game, 31/60 vs Spider + Tank. Main miss: slow blips guessed as
+Flea (`spiderscout`) once many Fleas were seen; the seen-count prior swamps
+the speed evidence when the blip moves slowly. Possible fix: cap the prior,
+or require a higher sustained speed before trusting a fast-unit guess.
+
 ## 7. Test evidence from latest changes
 
 ### Hard, session 2026-11-02 (TitanDuel, alternating sides)
@@ -502,6 +526,8 @@ built after 3+ enemy heavies); they fired in h98 but are not yet proven.
 | h99 | 3/4 | baseline: `noball,oldsquads,nooverwhelm,nophantom` |
 | h100 | 4/4 | slow ball narrowed to balls with a heavy (committed) |
 | h101 | 2/4 | baseline flags again (2 losses, one amph) |
+| h102 | 4/4 | + radar-blip identification and raid early warning (committed) |
+| h103 | 2/4 | same with `noblipid,noblipwarn,noblipcount` |
 
 Previous session's evidence:
 
@@ -586,7 +612,8 @@ From the previous session (several now addressed):
 
 Current priority order (2026-11-02):
 
-Items 1, 1b (stage 1) and 2 are implemented (section 6b.7); the
+Items 1, 1b (stage 1) and 2 are implemented (section 6b.7), item 3 too
+(section 6b.8; not yet: blip-based slow-push and artillery warnings); the
 descriptions are kept as design notes.
 
 1. **Raid-squad merging** (agreed with the user): form squads by position;
@@ -663,5 +690,5 @@ The 2026-11-02 commit contains all bot changes (incl. new `air.py`,
 `report.py`, `demostats.py`, `extract_weapons.py`), the `zk-startup.ps1`
 taskkill fix (a failed kill used to abort multi-game runs) and this file.
 `results/` stays untracked; never commit demos or `results/SKILL.md`.
-Branch `zkbot-hard`: `ae3c24c` (Hard beaten), then the section 6b.7 layer.
-`main` is unchanged (`git merge zkbot-hard` to bring it in).
+Branch `zkbot-hard`: `ae3c24c` (Hard beaten), the section 6b.7 layer,
+then radar blips (6b.8); merged into `main` and pushed.

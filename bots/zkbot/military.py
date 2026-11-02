@@ -660,6 +660,11 @@ class MilitaryMixin:
             if theirs <= 0:
                 continue
             cands.append((sec.income, theirs, pos))
+        # Raiders on radar heading for our mexes/constructors: meet them.
+        for w in self.update_raid_warnings():
+            if any(self.dist(w["pos"], c[2]) < 600.0 for c in cands):
+                continue
+            cands.append((3.0, w["power"], w["pos"]))
         if not cands:
             return out
         cands.sort(key=lambda c: -c[0])

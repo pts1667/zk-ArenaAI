@@ -41,6 +41,9 @@ class TacticsMixin:
                 out["assault"] += len(ids)
             else:
                 out[role] += len(ids)
+        # Moving radar blips identified by speed but never seen in LOS.
+        for role, n in self.blip_guessed_roles().items():
+            out["raider" if role == "raid" else role] += n
         return out
 
     def enemy_composition(self) -> dict[str, int]:

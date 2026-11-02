@@ -95,6 +95,12 @@ class ConstructionMixin:
             if (here > 20.0 and own < here * 1.2) or site_bad:
                 danger = self.enemy_near(u.pos, 1000.0)
                 self.retreat_builder(u, danger.pos if danger is not None else None)
+                continue
+            # Raiders on radar heading here: step aside before they arrive.
+            w = self.warning_near(u.pos, 10.0)
+            if w is not None and self.own_power_at(w["pos"]) < w["power"] * 1.2:
+                self.log(f"builder {u.name}#{u.uid} early raid warning ({w['n']} raiders, eta {w['eta']:.0f}s)")
+                self.retreat_builder(u, w["from"])
 
     def builder_safe_point(
         self, u: UnitInfo, danger_pos: tuple[float, float] | None = None
