@@ -1,13 +1,11 @@
 """IntelMixin methods for the zkbot Brain."""
 from __future__ import annotations
 
-import math
-import os
 from typing import Any
 
 from . import units
-from .client import QueryError
-from .models import Task, UnitInfo
+from .models import UnitInfo
+from .params import FLAGS
 
 
 class IntelMixin:
@@ -163,7 +161,7 @@ class IntelMixin:
         self.enemies = enemies
         self.radar = {}
         blips = obs.get("radarBlips") or {}
-        if blips and "blipdump" in os.environ.get("ZKBOT_FLAGS", "") and now % 300 < 12:
+        if blips and "blipdump" in FLAGS and now % 300 < 12:
             self.log(f"blipdump {list(blips.items())[:3]}")
         for uid_s, raw in blips.items():
             try:

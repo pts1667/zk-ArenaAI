@@ -14,7 +14,11 @@ guidance is a design requirement, see section 6b.
 Current status:
 
 - **CircuitAI:Normal**: consistently beaten (n28, n29).
-- **CircuitAI:Hard**: now beaten consistently. Committed build: `h93` 3/4,
+- **Caveat (2026-11-03, h120): all win rates below were measured at 10–16x
+  game speed, where CircuitAI is much weaker.** At 1x (human speed) the
+  current bot wins ~1/16 against Hard (section 3). Retuning at 1x is the
+  main open task.
+- **CircuitAI:Hard** (at high game speed): beaten consistently. Committed build: `h93` 3/4,
   `h94` **4/4** (metal ratio vs CircuitAI 1.39 / 1.46 / 1.73 at 5 / 10 / 15
   min); 14/18 since the human-review changes (`h91`–`h94`). Before this
   session: 0 wins.
@@ -73,7 +77,47 @@ Useful game facts:
 
 Headless at max speed; do not use windowed mode unless the user asks.
 
-**Preferred (this session):** `tools/run.sh` + `tools/report.py`.
+**Preferred (from 2026-11-03): `tools/prun.py`** — parallel games, paired
+A/B arms, code snapshots (safe to edit `bots/zkbot` while a batch runs),
+never kills other engines (a human game can run alongside).
+
+```bash
+python tools/prun.py h120 --games 4 --arm new= --arm off=noresign      # paired A/B, 8 games in parallel
+python tools/prun.py h121 --games 4 --arm new= --arm base=     --code base=results/_base_afae691/bots/zkbot                        # vs an older version
+#   (git archive afae691 bots/zkbot | tar -x -C results/_base_afae691)
+python tools/prun.py g1 --games 1 --arm shield= --arm-env shield:ZKBOT_FACTORY=factoryshield ...
+python tools/abstat.py results/h120-new results/h120-off                # win rates, CI, sign test
+```
+
+Each game gets its own slot (ControllerAI port 3100+4n, host port 8500+4n,
+write dir `results/_slots/slotN`, file-locked so concurrent batches don't
+collide). An engine commits 3.3–4.7 GB, so ~8–9 games fit in 48 GB; the
+runner waits for 9 GB free commit before each start. prun passes
+`-EngineAffinity` (all cores): the engine otherwise pins its main thread to
+one fixed core, so all parallel games shared it (h114–h119 ran like that, at
+~1–2x). With it, 8 parallel games run ~10x early on. A killed batch keeps
+its results.csv (written after every game) and continues with `--resume`.
+Output per arm:
+`results/<tag>-<arm>/game-NNN` + `results.csv` (report.py/abstat.py read it).
+`ZKBOT_PARAMS="resign.low_share=0.25"` overrides registered parameters;
+`ZKBOT_FACTORY=factoryX` forces the starting factory.
+`--enemy-factories cloak,shield,...` pins CircuitAI's starting factory per
+game (CircuitAI option `disabledunits`, new `zk-startup.ps1 -CircuitOptions`).
+**Matchups matter more than anything else:** pooled h100–h119, vs shield
+15/15, cloak 13/16, hover 3/12, amph 3/9. Use pinned, stratified batches.
+**Game speed matters most:** CircuitAI is much stronger at 1x (human
+speed). h120, same code and pinned matchups side by side: 1/16 at 1x vs 9/16
+uncapped (~10x), paired 0 vs 8, p = 0.01. CircuitAI's cumulative metal at
+15 min: 26.7k at 1x vs 18.7k at max speed (ours 22.6k vs 26.2k, equal at
+5 min). Our bot is frame-synchronous, so the change is CircuitAI's (threaded
+work finishes later in game time at high speed). Historical 70–100% win
+rates were at 10–16x against a weakened CircuitAI. Evaluate with
+`--speed 1`; compare arms only at the same speed.
+
+Offline checks (seconds, no engine): `python -m pytest tests -q` (catalog
+roles/abilities, factory fallbacks, flag/param semantics, brain composition).
+
+**Older:** `tools/run.sh` + `tools/report.py` (sequential).
 
 ```bash
 bash tools/run.sh h93 Hard 8 "TitanDuel 2.2" 22   # tag diff games map wall-minutes
@@ -146,21 +190,39 @@ Pitfalls:
 - `client.py` — fast `websockets.sync` + `orjson` client. Important for
   throughput; do not regress to `websocket-client` or JSON.
 - `brain.py` — orchestration, startup, frame loop, state; MRO currently:
-  `ThreatMixin, IntelMixin, EconomyMixin, ConstructionMixin,
-  ProductionMixin, StrategyMixin, TacticsMixin, DefenseMixin,
-  ScoutingMixin, AirMixin, BurrowMixin, RaidMixin, PhantomMixin,
-  BlipMixin, RaiderMicroMixin, ResignMixin, MilitaryMixin`.
+  `ThreatMixin, IntelMixin, EconomyMixin, ResourceBuildMixin,
+  FacilityBuildMixin, SupportBuildMixin, DefenseBuildMixin,
+  ConstructionMixin, ProductionMixin, StrategyMixin, TacticsMixin,
+  DefenseMixin, ScoutingMixin, AirMixin, BurrowMixin, RaidMixin,
+  PhantomMixin, BlipMixin, RaiderMicroMixin, ResignMixin,
+  UnitBehaviourMixin, ArmyPlannerMixin, EngagementLogMixin, MilitaryMixin`.
+  Design and migration plan: `docs/ARCHITECTURE.md`.
+- `params.py` — `FLAGS` (exact tokens of `ZKBOT_FLAGS`) and the `P()`
+  parameter registry (`ZKBOT_PARAMS` overrides).
+- `catalog.py` — unit roles/rosters/abilities/manual weapons from data
+  (`data/abilities.json`, built by `tools/extract_abilities.py`).
 - `models.py` — `UnitInfo`, `Task`.
 - `units.py` — static `units.json` helpers and factory-role tables.
 - `mapdata.py` — map spots, heightmap, water, terrain helpers.
 - `intel.py` — observations, enemies/radar, commander tracking, threat,
   spot status, observation-rate control.
-- `economy.py` — task creation, mex/energy/defense/radar tasks, assignment.
+- `economy.py` — the build task board and `economy_step`.
+- `build_resources.py`, `build_facilities.py`, `build_support.py`,
+  `build_defense.py` — build task generators by domain.
 - `construction.py` — placement, builder assignment, fallback/reclaim,
   commander confinement.
 - `production.py` — factory queues, unit-role selection, Gremlin production.
-- `military.py` — army modes, home guard, raider squads, focus fire, retreats,
-  commander safety, direct orders.
+- `military.py` — army mode, home guard, `military_step` (plan → behaviours),
+  responders, attack/hunt/raid target choice, kiting, order helpers,
+  commander safety.
+- `armyplan.py` — `ArmyPlan` and its parts (Posture, CommanderFocus,
+  SearchPlan, SlowBallPlan, RaidPlan, MainGroup), one planner method each.
+- `behaviours.py` — per-unit priority list `UNIT_BEHAVIOURS` (bomb, retreat,
+  air, aa_escort, home_guard, raider_micro, respond, focus_commander,
+  search, raider_squad, phantom, manual_fire, kite, ball_gather,
+  outranged, local_target, regroup, defend, attack, rally).
+- `engagements.py` — passive fight logging (training data) and enemy-death
+  inference from EVENT_ENEMY_DESTROYED.
 - `strategy.py` — sector clustering, terrain scoring, sector threat/strength,
   expansion/defense/attack/rally decisions.
 - `tactics.py` — composition counters, retreat decisions, local target
@@ -190,8 +252,10 @@ Pitfalls:
 - `units.ROLE_OVERRIDES` — roles for units that `units.json` leaves as
   generic `combat` (Buoy, Felon, Sumo, Crab, ...).
 
-`tools/`: `run.sh` (batch runner), `report.py` (batch report),
-`demostats.py` (demo reader), `extract_weapons.py`.
+`tools/`: `prun.py` (parallel paired batches), `abstat.py` (A/B stats,
+per enemy factory), `run.sh` (old sequential runner), `report.py` (batch
+report), `demostats.py` (demo reader), `extract_weapons.py`,
+`extract_abilities.py`, `catalog_check.py`.
 
 Zero-K source of truth for command IDs: the rapid pool in the portable
 install (`packages/*.sdp` → `pool/xx/<md5>.gz`, e.g.
@@ -563,6 +627,47 @@ because the map's extractors were gone; the guard was added after that).
 `ZKBOT_RESIGN="share,frames,min_s,min_peak"` overrides for testing (`r1`:
 forced resign at 2:22 ended the game as a CircuitAI win).
 
+## 6c. Session 2026-11-03 — redesign groundwork
+
+Plan and rationale: **`docs/ARCHITECTURE.md`** (current-state audit, target
+layers, migration table, evaluation method, research summary).
+
+* `tools/prun.py`, `tools/abstat.py` — parallel paired testing (section 3).
+* `catalog.py` — unit knowledge from data: stat roles (`stat_role`), the
+  game's description roles (`desc_roles`, dual roles kept in `roles()`),
+  ability tags and manual-fire weapons from `data/abilities.json`
+  (`tools/extract_abilities.py` reads the Zero-K unit Lua + scripts:
+  manualfire/D-gun stats, cloak, area_cloak, shield, jump, emp, disarm, slow,
+  fire, gravity, capture, torpedo, stockpile, kamikaze, drones, morph, ...).
+  `units.role_of` uses it for ground units the hand tables call "combat";
+  `units.factory_unit` uses it for roles a factory table lacks (opt-out
+  `noinfer`). `tools/catalog_check.py`: 100/108 agree with hand roles.
+* `armyplan.py` — `ArmyPlan` composed of `Posture`, `CommanderFocus`,
+  `SearchPlan`, `SlowBallPlan`, `RaidPlan`, `MainGroup` (+ responders), each
+  from one planner method; `behaviours.py` — the per-unit priority list
+  (`UNIT_BEHAVIOURS`), one small method per branch. `military_step` is now
+  ~25 lines (was ~500); logic unchanged.
+* New behaviour `manual_fire` (opt-out `nomanualfire`): any army unit with
+  a manual-fire weapon (Dante napalm, Scorpion, Bantha, Detriment, Reef)
+  fires it at the best cluster / most valuable target in range.
+* `params.py` — `FLAGS` exact-token set used by every module (the old
+  string `"emergency" in "noemergency"` was True), `P()` parameter registry
+  with ranges + `ZKBOT_PARAMS` overrides; config logged at game start.
+* `ZKBOT_FACTORY` override for factory generalisation tests.
+* `economy.py` split by domain: it keeps the task board (`economy_step`,
+  `add_task`, `finish_task`, ...); task generators moved unchanged to
+  `build_resources.py`, `build_facilities.py`, `build_support.py`,
+  `build_defense.py` (mixins placed right after EconomyMixin in the MRO).
+* `engagements.py` (passive, opt-out `noenglog`): every fight is logged as
+  one JSON line in `engagements-team<N>.jsonl` (both sides' cost, HP,
+  power, DPS, range, speed, roles, turrets, height; losses 20 s later) as
+  training data for a combat-outcome model. ControllerAI forwards
+  EVENT_ENEMY_DESTROYED (topic 18) **without a unit id**, so deaths are
+  matched to enemies that vanished (not into radar) in the same
+  observation. This also fixes the metrics column `enemy_killed_value`,
+  which was always 0. `python tools/combat_model.py` fits/compares outcome
+  models on all logged fights (needs ~100+ games before it means anything).
+
 ## 7. Test evidence from latest changes
 
 ### Hard, session 2026-11-02 (TitanDuel, alternating sides)
@@ -599,6 +704,13 @@ forced resign at 2:22 ended the game as a CircuitAI win).
 | h111 | 2/4 | emergency turrets narrowed |
 | h112 | 3/4 | `noemergency` → emergency made opt-in |
 | h113 | 2/4 | resign on: resigned in both losses (g2 at 5x army power → army guard added) |
+| h114 | 4/8 | resign army guard; parallel prun, CPU-starved (~1–2x) |
+| h115 | 1/4 vs 2/4 | refactor (new) vs afae691 (base), unpinned |
+| h116 | 3/16 vs 6/16 | refactor vs base, pinned enemy factories, starved ~1–2x |
+| h117 | 6/8 | base afae691, 2 parallel (~5–12x) |
+| h118 | 4/16 vs 2/16 | refactor vs base (pooled with h116: 7/32 vs 8/32, no regression) |
+| h119 | max 5/16 | speed test, invalid: all games shared one core (affinity bug) |
+| h120 | **1/16 at 1x vs 9/16 at ~10x** | same code and matchups; paired 0 vs 8, p = 0.01 |
 
 Previous session's evidence:
 
@@ -764,4 +876,6 @@ taskkill fix (a failed kill used to abort multi-game runs) and this file.
 Branch `zkbot-hard`: `ae3c24c` (Hard beaten), the section 6b.7 layer,
 then radar blips (6b.8), raider micro (6b.9), emergency turrets (opt-in)
 and resign (6b.10–11); `main` is fast-forwarded
-to `zkbot-hard` and pushed.
+to `zkbot-hard` and pushed. Then the 2026-11-03 redesign groundwork
+(section 6c: catalog/abilities, params, behaviours/army plan, economy split,
+engagement log, prun/abstat, engine affinity fix) on `zkbot-hard`.

@@ -26,7 +26,6 @@ Flags: `noblipid` (no identification), `noblipwarn` (no early warning),
 from __future__ import annotations
 
 import math
-import os
 from collections import deque
 from typing import Any
 
@@ -34,15 +33,15 @@ from . import units
 from .models import UnitInfo
 from .threat import combat_power
 
-FLAGS = os.environ.get("ZKBOT_FLAGS", "")
+from .params import FLAGS, P
 
-MOVING_SPEED = 20.0     # sustained elmos/s before speed says anything
-RAIDER_SPEED = 85.0     # ground blips faster than this are raiders
+MOVING_SPEED = P("blips.moving_speed", 20.0, 5.0, 60.0, "sustained elmos/s before speed says anything")
+RAIDER_SPEED = P("blips.raider_speed", 85.0, 60.0, 120.0, "ground blips faster than this are raiders")
 SPEED_WINDOW = 60       # frames: sustained speed = min over this window
 AIR_ALTITUDE = 60.0
-GUESS_ROLE_SHARE = 0.45
+GUESS_ROLE_SHARE = P("blips.guess_role_share", 0.45, 0.2, 0.9, "adopt a guess at this role share")
 WARN_HORIZON = (4.0, 8.0, 12.0)   # seconds of straight-line projection
-WARN_RADIUS = 450.0
+WARN_RADIUS = P("blips.warn_radius", 450.0, 200.0, 900.0, "raid warning radius")
 
 _FACTORY_OPTIONS: dict[str, list[dict[str, Any]]] | None = None
 

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from .client import QueryError
 from .models import Task, UnitInfo
+from .params import FLAGS
 
 CMD_TERRAFORM_INTERNAL = 39801
 CMD_LEVEL = 39736
@@ -43,7 +44,7 @@ class BurrowMixin:
         return best
 
     def spot_contested(self, idx: int) -> bool:
-        if "burrowall" in __import__("os").environ.get("ZKBOT_FLAGS", ""):
+        if "burrowall" in FLAGS:
             return True  # test mode
         lost = getattr(self, "spot_mex_losses", {}).get(idx, 0)
         if lost >= 2:
@@ -55,7 +56,7 @@ class BurrowMixin:
         return False
 
     def try_burrow_mex(self, u: UnitInfo, t: Task) -> bool:
-        if "noburrow" in __import__("os").environ.get("ZKBOT_FLAGS", ""):
+        if "noburrow" in FLAGS:
             return False
         if t.spot_index is None or not self.spot_contested(int(t.spot_index)):
             return False

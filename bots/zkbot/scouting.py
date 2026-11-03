@@ -10,12 +10,11 @@ for the guns.
 from __future__ import annotations
 
 import math
-import os
 
 from . import units
 from .models import UnitInfo
 
-FLAGS = os.environ.get("ZKBOT_FLAGS", "")
+from .params import FLAGS
 
 
 class ScoutingMixin:

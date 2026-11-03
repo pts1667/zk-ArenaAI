@@ -14,17 +14,16 @@ fresh expansions on the way so they are close when an enemy raid arrives.
 from __future__ import annotations
 
 import math
-import os
 
 from . import units
 from .models import UnitInfo
 from .threat import weapon_range
 
-FLAGS = os.environ.get("ZKBOT_FLAGS", "")
+from .params import FLAGS, P
 
-SLOW_SPEED = 60.0          # Buoy 51, Grizzly 45, Ogre 69 is borderline-fast
-BALL_MIN_VALUE = 800.0
-BALL_RADIUS = 600.0
+SLOW_SPEED = P("ball.slow_speed", 60.0, 40.0, 80.0, "Buoy 51, Grizzly 45, Ogre 69 is borderline-fast")
+BALL_MIN_VALUE = P("ball.min_value", 800.0, 300.0, 3000.0, "metal value of a slow ball")
+BALL_RADIUS = P("ball.radius", 600.0, 300.0, 1200.0, "slow ball cluster radius")
 
 _BALL_WEIGHT = {
     "skirm": 1.2,   # Ronins keep firing while the ball retreats

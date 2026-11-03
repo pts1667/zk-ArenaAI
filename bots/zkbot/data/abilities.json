@@ -1,0 +1,3112 @@
+{
+"amphaa": {
+"desc_roles": [
+"aa"
+],
+"description": "Amphibious Anti-Air Bot",
+"manual_weapon": null,
+"scripts": [
+"floating"
+],
+"sustained_dps": 0.0,
+"tags": [
+"regen"
+]
+},
+"amphassault": {
+"desc_roles": [
+"assault"
+],
+"description": "Heavy Amphibious Assault Walker",
+"manual_weapon": null,
+"scripts": [
+"floating",
+"radar_fire_toggle"
+],
+"sustained_dps": 250.0,
+"tags": [
+"regen"
+]
+},
+"amphbomb": {
+"desc_roles": [
+"bomb"
+],
+"description": "Amphibious Slow Bomb",
+"manual_weapon": null,
+"scripts": [
+"self_destructs"
+],
+"sustained_dps": 0.0,
+"tags": [
+"kamikaze",
+"regen"
+]
+},
+"amphcon": {
+"desc_roles": [
+"builder"
+],
+"description": "Amphibious Construction Bot, Armored When Idle",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": [
+"morph",
+"regen"
+]
+},
+"amphfloater": {
+"desc_roles": [
+"skirm"
+],
+"description": "Heavy Amphibious Skirmisher Bot",
+"manual_weapon": null,
+"scripts": [
+"floating"
+],
+"sustained_dps": 83.4,
+"tags": [
+"regen",
+"slow"
+]
+},
+"amphimpulse": {
+"desc_roles": [
+"raid",
+"riot"
+],
+"description": "Amphibious Raider/Riot Bot",
+"manual_weapon": null,
+"scripts": [
+"floating"
+],
+"sustained_dps": 132.9,
+"tags": [
+"regen",
+"underwater"
+]
+},
+"amphlaunch": {
+"desc_roles": [],
+"description": "Amphibious Launcher Bot",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": [
+"regen",
+"underwater"
+]
+},
+"amphraid": {
+"desc_roles": [
+"raid"
+],
+"description": "Amphibious Raider (Anti-Sub, Undersea Fire)",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 65.0,
+"tags": [
+"regen",
+"torpedo"
+]
+},
+"amphriot": {
+"desc_roles": [
+"riot"
+],
+"description": "Amphibious Riot Bot (Undersea Fire)",
+"manual_weapon": null,
+"scripts": [
+"floating"
+],
+"sustained_dps": 260.9,
+"tags": [
+"regen",
+"torpedo"
+]
+},
+"amphsupport": {
+"desc_roles": [],
+"description": "Deployable Amphibious Fire Support (must stop to fire)",
+"manual_weapon": null,
+"scripts": [
+"floating"
+],
+"sustained_dps": 86.9,
+"tags": [
+"regen"
+]
+},
+"amphtele": {
+"desc_roles": [],
+"description": "Amphibious Teleport Bridge",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": [
+"regen",
+"teleport"
+]
+},
+"armcom1": {
+"desc_roles": [
+"assault"
+],
+"description": "Mobile Assault Commander",
+"manual_weapon": {
+"aoe": 48.0,
+"damage": 99999.0,
+"desc": "",
+"effects": [
+"underwater"
+],
+"name": "disintegrator",
+"range": 250.0,
+"reload": 1.0
+},
+"scripts": [],
+"sustained_dps": 150.6,
+"tags": [
+"manualfire"
+]
+},
+"assaultcruiser": {
+"desc_roles": [
+"assault"
+],
+"description": "Heavy Cruiser (Assault)",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 520.0,
+"tags": [
+"underwater"
+]
+},
+"asteroid": {
+"desc_roles": [],
+"description": "Space Rock",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"athena": {
+"desc_roles": [
+"builder"
+],
+"description": "Airborne SpecOps Engineer",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": [
+"cloak",
+"jammer",
+"radar"
+]
+},
+"benzcom1": {
+"desc_roles": [],
+"description": "Standoff Combat Commander",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 180.0,
+"tags": []
+},
+"bomberassault": {
+"desc_roles": [
+"assault",
+"bomb"
+],
+"description": "Assault Bomber (Anti-Static)",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 2501.0,
+"tags": [
+"underwater"
+]
+},
+"bomberdisarm": {
+"desc_roles": [
+"bomb"
+],
+"description": "Disarming Lightning Bomber",
+"manual_weapon": null,
+"scripts": [
+"takeoff"
+],
+"sustained_dps": 0.0,
+"tags": [
+"disarm"
+]
+},
+"bomberheavy": {
+"desc_roles": [
+"bomb"
+],
+"description": "Singularity Bomber",
+"manual_weapon": null,
+"scripts": [
+"takeoff"
+],
+"sustained_dps": 2000.1,
+"tags": [
+"gravity"
+]
+},
+"bomberheavyold": {
+"desc_roles": [
+"bomb"
+],
+"description": "Singularity Bomber",
+"manual_weapon": null,
+"scripts": [
+"takeoff"
+],
+"sustained_dps": 2000.1,
+"tags": [
+"gravity"
+]
+},
+"bomberprec": {
+"desc_roles": [
+"bomb"
+],
+"description": "Precision Bomber (Anti-Sub)",
+"manual_weapon": null,
+"scripts": [
+"takeoff"
+],
+"sustained_dps": 100.0,
+"tags": [
+"underwater"
+]
+},
+"bomberriot": {
+"desc_roles": [
+"bomb"
+],
+"description": "Saturation Napalm Bomber",
+"manual_weapon": null,
+"scripts": [
+"takeoff"
+],
+"sustained_dps": 720.0,
+"tags": [
+"fire"
+]
+},
+"bomberstrike": {
+"desc_roles": [
+"bomb"
+],
+"description": "Tactical Strike Bomber",
+"manual_weapon": null,
+"scripts": [
+"takeoff"
+],
+"sustained_dps": 360.0,
+"tags": []
+},
+"chicken": {
+"desc_roles": [],
+"description": "Swarmer",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 66.7,
+"tags": [
+"regen",
+"underwater"
+]
+},
+"chicken_blimpy": {
+"desc_roles": [
+"bomb"
+],
+"description": "Dodo Bomber",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.2,
+"tags": [
+"regen",
+"underwater"
+]
+},
+"chicken_digger": {
+"desc_roles": [
+"scout",
+"raid"
+],
+"description": "Burrowing Scout/Raider",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 33.3,
+"tags": [
+"regen",
+"underwater"
+]
+},
+"chicken_dodo": {
+"desc_roles": [
+"bomb"
+],
+"description": "Chicken Bomb",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": [
+"kamikaze",
+"regen"
+]
+},
+"chicken_dragon": {
+"desc_roles": [
+"assault"
+],
+"description": "Prime Assault Chicken",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 1090.0,
+"tags": [
+"regen",
+"underwater"
+]
+},
+"chicken_drone": {
+"desc_roles": [],
+"description": "Morphs Into Chicken Structures",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": [
+"morph",
+"regen"
+]
+},
+"chicken_drone_starter": {
+"desc_roles": [],
+"description": "Morphs Into Chicken Structures",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": [
+"regen"
+]
+},
+"chicken_leaper": {
+"desc_roles": [
+"raid"
+],
+"description": "Hopping Raider",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 250.0,
+"tags": [
+"regen",
+"underwater"
+]
+},
+"chicken_listener": {
+"desc_roles": [],
+"description": "Burrowing Mobile Seismic Detector",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": [
+"regen"
+]
+},
+"chicken_pigeon": {
+"desc_roles": [
+"scout"
+],
+"description": "Flying Spore Scout",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 18.8,
+"tags": [
+"regen",
+"underwater"
+]
+},
+"chicken_rafflesia": {
+"desc_roles": [
+"shield"
+],
+"description": "Chicken Shield (Static)",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": [
+"regen",
+"shield"
+]
+},
+"chicken_roc": {
+"desc_roles": [],
+"description": "Heavy Attack Flyer",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 150.0,
+"tags": [
+"regen",
+"underwater"
+]
+},
+"chicken_shield": {
+"desc_roles": [
+"shield",
+"aa"
+],
+"description": "Shield/Anti-Air",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": [
+"regen",
+"shield",
+"underwater"
+]
+},
+"chicken_spidermonkey": {
+"desc_roles": [],
+"description": "All-Terrain Support",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 90.0,
+"tags": [
+"gravity",
+"regen",
+"slow"
+]
+},
+"chicken_sporeshooter": {
+"desc_roles": [
+"aa"
+],
+"description": "All-Terrain Spores (Anti-Air/Skirm)",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 100.0,
+"tags": [
+"regen",
+"underwater"
+]
+},
+"chicken_tiamat": {
+"desc_roles": [
+"assault",
+"riot"
+],
+"description": "Heavy Assault/Riot",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 423.6,
+"tags": [
+"fire",
+"regen",
+"shield",
+"underwater"
+]
+},
+"chickena": {
+"desc_roles": [
+"assault"
+],
+"description": "Assault/Anti-Armor",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 242.9,
+"tags": [
+"regen",
+"underwater"
+]
+},
+"chickenblobber": {
+"desc_roles": [
+"arty"
+],
+"description": "Heavy Artillery",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 247.5,
+"tags": [
+"regen",
+"underwater"
+]
+},
+"chickenbroodqueen": {
+"desc_roles": [],
+"description": "Tends the Nest",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 220.0,
+"tags": [
+"regen",
+"underwater"
+]
+},
+"chickenc": {
+"desc_roles": [
+"riot"
+],
+"description": "All-Terrain Riot",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 186.7,
+"tags": [
+"regen",
+"underwater"
+]
+},
+"chickend": {
+"desc_roles": [],
+"description": "Defence and energy source",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 20.0,
+"tags": [
+"regen",
+"underwater"
+]
+},
+"chickenf": {
+"desc_roles": [],
+"description": "Flying Spike Spitter",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 106.7,
+"tags": [
+"regen",
+"underwater"
+]
+},
+"chickenflyerqueen": {
+"desc_roles": [],
+"description": "Clucking Hell!",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 2450.0,
+"tags": [
+"regen",
+"underwater"
+]
+},
+"chickenlandqueen": {
+"desc_roles": [],
+"description": "Clucking Hell!",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 1993.3,
+"tags": [
+"regen",
+"underwater"
+]
+},
+"chickenr": {
+"desc_roles": [
+"arty"
+],
+"description": "Artillery",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 40.0,
+"tags": [
+"regen",
+"underwater"
+]
+},
+"chickens": {
+"desc_roles": [
+"skirm"
+],
+"description": "Skirmisher",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 60.0,
+"tags": [
+"regen",
+"underwater"
+]
+},
+"chickenspire": {
+"desc_roles": [
+"arty"
+],
+"description": "Static Artillery",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 285.7,
+"tags": [
+"regen",
+"underwater"
+]
+},
+"chickenwurm": {
+"desc_roles": [
+"assault",
+"riot"
+],
+"description": "Burrowing Flamer (Assault/Riot)",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 91.7,
+"tags": [
+"fire",
+"regen",
+"stealth",
+"underwater"
+]
+},
+"cloakaa": {
+"desc_roles": [
+"aa"
+],
+"description": "Cloaked Anti-Air Bot",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": [
+"cloak"
+]
+},
+"cloakarty": {
+"desc_roles": [
+"arty"
+],
+"description": "Light Artillery Bot",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 23.3,
+"tags": []
+},
+"cloakassault": {
+"desc_roles": [
+"assault"
+],
+"description": "Lightning Assault Bot",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 52.3,
+"tags": [
+"emp"
+]
+},
+"cloakbomb": {
+"desc_roles": [
+"bomb"
+],
+"description": "All Terrain EMP Bomb (Burrows)",
+"manual_weapon": null,
+"scripts": [
+"cloak",
+"self_destructs"
+],
+"sustained_dps": 0.0,
+"tags": [
+"kamikaze"
+]
+},
+"cloakcon": {
+"desc_roles": [
+"builder"
+],
+"description": "Cloaked Construction Bot",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": [
+"area_cloak",
+"cloak",
+"jammer"
+]
+},
+"cloakheavyraid": {
+"desc_roles": [
+"raid"
+],
+"description": "Cloaked Raider Bot",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 142.9,
+"tags": [
+"cloak",
+"underwater"
+]
+},
+"cloakjammer": {
+"desc_roles": [
+"support"
+],
+"description": "Area Cloaker/Jammer Walker",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": [
+"area_cloak",
+"jammer",
+"morph"
+]
+},
+"cloakraid": {
+"desc_roles": [
+"raid"
+],
+"description": "Light Raider Bot",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 105.0,
+"tags": [
+"regen"
+]
+},
+"cloakriot": {
+"desc_roles": [
+"riot"
+],
+"description": "Riot Bot",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 270.0,
+"tags": [
+"regen"
+]
+},
+"cloakskirm": {
+"desc_roles": [
+"skirm"
+],
+"description": "Skirmisher Bot (Direct-Fire)",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 51.4,
+"tags": []
+},
+"cloaksnipe": {
+"desc_roles": [
+"skirm",
+"antiheavy",
+"arty"
+],
+"description": "Cloaked Skirmish/Anti-Heavy Artillery Bot",
+"manual_weapon": null,
+"scripts": [
+"radar_fire_toggle"
+],
+"sustained_dps": 88.2,
+"tags": [
+"cloak"
+]
+},
+"commander_egg": {
+"desc_roles": [],
+"description": "Morphs into a Commander. Disarm and slow explosion on death.",
+"manual_weapon": null,
+"scripts": [
+"self_destructs"
+],
+"sustained_dps": 0.0,
+"tags": [
+"morph"
+]
+},
+"commrecon1": {
+"desc_roles": [],
+"description": "High Mobility Commander",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 90.0,
+"tags": [
+"jump",
+"slow"
+]
+},
+"commstrike1": {
+"desc_roles": [
+"assault"
+],
+"description": "Mobile Assault Commander",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 150.6,
+"tags": []
+},
+"commsupport1": {
+"desc_roles": [],
+"description": "Econ/Support Commander",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 56.0,
+"tags": []
+},
+"corcom1": {
+"desc_roles": [],
+"description": "Heavy Combat Commander",
+"manual_weapon": {
+"aoe": 48.0,
+"damage": 99999.0,
+"desc": "",
+"effects": [
+"underwater"
+],
+"name": "disintegrator",
+"range": 250.0,
+"reload": 1.0
+},
+"scripts": [],
+"sustained_dps": 109.1,
+"tags": [
+"manualfire"
+]
+},
+"cremcom1": {
+"desc_roles": [
+"assault"
+],
+"description": "Mobile Assault Commander",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 165.0,
+"tags": []
+},
+"damagesink": {
+"desc_roles": [],
+"description": "Does not care if you shoot at it.",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"dbg_m0r0": {
+"desc_roles": [],
+"description": "",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"dbg_m0r1": {
+"desc_roles": [],
+"description": "",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"dbg_m1r0": {
+"desc_roles": [],
+"description": "",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"dbg_m1r1": {
+"desc_roles": [],
+"description": "",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"dbg_moire": {
+"desc_roles": [],
+"description": "",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"dronecarry": {
+"desc_roles": [],
+"description": "Carrier Drone",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 360.0,
+"tags": [
+"capture",
+"drones",
+"stealth"
+]
+},
+"dronefighter": {
+"desc_roles": [
+"aa"
+],
+"description": "Fighter Drone",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 165.0,
+"tags": [
+"drones",
+"stealth"
+]
+},
+"droneheavyslow": {
+"desc_roles": [],
+"description": "Advanced Battle Drone",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 100.0,
+"tags": [
+"drones",
+"slow",
+"stealth"
+]
+},
+"dronelight": {
+"desc_roles": [],
+"description": "Attack Drone",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 40.0,
+"tags": [
+"drones",
+"stealth"
+]
+},
+"dynassault1": {
+"desc_roles": [],
+"description": "Heavy Combat Commander",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"dynknight1": {
+"desc_roles": [],
+"description": "",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"dynrecon1": {
+"desc_roles": [],
+"description": "High Mobility Commander",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": [
+"jump"
+]
+},
+"dynstrike1": {
+"desc_roles": [
+"assault"
+],
+"description": "Mobile Assault Commander",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": [
+"jammer"
+]
+},
+"dynsupport1": {
+"desc_roles": [],
+"description": "Econ/Support Commander",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"empiricaldpser": {
+"desc_roles": [],
+"description": "Shoot at it for science.",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"empiricaldpsersmall": {
+"desc_roles": [],
+"description": "Shoot at it for science.",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"empmissile": {
+"desc_roles": [],
+"description": "EMP missile",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 5000.4,
+"tags": [
+"emp"
+]
+},
+"energyfusion": {
+"desc_roles": [],
+"description": "Medium Powerplant",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"energygeo": {
+"desc_roles": [],
+"description": "Medium Powerplant",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": [
+"morph"
+]
+},
+"energyheavygeo": {
+"desc_roles": [],
+"description": "Large Powerplant - HAZARDOUS",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"energypylon": {
+"desc_roles": [],
+"description": "Extends overdrive grid",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"energysingu": {
+"desc_roles": [],
+"description": "Large Powerplant - HAZARDOUS",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"energysolar": {
+"desc_roles": [],
+"description": "Small Powerplant",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"energywind": {
+"desc_roles": [],
+"description": "Small Powerplant",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"factoryamph": {
+"desc_roles": [],
+"description": "Produces Amphibious Bots",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"factorycloak": {
+"desc_roles": [],
+"description": "Produces Cloaked, Mobile Robots",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"factorygunship": {
+"desc_roles": [],
+"description": "Produces Gunships",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"factoryhover": {
+"desc_roles": [],
+"description": "Produces Hovercraft",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"factoryjump": {
+"desc_roles": [],
+"description": "Produces Jumpjet Equipped Robots",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": [
+"jump"
+]
+},
+"factoryplane": {
+"desc_roles": [],
+"description": "Produces Airplanes",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"factoryshield": {
+"desc_roles": [
+"shield"
+],
+"description": "Produces Tough, Shielded Robots",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"factoryship": {
+"desc_roles": [],
+"description": "Produces Naval Units",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"factoryspider": {
+"desc_roles": [],
+"description": "Produces Spiders",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"factorytank": {
+"desc_roles": [],
+"description": "Produces Heavy Tracked Vehicles",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"factoryveh": {
+"desc_roles": [],
+"description": "Produces Rovers",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"fakeunit": {
+"desc_roles": [],
+"description": "Created by scrambling devices.",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"fakeunit_aatarget": {
+"desc_roles": [],
+"description": "Used by the jumpjet script.",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": [
+"kamikaze"
+]
+},
+"fakeunit_los": {
+"desc_roles": [],
+"description": "Knows all and sees all",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": [
+"stealth"
+]
+},
+"grebe": {
+"desc_roles": [
+"raid"
+],
+"description": "Amphibious Raider Bot",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 160.0,
+"tags": []
+},
+"gunshipaa": {
+"desc_roles": [
+"aa"
+],
+"description": "Anti-Air Gunship",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"gunshipassault": {
+"desc_roles": [
+"raid",
+"assault"
+],
+"description": "Heavy Raider/Assault Gunship",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 189.4,
+"tags": []
+},
+"gunshipbomb": {
+"desc_roles": [
+"bomb",
+"scout"
+],
+"description": "Flying Bomb/Scout (Burrows)",
+"manual_weapon": null,
+"scripts": [
+"cloak",
+"self_destructs"
+],
+"sustained_dps": 0.0,
+"tags": [
+"kamikaze"
+]
+},
+"gunshipcon": {
+"desc_roles": [
+"builder"
+],
+"description": "Heavy Gunship Constructor",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"gunshipemp": {
+"desc_roles": [
+"antiheavy"
+],
+"description": "Anti-Heavy EMP Drone",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 291.7,
+"tags": [
+"emp"
+]
+},
+"gunshipheavyskirm": {
+"desc_roles": [],
+"description": "Fire Support Gunship",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 184.8,
+"tags": []
+},
+"gunshipheavytrans": {
+"desc_roles": [
+"transport"
+],
+"description": "Armed Heavy Air Transport",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 100.0,
+"tags": [
+"transport"
+]
+},
+"gunshipkrow": {
+"desc_roles": [],
+"description": "Flying Fortress",
+"manual_weapon": {
+"aoe": 128.0,
+"damage": 18750.0,
+"desc": "",
+"effects": [],
+"name": "clusterbomb",
+"range": 200.0,
+"reload": 30.0
+},
+"scripts": [],
+"sustained_dps": 825.0,
+"tags": [
+"manualfire"
+]
+},
+"gunshipraid": {
+"desc_roles": [
+"raid"
+],
+"description": "Raider Gunship",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 60.8,
+"tags": []
+},
+"gunshipskirm": {
+"desc_roles": [],
+"description": "Multi-Role Support Gunship",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 44.0,
+"tags": [
+"slow"
+]
+},
+"gunshiptrans": {
+"desc_roles": [
+"transport"
+],
+"description": "Air Transport",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": [
+"transport"
+]
+},
+"hoveraa": {
+"desc_roles": [
+"aa"
+],
+"description": "Anti-Air Hovercraft",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"hoverarty": {
+"desc_roles": [
+"antiheavy",
+"arty"
+],
+"description": "Anti-Heavy Artillery Hovercraft",
+"manual_weapon": null,
+"scripts": [
+"radar_fire_toggle"
+],
+"sustained_dps": 130.4,
+"tags": []
+},
+"hoverassault": {
+"desc_roles": [],
+"description": "Blockade Runner Hover",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 133.4,
+"tags": []
+},
+"hovercon": {
+"desc_roles": [
+"builder"
+],
+"description": "Construction Hovercraft",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"hoverdepthcharge": {
+"desc_roles": [
+"riot"
+],
+"description": "Riot Hovercraft (Anti-Sub)",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 167.8,
+"tags": [
+"torpedo"
+]
+},
+"hoverheavyraid": {
+"desc_roles": [],
+"description": "Disruptor Hovercraft",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 96.9,
+"tags": [
+"slow"
+]
+},
+"hoverminer": {
+"desc_roles": [],
+"description": "Minelaying Hover",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 4.0,
+"tags": []
+},
+"hoverraid": {
+"desc_roles": [],
+"description": "Fast Attack Hovercraft (Anti-Sub)",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 38.8,
+"tags": [
+"underwater"
+]
+},
+"hoverriot": {
+"desc_roles": [
+"riot"
+],
+"description": "Riot Hover",
+"manual_weapon": null,
+"scripts": [
+"reload_change"
+],
+"sustained_dps": 326.5,
+"tags": []
+},
+"hovershotgun": {
+"desc_roles": [],
+"description": "Shotgun Hover",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 170.7,
+"tags": []
+},
+"hoverskirm": {
+"desc_roles": [
+"skirm",
+"antiheavy"
+],
+"description": "Skirmisher/Anti-Heavy Hovercraft",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 64.0,
+"tags": []
+},
+"hoverskirm2": {
+"desc_roles": [
+"assault"
+],
+"description": "Light Assault/Battle Hovercraft",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 90.0,
+"tags": []
+},
+"hoversonic": {
+"desc_roles": [],
+"description": "Antisub Hovercraft",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 159.1,
+"tags": [
+"underwater"
+]
+},
+"jumpaa": {
+"desc_roles": [
+"aa"
+],
+"description": "Heavy Anti-Air Jumper",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": [
+"jump"
+]
+},
+"jumparty": {
+"desc_roles": [
+"arty"
+],
+"description": "Saturation Artillery Walker",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 56.7,
+"tags": [
+"fire"
+]
+},
+"jumpassault": {
+"desc_roles": [
+"assault"
+],
+"description": "Melee Assault Jumper",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 300.1,
+"tags": [
+"jump",
+"underwater"
+]
+},
+"jumpblackhole": {
+"desc_roles": [],
+"description": "Black Hole Launcher",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": [
+"gravity"
+]
+},
+"jumpbomb": {
+"desc_roles": [
+"antiheavy",
+"bomb"
+],
+"description": "Cloaked Jumping Anti-Heavy Bomb",
+"manual_weapon": null,
+"scripts": [
+"self_destructs"
+],
+"sustained_dps": 0.0,
+"tags": [
+"cloak",
+"jump",
+"kamikaze"
+]
+},
+"jumpcon": {
+"desc_roles": [
+"builder"
+],
+"description": "Jumpjet Constructor",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 7.5,
+"tags": [
+"jump",
+"slow"
+]
+},
+"jumpraid": {
+"desc_roles": [
+"raid",
+"riot"
+],
+"description": "Raider/Riot Jumper",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 69.2,
+"tags": [
+"fire",
+"jump"
+]
+},
+"jumpscout": {
+"desc_roles": [],
+"description": "Walking Missile",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 273.4,
+"tags": []
+},
+"jumpskirm": {
+"desc_roles": [
+"skirm"
+],
+"description": "Disruptor Skirmisher Walker",
+"manual_weapon": null,
+"scripts": [
+"radar_fire_toggle"
+],
+"sustained_dps": 46.0,
+"tags": [
+"slow"
+]
+},
+"jumpsumo": {
+"desc_roles": [
+"riot"
+],
+"description": "Heavy Riot Jumper",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.1,
+"tags": [
+"gravity",
+"jump"
+]
+},
+"mahlazer": {
+"desc_roles": [],
+"description": "Planetary Energy Chisel",
+"manual_weapon": null,
+"scripts": [
+"reload_change"
+],
+"sustained_dps": -0.0,
+"tags": [
+"underwater"
+]
+},
+"missileslow": {
+"desc_roles": [],
+"description": "Slow Homing Missile - High single-target slow damage with lingering damage over time",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 300.0,
+"tags": [
+"slow"
+]
+},
+"napalmmissile": {
+"desc_roles": [],
+"description": "Napalm Missile",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 15.1,
+"tags": [
+"fire"
+]
+},
+"nebula": {
+"desc_roles": [],
+"description": "Atmospheric Mothership",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 400.0,
+"tags": [
+"shield"
+]
+},
+"neebcomm": {
+"desc_roles": [],
+"description": "Ugly Turkey",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": [
+"regen"
+]
+},
+"obj_artefact": {
+"desc_roles": [
+"capture"
+],
+"description": "Capture artefacts by destroying them. Control all artefacts to win.",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"planecon": {
+"desc_roles": [
+"builder"
+],
+"description": "Construction Aircraft",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"planefighter": {
+"desc_roles": [
+"aa"
+],
+"description": "Multi-role Fighter",
+"manual_weapon": null,
+"scripts": [
+"reload_change"
+],
+"sustained_dps": 35.5,
+"tags": []
+},
+"planeheavyfighter": {
+"desc_roles": [
+"aa"
+],
+"description": "Air Superiority Fighter",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 10.0,
+"tags": []
+},
+"planelightscout": {
+"desc_roles": [
+"scout",
+"support"
+],
+"description": "Light Scout/Radar Jammer Plane",
+"manual_weapon": null,
+"scripts": [
+"takeoff"
+],
+"sustained_dps": 0.0,
+"tags": [
+"jammer"
+]
+},
+"planescout": {
+"desc_roles": [
+"scout"
+],
+"description": "Radar/Sonar Scout Plane",
+"manual_weapon": null,
+"scripts": [
+"takeoff"
+],
+"sustained_dps": 0.0,
+"tags": [
+"radar"
+]
+},
+"planesupport": {
+"desc_roles": [
+"aa",
+"bomb"
+],
+"description": "Strafing Disruption Fighter-Bomber",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 60.0,
+"tags": [
+"slow"
+]
+},
+"plateamph": {
+"desc_roles": [],
+"description": "Parallel Unit Production",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"platecloak": {
+"desc_roles": [],
+"description": "Parallel Unit Production",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"plategunship": {
+"desc_roles": [],
+"description": "Parallel Unit Production",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"platehover": {
+"desc_roles": [],
+"description": "Parallel Unit Production",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"platejump": {
+"desc_roles": [],
+"description": "Parallel Unit Production",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": [
+"jump"
+]
+},
+"plateplane": {
+"desc_roles": [],
+"description": "Parallel Unit Production",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"plateshield": {
+"desc_roles": [],
+"description": "Parallel Unit Production",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"plateship": {
+"desc_roles": [],
+"description": "Parallel Unit Production",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"platespider": {
+"desc_roles": [],
+"description": "Parallel Unit Production",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"platetank": {
+"desc_roles": [],
+"description": "Parallel Unit Production",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"plateveh": {
+"desc_roles": [],
+"description": "Parallel Unit Production",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"pw_generic": {
+"desc_roles": [],
+"description": "Blank",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"pw_hq_attacker": {
+"desc_roles": [],
+"description": "PlanetWars Field HQ (changes influence gain)",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"pw_hq_attacker_extra": {
+"desc_roles": [],
+"description": "",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"pw_hq_defender": {
+"desc_roles": [],
+"description": "",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"pw_hq_defender_extra": {
+"desc_roles": [],
+"description": "",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"raveparty": {
+"desc_roles": [],
+"description": "Destructive Rainbow Projector",
+"manual_weapon": null,
+"scripts": [
+"reload_change"
+],
+"sustained_dps": 5957.6,
+"tags": [
+"emp",
+"fire",
+"slow"
+]
+},
+"rocksink": {
+"desc_roles": [],
+"description": "Rocks when you shoot at it.",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"roost": {
+"desc_roles": [],
+"description": "Spawns Chicken",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": [
+"regen",
+"underwater"
+]
+},
+"seismic": {
+"desc_roles": [],
+"description": "Seismic Missile",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 2.0,
+"tags": [
+"underwater"
+]
+},
+"shieldaa": {
+"desc_roles": [
+"aa"
+],
+"description": "Anti-Air Bot",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"shieldarty": {
+"desc_roles": [
+"arty"
+],
+"description": "Disarming Artillery",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 125.0,
+"tags": [
+"disarm"
+]
+},
+"shieldassault": {
+"desc_roles": [
+"shield",
+"assault"
+],
+"description": "Shielded Assault Bot",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 46.2,
+"tags": [
+"shield"
+]
+},
+"shieldbomb": {
+"desc_roles": [
+"bomb"
+],
+"description": "Crawling Bomb (Burrows)",
+"manual_weapon": null,
+"scripts": [
+"cloak",
+"self_destructs"
+],
+"sustained_dps": 0.0,
+"tags": [
+"kamikaze"
+]
+},
+"shieldcon": {
+"desc_roles": [
+"shield",
+"builder"
+],
+"description": "Shielded Construction Bot",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": [
+"shield"
+]
+},
+"shieldfelon": {
+"desc_roles": [
+"shield",
+"riot",
+"skirm"
+],
+"description": "Shielded Riot/Skirmisher Bot",
+"manual_weapon": null,
+"scripts": [
+"radar_fire_toggle"
+],
+"sustained_dps": 566.3,
+"tags": [
+"shield"
+]
+},
+"shieldraid": {
+"desc_roles": [
+"raid"
+],
+"description": "Medium-Light Raider Bot",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 84.8,
+"tags": []
+},
+"shieldriot": {
+"desc_roles": [
+"riot"
+],
+"description": "Riot Bot",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 32.2,
+"tags": [
+"slow"
+]
+},
+"shieldscout": {
+"desc_roles": [],
+"description": "Box of Dirt",
+"manual_weapon": null,
+"scripts": [
+"self_destructs"
+],
+"sustained_dps": 25.3,
+"tags": [
+"jump",
+"underwater"
+]
+},
+"shieldshield": {
+"desc_roles": [
+"shield"
+],
+"description": "Area Shield Walker",
+"manual_weapon": null,
+"scripts": [
+"floating"
+],
+"sustained_dps": 0.0,
+"tags": [
+"morph",
+"shield"
+]
+},
+"shieldskirm": {
+"desc_roles": [
+"skirm"
+],
+"description": "Skirmisher Bot (Indirect Fire)",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 47.1,
+"tags": []
+},
+"shipaa": {
+"desc_roles": [
+"aa"
+],
+"description": "Anti-Air Frigate",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": [
+"radar"
+]
+},
+"shiparty": {
+"desc_roles": [
+"arty"
+],
+"description": "Artillery Cruiser",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 164.4,
+"tags": []
+},
+"shipassault": {
+"desc_roles": [
+"riot",
+"assault"
+],
+"description": "Riot/Assault Destroyer (Anti-Sub)",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 179.6,
+"tags": [
+"underwater"
+]
+},
+"shipcarrier": {
+"desc_roles": [
+"arty"
+],
+"description": "Aircraft Carrier (Bombardment), stockpiles disarm missiles at 5 m/s",
+"manual_weapon": {
+"aoe": 280.0,
+"damage": 15000.0,
+"desc": "",
+"effects": [
+"disarm",
+"stockpile"
+],
+"name": "disarm_rocket",
+"range": 3000.0,
+"reload": 5.0
+},
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": [
+"drones",
+"manualfire"
+]
+},
+"shipcon": {
+"desc_roles": [
+"builder"
+],
+"description": "Construction Ship",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"shipheavyarty": {
+"desc_roles": [
+"arty"
+],
+"description": "Battleship (Heavy Artillery)",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 360.8,
+"tags": []
+},
+"shipriot": {
+"desc_roles": [
+"raid",
+"riot"
+],
+"description": "Raider/Riot Corvette",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 276.0,
+"tags": []
+},
+"shipscout": {
+"desc_roles": [
+"scout"
+],
+"description": "Scout Ship (Disarming)",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 8.8,
+"tags": [
+"disarm"
+]
+},
+"shipskirm": {
+"desc_roles": [
+"skirm"
+],
+"description": "Skirmisher Ship",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 106.7,
+"tags": []
+},
+"shiptorpraider": {
+"desc_roles": [
+"raid"
+],
+"description": "Torpedo Raider Ship (Anti-Sub)",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": [
+"torpedo"
+]
+},
+"slicer": {
+"desc_roles": [
+"assault"
+],
+"description": "Melee Assault Walker",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 1002.0,
+"tags": [
+"jump",
+"underwater"
+]
+},
+"spideraa": {
+"desc_roles": [
+"aa"
+],
+"description": "Anti-Air Spider",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"spideranarchid": {
+"desc_roles": [
+"riot"
+],
+"description": "Riot EMP Spider",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 50.0,
+"tags": []
+},
+"spiderantiheavy": {
+"desc_roles": [
+"scout",
+"antiheavy"
+],
+"description": "Cloaked Scout/Anti-Heavy",
+"manual_weapon": null,
+"scripts": [
+"radar_fire_toggle"
+],
+"sustained_dps": 114.3,
+"tags": [
+"cloak",
+"emp"
+]
+},
+"spiderassault": {
+"desc_roles": [
+"assault"
+],
+"description": "All Terrain Assault Bot",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 54.2,
+"tags": []
+},
+"spidercon": {
+"desc_roles": [
+"builder"
+],
+"description": "Construction Spider",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": [
+"radar"
+]
+},
+"spidercrabe": {
+"desc_roles": [
+"riot",
+"skirm"
+],
+"description": "Heavy Riot/Skirmish Spider - Curls into Armored Form When Stationary",
+"manual_weapon": null,
+"scripts": [
+"armor"
+],
+"sustained_dps": 150.1,
+"tags": []
+},
+"spideremp": {
+"desc_roles": [
+"riot"
+],
+"description": "Lightning Riot Spider",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 27.1,
+"tags": [
+"emp"
+]
+},
+"spiderriot": {
+"desc_roles": [
+"riot"
+],
+"description": "Riot Spider",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 266.7,
+"tags": []
+},
+"spiderscout": {
+"desc_roles": [
+"scout"
+],
+"description": "Ultralight Scout Spider (Burrows)",
+"manual_weapon": null,
+"scripts": [
+"cloak"
+],
+"sustained_dps": 51.5,
+"tags": []
+},
+"spiderskirm": {
+"desc_roles": [
+"skirm"
+],
+"description": "Skirmisher Spider (Indirect Fire)",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 101.2,
+"tags": []
+},
+"starlight_satellite": {
+"desc_roles": [],
+"description": "Starlight relay satellite",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": [
+"underwater"
+]
+},
+"staticantinuke": {
+"desc_roles": [],
+"description": "Strategic Nuke Interception System",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 250.0,
+"tags": [
+"radar"
+]
+},
+"staticarty": {
+"desc_roles": [
+"arty"
+],
+"description": "Plasma Artillery Battery - Power by connecting to a 50 energy grid",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 180.3,
+"tags": []
+},
+"staticcon": {
+"desc_roles": [
+"builder"
+],
+"description": "Construction Assistant",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"staticheavyarty": {
+"desc_roles": [],
+"description": "Strategic Plasma Cannon",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 250.3,
+"tags": []
+},
+"staticheavyradar": {
+"desc_roles": [],
+"description": "Long-Range Radar",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": [
+"radar"
+]
+},
+"staticjammer": {
+"desc_roles": [
+"support"
+],
+"description": "Area Cloaker/Jammer",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": [
+"area_cloak",
+"cloak",
+"jammer",
+"morph"
+]
+},
+"staticmex": {
+"desc_roles": [],
+"description": "Produces Metal",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"staticmissilesilo": {
+"desc_roles": [],
+"description": "Produces Tactical Missiles",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"staticnuke": {
+"desc_roles": [],
+"description": "Strategic Nuclear Launcher, Drains 18 m/s, 3 minute stockpile",
+"manual_weapon": {
+"aoe": 1920.0,
+"damage": 11501.1,
+"desc": "",
+"effects": [
+"stockpile"
+],
+"name": "crblmssl",
+"range": 72000.0,
+"reload": 10.0
+},
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": [
+"manualfire"
+]
+},
+"staticradar": {
+"desc_roles": [],
+"description": "Early Warning System",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": [
+"morph",
+"radar"
+]
+},
+"staticrearm": {
+"desc_roles": [],
+"description": "Repairs and Rearms Aircraft, repairs at 2.5 e/s per pad",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"staticshield": {
+"desc_roles": [
+"shield"
+],
+"description": "Area Shield",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": [
+"morph",
+"shield"
+]
+},
+"staticsonar": {
+"desc_roles": [],
+"description": "Locates Water Units",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"staticstorage": {
+"desc_roles": [],
+"description": "Stores Metal and Energy (500)",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"statictele": {
+"desc_roles": [],
+"description": "Blank",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"statictempshield": {
+"desc_roles": [
+"shield"
+],
+"description": "Temporary Shield",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": [
+"shield"
+]
+},
+"striderantiheavy": {
+"desc_roles": [
+"antiheavy"
+],
+"description": "Cloaked Anti-Strider Walker (Undersea Fire)",
+"manual_weapon": {
+"aoe": 48.0,
+"damage": 2000.1,
+"desc": "",
+"effects": [
+"underwater"
+],
+"name": "disintegrator",
+"range": 250.0,
+"reload": 2.0
+},
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": [
+"cloak",
+"manualfire"
+]
+},
+"striderarty": {
+"desc_roles": [
+"arty"
+],
+"description": "Heavy Saturation Artillery Strider",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 294.0,
+"tags": []
+},
+"striderbantha": {
+"desc_roles": [],
+"description": "Ranged Support Strider",
+"manual_weapon": {
+"aoe": 128.0,
+"damage": 15000.0,
+"desc": "",
+"effects": [
+"emp"
+],
+"name": "emp_missile",
+"range": 1200.0,
+"reload": 30.0
+},
+"scripts": [],
+"sustained_dps": 460.0,
+"tags": [
+"emp",
+"manualfire"
+]
+},
+"striderdante": {
+"desc_roles": [
+"assault",
+"riot"
+],
+"description": "Assault/Riot Strider",
+"manual_weapon": {
+"aoe": 168.0,
+"damage": 3000.2,
+"desc": "Fire Special Weapon: Fire a napalm rocket salvo.",
+"effects": [
+"fire"
+],
+"name": "napalm_rockets_salvo",
+"range": 460.0,
+"reload": 20.0
+},
+"scripts": [],
+"sustained_dps": 1259.5,
+"tags": [
+"fire",
+"manualfire"
+]
+},
+"striderdetriment": {
+"desc_roles": [
+"assault"
+],
+"description": "Ultimate Assault Strider (Undersea Fire)",
+"manual_weapon": {
+"aoe": 212.0,
+"damage": 12001.0,
+"desc": "",
+"effects": [],
+"name": "obliteration_blaster",
+"range": 700.0,
+"reload": 40.0
+},
+"scripts": [
+"reload_change"
+],
+"sustained_dps": 850.3,
+"tags": [
+"jump",
+"manualfire",
+"underwater"
+]
+},
+"striderdozer": {
+"desc_roles": [],
+"description": "Heavy Buster, Very Tank",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 50.0,
+"tags": []
+},
+"striderfunnelweb": {
+"desc_roles": [
+"shield"
+],
+"description": "Shield Support Strider",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": [
+"radar",
+"shield"
+]
+},
+"striderhub": {
+"desc_roles": [
+"builder"
+],
+"description": "Constructs Striders",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"striderscorpion": {
+"desc_roles": [],
+"description": "Cloaked Infiltration Strider",
+"manual_weapon": {
+"aoe": 160.0,
+"damage": 20000.2,
+"desc": "",
+"effects": [
+"emp"
+],
+"name": "multilightning",
+"range": 490.0,
+"reload": 30.0
+},
+"scripts": [],
+"sustained_dps": 510.1,
+"tags": [
+"cloak",
+"emp",
+"manualfire"
+]
+},
+"subraider": {
+"desc_roles": [
+"raid"
+],
+"description": "Raider Submarine (Anti-Sub, Undersea Fire)",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": [
+"slow",
+"torpedo"
+]
+},
+"subscout": {
+"desc_roles": [
+"scout"
+],
+"description": "Scout/Suicide Minisub",
+"manual_weapon": null,
+"scripts": [
+"self_destructs"
+],
+"sustained_dps": 0.0,
+"tags": [
+"kamikaze"
+]
+},
+"subtacmissile": {
+"desc_roles": [],
+"description": "Tactical Nuke Missile Sub, Drains 20 m/s, 30 second stockpile",
+"manual_weapon": {
+"aoe": 256.0,
+"damage": 3502.4,
+"desc": "",
+"effects": [
+"underwater",
+"stockpile"
+],
+"name": "tacnuke",
+"range": 3000.0,
+"reload": 1.0
+},
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": [
+"manualfire"
+]
+},
+"tacnuke": {
+"desc_roles": [],
+"description": "Tactical Nuke",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 350.2,
+"tags": []
+},
+"tankaa": {
+"desc_roles": [
+"aa"
+],
+"description": "Flak Anti-Air Tank",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"tankarty": {
+"desc_roles": [
+"arty"
+],
+"description": "General-Purpose Artillery",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 85.8,
+"tags": []
+},
+"tankassault": {
+"desc_roles": [
+"assault"
+],
+"description": "Assault Tank",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 160.1,
+"tags": []
+},
+"tankcon": {
+"desc_roles": [
+"builder"
+],
+"description": "Armed Construction Tank",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 43.2,
+"tags": []
+},
+"tankheavyarty": {
+"desc_roles": [
+"arty"
+],
+"description": "Heavy Saturation Artillery Tank",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 435.4,
+"tags": []
+},
+"tankheavyassault": {
+"desc_roles": [],
+"description": "Very Heavy Tank Buster",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 525.7,
+"tags": [
+"slow"
+]
+},
+"tankheavyraid": {
+"desc_roles": [
+"assault",
+"raid"
+],
+"description": "Lightning Assault/Raider Tank",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 34.6,
+"tags": [
+"emp"
+]
+},
+"tankraid": {
+"desc_roles": [
+"raid"
+],
+"description": "Raider Tank",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 80.0,
+"tags": [
+"fire"
+]
+},
+"tankriot": {
+"desc_roles": [
+"riot"
+],
+"description": "Heavy Riot Support Tank",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 800.3,
+"tags": []
+},
+"tele_beacon": {
+"desc_roles": [],
+"description": "Teleport Bridge Entry Beacon, right click to teleport.",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"terraunit": {
+"desc_roles": [],
+"description": "Spent: 0",
+"manual_weapon": null,
+"scripts": [
+"self_destructs"
+],
+"sustained_dps": 0.0,
+"tags": [
+"stealth"
+]
+},
+"tiptest": {
+"desc_roles": [],
+"description": "Tests turn in place",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"turretaaclose": {
+"desc_roles": [
+"aa"
+],
+"description": "Burst Anti-Air Turret",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"turretaafar": {
+"desc_roles": [
+"aa"
+],
+"description": "Long-Range Anti-Air Missile Battery",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": [
+"underwater"
+]
+},
+"turretaaflak": {
+"desc_roles": [
+"aa"
+],
+"description": "Anti-Air Flak Gun",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"turretaaheavy": {
+"desc_roles": [
+"aa"
+],
+"description": "Very Long-Range Anti-Air Missile Tower, Drains 4 m/s, 20 second stockpile",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": [
+"stockpile",
+"underwater"
+]
+},
+"turretaalaser": {
+"desc_roles": [
+"aa"
+],
+"description": "Hardened Anti-Air Laser",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"turretantiheavy": {
+"desc_roles": [],
+"description": "Tachyon Projector - Power by connecting to a 50 energy grid",
+"manual_weapon": null,
+"scripts": [
+"radar_fire_toggle"
+],
+"sustained_dps": 400.0,
+"tags": []
+},
+"turretemp": {
+"desc_roles": [],
+"description": "EMP Turret",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 189.7,
+"tags": [
+"emp"
+]
+},
+"turretgauss": {
+"desc_roles": [],
+"description": "Popup gauss turret, regenerates when closed (Anti-Sub)",
+"manual_weapon": null,
+"scripts": [
+"armor"
+],
+"sustained_dps": 95.3,
+"tags": [
+"underwater"
+]
+},
+"turretheavy": {
+"desc_roles": [],
+"description": "Medium Range Defence Fortress - Power by connecting to a 50 energy grid",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 1450.6,
+"tags": []
+},
+"turretheavylaser": {
+"desc_roles": [],
+"description": "High-Energy Laser Tower",
+"manual_weapon": null,
+"scripts": [
+"radar_fire_toggle"
+],
+"sustained_dps": 188.9,
+"tags": []
+},
+"turretimpulse": {
+"desc_roles": [],
+"description": "Gravity Turret",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.1,
+"tags": [
+"gravity"
+]
+},
+"turretlaser": {
+"desc_roles": [],
+"description": "Light Laser Tower",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 75.0,
+"tags": []
+},
+"turretmissile": {
+"desc_roles": [],
+"description": "Light Missile Tower",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 86.7,
+"tags": []
+},
+"turretriot": {
+"desc_roles": [],
+"description": "Anti-Swarm Turret",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 450.0,
+"tags": []
+},
+"turretsunlance": {
+"desc_roles": [],
+"description": "Anti-Tank Turret - Requires 25 Power",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 350.0,
+"tags": []
+},
+"turrettorp": {
+"desc_roles": [],
+"description": "Torpedo Launcher (Anti-Sub)",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": [
+"torpedo"
+]
+},
+"vehaa": {
+"desc_roles": [
+"aa"
+],
+"description": "Fast Anti-Air Rover",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"veharty": {
+"desc_roles": [
+"arty"
+],
+"description": "Artillery Minelayer Rover",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 3.6,
+"tags": []
+},
+"vehassault": {
+"desc_roles": [
+"assault"
+],
+"description": "Assault Rover",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 105.0,
+"tags": []
+},
+"vehcapture": {
+"desc_roles": [
+"capture"
+],
+"description": "Capture Rover",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 660.0,
+"tags": [
+"capture"
+]
+},
+"vehcon": {
+"desc_roles": [
+"builder"
+],
+"description": "Construction Rover",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 0.0,
+"tags": []
+},
+"vehheavyarty": {
+"desc_roles": [
+"arty"
+],
+"description": "Precision Artillery Rover",
+"manual_weapon": null,
+"scripts": [
+"radar_fire_toggle"
+],
+"sustained_dps": 80.0,
+"tags": []
+},
+"vehraid": {
+"desc_roles": [
+"raid"
+],
+"description": "Raider Rover",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 300.0,
+"tags": []
+},
+"vehriot": {
+"desc_roles": [
+"riot"
+],
+"description": "Riot Rover",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 141.6,
+"tags": []
+},
+"vehscout": {
+"desc_roles": [
+"raid",
+"scout"
+],
+"description": "Disruptor Raider/Scout Rover",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 32.0,
+"tags": [
+"slow"
+]
+},
+"vehsupport": {
+"desc_roles": [],
+"description": "Deployable Missile Rover (must stop to fire)",
+"manual_weapon": null,
+"scripts": [],
+"sustained_dps": 52.2,
+"tags": []
+},
+"wolverine_mine": {
+"desc_roles": [],
+"description": "Badger Mine",
+"manual_weapon": null,
+"scripts": [
+"cloak"
+],
+"sustained_dps": 8.5,
+"tags": [
+"stealth"
+]
+},
+"zenith": {
+"desc_roles": [],
+"description": "Meteor Controller",
+"manual_weapon": null,
+"scripts": [
+"reload_change"
+],
+"sustained_dps": 1333.3,
+"tags": [
+"underwater"
+]
+}
+}

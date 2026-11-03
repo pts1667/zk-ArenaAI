@@ -20,20 +20,19 @@ Flags: `oldmicro` (all of it off), `nopincer`, `nooffense`.
 from __future__ import annotations
 
 import math
-import os
 from typing import Any
 
 from . import units
 from .models import UnitInfo
 from .threat import combat_power, weapon_range
 
-FLAGS = os.environ.get("ZKBOT_FLAGS", "")
+from .params import FLAGS, P
 
-GROUP_RADIUS = 450.0
-PINCER_ANGLE = math.radians(70.0)
-PINCER_RATIO = 1.4
-OFFENSE_SHARE = 0.35
-OFFENSE_START = 120.0
+GROUP_RADIUS = P("raidmicro.group_radius", 450.0, 200.0, 900.0, "enemy raider cluster radius")
+PINCER_ANGLE = math.radians(P("raidmicro.pincer_angle_deg", 70.0, 30.0, 110.0, "pincer stage angle"))
+PINCER_RATIO = P("raidmicro.pincer_ratio", 1.4, 1.0, 3.0, "power needed for a pincer")
+OFFENSE_SHARE = P("raidmicro.offense_share", 0.35, 0.0, 1.0, "raiders kept on offence while defending")
+OFFENSE_START = P("raidmicro.offense_start", 120.0, 0.0, 600.0, "seconds before the offence share applies")
 
 
 def _unit(dx: float, dz: float) -> tuple[float, float]:

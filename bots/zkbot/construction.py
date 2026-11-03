@@ -2,14 +2,12 @@
 from __future__ import annotations
 
 import math
-import os
-from typing import Any
 
 from . import units
 from .client import QueryError
 from .models import Task, UnitInfo
 
-FLAGS = os.environ.get("ZKBOT_FLAGS", "")
+from .params import FLAGS
 
 
 class ConstructionMixin:

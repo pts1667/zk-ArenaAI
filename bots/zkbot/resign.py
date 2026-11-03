@@ -19,14 +19,14 @@ from __future__ import annotations
 import os
 from collections import deque
 
-FLAGS = os.environ.get("ZKBOT_FLAGS", "")
+from .params import FLAGS, P
 
-WINDOW = 3600          # frames averaged (2 min)
-LOW_SHARE = 0.30
-LOW_FOR = 2700         # frames below the threshold before resigning (90 s)
-MIN_TIME = 360.0       # seconds
-MIN_PEAK = 4.0         # metal/s
-ARMY_GUARD = 1.5       # no resign while our army power >= this x enemy's
+WINDOW = P("resign.window", 3600, 1800, 7200, "frames averaged (2 min)")
+LOW_SHARE = P("resign.low_share", 0.30, 0.1, 0.6, "resign below this share of peak extraction")
+LOW_FOR = P("resign.low_for", 2700, 900, 7200, "frames below the threshold before resigning (90 s)")
+MIN_TIME = P("resign.min_time", 360.0, 120.0, 1800.0, "seconds")
+MIN_PEAK = P("resign.min_peak", 4.0, 0.0, 20.0, "metal/s")
+ARMY_GUARD = P("resign.army_guard", 1.5, 1.0, 5.0, "no resign while our army power >= this x enemy's")
 # Test override: ZKBOT_RESIGN="share,low_frames,min_seconds,min_peak".
 if os.environ.get("ZKBOT_RESIGN"):
     _v = [float(x) for x in os.environ["ZKBOT_RESIGN"].split(",")]

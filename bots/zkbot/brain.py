@@ -11,6 +11,10 @@ from .client import Client, QueryError
 from .construction import ConstructionMixin
 from .defense import DefenseMixin
 from .economy import EconomyMixin
+from .build_resources import ResourceBuildMixin
+from .build_facilities import FacilityBuildMixin
+from .build_support import SupportBuildMixin
+from .build_defense import DefenseBuildMixin
 from .intel import IntelMixin
 from .mapdata import MapData
 from .military import MilitaryMixin
@@ -27,12 +31,19 @@ from .snipers import PhantomMixin
 from .blips import BlipMixin
 from .raidmicro import RaiderMicroMixin
 from .resign import ResignMixin
+from .behaviours import UnitBehaviourMixin
+from .armyplan import ArmyPlannerMixin
+from .engagements import EngagementLogMixin
 
 
 class Brain(
     ThreatMixin,
     IntelMixin,
     EconomyMixin,
+    ResourceBuildMixin,
+    FacilityBuildMixin,
+    SupportBuildMixin,
+    DefenseBuildMixin,
     ConstructionMixin,
     ProductionMixin,
     StrategyMixin,
@@ -46,6 +57,9 @@ class Brain(
     BlipMixin,
     RaiderMicroMixin,
     ResignMixin,
+    UnitBehaviourMixin,
+    ArmyPlannerMixin,
+    EngagementLogMixin,
     MilitaryMixin,
 ):
     def __init__(self, client: Client, team_id: int, log):
@@ -266,6 +280,7 @@ class Brain(
         # stride return so damage/destroyed events are never lost.
         if self.units:
             self.read_battle_events(obs)
+            self.note_event_topics(obs)
         # Synchronous ControllerAI blocks the engine for every observation.
         # Processing every Nth observation (while still acknowledging every
         # frame) roughly halves the Python work without meaningfully changing
@@ -300,6 +315,7 @@ class Brain(
         if self.resign_step():
             return
         self.read_enemies(obs)
+        self.resolve_enemy_deaths()
         if self.frame - self.last_spot_frame >= 15:
             self.last_spot_frame = self.frame
             self.update_spot_status()
@@ -329,6 +345,7 @@ class Brain(
             self.military_step()
             if hasattr(self, "gremlin_step"):
                 self.gremlin_step()
+        self.engagement_step()
 
         if self.frame - self.last_query_frame >= 60:
             self.last_query_frame = self.frame
@@ -374,6 +391,9 @@ class Brain(
             f"water={self.map.water_fraction:.2%} "
             f"factory={self.factory_name} enemy_guess={tuple(round(v) for v in self.enemy_base or (0,0))}"
         )
+        from . import params
+
+        self.log("config " + params.describe())
         self.plop_factory()
         # Energy first: construction is limited by energy in the opening.
         self.ensure_mex_tasks(limit=4)
@@ -428,6 +448,10 @@ class Brain(
         name = "factorycloak"
         if ground < -1.0 or water > 0.25:
             name = "factoryhover"
+        # Test override: start with another factory (generalisation tests).
+        forced = os.environ.get("ZKBOT_FACTORY")
+        if forced and units.id_of(forced) is not None:
+            name = forced
         did = units.id_of(name)
         if did is None:
             did = units.id_of("factorycloak") or 409

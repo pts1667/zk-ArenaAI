@@ -10,6 +10,8 @@ import json
 import pathlib
 from typing import Any
 
+from .params import FLAGS as _FLAGS
+
 _HERE = pathlib.Path(__file__).resolve().parent
 _DATA_PATH = _HERE / "data" / "units.json"
 
@@ -118,7 +120,18 @@ def role_of(d: dict[str, Any] | None) -> str:
         return "other"
     r = d.get("role") or "other"
     if r == "combat":
-        return ROLE_OVERRIDES.get(d.get("name") or "", r)
+        name = d.get("name") or ""
+        if name in ROLE_OVERRIDES:
+            return ROLE_OVERRIDES[name]
+        # Generic ground units (striders, new or rebalanced units) get a
+        # role from their stats instead of counting as nothing.  Air keeps
+        # "combat": the air code handles aircraft by name.
+        if d.get("isMobile") and not d.get("isAir") and "noinfer" not in _FLAGS:
+            from . import catalog
+
+            inferred = catalog.infer_role(name)
+            if inferred not in ("other", "static", "builder"):
+                return inferred
     return r
 
 
@@ -239,4 +252,13 @@ BLAST_RADIUS = {"energysingu": 720.0, "energyfusion": 380.0}
 
 def factory_unit(factory_name: str, role: str) -> int | None:
     table = FACTORY_UNITS.get(factory_name) or {}
-    return id_of(table.get(role, ""))
+    did = id_of(table.get(role, ""))
+    if did is None and "noinfer" not in _FLAGS:
+        # Roles missing from the hand table (e.g. shield AA/artillery, or a
+        # factory the table doesn't know) come from the stat catalog.
+        from . import catalog
+
+        name = catalog.pick(factory_name, role)
+        if name:
+            did = id_of(name)
+    return did

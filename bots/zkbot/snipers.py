@@ -11,21 +11,19 @@ param 1 = don't fire at radar; the unit default is to fire at radar).
 from __future__ import annotations
 
 import math
-import os
 
 from . import units
 from .models import UnitInfo
-from .threat import weapon_range
 
-FLAGS = os.environ.get("ZKBOT_FLAGS", "")
+from .params import FLAGS, P
 
 CMD_DONT_FIRE_AT_RADAR = 38372
 PHANTOM = "cloaksnipe"
 PHANTOM_DECLOAK = 155.0
 PHANTOM_RANGE = 700.0
 GREMLIN_DECLOAK = 125.0
-SPOTTER_STANDOFF = 330.0
-SPOTTER_EVADE = 230.0
+SPOTTER_STANDOFF = P("phantom.spotter_standoff", 330.0, 150.0, 600.0, "Gremlin spotter distance")
+SPOTTER_EVADE = P("phantom.spotter_evade", 230.0, 100.0, 500.0, "Gremlin spotter evade distance")
 
 
 class PhantomMixin:

@@ -44,6 +44,16 @@ Game speed to ask the engine for once the game starts, or 'max': as fast as the 
 down to what the CPU (or a Synchronous-Mode client) can keep up with. Default max with -Headless, else 1 (normal).
 0 leaves it alone.
 
+.PARAMETER EngineAffinity
+CPU mask the engine process is set to once the game starts, e.g. 0xFFFF. Setting it resets the affinity of every
+engine thread: the engine pins its main thread to one fixed core, so parallel headless games otherwise all share
+that core. 0 (default) leaves it alone.
+
+.PARAMETER CircuitOptions
+AI options for every CircuitAI member, as key=value pairs (comma separated) or a hashtable, e.g.
+-CircuitOptions 'disabledunits=factoryveh+factorytank' (see the AI's AIOptions.lua). Disabling all factories but
+one fixes the factory CircuitAI starts with.
+
 .PARAMETER TimeoutMinutes
 Wall-clock limit per match, after which it is ended and counted as a timeout. Default 60 with -Headless, else 0 (none).
 #>
@@ -59,9 +69,11 @@ param(
     [string[]]$Client,
     [int]$ControllerPort = 3017,
     $ControllerOptions,
+    $CircuitOptions,
     $ModOptions,
     [ValidateSet('Fixed', 'Random', 'Choose')][string]$StartPos = 'Choose',
     [string]$Speed,
+    [long]$EngineAffinity = 0,
     [double]$TimeoutMinutes = -1,
     [string]$Name,
     [string]$OutDir,
@@ -361,6 +373,10 @@ function New-StartScript($sides, [string]$mapName, $order) {
                 $l.Add('    [Options]'); $l.Add('    {')
                 foreach ($o in $script:ControllerOptionTable.GetEnumerator()) { $l.Add("      $($o.Key)=$($o.Value);") }
                 $l.Add('    }')
+            } elseif ($m.Kind -eq 'CircuitAI' -and $script:CircuitOptionTable.Count) {
+                $l.Add('    [Options]'); $l.Add('    {')
+                foreach ($o in $script:CircuitOptionTable.GetEnumerator()) { $l.Add("      $($o.Key)=$($o.Value);") }
+                $l.Add('    }')
             }
             $l.Add('  }')
             $ai++
@@ -520,6 +536,12 @@ function Invoke-Match([int]$index, [string]$mapName, [bool]$swapped) {
                         if ($b.Length -gt 21) { $result.Demo = $utf8.GetString($b, 21, $b.Length - 21).TrimEnd([char]0) }
                         $ahLog.WriteLine("$(Get-Date -Format HH:mm:ss) game started; demo: $($result.Demo)")
                         Note "  game started$(if ($result.Demo) { "; demo $($result.Demo)" })" DarkGray
+                        if ($EngineAffinity) {
+                            try {
+                                $engine.ProcessorAffinity = [IntPtr]$EngineAffinity
+                                $ahLog.WriteLine("$(Get-Date -Format HH:mm:ss) engine affinity set to 0x$('{0:x}' -f $EngineAffinity)")
+                            } catch { $ahLog.WriteLine("$(Get-Date -Format HH:mm:ss) engine affinity failed: $_") }
+                        }
                         if ($script:SpeedValue -gt 0 -and $script:SpeedValue -ne 1) {
                             & $send "/setmaxspeed $($script:SpeedValue)"
                             & $send "/setminspeed $($script:SpeedValue)"
@@ -644,6 +666,7 @@ if ($Client.Count -gt 1 -and $Client.Count -ne $controllerCount) { throw "Give o
 if ($Client.Count -and -not $controllerCount) { throw '-Client is for ControllerAI teams, and there are none.' }
 
 $script:ControllerOptionTable = ConvertTo-OptionTable $ControllerOptions '-ControllerOptions'
+$script:CircuitOptionTable = ConvertTo-OptionTable $CircuitOptions '-CircuitOptions'
 if (-not $script:ControllerOptionTable.Contains('ip')) { $script:ControllerOptionTable.Insert(0, 'ip', '127.0.0.1') }
 if ($script:ControllerOptionTable.Contains('port')) { $ControllerPort = [int]$script:ControllerOptionTable['port'] } else { $script:ControllerOptionTable['port'] = [string]$ControllerPort }
 $masterUrl = "http://$($script:ControllerOptionTable['ip']):$ControllerPort"

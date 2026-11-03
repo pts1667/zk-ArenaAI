@@ -18,7 +18,6 @@ per-cell simulation is necessary for the few dozen sectors involved.
 from __future__ import annotations
 
 import math
-import os
 from typing import Any
 
 from . import units
@@ -47,7 +46,7 @@ def _is_real_aircraft(u: UnitInfo) -> bool:
     return True
 
 
-FLAGS = os.environ.get("ZKBOT_FLAGS", "")
+from .params import FLAGS
 
 class DefenseMixin:
     # ------------------------------------------------------------ air intel
@@ -454,7 +453,7 @@ class DefenseMixin:
                 # complaint; it loses to the raiders it is meant to stop.)
                 n = int(getattr(self, "_default_turret_n", 0))
                 self._default_turret_n = n + 1
-                if "oldturret" in os.environ.get("ZKBOT_FLAGS", ""):
+                if "oldturret" in FLAGS:
                     req = 500.0
                 else:
                     req = 500.0 if n % 3 == 2 else 400.0

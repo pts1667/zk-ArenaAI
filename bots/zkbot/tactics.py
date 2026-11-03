@@ -9,15 +9,13 @@ from __future__ import annotations
 
 import collections
 import math
-import os
-from typing import Any
 
 from . import units
 from .defense import _is_real_aircraft
 from .models import UnitInfo
 from .threat import ground_dps, weapon_range
 
-FLAGS = os.environ.get("ZKBOT_FLAGS", "")
+from .params import FLAGS
 
 
 class TacticsMixin:

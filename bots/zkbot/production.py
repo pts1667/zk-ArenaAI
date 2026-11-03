@@ -2,12 +2,11 @@
 from __future__ import annotations
 
 import math
-import os
-from typing import Any
 
 from . import units
 from .client import QueryError
-from .models import Task, UnitInfo
+from .models import UnitInfo
+from .params import FLAGS
 
 
 class ProductionMixin:
@@ -68,7 +67,7 @@ class ProductionMixin:
         # Emergency combat units must not starve expansion completely: an
         # early raider poke used to stop constructor production for minutes
         # (3 builders and 5 extractors from 1:00 to 5:30).
-        flags = os.environ.get("ZKBOT_FLAGS", "")
+        flags = FLAGS
         # Lost constructors come back first: after a raid killed both cons
         # the bot ran on the commander alone with 1-3 extractors for five
         # minutes while it built combat units.
@@ -201,7 +200,7 @@ class ProductionMixin:
         # walking to extractors, do not queue more combat units beyond a
         # small screen; an 85-metal extractor pays back in ~45 s.
         hold_army = (
-            'nohold' not in os.environ.get('ZKBOT_FLAGS', '')
+            'nohold' not in FLAGS
             and self.frame_time() < 300
             and self.metal_current() < 40.0
             and len(self.army) >= 4
