@@ -17,7 +17,9 @@ beats us (outranging, turrets, line of sight, terrain, reclaim, explosions)
 is what a simplified sim leaves out, policy RL from scratch needs far more
 games than the engine can play (about 4,500/day at max speed), and the data
 supports models of 0.1-10M parameters, not 100M.  See HANDOFF.md
-(h124 onwards) for the reasoning and results.
+(h124 onwards) for the reasoning and results.  That reasoning was revisited on
+2026-11-04: see `docs/learned-policy/00-overview.md` for the plan to try it anyway,
+with a sim that includes those mechanics and gates that test it against the engine.
 
 ## Environment (WSL, PyTorch with torch.compile)
 

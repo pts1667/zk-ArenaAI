@@ -16,7 +16,7 @@ Current status:
 - **Direction (2026-11-04):** rule changes stopped moving the win rate (2/18 vs 2/18
   in the last A/B, section 6e), so the user asked for a Pluto-style self-play policy
   trained in a simplified simulator.  The implementation plan is on branch
-  `learned-policy-plan`; the flags below remain the rules bot's baseline, none adopted.
+  `learned-policy-plan`, starting at `docs/learned-policy/00-overview.md`; the flags below remain the rules bot's baseline, none adopted.
 - **CircuitAI:Normal**: consistently beaten (n28, n29).
 - **Caveat (2026-11-03, h120): all win rates below were measured at 10–16x
   game speed, where CircuitAI is much weaker.** At 1x (human speed) the
