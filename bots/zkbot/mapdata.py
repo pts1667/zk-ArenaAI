@@ -8,6 +8,8 @@ from typing import Any
 
 import numpy as np
 
+from .params import flag
+
 
 @dataclass
 class MetalSpot:
@@ -86,6 +88,13 @@ class MapData:
             self.water_fraction = float((self.heightmap < -1.0).mean())
         except Exception:
             self.heightmap = None
+
+    def favours_hover(self, ground: float) -> bool:
+        """Is this a water map, or a base on the seabed?  Lava and void read as
+        water in the heights, but hovers burn on one and can't enter the other."""
+        if flag("safefac") and self.water_is_harmful:
+            return False
+        return ground < -1.0 or self.water_fraction > 0.25
 
     def ground_height(self, x: float, z: float) -> float:
         if self.heightmap is None or self.width <= 0 or self.height <= 0:

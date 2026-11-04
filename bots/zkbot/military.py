@@ -9,7 +9,13 @@ from .models import UnitInfo
 from .threat import combat_power, weapon_range
 
 
-from .params import FLAGS
+from .params import FLAGS, P
+
+ATTACK_RATIO = P("army.attack_ratio", 1.4, 1.0, 3.0, "army power vs enemy estimate needed to start an attack")
+HOLD_RATIO = P("army.hold_ratio", 1.0, 0.5, 2.0, "ratio below which an ongoing attack falls back")
+ATTACK_MIN_UNITS = P("army.min_units", 12, 6, 30, "combat units needed before attacking (grows with time)")
+TARGET_RATIO = P("army.target_ratio", 1.3, 0.8, 3.0, "army power vs local enemy power to accept an attack target")
+OUTRANGED_HOLD = P("army.outranged_hold", 1.5, 1.0, 3.0, "local power ratio at which outranged units stay")
 
 
 class _BranchCounter(collections.Counter):
@@ -64,6 +70,7 @@ class MilitaryMixin:
             and threatened.threat > 0
             and threatened.distance_base < 1800.0
             and threatened.owner == "ours"
+            and not self.minor_threat((threatened.x, threatened.z))
         ):
             return "defend"
         # Defend only a real attack, or enemy units close enough to the base
@@ -71,7 +78,7 @@ class MilitaryMixin:
         # defend mode forever while CircuitAI freely rebuilt its economy.
         if self.threat_pos and self.frame - self.threat_frame < 900:
             near_base = self.dist(self.threat_pos, self.base_pos) < 1800.0
-            if near_base or enemy_count >= max(4, int(combat * 0.60)):
+            if (near_base or enemy_count >= max(4, int(combat * 0.60))) and not self.minor_threat(self.threat_pos):
                 return "defend"
         # Strength, not head count: compare the total combat power of our
         # army with every enemy combat unit seen in the last minute.
@@ -89,11 +96,11 @@ class MilitaryMixin:
         theirs = max(seen, peak)
         self._power_cache = (self.frame, ours, theirs)
         was_attacking = getattr(self, "_last_mode", "gather") == "attack"
-        min_units = max(12, 8 + int(self.frame_time() / 120))
+        min_units = max(ATTACK_MIN_UNITS, ATTACK_MIN_UNITS - 4 + int(self.frame_time() / 120))
         if was_attacking:
-            ok = combat >= min_units * 0.6 and ours >= theirs * 1.0
+            ok = combat >= min_units * 0.6 and ours >= theirs * HOLD_RATIO
         else:
-            ok = combat >= min_units and ours >= max(1.0, theirs) * 1.4
+            ok = combat >= min_units and ours >= max(1.0, theirs) * ATTACK_RATIO
         mode = "attack" if ok or combat >= 45 else "gather"
         self._last_mode = mode
         return mode
@@ -182,6 +189,7 @@ class MilitaryMixin:
                 continue
             br.uid = uid
             for behaviour in chain:
+                self.order_source = behaviour.__name__
                 branch = behaviour(u, plan)
                 if branch is not None:
                     br[branch] += 1
@@ -225,6 +233,8 @@ class MilitaryMixin:
             if uid in self.units
             and uid not in self.retreating
             and uid not in self.home_guard
+            and uid not in self.spearhead
+            and uid not in self.mex_patrol
             and units.role_of(self.units[uid].data) != "bomb"
             and not self.units[uid].is_air
         ]
@@ -308,7 +318,7 @@ class MilitaryMixin:
         return best or self.base_pos
 
     def choose_attack_target(
-        self, center: tuple[float, float], power: float
+        self, center: tuple[float, float], power: float, members: list[int] | None = None
     ) -> tuple[float, float] | None:
         """Most valuable enemy position the group can actually beat."""
         cands: list[tuple[float, tuple[float, float]]] = []
@@ -355,7 +365,15 @@ class MilitaryMixin:
             if theirs is None:
                 _o, theirs = self.local_balance(pos, 900.0)
                 cache[key] = theirs
-            if power < theirs * 1.3:
+            if "fightnet" in FLAGS and members and theirs > 0:
+                from .fightnet import TARGET_EXCH
+                ev = self.fight_eval_moved(pos, members)
+                if ev is not None:
+                    if ev["exchange"] < TARGET_EXCH:
+                        continue
+                elif power < theirs * TARGET_RATIO:
+                    continue
+            elif power < theirs * TARGET_RATIO:
                 continue
             score = value - self.dist(center, pos) * 0.12 - theirs * 0.5
             # Stick to the current objective: re-scoring every step flipped
@@ -407,7 +425,7 @@ class MilitaryMixin:
         if worst is None:
             return None
         ours, theirs = self.local_balance(u.pos, 650.0)
-        if ours >= 1.5 * theirs:
+        if ours >= OUTRANGED_HOLD * theirs:
             return None
         er = weapon_range(worst)
         hx, hz = self.rally_point() if self.dist(u.pos, self.base_pos) > 1200.0 else self.base_pos
@@ -702,8 +720,9 @@ class MilitaryMixin:
 
     def order_attack(self, uid: int, target_id: int) -> None:
         old = self.unit_order.get(uid)
-        if old and old[0] == "attack" and old[3] == target_id and self.frame - old[4] < 120:
+        if old and old[0] == "attack" and old[3] == target_id and self.frame - old[4] < self.attack_refresh_frames():
             return
+        self.count_order("attack", old, target=target_id)
         self.queue({"type": "attack", "unitId": int(uid), "targetId": int(target_id)})
         self.unit_order[uid] = ("attack", 0.0, 0.0, int(target_id), self.frame)
 
@@ -730,10 +749,14 @@ class MilitaryMixin:
 
     def _order(self, uid: int, typ: str, pos: tuple[float, float]) -> None:
         old = self.unit_order.get(uid)
-        if old and old[0] == typ:
+        if "smoothorders" in FLAGS:
+            if self.order_settled(uid, typ, pos, old):
+                return
+        elif old and old[0] == typ:
             ox, oz = old[1], old[2]
             if math.hypot(ox - pos[0], oz - pos[1]) < 150 and self.frame - old[4] < 90:
                 return
+        self.count_order(typ, old, pos)
         self.queue({"type": typ, "unitId": int(uid), "pos": [float(pos[0]), 0.0, float(pos[1])]})
         self.unit_order[uid] = (typ, float(pos[0]), float(pos[1]), None, self.frame)
 

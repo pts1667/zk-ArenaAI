@@ -46,7 +46,11 @@ def _is_real_aircraft(u: UnitInfo) -> bool:
     return True
 
 
-from .params import FLAGS
+from .params import FLAGS, P
+
+DEF_BASE_SHARE = P("def.base_share", 0.07, 0.0, 0.4, "baseline share of spending on static defence")
+DEF_MAX_SHARE = P("def.max_share", 0.52, 0.2, 0.8, "cap on the static defence share")
+
 
 class DefenseMixin:
     # ------------------------------------------------------------ air intel
@@ -204,6 +208,12 @@ class DefenseMixin:
                         an = "?own"
                     else:
                         an = "?unseen"
+                    if hasattr(self, "note_hit"):
+                        try:
+                            wd = int(event["weaponDefId"]) if event.get("weaponDefId") is not None else None
+                        except (TypeError, ValueError):
+                            wd = None
+                        an = self.note_hit(uid, an, damage, wd)
                     led[an] = led.get(an, 0.0) + damage
                     if a is not None and a.is_air and _is_real_aircraft(a):
                         log = self.__dict__.setdefault("air_damage_log", [])
@@ -272,6 +282,11 @@ class DefenseMixin:
                     self.builder_death_count = getattr(self, "builder_death_count", 0) + 1
                 if hasattr(self, "note_own_death"):
                     self.note_own_death(u, event)
+                if hasattr(self, "log_own_death"):
+                    try:
+                        self.log_own_death(u, event)
+                    except Exception as exc:  # logging must never break the game
+                        self.log(f"death log error: {exc!r}")
                 sid = self._battle_sector_id(u.pos)
                 if u.name == "staticmex" or units.is_defense(u.data):
                     self._note_attack_pressure(sid, 2.0)
@@ -390,19 +405,19 @@ class DefenseMixin:
             if s.owner == "ours":
                 strain = max(strain, self.sector_strain(s))
         arty = self.enemy_artillery_estimate()
-        share = 0.07
+        share = DEF_BASE_SHARE
         share += min(0.18, attack * 0.018)
         share += min(0.20, strain * 0.28)
         share += min(0.16, arty * 0.035)
         if self.threat_pos is not None and self.frame - self.threat_frame < 600:
             if self.dist(self.threat_pos, self.base_pos) < 1800.0:
                 share += 0.05
-        return max(0.04, min(0.52, share))
+        return max(0.04, min(DEF_MAX_SHARE, share))
 
     def defense_pending_cost(self) -> float:
         total = 0.0
         for t in self.tasks.values():
-            if t.kind not in ("defense", "mexdef", "frontdef", "aa"):
+            if t.kind not in ("defense", "mexdef", "frontdef", "aa", "clusterdef"):
                 continue
             # A task whose builder died two minutes ago must not block a
             # replacement turret near the base.  It still gets cleaned up by

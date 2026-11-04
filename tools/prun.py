@@ -95,6 +95,12 @@ def run_game(job: dict, slot: int, args, log) -> dict:
     them = f"CircuitAI:{args.diff}"
     teams = [them, us] if job["swapped"] else [us, them]
     py = os.environ.get("ZKBOT_PY", "python")
+    client = f"{py} {job['code']}\\main.py {{team}}"
+    if args.observe:
+        # CircuitAI vs CircuitAI, each with an allied passive observer that
+        # logs its full state (bots/observer): ML stage 3 data.
+        teams = [f"CircuitAI:{args.diff}+ControllerAI", f"CircuitAI:{args.diff}+ControllerAI"]
+        client = f"{py} {ROOT / 'bots' / 'observer' / 'main.py'} {{team}}"
     cmd = [
         "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ROOT / "zk-startup.ps1"),
         *teams,
@@ -106,17 +112,17 @@ def run_game(job: dict, slot: int, args, log) -> dict:
         "-WriteDir", str(slot_dir(slot)),
         "-ControllerPort", str(3100 + 4 * slot),
         "-HostPort", str(8500 + 4 * slot),
-        "-Client", f"{py} {job['code']}\\main.py {{team}}",
+        "-Client", client,
     ]
     # The engine pins its main thread to one fixed logical core (0x4000 on
     # this machine) whatever SetCoreAffinity says, so parallel games all
     # shared that core.  zk-startup resets the engine to all cores.
     cmd += ["-EngineAffinity", os.environ.get("ZK_ENGINE_AFFINITY", str((1 << (os.cpu_count() or 16)) - 1))]
     if args.speed:
-        # CircuitAI plays better at lower game speed (h116/h117): cap the
+        # CircuitAI plays worse above ~3x (h120/h121): cap the
         # speed so arms and batches see the same opponent strength.
         cmd += ["-Speed", str(args.speed)]
-    if job.get("enemy_factory"):
+    if job.get("enemy_factory") and not args.observe:
         # CircuitAI can only start with the one factory left enabled.
         off = "+".join(f"factory{f}" for f in ALL_FACTORIES if f != job["enemy_factory"])
         cmd += ["-CircuitOptions", f"disabledunits={off}"]
@@ -179,10 +185,12 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--env", action="append", default=[], help="K=V passed to every game")
     ap.add_argument("--first-swapped", action="store_true")
     ap.add_argument("--min-slot", type=int, default=0)
-    ap.add_argument("--speed", type=float, default=0, help="cap game speed (e.g. 1 = human speed); 0 = max")
+    ap.add_argument("--speed", type=float, default=3, help="cap game speed (default 3: CircuitAI plays as at 1x, h121); 0 = max (CircuitAI weaker)")
     ap.add_argument("--enemy-factories", default="",
                     help="comma list (e.g. cloak,shield,veh,tank,hover,amph,spider,jump) cycled by game "
                          "index: CircuitAI may only start with that factory, so paired games share the matchup")
+    ap.add_argument("--observe", action="store_true",
+                    help="CircuitAI vs CircuitAI with a passive allied observer per side (ML stage 3 data)")
     ap.add_argument("--resume", action="store_true",
                     help="keep the output dirs and play only the games missing from results.csv")
     ap.add_argument("--arm-env", action="append", default=[], help="NAME:K=V extra env for arm NAME")

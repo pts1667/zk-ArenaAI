@@ -6,7 +6,9 @@ import math
 from . import units
 from .client import QueryError
 from .models import UnitInfo
-from .params import FLAGS
+from .params import FLAGS, P
+
+CONS_PER_INCOME = P("eco.cons_per_income", 0.6, 0.2, 1.2, "flag morebp: mobile constructors per metal/s of income")
 
 
 class ProductionMixin:
@@ -27,6 +29,20 @@ class ProductionMixin:
         lo = 2 if t < 60 else 3
         if len(self.army) < 3 and t > 90:
             lo = 2
+        if "fewercons" in FLAGS:
+            # The opening metal goes further as raiders and extractors than as a
+            # third and fourth constructor.  Later, income calls for more, but it
+            # can't be the only reason: a raided economy on 3 extractors stayed there
+            # with too few constructors to claim anything.
+            want_cons = math.ceil(max(0.0, minc - 12.0) / bp_con) + self.constructors_for_waiting_jobs()
+            lo = 1 if t < 120 else (2 if t < 240 else 3)
+        if "morebp" in FLAGS:
+            # CircuitAI's config says 1.25 BP per metal/s too, but the
+            # observer games (o2) show it fielding 4 / 8 / 11 / 13-15 mobile
+            # constructors at 4 / 8 / 10 / 16+ min, about twice ours; we
+            # follow what it does, ~0.6 constructors per metal/s.
+            want_cons = math.ceil(CONS_PER_INCOME * minc)
+            return 1 + max(lo, min(15, want_cons))
         cons = max(lo, min(9, want_cons))
         return 1 + cons
 
@@ -58,7 +74,9 @@ class ProductionMixin:
         quota = self.phantom_quota()
         if quota > 0:
             have = sum(1 for u in self.units.values() if u.name == "cloaksnipe")
-            if have < quota and self.production_counter % 2 == 0:
+            # The counter doesn't advance on the counter_role path, so an odd value could
+            # block Phantoms for good.  `have` includes one in production, so this can't overqueue.
+            if have < quota and (self.production_counter % 2 == 0 or self.armored_heavies()):
                 did = units.id_of("cloaksnipe")
                 if did is not None:
                     self.production_counter += 1
@@ -96,9 +114,12 @@ class ProductionMixin:
                     1 for uid in self.army
                     if units.role_of(self.units[uid].data) == "riot"
                 )
-                many = ec.get("raider", 0) >= 4 and our_riot * 3 < ec.get("raider", 0)
+                raiders = self.enemy_real_raiders() if "raidfirst" in flags else ec.get("raider", 0)
+                many = raiders >= 4 and our_riot * 3 < raiders and self.raid_ramp() > 0.0
                 role = "riot" if many else "raid"
             self.production_counter += 1
+        elif self.patrol_short():
+            role = "raid"
         elif (
             builders < self.desired_builder_count()
             and (len(self.army) >= 2 or builders < 2)
@@ -113,6 +134,8 @@ class ProductionMixin:
             self.production_counter += 1
             hunt_roles = ["assault", "riot", "bomb", "skirm", "assault", "snipe", "riot", "skirm"]
             role = hunt_roles[n % len(hunt_roles)]
+        elif self.raid_ramp() <= 0.0:
+            role = "raid"
         elif (counter := self.counter_role()) is not None:
             role = counter
             if self.frame - self.last_composition_log_frame >= 300:
@@ -125,6 +148,10 @@ class ProductionMixin:
                     f"assault={ec['assault']} arty={ec['arty']} "
                     f"static={ec['static']}"
                 )
+        elif self.raid_ramp() < 1.0:
+            # Every quota is met while riots and assaults phase in: more raiders,
+            # not the fixed cycle below, which has riots in it.
+            role = "raid"
         else:
             enemy_air = self.aircraft_seen()
             enemy_raiders = sum(
@@ -176,7 +203,10 @@ class ProductionMixin:
                 elif m == 5:
                     role = "skirm"
                 elif m == 6:
-                    role = "riot"
+                    # Flag lessriot: CircuitAI puts 4-6% of its metal into
+                    # riots after minute 7 (we: 15-22%) and 7-11% into
+                    # artillery (we: 2%).
+                    role = "assault" if "lessriot" in FLAGS else "riot"
                 elif m == 7:
                     role = "skirm"
                 elif m == 8:
@@ -184,7 +214,7 @@ class ProductionMixin:
                 elif m == 9:
                     role = "heavyraid"
                 elif m == 10:
-                    role = "riot"
+                    role = "arty" if "lessriot" in FLAGS else "riot"
                 else:
                     role = "skirm"
         did = units.factory_unit(fname, role)
@@ -193,6 +223,7 @@ class ProductionMixin:
         return did
 
     def production_step(self) -> None:
+        self.update_factory_priority()
         factories = self.factory_list()
         if not factories:
             return
@@ -207,6 +238,7 @@ class ProductionMixin:
             and not (self.threat_pos is not None and self.frame - self.threat_frame < 300)
             and any(t.kind == "mex" and t.assignees for t in self.tasks.values())
             and self.builder_count() >= self.desired_builder_count()
+            and not self.patrol_short()
         )
         for f in factories:
             q = self.factory_queue.get(f.uid, 0)
@@ -342,6 +374,7 @@ class ProductionMixin:
                                     "targetId": int(building.uid),
                                 }
                             )
+                            self.note_guard(uid, building.uid, key)
                             self.builder_job_frame[uid] = self.frame
                             self.builder_idle[uid] = False
                             self.log(f"assist build {u.name}#{uid} -> {key}")

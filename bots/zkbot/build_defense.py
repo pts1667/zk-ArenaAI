@@ -7,10 +7,113 @@ from __future__ import annotations
 import math
 
 from . import units
-from .params import FLAGS
+from .params import FLAGS, P
+from .raidprobe import is_ground_turret
+
+MEXLLT_AFTER = P("mexllt.after", 150.0, 0.0, 900.0, "seconds into the game a new extractor gets a turret first")
+MEXLLT_NEAR = P("mexllt.near", 400.0, 150.0, 800.0, "a turret this close already covers the spot")
+MEXLLT_OFFSET = P("mexllt.offset", 110.0, 70.0, 300.0, "elmos from the spot to the turret")
+MEXLLT_PENDING = P("mexllt.pending", 2, 1, 6, "turrets of this kind waiting at once")
+MEXLLT_GIVE_UP = P("mexllt.give_up", 2700, 300, 9000, "frames to wait for the turret before building the extractor anyway")
+MEXLLT_SKIP = P("mexllt.skip", 5400, 300, 18000, "frames a spot then goes without asking again")
+MEXLLT_MIN_MEX = P("mexllt.min_mex", 4, 0, 12, "with fewer extractors than this, income comes first")
+
+MEX_DEF_CAP = P("def.mex_cap", 8, 2, 30, "max static defences while adding extractor turrets")
+MEX_DEF_SCAN = P("def.mex_scan", 6, 2, 30, "forward-most extractors considered for a turret")
+CLUSTER_DEF_SEC = P("def.cluster_sec", 23.0, 5.0, 60.0,
+                    "flag circdef: turret value per owned cluster, in seconds of income")
+
+# CircuitAI's land "porcupine" chain (data/config/build_chain.json): the
+# turrets a defended metal cluster gets, in order, while its defence value is
+# below the income-scaled cap.  Its caretakers, shield, radar and artillery
+# entries are left out; AA entries are skipped until aircraft are seen.
+CLUSTER_CHAIN = ("turretlaser", "turretlaser", "turretmissile", "turretheavylaser", "turretaalaser",
+                 "turretmissile", "turretriot", "turretgauss", "turretmissile", "turretemp",
+                 "turretaalaser", "turretriot", "turretheavylaser", "turretaalaser", "turretlaser",
+                 "turretemp", "turretgauss", "turretmissile", "turretheavylaser", "turretaafar",
+                 "turretaaheavy")
 
 
 class DefenseBuildMixin:
+    def ensure_cluster_defense_tasks(self) -> None:
+        """Flag circdef: CircuitAI's per-cluster porcupine (MilitaryManager::
+        MakeDefence).  Every owned metal cluster has a defence point whose
+        turret value may grow to CLUSTER_DEF_SEC seconds of income
+        (16 s x CircuitAI's map amount factor ~1.45); front clusters (enemy
+        or recent attacks nearby, or a rich spot) walk the whole chain,
+        quiet ones get one turret.  Unlike the share budget, the turret
+        value grows with income and with the number of clusters held, which
+        is how CircuitAI ends up putting 15-27% of its metal into turrets."""
+        if "circdef" not in FLAGS or self.frame_time() < 60:
+            return
+        if self.frame - getattr(self, "_cdef_frame", -10**9) < 60:
+            return
+        self._cdef_frame = self.frame
+        pending = [t for t in self.tasks.values() if t.kind == "clusterdef"]
+        if len(pending) >= 3:
+            return
+        sectors = [s for s in getattr(self, "sectors", []) if s.spots and s.owner == "ours"]
+        if not sectors:
+            return
+        income = min(self.metal_income(), self.energy_income())
+        incomes = [sp.income for sp in self.map.spots] or [1.0]
+        avg_i, max_i = sum(incomes) / len(incomes), max(incomes)
+        air = self.aircraft_seen()
+        defs = [u for u in self.units.values() if units.is_defense(u.data) and not u.is_mobile]
+        start = getattr(self, "_cdef_next", 0) % len(sectors)
+        for k in range(len(sectors)):
+            s = sectors[(start + k) % len(sectors)]
+            if any(t.anchor and self.dist(t.anchor, (s.x, s.z)) < 450 for t in pending):
+                continue
+            ours = sum(1 for sp in s.spots if getattr(sp, "status", "") == "ours") or 1
+            max_cost = CLUSTER_DEF_SEC * income * max(1.0, ours / 3.0)
+            rich = max_i > avg_i + 1.0 and max(sp.income for sp in s.spots) > (avg_i + max_i) * 0.5
+            # CircuitAI: two neighbouring clusters under threat (or a rich
+            # spot) make a cluster front line.
+            near_threat = sum(
+                1 for o in getattr(self, "sectors", [])
+                if o is not s and o.owner != "ours" and (o.owner == "enemy" or o.threat > 0)
+                and self.dist((o.x, o.z), (s.x, s.z)) < 1800.0
+            )
+            porc = rich or near_threat >= 2 or self.sector_attack_pressure_value(s) > 0.3
+            point = self.best_defense_pos(s) or (s.x, s.z)
+            if self.enemy_base:
+                dx, dz = self.enemy_base[0] - point[0], self.enemy_base[1] - point[1]
+                ln = math.hypot(dx, dz) or 1.0
+                point = (point[0] + dx / ln * 120.0, point[1] + dz / ln * 120.0)
+            have = sum(units.cost(u.data) for u in defs if self.dist(u.pos, point) < 420.0)
+            total, n = 0.0, 0
+            for name in CLUSTER_CHAIN:
+                if name.startswith("turretaa") and not air:
+                    continue
+                if not porc and n >= 1:
+                    break
+                d = units.by_name(name)
+                if d is None:
+                    continue
+                n += 1
+                total += units.cost(d)
+                if total <= have + 1.0:
+                    continue
+                if total >= max_cost:
+                    break
+                urgent = self.enemy_near(point, 700.0) is not None
+                self.log(f"clusterdef {name} sector #{s.sid} porc={porc} have={have:.0f} cap={max_cost:.0f}")
+                self.add_task(
+                    f"clusterdef:{self.frame}:{s.sid}",
+                    "clusterdef",
+                    int(d["id"]),
+                    point[0],
+                    point[1],
+                    # CircuitAI queues defence at HIGH priority; at 1300 the
+                    # first turrets went stale behind extractor jobs.
+                    1600.0 if urgent else 1450.0,
+                    anchor=point,
+                )
+                self._cdef_next = start + k + 1
+                return
+        self._cdef_next = start + 1
+
     def ensure_mex_defense_tasks(self) -> None:
         """Put a range-appropriate turret on the forward extractors.
 
@@ -20,7 +123,7 @@ class DefenseBuildMixin:
         of recently attacking units, and the budget gate keeps static defence
         from crowding out mobile production.
         """
-        if self.frame_time() < 150 or self.metal_income() < 8:
+        if self.frame_time() < 150 or self.metal_income() < 8 or "circdef" in FLAGS:
             return
         mexes = [
             u
@@ -41,10 +144,10 @@ class DefenseBuildMixin:
         ]
         pending = [t for t in self.tasks.values() if t.kind == "mexdef"]
         desired = self.desired_defense_share()
-        cap = max(2, min(8, int(2 + desired * 18)))
+        cap = max(2, min(MEX_DEF_CAP, int(2 + desired * 18)))
         if len(existing) + len(pending) >= cap:
             return
-        for m in mexes[:6]:
+        for m in mexes[:MEX_DEF_SCAN]:
             if self.frame_time() < 360 and self.dist(m.pos, self.base_pos) > 1500.0:
                 continue
             if any(self.dist(m.pos, u.pos) < 300 for u in existing):
@@ -94,11 +197,70 @@ class DefenseBuildMixin:
                 anchor=m.pos,
             )
 
+    def hold_unstarted_mexes(self) -> None:
+        """Extractor jobs queued before 2:30 with nobody on them wait for a turret too."""
+        if "mexllt" not in FLAGS:
+            return
+        for key, t in list(self.tasks.items()):
+            # Only what was queued before the rule began: later jobs have been through
+            # it, and redoing them had turrets and extractors take turns being dropped.
+            if t.kind != "mex" or t.assignees or t.spot_index is None or t.created >= MEXLLT_AFTER:
+                continue
+            if any(u.is_being_built and u.def_id == t.def_id and self.dist(u.pos, (t.x, t.z)) < 130.0
+                   for u in self.units.values()):
+                continue
+            if self.mex_waits_for_turret(self.map.spots[t.spot_index], t.priority):
+                self.drop_task(key, "turret first")
+
+    def mex_waits_for_turret(self, s, priority: float) -> bool:
+        """From 2:30 an unclaimed spot gets a Lotus (LLT) next to it first (flag `mexllt`),
+        unless a turret covers it already.  A spot where that fails gets its extractor
+        anyway after a while."""
+        if "mexllt" not in FLAGS or self.frame_time() < MEXLLT_AFTER:
+            return False
+        if self.mex_count() < MEXLLT_MIN_MEX:
+            return False
+        spot = (s.x, s.z)
+        skip = self.__dict__.setdefault("mexllt_skip", {})
+        if skip.get(s.index, -1) > self.frame:
+            return False
+        near = [u for u in self.units.values() if is_ground_turret(u) and self.dist(u.pos, spot) < MEXLLT_NEAR]
+        asked = self.__dict__.setdefault("mexllt_asked", {})
+        if any(u.is_finished for u in near):
+            asked.pop(s.index, None)
+            return False
+        key = f"mexllt:{s.index}"
+        if near:
+            asked[s.index] = self.frame
+            return True
+        waiting = self.tasks.get(key)
+        if waiting is not None and waiting.assignees:
+            asked[s.index] = self.frame
+            return True
+        if self.frame - asked.setdefault(s.index, self.frame) > MEXLLT_GIVE_UP:
+            asked.pop(s.index, None)
+            skip[s.index] = self.frame + MEXLLT_SKIP
+            self.drop_task(key, "extractor goes first")
+            return False
+        if key in self.tasks:
+            return True
+        did = units.id_of("turretlaser")
+        pending = sum(1 for t in self.tasks.values() if t.kind == "mexllt")
+        if did is None or pending >= MEXLLT_PENDING:
+            return did is not None
+        # On the enemy's side of the spot, and clear of the spot itself.
+        ex, ez = self.enemy_base or self.map.center
+        d = math.hypot(ex - s.x, ez - s.z) or 1.0
+        x, z = s.x + (ex - s.x) / d * MEXLLT_OFFSET, s.z + (ez - s.z) / d * MEXLLT_OFFSET
+        self.add_task(key, "mexllt", did, x, z, priority, anchor=(x, z))
+        self.log(f"mexllt turret first at spot {s.index} ({s.x:.0f},{s.z:.0f})")
+        return True
+
     def ensure_front_defense_tasks(self) -> None:
         # Forward turrets are useful once there is an army and an economy to
         # spare.  Their type follows recent attacker range; the budget gate
         # prevents a turret line from taking metal from the mobile army.
-        if self.frame_time() < 900 or self.combat_count() < 20:
+        if self.frame_time() < 900 or self.combat_count() < 20 or "circdef" in FLAGS:
             return
         mexes = [
             u

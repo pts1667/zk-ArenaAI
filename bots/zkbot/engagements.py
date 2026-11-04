@@ -31,6 +31,14 @@ CLUSTER_RADIUS = 500.0
 CONTACT_RADIUS = 800.0
 MAX_OPEN = 6
 EVENT_ENEMY_DESTROYED = 18
+# Negative weapon def ids are engine damage sources (CSolidObject::DamageType).
+ENV_DAMAGE = {
+    1: "debris", 2: "ground_collision", 3: "object_collision", 4: "fire",
+    5: "water", 6: "killed", 7: "crushed", 8: "aircraft_crash",
+    9: "negative_health", 10: "selfd_expired", 11: "killed_cheat",
+    12: "reclaimed", 13: "out_of_bounds",
+}
+DEF_QUERIES_PER_STEP = 4
 
 
 class EngagementLogMixin:
@@ -135,6 +143,166 @@ class EngagementLogMixin:
                     "branch": dict(Counter(getattr(self, "unit_branch", {}).get(u.uid, "none") for u in ours)),
                 },
             })
+
+    # ------------------------------------------------- weapon def index
+
+    def learn_weapon_defs(self) -> None:
+        """Map weapon def ids to what fired them, a few unit defs per step.
+
+        Damage events carry a weaponDefId even when the attacker is hidden
+        or already dead.  A def's weapon mounts name the unit; its death and
+        self-destruct explosions are shared weapons (a fusion's atomic_blast,
+        a pylon's estor_buildingex) that killed ~10% of our losses in h124
+        while being logged as "?noid".  Def types we have seen go first, then
+        the rest of the metadata table, so the index is built from the game
+        itself and follows balance changes."""
+        if "noenglog" in FLAGS:
+            return
+        done = self.__dict__.setdefault("_wd_defs_done", set())
+        queue = self.__dict__.setdefault("_wd_def_queue", [])
+        if not queue:
+            seen = {u.def_id for u in self.units.values()}
+            seen.update(e.def_id for e in self.enemies.values())
+            seen.update(e.def_id for e in self.radar.values())
+            queue.extend(d for d in seen if d > 0 and d not in done)
+            if not queue and self.frame > 900 and not getattr(self, "_wd_meta_queued", False):
+                self._wd_meta_queued = True
+                for k in getattr(self, "metadata", {}) or {}:
+                    try:
+                        d = int(k)
+                    except (TypeError, ValueError):
+                        continue
+                    if d > 0 and d not in done:
+                        queue.append(d)
+        index = self.__dict__.setdefault("wd_index", {})
+        for _ in range(DEF_QUERIES_PER_STEP):
+            if not queue:
+                break
+            did = queue.pop(0)
+            if did in done:
+                continue
+            done.add(did)
+            try:
+                res = self.client.query({"type": "unit_def_by_id", "unitDefId": int(did)}, timeout=3.0)
+            except Exception:
+                continue
+            if not isinstance(res, dict):
+                continue
+            name = res.get("name") or f"def{did}"
+            for m in res.get("weaponMounts") or []:
+                w = (m or {}).get("weaponDef") or {}
+                if isinstance(w.get("id"), int) and w["id"] not in index:
+                    index[w["id"]] = name
+            for key in ("deathExplosion", "selfDExplosion"):
+                w = res.get(key) or {}
+                if isinstance(w, dict) and isinstance(w.get("id"), int):
+                    index.setdefault(w["id"], "boom:" + str(w.get("name") or w["id"]))
+
+    def weapon_label(self, weapon_def: int | None) -> str | None:
+        """What a weapon def id is: a unit name, "boom:<explosion>" or
+        "env:<damage source>"; None when unknown."""
+        if weapon_def is None:
+            return None
+        if weapon_def < 0:
+            return "env:" + ENV_DAMAGE.get(-weapon_def, str(-weapon_def))
+        owner = getattr(self, "wd_owner", {}).get(weapon_def)
+        if owner:
+            return owner
+        return getattr(self, "wd_index", {}).get(weapon_def)
+
+    def resolve_attacker(self, attacker: str, weapon_def: int | None) -> str:
+        """Name a hidden or unidentified attacker from its weapon: "~name"
+        for an inferred enemy unit, "own:name" for damage from our own side
+        (death explosions included), "boom:..."/"env:..." as is."""
+        if not attacker.startswith("?"):
+            return attacker
+        label = self.weapon_label(weapon_def)
+        if not label:
+            return attacker
+        if attacker == "?own":
+            return "own:" + label
+        if label.startswith(("boom:", "env:")):
+            return label
+        return "~" + label
+
+    def note_hit(self, uid: int, attacker: str, damage: float, weapon_def: int | None) -> str:
+        """Remember who last damaged each of our units, for log_own_death.
+        Returns the attacker name, resolved from the weapon when hidden."""
+        if "noenglog" in FLAGS:
+            return attacker
+        # Learn weapon def -> unit name from visible attackers too: it
+        # covers weapons whose def has not been queried yet.
+        owners = self.__dict__.setdefault("wd_owner", {})
+        if attacker.startswith("def"):
+            # A radar blip of unknown type ("def0"): name it from the weapon.
+            attacker = "?blip"
+        if weapon_def is not None and weapon_def >= 0 and not attacker.startswith("?"):
+            owners[weapon_def] = attacker
+        attacker = self.resolve_attacker(attacker, weapon_def)
+        hits = self.__dict__.setdefault("_hits", {})
+        rec = hits.get(uid)
+        if rec is None or self.frame - rec["f"] > 300:
+            rec = hits[uid] = {"f0": self.frame, "by": Counter()}
+        rec["f"] = self.frame
+        rec["last"] = attacker
+        rec["wd"] = weapon_def
+        rec["by"][attacker] += damage
+        return attacker
+
+    def log_own_death(self, u, event: dict) -> None:
+        """One JSON line per lost unit (deaths-team<N>.jsonl): what killed it
+        (attacker name, ?unseen / ?noid when hidden, plus the weapon def id),
+        where, in which behaviour branch, and the local balance it died in.
+        Answers "what kills our units" directly, unlike the engagement
+        snapshots, which see only the visible mobile enemies."""
+        if "noenglog" in FLAGS:
+            return
+        hits = self.__dict__.setdefault("_hits", {}).pop(u.uid, None) or {}
+        killer_id = int(event.get("attackerId") or -1)
+        k = self._attacker(killer_id) if hasattr(self, "_attacker") else None
+        near_e = [e for e in self.contacts().values()
+                  if not e.is_air and self.dist(e.pos, u.pos) < 700.0 and (e.is_combat or not e.is_mobile)]
+        near_o = [o for uid, o in self.units.items()
+                  if uid != u.uid and o.is_combat and o.is_mobile and self.dist(o.pos, u.pos) < 700.0]
+        span = self.dist(self.base_pos, self.enemy_base or self.map.center) or 1.0
+        if k is not None and k.name.startswith("def"):
+            k = None
+        if k is not None:
+            killer = k.name
+        else:
+            raw = "?noid" if killer_id <= 0 else ("?own" if killer_id in self.units else "?unseen")
+            # Late labels: the def index may have learned the weapon since.
+            killer = self.resolve_attacker(raw, hits.get("wd"))
+            if killer == raw and hits.get("last") and not str(hits["last"]).startswith("?"):
+                killer = hits["last"]
+        rec = {
+            "t": round(self.frame_time()),
+            "name": u.name,
+            "cost": round(units.cost(u.data)),
+            "branch": getattr(self, "unit_branch", {}).get(u.uid, "none"),
+            "pos": [round(v) for v in u.pos],
+            "depth": round(self.dist(self.base_pos, u.pos) / span, 2),
+            "killer": killer,
+            "built": u.is_finished,
+            "last_hit": hits.get("last"),
+            "weapon_def": hits.get("wd"),
+            "hit_for": round((self.frame - hits["f0"]) / 30.0, 1) if hits else None,
+            "dmg_by": {a: round(d) for a, d in hits.get("by", Counter()).most_common(4)},
+            "near_enemy": dict(Counter(e.name for e in near_e).most_common(6)),
+            "near_enemy_power": round(sum(combat_power(e) for e in near_e if e.is_mobile)),
+            "near_enemy_turrets": sum(1 for e in near_e if not e.is_mobile and units.is_defense(e.data)),
+            "near_own_power": round(sum(combat_power(o) for o in near_o)),
+        }
+        f = getattr(self, "_death_file", None)
+        if f is None:
+            try:
+                path = os.path.join(os.environ.get("ZK_ARENA_OUT", "."), f"deaths-team{self.team_id}.jsonl")
+                f = self._death_file = open(path, "a", encoding="utf8", buffering=1)
+            except OSError:
+                self._death_file = False
+                return
+        if f:
+            f.write(json.dumps(rec, separators=(",", ":")) + "\n")
 
     def _side_features(self, us: list) -> dict:
         cost = sum(units.cost(u.data) for u in us) or 1.0

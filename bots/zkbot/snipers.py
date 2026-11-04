@@ -42,6 +42,9 @@ class PhantomMixin:
             return 0
         if (self.factory_name or "").lower() != "factorycloak":
             return 0
+        armored = self.armored_phantom_quota()
+        if armored > 0:
+            return armored
         if self.frame_time() < 600.0 or self.metal_income() < 25.0:
             return 0
         seen = self.seen_enemy_roles()

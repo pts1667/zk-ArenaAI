@@ -19,20 +19,26 @@ from __future__ import annotations
 
 from . import catalog, units
 from .armyplan import ArmyPlan
+from .attackline import REGROUP_DIST
 from .models import UnitInfo
 from .threat import ground_dps, weapon_range
 
-from .params import FLAGS
+from .params import FLAGS, P
+
+CHASE_RATIO = P("army.chase_ratio", 1.3, 0.8, 3.0, "local enemy/our power above which units do not chase a target")
 
 CMD_MANUALFIRE = 105
+BALL_EDGE_MOVING = 500.0      # with 350 when not yet moving away
 
 
 # Priority order.  The first behaviour that returns a branch name wins.
 UNIT_BEHAVIOURS = (
     "beh_bomb",
+    "beh_raider_regen",
     "beh_retreat",
     "beh_air",
     "beh_aa_escort",
+    "beh_mex_patrol",
     "beh_home_guard",
     "beh_raider_micro",
     "beh_respond",
@@ -123,7 +129,7 @@ class UnitBehaviourMixin:
         # The guard holds the base / threatened owned sector while the main
         # force is away.  In defend mode everyone converges, so this branch
         # is intentionally limited to attack.
-        if u.uid in self.home_guard and p.posture.mode == "attack":
+        if u.uid in self.home_guard and p.posture.mode == "attack" and u.uid not in self.spearhead:
             self.order_fight(u.uid, p.posture.home_anchor)
             return "guard"
         return None
@@ -185,7 +191,10 @@ class UnitBehaviourMixin:
         uid = u.uid
         if uid in p.raids.orders:
             tgt, at_stage = p.raids.orders[uid]
-            self.order_fight(uid, tgt if at_stage else p.raids.stage)
+            dest = tgt if at_stage else p.raids.stage
+            if "hitrun" in FLAGS:
+                return self.hitrun_order(u, dest, p.raids.modes.get(uid))
+            self.order_fight(uid, dest)
             return "raid_group"
         if p.raids.group_active and p.raids.target is not None and "oldraid" in FLAGS:
             self.order_fight(uid, p.raids.target if uid in p.raids.ready else p.raids.stage)
@@ -258,15 +267,23 @@ class UnitBehaviourMixin:
     def beh_ball_gather(self, u: UnitInfo, p: ArmyPlan) -> str | None:
         if not (p.posture.mode_eff == "ballgather" and p.ball.gather is not None and u.uid in p.group.member_set):
             return None
-        # Wait out of the ball's reach until the group is big enough.
-        if self.dist(u.pos, p.ball.ball["pos"]) < p.ball.ball["range"] + 350.0:
+        shell = self.shell_point(u, p.ball.ball)
+        if shell is not None:
+            self.order_fight(u.uid, shell)
+            return "ball_shell"
+        # Wait out of the ball's reach until the group is big enough.  Moving away carries
+        # on a little further, or units flip between move and fight at the edge of it.
+        margin = 350.0
+        if "smoothorders" in FLAGS and (self.unit_order.get(u.uid) or ("",))[0] == "move":
+            margin = BALL_EDGE_MOVING
+        if self.dist(u.pos, p.ball.ball["pos"]) < p.ball.ball["range"] + margin:
             self.order_move(u.uid, p.ball.gather)
         else:
             self.order_fight(u.uid, p.ball.gather)
         return "ball_gather"
 
     def beh_outranged(self, u: UnitInfo, p: ArmyPlan) -> str | None:
-        if "nooutrange" in FLAGS:
+        if "nooutrange" in FLAGS or self.closes_with_armored_ball(u, p):
             return None
         away = self.outranged_escape(u)
         if away is None:
@@ -287,8 +304,13 @@ class UnitBehaviourMixin:
         # Do not let a unit chase into a fight the group would lose.
         if near and not aa_air and p.posture.mode_eff != "defend":
             ours_l, theirs_l = self.local_balance(local.pos, 600.0)
-            if theirs_l > ours_l * 1.3 and self.dist(u.pos, local.pos) > weapon_range(u):
+            if theirs_l > ours_l * CHASE_RATIO and self.dist(u.pos, local.pos) > weapon_range(u):
                 near = False
+            if "fightnet" in FLAGS and self.dist(u.pos, local.pos) > weapon_range(u):
+                from .fightnet import CHASE_EXCH
+                ev = self.fight_eval(local.pos, commit=True)
+                if ev is not None:
+                    near = ev["exchange"] >= CHASE_EXCH
         if not (near or aa_air):
             return None
         # Radar blips have no valid attack target id for most weapons;
@@ -300,6 +322,14 @@ class UnitBehaviourMixin:
         return "local"
 
     def beh_regroup(self, u: UnitInfo, p: ArmyPlan) -> str | None:
+        if "fastgather" in FLAGS:
+            if not (p.group.regroup and "noregroup" not in FLAGS and u.uid in p.group.member_set):
+                return None
+            meet = self.meeting_point(p.group.center, p.posture.attack_target)
+            if self.dist(u.pos, meet) <= REGROUP_DIST:
+                return None
+            self.order_move(u.uid, meet)
+            return "regroup"
         if (
             p.group.regroup
             and "noregroup" not in FLAGS
@@ -320,6 +350,11 @@ class UnitBehaviourMixin:
 
     def beh_attack(self, u: UnitInfo, p: ArmyPlan) -> str | None:
         if p.posture.mode_eff == "attack" and p.posture.attack_target is not None:
+            if "assaultfirst" in FLAGS and u.uid in p.group.member_set:
+                hold = self.hold_behind_front(u, p.group.members, p.group.center, p.posture.attack_target)
+                if hold is not None:
+                    self.order_fight(u.uid, hold)
+                    return "attack_behind"
             self.order_fight(u.uid, p.posture.attack_target)
             return "attack"
         return None

@@ -30,8 +30,14 @@ def main() -> int:
 
     lock = __import__("threading").Lock()
 
+    brain_ref: list = []
+
     def log(message: str) -> None:
-        line = f"[{time.strftime('%H:%M:%S')}] {message}"
+        # Wall clock plus game time (frames / 30), so events can be lined up
+        # with metrics and replays at any game speed.
+        frame = getattr(brain_ref[0], "frame", 0) if brain_ref else 0
+        gs = int(frame or 0) // 30
+        line = f"[{time.strftime('%H:%M:%S')} g{gs // 60:02d}:{gs % 60:02d}] {message}"
         with lock:
             log_file.write(line + "\n")
             print(line, flush=True)
@@ -39,6 +45,7 @@ def main() -> int:
     log(f"start team={team_id} master={master}")
     client = Client(master, team_id, log)
     brain = Brain(client, team_id, log)
+    brain_ref.append(brain)
 
     # Keep ControllerAI's defaults (sync mode, one observation per frame).  In
     # sync mode the bot sees every frame, which makes the task state simple and

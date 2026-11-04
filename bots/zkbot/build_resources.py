@@ -7,6 +7,7 @@ from __future__ import annotations
 import math
 
 from . import units
+from .params import FLAGS
 
 
 class ResourceBuildMixin:
@@ -15,6 +16,7 @@ class ResourceBuildMixin:
             return
         self.ensure_strategy()
         self.update_sector_state()
+        self.hold_unstarted_mexes()
         if limit is None:
             t = self.frame_time()
             if t < 90:
@@ -54,6 +56,8 @@ class ResourceBuildMixin:
         if self.combat_count() < 4:
             safe_radius = min(safe_radius, 2600.0)
         free = [s for s in free if math.hypot(s.x - bx, s.z - bz) <= safe_radius]
+        if self.hazards is not None:
+            free = self.hazards.spots_in_reach(free, (u for u in self.units.values() if u.is_builder and u.is_mobile))
         pending = sum(1 for t in self.tasks.values() if t.kind == "mex")
         room = max(0, limit - pending)
         room = min(room, max(6, self.builder_count() * 2) - pending)
@@ -107,6 +111,8 @@ class ResourceBuildMixin:
                 and self.dist(u.pos, (s.x, s.z)) < 130.0
                 for u in self.units.values()
             ):
+                continue
+            if self.mex_waits_for_turret(s, priority):
                 continue
             self.add_task(
                 key,
@@ -336,6 +342,9 @@ class ResourceBuildMixin:
         )
 
     def ensure_pylon_tasks(self) -> None:
+        if "pylongrid" in FLAGS:
+            self.ensure_grid_pylons()
+            return
         # Energy waste while overdrive metal is low usually means generator
         # grids are not linked to the mex grids.  A pylon bridges 500 elmos.
         if self.od_waste < 4.0 or self.od_metal < 0.1:

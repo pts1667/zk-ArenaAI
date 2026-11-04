@@ -56,6 +56,7 @@ class SlowBallPlan:
 class RaidPlan:
     stage: Pos                                # raider rally/stage point
     orders: dict[int, tuple[Pos, bool]] = field(default_factory=dict)  # uid -> (target, at stage)
+    modes: dict[int, int | str | None] = field(default_factory=dict)   # hitrun: uid -> run, fight or a target
     group_active: bool = False
     target: Pos | None = None                 # shared target (oldraid only)
     ready: list[int] = field(default_factory=list)
@@ -110,6 +111,8 @@ class ArmyPlannerMixin:
         stage = self.rally_point()
         if self.enemy_near(stage, 650.0) is not None:
             stage = self.base_pos
+        if "raidprobe" in FLAGS:
+            stage = self.forward_stage(stage)
         search = self.plan_search(mode, focus, enemy_army_pos)
         ball = self.plan_slow_ball(raider_uids)
         raids = self.plan_raids(mode, focus, search, ball, raider_uids, stage)
@@ -238,11 +241,12 @@ class ArmyPlannerMixin:
         raider_uids: list[int],
         stage: Pos,
     ) -> RaidPlan:
-        raids = RaidPlan(stage=stage)
+        self.raid_modes = {}
+        raids = RaidPlan(stage=stage, modes=self.raid_modes)
         limit = 3 if self.frame_time() < 420 else 5
         squad = raider_uids[:limit]
-        group_needed = 2 if self.frame_time() < 300 else 3
-        free_to_raid = not focus.active and not search.active and mode != "attack"
+        group_needed = 2 if self.frame_time() < 300 or "fastgather" in FLAGS else 3
+        free_to_raid = not focus.active and not search.active and (mode != "attack" or "raidprobe" in FLAGS)
         if "oldraid" in FLAGS:
             raids.group_active = (
                 len(squad) >= group_needed
@@ -260,6 +264,9 @@ class ArmyPlannerMixin:
         # (Only the first 3-5 raided before; the rest idled at the rally
         # point while a human held the map with a few Kodachis.)
         squad_raiders = [uid for uid in raider_uids if uid not in ball.joiners]
+        spear = self.update_spearhead(squad_raiders)
+        patrol = self.update_mex_patrol(squad_raiders, spear)
+        squad_raiders = [uid for uid in squad_raiders if uid not in patrol]
         update = self.update_raid_squads if "oldsquads" in FLAGS else self.update_raid_squads_v2
         raids.group_active = (
             len(squad_raiders) >= group_needed
@@ -273,11 +280,14 @@ class ArmyPlannerMixin:
         if raids.group_active:
             update(squad_raiders, stage, group_needed, raids.orders)
             raids.group_active = bool(raids.orders)
-        elif free_to_raid:
-            # At least one squad keeps raiding while the rest defend.
+        elif free_to_raid or (("raidprobe" in FLAGS or spear) and not focus.active and not search.active):
+            # At least one squad keeps raiding while the rest defend, or attack.
             offense = self.offensive_raiders(squad_raiders, self.threat_pos)
-            if len(offense) >= group_needed:
-                update(offense, stage, group_needed, raids.orders)
+            if spear:
+                offense = sorted(set(offense) | spear)
+            needed = 1 if spear else group_needed
+            if len(offense) >= needed:
+                update(offense, stage, needed, raids.orders)
         return raids
 
     def plan_shared_raid(self, raids: RaidPlan, squad: list[int]) -> None:
@@ -318,7 +328,8 @@ class ArmyPlannerMixin:
             and uid not in self.retreating
         ]
         center = self.median_pos(members) or self.rally_point()
-        cohesion = sum(1 for uid in members if self.dist(self.units[uid].pos, center) < 700.0)
+        gather_radius, gather_share = self.gather_terms()
+        cohesion = sum(1 for uid in members if self.dist(self.units[uid].pos, center) < gather_radius)
         # Away from the base a defence is fought as one group too; feeding
         # units in one by one lost even fights.  At the base, everyone goes.
         far_defence = (
@@ -327,10 +338,10 @@ class ArmyPlannerMixin:
             and defense_anchor is not None
             and self.dist(defense_anchor, self.base_pos) > 1200.0
         )
-        regroup = (
+        regroup = self.regroup_allowed(
             (mode in ("attack", "gather") or far_defence)
             and len(members) >= 4
-            and cohesion < 0.6 * len(members)
+            and cohesion < gather_share * len(members)
         )
         return MainGroup(
             members=members,
@@ -390,6 +401,11 @@ class ArmyPlannerMixin:
             and self.dist(t.pos, anchor) < 900.0
         ]
         engage = group.power + sum(combat_power(t) for t in turrets) >= 0.8 * theirs
+        if "fightnet" in FLAGS and theirs > 0:
+            from .fightnet import HOLD_EXCH
+            ev = self.fight_eval_moved(anchor, group.members)
+            if ev is not None:
+                engage = ev["exchange"] >= HOLD_EXCH
         b = ball.ball
         if b is not None and self.dist(b["pos"], anchor) < 1100.0:
             turret_value = sum(units.cost(t.data) for t in turrets)
@@ -397,9 +413,12 @@ class ArmyPlannerMixin:
         return engage
 
     def choose_main_attack(self, posture: Posture, group: MainGroup) -> None:
-        target = self.choose_attack_target(group.center, group.power)
+        target = self.kept_attack_target()
+        if target is None:
+            target = self.choose_attack_target(group.center, group.power, group.members)
         if target is None and "nohunt" not in FLAGS:
             target = self.hunt_target(group.center, group.power)
+        self.note_attack_target(target)
         posture.attack_target = target
         posture.mode_eff = "attack" if target is not None else "gather"
 
@@ -416,4 +435,6 @@ class ArmyPlannerMixin:
             f"defend_engage={posture.defend_engage} target={tgt} "
             f"branches={dict(getattr(self, '_branch_counts', {}))}"
             f" comp={self.our_role_counts()}"
+            f" orders={dict(self.__dict__.get('order_counts', {}))}"
+            f" order_sources={self.top_order_sources()}"
         )

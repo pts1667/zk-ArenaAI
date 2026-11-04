@@ -175,12 +175,22 @@ cloak units for raids, jump units ignoring cliffs in pathing.
   4.5k/13.5k/26.7k at 1x vs 4.0k/10.9k/18.7k at max speed, while ours was
   4.9k/13.3k/22.6k vs 5.1k/15.4k/26.2k (ours is already equal at 5 min,
   before much fighting).  Our bot is frame-synchronous (the engine waits for
-  it; no query timeouts), so the change is CircuitAI's: it does work on its
-  own threads, which at high game speed finishes later in game time.  Human
+  it; no query timeouts), so the change is CircuitAI's.  Source
+  (RecoilEngine/AI/Skirmish/CircuitAI, util/Scheduler.cpp): all its
+  decision logic is frame-scheduled, but threat/influence/enemy maps
+  (AllyTeam::Update, every 7 frames, skipped while the previous job runs)
+  and every path and builder cost-map query (PathFinder::Run*, 4 pather
+  threads) run on worker threads and are applied on whichever frame they
+  finish.  An idle builder gets no task until its cost-map query is ready
+  (BuilderManager::DefaultMakeTask returns nullptr), raid/attack squads move
+  only when their path arrives.  At 10x a job of fixed wall time spans 10x
+  as many game frames: staler threat maps and longer idle builders and
+  squads.  Human
   games run at 1x, so **all historical win rates (70–100% at 10–16x) were
   against a weakened CircuitAI; at 1x the bot loses ~95%**.  Evaluate at
-  `--speed 1` (or a speed shown to be equivalent), and compare arms only
-  under the same speed.
+  `--speed 3`, shown equivalent to 1x in h121 (0/16; CircuitAI's metal
+  14.1k/27.0k at 10/15 min vs 13.5k/26.7k at 1x) and prun's default; confirm
+  key results at `--speed 1`, and compare arms only under the same speed.
 * Statistics (`tools/abstat.py`): win rate with Wilson intervals; for paired
   arms, the discordant pairs and an exact sign-test p-value.  A difference of
   one or two games in 4-game batches is noise: p stays near 1.

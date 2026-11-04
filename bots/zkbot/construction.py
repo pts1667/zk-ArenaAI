@@ -131,7 +131,7 @@ class ConstructionMixin:
         own = self.own_power_at(pos)
         # Turrets are exactly what a contested site needs, so tolerate a bit
         # more risk for them when our army is present.
-        factor = 1.0 if kind in ("defense", "mexdef", "frontdef") else 1.4
+        factor = 1.0 if kind in ("defense", "mexdef", "mexllt", "frontdef", "clusterdef") else 1.4
         return own >= threat * factor and threat < 400.0
 
     def builder_safety_step(self) -> None:
@@ -250,6 +250,8 @@ class ConstructionMixin:
                     limit = 7000.0
                 if d > limit:
                     continue
+                if self.hazards is not None and not self.hazards.can_walk(u.name, u.pos, (t.x, t.z)):
+                    continue
                 if not self.site_safe_for_builder((t.x, t.z), t.kind):
                     continue
                 path_risk = self.path_threat(u.pos, (t.x, t.z))
@@ -265,6 +267,8 @@ class ConstructionMixin:
                 score -= path_risk * 4.0
                 candidates.append((score, t))
             candidates.sort(key=lambda p: p[0], reverse=True)
+            if self.focus_on_frames(u, max((t.priority for _s, t in candidates), default=None)):
+                continue
             for _score, t in candidates:
                 if self.ensure_placement(t):
                     chosen = t
@@ -302,6 +306,7 @@ class ConstructionMixin:
                 self.builder_task[u.uid] = chosen.key
                 self.builder_idle[u.uid] = False
                 self.builder_job_frame[u.uid] = self.frame
+                self.note_guard(u.uid, existing.uid, chosen.key)
                 self.log(
                     f"assist existing {u.name}#{u.uid} -> {chosen.key}"
                 )
@@ -342,6 +347,12 @@ class ConstructionMixin:
             or x > self.map.width - margin
             or z > self.map.height - margin
         ):
+            return False
+        if self.hazards is not None and self.hazards.site_bad(x, z):
+            return False
+        if t.kind == "pylon" and "pylongrid" in FLAGS and not self.pylon_links(x, z):
+            return False
+        if t.kind == "mexllt" and any(math.hypot(x - s.x, z - s.z) < 70.0 for s in self.map.spots):
             return False
         # Energy generators must stay linked to a metal extractor so that
         # Zero-K's overdrive grid can use their output.  Generators link to
@@ -553,8 +564,10 @@ class ConstructionMixin:
             return False
         if t.kind == "strider":
             radii = (180, 260, 340)
-        elif t.kind in ("defense", "frontdef", "aa"):
-            radii = (80, 130, 190)
+        elif t.kind in ("defense", "frontdef", "aa", "clusterdef", "mexllt"):
+            radii = (80, 130, 190, 260)
+        elif t.kind == "pylon" and "pylongrid" in FLAGS:
+            radii = (40, 80, 120, 180)
         elif t.kind == "seismic":
             radii = (70, 100, 130, 160)
         elif t.kind == "energy":
@@ -686,6 +699,8 @@ class ConstructionMixin:
                 if d > 1600.0:
                     continue
                 if self.threat_in_radius((float(pos[0]), float(pos[2])), 200.0) > 0.0:
+                    continue
+                if self.hazards is not None and not self.hazards.can_walk(u.name, u.pos, (float(pos[0]), float(pos[2]))):
                     continue
                 if metal > best_metal * 1.3 or d < best_d:
                     if metal >= best_metal * 0.7:

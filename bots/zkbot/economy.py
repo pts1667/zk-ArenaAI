@@ -16,6 +16,7 @@ class EconomyMixin:
         self.cleanup_tasks()
         self.ensure_mex_tasks()
         self.ensure_mex_defense_tasks()
+        self.ensure_cluster_defense_tasks()
         self.ensure_energy_tasks()
         self.ensure_storage_tasks()
         self.ensure_pylon_tasks()
@@ -29,6 +30,8 @@ class EconomyMixin:
         self.ensure_silo_tasks()
         self.ensure_seismic_tasks()
         self.production_step()
+        self.release_finished_guards()
+        self.reclaim_step()
         self.assign_builders()
 
     # -------------------------------------------------------------- task setup

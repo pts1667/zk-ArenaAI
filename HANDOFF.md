@@ -13,6 +13,10 @@ guidance is a design requirement, see section 6b.
 
 Current status:
 
+- **Direction (2026-11-04):** rule changes stopped moving the win rate (2/18 vs 2/18
+  in the last A/B, section 6e), so the user asked for a Pluto-style self-play policy
+  trained in a simplified simulator.  The implementation plan is on branch
+  `learned-policy-plan`; the flags below remain the rules bot's baseline, none adopted.
 - **CircuitAI:Normal**: consistently beaten (n28, n29).
 - **Caveat (2026-11-03, h120): all win rates below were measured at 10–16x
   game speed, where CircuitAI is much weaker.** At 1x (human speed) the
@@ -75,7 +79,8 @@ Useful game facts:
 
 ## 3. Running tests
 
-Headless at max speed; do not use windowed mode unless the user asks.
+Headless at 3x (prun's default `--speed 3`, see below); do not use windowed
+mode unless the user asks.
 
 **Preferred (from 2026-11-03): `tools/prun.py`** — parallel games, paired
 A/B arms, code snapshots (safe to edit `bots/zkbot` while a batch runs),
@@ -111,8 +116,11 @@ uncapped (~10x), paired 0 vs 8, p = 0.01. CircuitAI's cumulative metal at
 15 min: 26.7k at 1x vs 18.7k at max speed (ours 22.6k vs 26.2k, equal at
 5 min). Our bot is frame-synchronous, so the change is CircuitAI's (threaded
 work finishes later in game time at high speed). Historical 70–100% win
-rates were at 10–16x against a weakened CircuitAI. Evaluate with
-`--speed 1`; compare arms only at the same speed.
+rates were at 10–16x against a weakened CircuitAI. **3x is equivalent to
+1x** (h121: 0/16, CircuitAI metal 14.1k/27.0k at 10/15 min vs 13.5k/26.7k
+at 1x), so prun defaults to `--speed 3` (16 games, 4 parallel, ~45 min).
+Use `--speed 1` only to confirm key results; compare arms only at the same
+speed.
 
 Offline checks (seconds, no engine): `python -m pytest tests -q` (catalog
 roles/abilities, factory fallbacks, flag/param semantics, brain composition).
@@ -204,6 +212,13 @@ Pitfalls:
 - `models.py` — `UnitInfo`, `Task`.
 - `units.py` — static `units.json` helpers and factory-role tables.
 - `mapdata.py` — map spots, heightmap, water, terrain helpers.
+- `terrain.py` — levels, ramps, regions and the gate graph (section 6e; imported
+  only by `hazards.py`, and only when flag `avoidlava` meets harmful liquid).
+- `hazards.py` — keeps builders off lava and void using `terrain.py` (section 6e).
+- `raidprobe.py` — raiders-only opening and probing raid squads (section 6e).
+- `nearbuild.py`, `mexpatrol.py` — sized responses to small raids (section 6e).
+- `smoothorders.py`, `buildfocus.py`, `reclaim.py`, `pylongrid.py`, `attackline.py`, `heavycounter.py` — from
+  the spec3 review: order rate, constructors, overdrive grid, army order (section 6e).
 - `intel.py` — observations, enemies/radar, commander tracking, threat,
   spot status, observation-rate control.
 - `economy.py` — the build task board and `economy_step`.
@@ -668,6 +683,425 @@ layers, migration table, evaluation method, research summary).
   which was always 0. `python tools/combat_model.py` fits/compares outcome
   models on all logged fights (needs ~100+ games before it means anything).
 
+## 6d. Session 2026-11-03 (later) — loss attribution and ML stages 1–4
+
+See **`docs/ML.md`** for the plan, environment and commands.
+
+* **Metrics**: `tools/abstat.py` prints per-arm geometric means and paired
+  sign tests of `M10/M15` (our/CircuitAI metal produced, from the demo) and
+  `X10/X15` (metal killed / lost): nearly every game is lost, so win counts
+  cannot separate arms. Log lines carry game time (`[hh:mm:ss gMM:SS]`).
+* **Death log** `deaths-team<N>.jsonl` (`engagements.py`): killer, weapon,
+  seconds under fire, damage by attacker, branch, depth, local balance.
+  Weapon def ids are resolved at runtime (`learn_weapon_defs` queries each
+  unit def once: weapon mounts + death/self-d explosions): `~name` inferred
+  hidden attacker, `own:name` friendly fire / own explosions,
+  `boom:<explosion>`, `env:<source>`. h124 (48 games) re-labelled: unknown
+  killers 9% → 2.5%; death explosions 3.2% of all metal lost (fusion
+  `atomic_blast` ~0.8k/game in our base; enemy pylon `estor_buildingex`
+  kills raiding Glaives); friendly fire lands 2% of killing blows (Rocko
+  and Reaver into our own Glaives); 10 fusions died without any damage
+  event (unfinished frames decaying? new `built` field will tell).
+* Where metal is lost (h124 base, by killer role): first 10 min raiders
+  25%, turrets 18%, riots 18%; 10–20 min assaults 19%, skirmishers 18%,
+  turrets 16%. Victims 10–20 min: Glaive 26%, Reaver 18%, Rocko 12%.
+* **ControllerAI** forwards ENEMY_DAMAGED (topic 17, ~15k events/game) with
+  the enemy id: now used for exact enemy-loss labels. It drops the
+  `weaponDefID` of UNIT_DESTROYED and the ids of ENEMY_DESTROYED (one-line
+  fixes in `ControllerAISerialization.cpp` if ever needed; not done).
+* **Stage 1** `fightnet.py`: entity-level fight logger (`fights-team<N>`,
+  every unit near a fight incl. turrets, air, remembered structures,
+  blips; losses after 10/20 s from damage events), featuriser shared with
+  `tools/train_fightnet.py` (set transformer, WSL + torch.compile), numpy
+  inference of exported `data/fightnet.npz` (parity 6e-8), decision hooks
+  behind flag **`fightnet`** (retreat threshold, attack target, hold/meet
+  an attack, chase). Not trained yet (needs the d1 batch).
+* **Stage 2** `statelog.py` (`state-team<N>`, every 10 s) +
+  `tools/train_value.py` (temporal transformer; targets: winner, metal
+  ratio 5 min ahead).
+* **Stage 3** `bots/observer/main.py` + `prun.py --observe`: CircuitAI vs
+  CircuitAI, each with an allied passive ControllerAI observer logging
+  CircuitAI's full force and every unit it starts; `tools/observe_dataset.py`
+  spend-mix comparison and behaviour-cloning examples.
+* **Stage 4** `tools/tune.py`: SPSA over `P()` parameters with paired
+  +/- prun games. The fight constants are now parameters (same defaults):
+  `army.attack_ratio/hold_ratio/min_units/target_ratio/outranged_hold/
+  chase_ratio`, `retreat.hp_cheap/hp`, plus `def.base_share/max_share/
+  mex_cap/mex_scan` and `fightnet.*` thresholds.
+
+### 6d.1 First ML results (d1: 37 games + 8 partial vs Hard at 3x, 3/37 won; o2: 8 observer games)
+
+Both batches were stopped early by Claude Code under system memory
+pressure (8 + 2 parallel games); resume with `--resume`, fewer jobs.
+
+* Stage 1 (12.5k fight snapshots): predicting "fight won" (their loss >
+  ours in 20 s), the bot's power-ratio rule has AUC 0.49–0.58 over four
+  game splits, i.e. about chance; the set transformer 0.54–0.63. Better in
+  3 of 4 splits but not yet reliable: needs ~100+ games. A preliminary
+  model is exported to `data/fightnet.npz` (15 epochs); flag `fightnet`
+  is untested.
+* Stage 2 (7.2k steps): win prediction impossible yet (3 wins); metal
+  ratio 5 min ahead: MAE 0.17 vs 0.233 for the median (26% better), then
+  overfits. Not exported.
+* Stage 3, spend mix by phase (CircuitAI: metal of units started; ours:
+  net value added, which flatters categories that survive):
+
+  | phase | CircuitAI | ours |
+  |---|---|---|
+  | 3–7 min | energy 19, **defence 16**, skirm 14, mex 10 | energy 18, assault 15, raid 14, riot 13, **defence 7** |
+  | 7–12 min | **defence 26**, energy 17, assault 10 | energy 24, riot 15, raid 12, **defence 5** |
+  | 12–20 min | **energy 22, defence 18**, assault 11 | riot 22, skirm 15, assault 14, **energy 12, defence 3** |
+
+  h124's higher `def.base_share` was neutral; whether it actually raised
+  realised defence spending to CircuitAI's level is unchecked (h124 had no
+  state logs). Next: an arm whose realised spend follows CircuitAI's mix.
+
+### 6d.2 Full d1, label fix, CircuitAI-macro arms (h127 pending)
+
+* d1 resumed at 6 parallel and finished: 64 games, 7 won; metal ratio
+  1.14 / 1.01 / 0.91 at 5 / 10 / 15 min.
+* **Label bug:** `terraunit` (the engine's terraform helper, listed at
+  100,000 metal) was in 17% of fight snapshots, inflating our side's value
+  and logging fake losses (117 snapshots > 20k). Excluded now
+  (`fightnet.NOT_UNITS`; also from the state log and spend counter);
+  `train_fightnet.py` drops old snapshots that contain it. The stage 1
+  numbers in 6d.1 were measured on contaminated labels.
+* Stage 1 on full d1, clean: AUC net **0.59–0.62** vs power-ratio
+  **0.50–0.55** on 3 of 3 splits. Exported (`data/fightnet.npz`, all
+  games, 20 epochs). Predictions regress to the mean (10/50/90% of
+  predicted exchange 0.36/0.69/1.2), so the `fightnet.*` thresholds were
+  moved to those quantiles (attack 1.0, hold 0.6, chase 0.7, retreat
+  stays ≥1.2, leaves early ≤0.5).
+* Stage 2 on full d1: metal ratio 5 min ahead MAE 0.15–0.17 vs median
+  0.25–0.28 (~40% better). Win AUC unmeasurable (1–2 won games per split).
+  Exported (`data/valuenet.pt`, 10 epochs; offline use only).
+* Stage 3: `state-team<N>.jsonl` now logs `spent` (metal committed per
+  category, dead units included), so our realised mix is comparable with
+  CircuitAI's. CircuitAI's turret metal (9 games, <20 min): Lotus
+  (turretlaser) 28%, Stinger (turretheavylaser) 24%, Picket
+  (turretmissile) 15%, Warden (turretriot) 12%, Gauss 10%; half its
+  energy metal is one Singularity. Its turrets come from a per-cluster
+  "porcupine" whose value cap scales with income (MilitaryManager::
+  MakeDefence): our turret caps are fixed counts (base perimeter ~4
+  anchors, 8 extractor turrets, 8 pending), which is why h124's higher
+  share was neutral. New arms: `circdef` (that porcupine) and `lessriot`
+  (see docs/ML.md). Smoke: `circdef` built 17–22 turrets, realised turret
+  share 4–10% in a low-income game; most of our riots come from the
+  reactive rules, not the cycle `lessriot` changes.
+* **h127** (16 games/arm): base 0/16, `fightnet` 1/16, `circdef` 0/16,
+  `circdef,lessriot`+`def.cluster_sec=40` 1/16. Nothing significant:
+  `fightnet` M15 0.66 vs 0.81 (paired x1.24 for base, p=0.12: if
+  anything worse economy), `circdef` X10 0.47 vs 0.39 (p=0.45). But the
+  realised spend shows the CircuitAI arms did not get CircuitAI's mix:
+  turrets 5–11% (CircuitAI 16–27%), riots unchanged. 25–55% of `circdef`
+  jobs went stale unassigned: **build power**, not turret rules, is the
+  limit. CircuitAI fields 4 / 8 / 11 / 13–15 mobile constructors at
+  4 / 8 / 10 / 16+ min (o2), we ~5–7 throughout (our 1.25 BP per metal/s
+  formula is CircuitAI's config value, but not what it actually does).
+* **Raider overproduction:** `counter_role` keeps standing *head-count*
+  shares (late raid 0.24). Glaives are cheap and die first, so the quota
+  refills them without end: ~150 dead Glaives (10k metal) per game in
+  h127-base, raiders ~20% of all metal (CircuitAI 5–7%).
+* New arms: `morebp` (~0.6 mobile constructors per metal/s, max 15,
+  `eco.cons_per_income`) and `spendmix` (role quotas measured on metal
+  started in the last 4 min, CircuitAI's late army mix as target). Smoke
+  `spendmix`: still 30% raiders late, because that enemy was skirmisher-
+  heavy and the counter rule (raiders beat skirmishers) adds raid weight.
+* **h128**: base 1/16, `morebp` 0/16, `morebp,circdef` 0/16. More
+  constructors match CircuitAI's spend on builders (24% / 18% of metal at
+  0–3 / 3–7 min) and with `circdef` lift turrets to 11–13% from minute 3,
+  but the thinner early army trades far worse: X10 0.24 / 0.29 vs 0.39
+  (13/16 pairs favour base, p=0.02 each), M15 0.65 / 0.75 vs 0.84.
+  Rejected: CircuitAI's macro does not transfer piecewise; its bigger
+  build power works because its army holds (its early raiders and
+  turrets), ours does not.
+* **h129**: base 3/16, `spendmix` 2/16; M15 0.81 vs 0.86, X10 0.35 vs
+  0.43, all n.s. Raiders fell to 11% of late spend but air rose to 26%
+  (second factory, outside `counter_role`). Not adopted.
+* Stage 3 summary: four piecewise imitations of CircuitAI's spend mix
+  (turrets, fewer riots, constructors, spend-based quotas) moved the
+  realised mix toward CircuitAI's without improving results; `morebp`
+  clearly hurt. The macro gap is a consequence of losing fights (X ~0.4),
+  not its cause, so the next lever is fighting (stage 1/4), not the mix.
+* Stage 4 started: `tools/tune.py army1` over `army.attack_ratio,
+  hold_ratio, chase_ratio, target_ratio, outranged_hold, min_units,
+  retreat.hp, hp_cheap`, 20 iterations x 8 paired games, 6 parallel
+  (state: `results/tune-army1/state.json`; `--resume` continues).
+* Stage 4 result, not adopted: `army1` finished 20 iterations (159 pairs) at
+  `army.attack_ratio=1.376,army.hold_ratio=1.024,army.chase_ratio=1.12,
+  army.target_ratio=1.674,army.outranged_hold=1.595,army.min_units=7.058,
+  retreat.hp=0.3838,retreat.hp_cheap=0.2136`.  Plus-minus scores swung between
+  -0.43 and +0.54 with no trend.  A/B against defaults (`results/tuned-ab-*`, 20
+  games per arm, TitanDuel, Hard, 3x, varied enemy factories): 1/20 base, 0/20
+  tuned; M15 0.83 against 0.84; X15 0.44 for both; X10 0.52 base against 0.43
+  tuned (paired 15/20, p=0.04, one of four tests, gone by minute 15).  Defaults
+  stay.  8 game pairs per step is too noisy for this kind of tuning.
+* o2 finished: 24 observer games; CircuitAI's mix is stable (table above
+  within 1–3 points). `results/o2/macro.jsonl` holds the 9k windows.
+
+## 6e. Session 2026-11-04 — terrain regions (bot uses them only behind `avoidlava`)
+
+`bots/zkbot/terrain.py` builds a walkable-distance map graph from height and
+slope arrays.  No bot module imports it, so behaviour is unchanged.  (prun
+snapshots `bots/zkbot` per batch and `tools/tune.py` runs one batch per
+iteration, so an edit to an imported module would leak into a running tune.)
+
+- **Passability:** the engine's speed formulas for kbot, tank, spider, amph,
+  hover and ship, with limits from `gamedata/movedefs.lua`.  Reachability uses
+  the full 16-elmo grid; regions grow on a 32-elmo grid (64 on huge maps).
+- **Levels and ramps** (the user's definition): a level is a large flat area; a
+  ramp is a walkable slope joining two levels at least 40 elmos apart.  A slope
+  with no level at its top, or a sheer cliff, is not a ramp.  Flatness tolerates
+  map noise (slope < 0.02); ground that still climbs 40 elmos at that limit is
+  re-split at 0.006.  The strict limit alone lost TitanDuel's west plateau.
+- **Chokes, by shape:** open ground is wherever a disk fits; the passable rest is
+  narrow.  A narrow part touching open ground in two separate places joins them,
+  and the narrowest point of the widest path through it is a choke, unless a way
+  around within 1000 elmos is wider than the choke.  So a compound's gates all
+  count (Castel Gods' centre has four), corners never do, and a gap beside a
+  rock doesn't.  Land chokes use kbot passability; straits use ship passability.
+- **Regions:** seeded from metal clusters, start positions, large levels and
+  open ground, grown by walking cost.  Land and open sea never share a region;
+  borders prefer chokes and ramps; small metal-less regions join their
+  neighbours.  A choke with no seed behind it can sit inside one region.
+- **Graph:** gates per movement class and per connected area, with width and
+  walking length.  A gate on a choke is tagged `choke`, as is a narrow border
+  with a long way around.  Crossings use per-class full-grid labels: a cell under
+  a work-grid wall takes the region it is walkably joined to.  (Labelling it by
+  nearest region made false gates through sealed walls with walkable flanks.)
+- **Lava and void:** any water damage makes the plane lava, or void from the
+  engine's ground limit up (1000 per slow update, 2000 per second in mapinfo).
+  No class may enter and neither makes sea regions, since the engine would path
+  units through lava and they would burn.  Void also blocks the 20 elmos above
+  the plane: The Hole and Hexian Arena destroy anything below y = 20 by gadget.
+  Lava doesn't, as Carabanossi has 18% of its map on a real shelf at 10-20 elmos.
+  Hover may cross lava only where Zero-K's `map_lava` runs (`hover_safe`, live
+  from the `lavaLevel` game rules param), which cancels their damage; a map's
+  own gadget doesn't (Banana Republic).  `map_lava` also counts as lava when the
+  engine reports no damage.  `water_damage` is the engine's and the bridge's
+  value, per slow update: half the mapinfo figure.
+- **Water:** the engine's water plane is hardcoded at 0.  Zero-K's `waterlevel`
+  and `waterpreset` shift the terrain (`GG.Terraform_RaiseWater`), and the map
+  can also generate its terrain in-game, so use live heights.  `water_level`
+  is a plain shift for anything else.
+
+`tools/terrain_map.py` runs it offline from map archives and draws
+`results/terrain/*.png`; `tests/test_terrain.py` has the synthetic maps.
+
+Survey of all 111 maps in the portable install (no failures), by
+`python tools/terrain_map.py --all --check-graph`: build 2.0 s
+median, 4.4 s worst, offline with a tune running; land regions 31 median, 120
+worst; ramps 10 median, 89 worst, 28 maps with none; chokes 9 median, 96 worst, 32
+maps with none.  Metal spots
+match except duck, DunePatrolRedux, Living Lands, Scorched Crossing and StormSiege
+(the tool's reader only approximates mex_spot_finder.lua; a game uses its own
+list).  Every spot pair the full grid connects also has a route on the graph.
+10 maps have harmful liquid: 4 void (Hexian Arena, The Hole, Violence, ZeroWars
+Crossfire), 6 lava (Banana Republic, Carabanossi, LimeQuat, Scorched Crossing,
+Violet Rampart, Zed Remake).
+
+**Raider opening, flags `raidfirst` and `raidprobe` (`bots/zkbot/raidprobe.py`), not
+adopted:** from the user's spectated game (`results/spec1`): a Reaver by minute 1-2
+and Glaives parked at minute 3.  Causes: the fixed opening mix queued the first riot
+at about 65 s in the median game whatever the enemy had, Fleas counted as raiders
+there, and a squad at an empty metal spot waited for the 20 s retarget.
+`raidfirst`: raiders and constructors only until 5:00, riots and assaults phasing in
+by 10:00; ends early on 6+ real raiders outnumbering ours or 3+ riots and assaults
+seen.  `raidprobe`: an empty target means move on to the next unchecked point toward
+the enemy spawn; rally 55% of the way there; a turret counts against a target only
+if its range reaches it, and routes bend around coverage; squads accept defence up
+to their own metal value (was half) and keep raiding in attack mode.  **Existing bug,
+still there without the flag:** `raid_defense_value` ignores turrets in view (they
+aren't `is_dangerous`, and are marked seen so memory skips them too).
+
+A/B `results/rp-ab-*`, 12 games per arm, TitanDuel, Hard, 3x, varied factories:
+
+| | base | raidfirst | both |
+|---|---|---|---|
+| Wins | 1 | 0 | 1 |
+| First riot, median | 65 s | 350 s | 330 s |
+| Median game length (metrics) | 1735 s | 1270 s | 1340 s |
+| M10 / M15 | 0.99 / 0.88 | 0.93 / 0.79 | 0.99 / 0.88 |
+| X10 / X15 | 0.50 / 0.42 | 0.34 / 0.31 | 0.39 / 0.40 |
+| Glaive deaths by 7 min, per game | 19 | 32 | 34 |
+
+The opening now looks as asked, but the raiders die without earning it, and the bot
+loses sooner.  Only 16% of the early Glaive deaths in `both` were to turrets; enemy
+commanders, riots and raiders kill more.
+
+**Hit-and-run raids, flag `hitrun` (with `raidprobe`), and `seeturrets`, untested
+beyond one short headless game and the user's spectated `results/spec2`:** the A/B
+above showed Glaives reaching the enemy economy (91% of early deaths in the enemy
+half) and dying at a local enemy force of 2.6x.  `hitrun`: move orders on the way in,
+then "fight" armed units at the target, else attack constructors first, then the
+nearest unarmed target; a squad takes a target only if worth twice its defence value;
+a riot within 520 elmos, or seen there in the last 10 s, rules a target out whatever
+the squad's size; a squad breaks off when the defence within 650 elmos passes that
+limit; a finished target means a new order that tick; squads may be larger (6/8/10
+by phase, was 4/6/8).  Raiders below 50% in a squad of 6 or more go back along its
+route, then wander to safe metal spots, until 95% or 60 s.  `seeturrets` counts
+turrets in view within the old radius (`raidprobe` uses their real range instead).
+
+**From spectating `results/spec2`, flags `spearhead`, `nearbuild`, `mexpatrol`
+(`nearbuild.py`, `mexpatrol.py`), no A/B yet:** at 1:02 a raid warning for one Flea put
+the army in defend mode and recalled every Glaive.  `spearhead`: the first 3 raiders
+never defend, skip the route via our expansions, and aren't replaced.  `nearbuild`: no
+defend mode when local units, the commander, patrols and any combat unit finishing
+within 5 s match the threat; while there's a threat, a factory building a combat unit
+is on high priority (`CMD_PRIORITY` 34220).  `mexpatrol`: 22% of raiders, at least 2
+(production ensures them from 1:00), only walk our extractors and answer threats.
+Under `raidprobe`, all raiders now keep raiding in attack mode: they were idling at
+the rally point once it began.
+
+**From the review of `results/spec3` (first spectated win, g24:26, one game), nine
+opt-in flags, no A/B yet.  Tests in `tests/test_spec3_review.py`.**
+
+- `smoothorders` (`smoothorders.py`): units visibly stopped when re-ordered.  Repeats
+  were only part of it (every 3 s even unchanged).  Attribution by behaviour showed
+  most orders were destinations jumping 1000+ elmos between plans (patrol, raid
+  squads, main attack, home guard).  So: destination may drift by 25% of the distance
+  left, slow refresh, and a plan's order stands 5 s against other plans unless the
+  unit has arrived; reactions aren't held back, and a squad breaking off is released.
+  The `army mode` log line now has `orders=` and `order_sources=`, with or without the
+  flag; `soon` counts orders within 3 s of that unit's previous one.
+- `unstick` (`buildfocus.py`): the constructor idle all game was guarding a finished
+  solar.  "Assist" is a guard order, which never ends, so its queue was never empty
+  and the idle check never fired.  Guards are tracked and released.  A trap nearby:
+  `cleanup_tasks` moves `created_frame` forward while a nanoframe exists, so energy
+  tasks are normally closed by the idle check as "occupied", not as "done".
+- `finishfirst` (`buildfocus.py`): with under 150 metal banked and at least
+  1 + income/15 buildings unfinished (2 to 8), constructors help the nearest one instead
+  of starting another, unless the job has priority 1600+.
+- `fewercons` (`production.py`): at least 1 constructor before 2:00, 2 before 4:00, then
+  3; 1 per 5 metal/s above 12, instead of 1.25x that.  A floor of 2 trapped one raided
+  game on 3 extractors for 10 minutes (`results/rev3-new/game-002`).
+- `reclaimcons` (`reclaim.py`): at 700+ safe wreck metal, 2 constructors (1 if under 3);
+  at 150+, any above `desired_builder_count`; at most half.  Stays on a wreck while it
+  exists, and prefers piles of them.  Safe means our side of the map, with no threat
+  within 250 and no enemy within 500.
+- `pylongrid` (`pylongrid.py`): units link when `dist < rangeA + rangeB`
+  (`quadField:GetIntersections`).  Pylon when `count * 200 / gain <= 300 s`, where gain
+  comes from `sqrt(energy/mexes) * 0.25` per extractor income.  One at a time, chains
+  from the grid, priority 1400 plus the seconds it beats that payback by (at a fixed
+  1100 they went stale unserved).  Replaces `ensure_pylon_tasks`, which built at most
+  one, near a reactor.  The `grid extractors` log line shows joined and apart.
+- `fastgather` (`attackline.py`): gathered means 50% within 1100 (was 60% within 700);
+  the group meets 30% of the way to the target (at most 600 elmos) and only units 900+
+  from there walk; a regroup lasts 20 s, then 40 s of attacking.  Raid stage radius
+  1400 (was 900), squads act from 2 raiders, and combined squads meet between them.
+- `assaultfirst` (`attackline.py`): within 1800 of the target, or 1200 of an enemy,
+  followers hold behind the front (assault, heavy; riot if there are under 2): riots
+  90 elmos, others 170, artillery 80% of range.  The hold point moves only after the
+  front has moved 300 elmos, so this doesn't bring the stop-start back.
+- `mexllt` (`build_defense.py`): from 2:30 a spot without a ground turret within 400
+  gets a Lotus 110 elmos to the enemy side first, and unstarted extractor jobs wait for
+  it too.  2 waiting at most; after 90 s with no constructor on it the extractor goes
+  ahead, and the spot doesn't ask again for 3 min.  Under 4 extractors, income comes
+  first.  Only jobs queued before 2:30 are converted: redoing later ones had turrets
+  and extractors dropping each other in turn.
+
+Measured on TitanDuel, 14 game minutes against CircuitAI Hard, not win rates (no game
+reached an end; 0 wins, all timeouts).  Orders within 3 s of the unit's last order:
+without these flags 4391 and 6469 (`results/rev3-old`), with them 430 and 466
+(`results/rev3-new`) and 421-652 after the later fixes (`results/rev4`, 4 games).  All
+orders: 8326 and 11529 against 1923-3064.  Armies differ in size, so those aren't exact
+ratios.  Attack target flips remain the largest source (`attack:jump`).  Expansion looks
+slower: 5-6 extractors at 4:00 and income 19-30 at 8:00 (rev4), against 8-10 and 26-34
+(rev3-old), in too few games to tell which flag does it; `fewercons` and `mexllt` are
+the suspects.  Not yet seen working: grid is still mostly apart (joined 2-4, apart 2-10
+at 14:00) before the priority change, which has only had unit tests.
+
+`results/spec4` (all these flags, spectated, enemy on spiders): lost at g21:45, one game,
+so no verdict on the set; spec3's win was against shields.  Metal lost 25.2k, killed
+8.5k; Crabe and Recluse did most of it.  Constructors stayed at 4 from 6:00 and income
+at 17-22, with 17 extractor assignments and 27 extractor jobs gone stale, so constructors
+now limit expansion (`fewercons` follows income, income needs extractors).  One extractor
+on the grid nearly all game: 4 pylon jobs, 2 assigned.  Mexllt: 20 asked, 8 assigned, 13
+gave up.  Largest order sources are new: `ball_gather:switch` 403 (move and fight flip at
+the edge of the ball's reach) and `defend:switch` 359.  `attack_behind` barely ran.
+
+**After spec4 (flags `stickytarget`, `armorcounter`; A/B `results/rev5-*`):** `fewercons`
+adds a constructor per 3 safe unassigned extractor, turret or pylon jobs (at most 4,
+from 2:00), since income alone trapped it.  `smoothorders` leaves a unit shooting a live
+target for 2 s, and `ball_gather` moves on to 500 past the ball's reach once moving.
+`stickytarget` (`attackline.py`) keeps the main group's target 20 s unless blacklisted.
+`armorcounter` (`heavycounter.py`, reviewer's advice: Slings, Phantoms, massed Knights):
+an armored heavy is slow, 800+ metal, a 100+ blast and the `armor` tag, which today means
+only the Crab; Grizzly's blast is 14, and the raider-Ronin answer still applies to it.
+Counted for 5 min after last seen.  Mix: assault .44, arty .30, raid .12, skirm .10, riot
+.04.  Phantoms 1 more than Crabs, at most income/15, without the 10:00 and income 25
+gates.  Raiders don't join and treat it like a riot.  The group commits only when
+role-weighted metal, with raiders at 0, outweighs the ball; assaults then ignore being
+outranged, and units with more range fire from 92% of theirs instead of waiting.
+
+A/B before and after (TitanDuel, 3x, all factories): `results/rev5-*` 1/10 and 0/10,
+`results/rev6-*` 1/8 and 2/8, so 2/18 each; no difference shown.  `--enemy-factories` steps
+every 2 games, so rev5's 10 games only reached the first 5 entries and no Crab; rev6 covers
+spider, amph and jump.  Orders within 3 s per minute: about 375 down to 60.  Crabs got their
+first kill at 17:00-25:00 in 3 of 4 after-arm spider games, all lost, costing 3.4k-13.9k
+metal (before arm: 2 of 4 games, 24:00 and 29:00, 3.2k and 3.3k, both lost).  Two of those three queued no Phantom (`production_counter`
+bug, then fixed under `armorcounter`; that fix has unit tests only).  Not adopted.
+
+**Factory on lava and void, flag `safefac` (`MapData.favours_hover`):** without it
+`choose_factory` picks `factoryhover` when `water_fraction` > 0.25, which counts
+lava and void as water (Hexian Arena, Violence, ZeroWars Crossfire, Carabanossi,
+Zed Remake).  With it, any harmful liquid means `factorycloak`, including on Zed
+Remake where hover is safe.  Not adopted yet: only a 4-game smoke test
+(`results/safefac-smoke-*`; 1/2 wins against 0/2, too few to mean anything).
+In `deaths-team*.jsonl`, `weapon_def` -5 is water damage.
+
+**Builders and lava, flag `avoidlava` (`bots/zkbot/hazards.py`):** on maps with
+harmful liquid only.  Skips metal spots no mobile builder can walk to, won't assign
+a builder a job or a wreck it can't walk to, and refuses sites in or against the
+liquid.  Not adopted yet.  Smoke test `results/avoidlava-smoke-*`, 4 games per arm
+on Carabanossi and Violence, both arms with `safefac`, while the tune was running:
+
+| | `safefac` | `safefac,avoidlava` |
+|---|---|---|
+| Wins | 1/4 | 0/4 (sign test p=1.00) |
+| Constructors lost to lava, Carabanossi | 115 | 11 |
+| Constructors lost to lava, Violence | 53 | 0 |
+| All units lost to lava, Carabanossi | 450 (35% of metal lost) | 628 (46%) |
+| All units lost to lava, Violence | 56 (6%) | 0 |
+
+Violence's shore deaths were constructors walking to off-land spots, though each
+died nearest a main-land spot: 118 mex assignments went off the main land without
+the flag and none with it.  16 other jobs (radar, storage, defense) still end up
+off it with the flag, with no lava deaths; `can_walk` checks the task position
+before placement moves it, which may be why.  Carabanossi's army still burns, 478 of 543 lava deaths
+in one game coming from units in a retreat branch: retreats go straight across
+lava.  That is the next thing to fix, and these games don't show the flag helps
+win.  **Open:** one flagged Carabanossi game logged 106 idle-builder warnings
+(others 0-15), builders parked near (2010,3376) for 15+ minutes while tasks were
+open.  Cause unknown, and a single game, so it may not be the flag.  `site_bad`
+looks unlikely: the comparable unflagged game dropped more unplaceable energy tasks
+(47 against 25) with only 5 warnings.  The
+"N of M free spots out of reach" line also logs 40-59 times a game, as the free
+list changes.
+
+Still to check, in a live game:
+1. **Possible existing bug:** six maps store flat placeholder heights (Alphabet
+   Siege Dry, Fickle Rivers, LimeQuat Republic, Rainbow Comet, Random Plateaus,
+   THISspace), and most of them generate terrain in-game.  The bot reads
+   `heightmap` from the snapshot taken at AI load.  If that predates generation,
+   `map.water_fraction` and `is_water` are wrong there (Fickle Rivers would read
+   as all water) and factory choice follows.  Unverified.
+
+Checked live on Carabanossi and Violence: `height_map` and `slope_map` give the same
+mean height, regions, chokes, ramps, walls and share below 0 as the map files.
+Queries took 0.24-0.31 s and the build 1.0-2.0 s at game start, with 6 tuning games
+running alongside.
+
+Not modelled, because the bridge does not expose them: typemap speed changes
+(mapinfo sets a zero speed on Hexian Arena, Scorched Crossing, The Hole and Zed
+Remake), blocking features.  Also not modelled: lava that rises in a game, and
+Scorched Crossing's burn line 20 elmos above its lava (0.3% of that map).  The
+flat-slope, level-size and choke limits were set by eye on a few maps.
+
+First wiring to try, behind a flag and A/B tested: `path_threat` along real
+routes instead of straight lines.  Testing it needs several maps; prun defaults
+to TitanDuel only.
+
 ## 7. Test evidence from latest changes
 
 ### Hard, session 2026-11-02 (TitanDuel, alternating sides)
@@ -711,6 +1145,12 @@ layers, migration table, evaluation method, research summary).
 | h118 | 4/16 vs 2/16 | refactor vs base (pooled with h116: 7/32 vs 8/32, no regression) |
 | h119 | max 5/16 | speed test, invalid: all games shared one core (affinity bug) |
 | h120 | **1/16 at 1x vs 9/16 at ~10x** | same code and matchups; paired 0 vs 8, p = 0.01 |
+| h121 | 3x 0/16, 2x 1/13 (stopped) | speed calibration: 3x matches 1x (CircuitAI metal @15m 27.0k vs 26.7k); our metal ratio 1.09/0.93/0.84 at 5/10/15 min, losses 2–4x kills |
+| h122 | base 2/16, `staticmix` 1/16, `regenretreat` 2/16, `nooffense` 1/16 | `staticmix` worse economy (paired M10 x1.31 p=0.02, M15 x1.42 p=0.04): early raiders buy map control; others neutral |
+| h124 | base 2/16, tur 3/16, tur2 2/16 | more static defence (`def.base_share` 0.14/0.22, mex turret cap/scan up): neutral (base vs tur X10 x0.81 p=0.45, M15 x0.94 p=0.79); not adopted |
+| h127 | base 0/16, `fightnet` 1/16, `circdef` 0/16, circmax 1/16 | none significant; `fightnet` M15 0.66 vs 0.81 (p=0.12); `circdef` turrets only 5–11% of spend (jobs stale: too few constructors) |
+| h128 | base 1/16, `morebp` 0/16, `morebp,circdef` 0/16 | more constructors: X10 0.24/0.29 vs 0.39 (p=0.02): rejected |
+| h129 | base 3/16, `spendmix` 2/16 | n.s.; raiders 11% of late spend but air 26%: not adopted |
 
 Previous session's evidence:
 

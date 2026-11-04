@@ -20,6 +20,9 @@ from .models import UnitInfo
 from .threat import weapon_range
 
 from .params import FLAGS, P
+from .attackline import RAID_STAGE_RADIUS, SQUAD_READY_RADIUS, SQUAD_WAIT
+from .heavycounter import is_armored_heavy
+from .raidprobe import BLACKLIST_FRAMES, CAP_EARLY, CAP_LATE, CAP_MID
 
 SLOW_SPEED = P("ball.slow_speed", 60.0, 40.0, 80.0, "Buoy 51, Grizzly 45, Ogre 69 is borderline-fast")
 BALL_MIN_VALUE = P("ball.min_value", 800.0, 300.0, 3000.0, "metal value of a slow ball")
@@ -95,6 +98,7 @@ class RaidMixin:
                         "range": max(weapon_range(o) for o in members),
                         "count": len(members),
                         "speed": max(float(o.data.get("speed") or 0.0) for o in members),
+                        "armored": "armorcounter" in FLAGS and any(is_armored_heavy(o.name) for o in members),
                     }
         self._ball_cache = (self.frame, res)
         return res
@@ -112,7 +116,7 @@ class RaidMixin:
     def ball_joiners(self, raider_uids: list[int], ball: dict | None) -> set[int]:
         """Raiders that fight the slow ball with the main group: all of them
         up to 8, else the 60% closest to the ball.  The rest keep raiding."""
-        if ball is None or not raider_uids:
+        if ball is None or not raider_uids or ball.get("armored"):
             return set()
         if len(raider_uids) <= 8:
             return set(raider_uids)
@@ -126,7 +130,7 @@ class RaidMixin:
         self, ball: dict, group: list[int], group_center: tuple[float, float]
     ) -> tuple[str, tuple[float, float]]:
         """("commit", ball position) or ("gather", gather point)."""
-        ours = self.ball_value_of(group)
+        ours = self.armored_ball_value(group) if ball.get("armored") else self.ball_value_of(group)
         committed = getattr(self, "_ball_committed", False)
         need = 0.7 if committed else 1.0
         near = sum(
@@ -224,13 +228,17 @@ class RaidMixin:
         out: dict[int, tuple[tuple[float, float], bool]],
     ) -> None:
         t = self.frame_time()
-        cap = 4 if t < 300 else (6 if t < 900 else 8)
+        hitrun = "hitrun" in FLAGS
+        if hitrun:
+            cap = CAP_EARLY if t < 300 else (CAP_MID if t < 900 else CAP_LATE)
+        else:
+            cap = 4 if t < 300 else (6 if t < 900 else 8)
         squads: list[dict] = self.__dict__.setdefault("raid_squads", [])
         black = self.__dict__.setdefault("raid_blacklist", {})
         for k, until in list(black.items()):
             if until < self.frame:
                 black.pop(k, None)
-        alive = set(raider_uids)
+        alive = set(raider_uids) - set(self.__dict__.get("raid_regen", {}))
         for sq in squads:
             sq["members"] &= alive
         squads[:] = [sq for sq in squads if sq["members"]]
@@ -291,7 +299,8 @@ class RaidMixin:
             ]
             total = sum(acc for _sq, acc in near)
             # The prize's own worth buys some extra risk.
-            if defended > max(singles) and total + 0.25 * pworth >= defended and len(near) > 1:
+            extra = 0.0 if hitrun else 0.25 * pworth
+            if defended > max(singles) and total + extra >= defended and len(near) > 1:
                 for sq, _acc in near:
                     combine_ids.add(id(sq))
                     if sq["target"] is None or self.dist(sq["target"], ppos) > 300.0:
@@ -312,13 +321,28 @@ class RaidMixin:
             if len(members) < group_needed and id(sq) not in combine_ids:
                 continue
             center = self._squad_center(members) or stage
+            if hitrun:
+                self.note_trail(sq, center)
+                members = self.peel_hurt(sq, members)
+                if not members:
+                    continue
             tgt = sq["target"]
+            probe = "raidprobe" in FLAGS
+            if probe:
+                self.note_points_checked(center)
+                if tgt is not None and id(sq) not in combine_ids and self.target_is_empty(tgt, center):
+                    tgt = None
+            if hitrun and id(sq) not in combine_ids and self.squad_breaks_off(sq, members, center):
+                self.release_orders(members)
+                if tgt is not None:
+                    black[(int(tgt[0] // 250), int(tgt[1] // 250))] = self.frame + BLACKLIST_FRAMES
+                tgt = None
             if tgt is not None and id(sq) not in combine_ids:
                 defended = self.raid_defense_value(tgt)
                 accept = self.raid_accept_value(members)
                 hot = defended > accept
                 if hot:
-                    black[(int(tgt[0] // 250), int(tgt[1] // 250))] = self.frame + 2400
+                    black[(int(tgt[0] // 250), int(tgt[1] // 250))] = self.frame + (BLACKLIST_FRAMES if probe else 2400)
                     self.log(
                         f"raid squad {i} target {tuple(round(v) for v in tgt)} too well "
                         f"defended ({defended:.0f} vs {accept:.0f}); retargeting"
@@ -329,7 +353,8 @@ class RaidMixin:
                 old = sq["target"]
                 tgt = self.choose_raid_group_target(members, exclude=taken)
                 sq["target"], sq["tframe"] = tgt, self.frame
-                sq["via"] = self.raid_route_via(center, tgt) if tgt is not None else None
+                straight = "spearhead" in FLAGS and sq["members"] & self.spearhead
+                sq["via"] = self.raid_route_via(center, tgt) if tgt is not None and not straight else None
                 if tgt is not None and (old is None or self.dist(old, tgt) > 200.0):
                     via = sq["via"]
                     self.log(
@@ -342,27 +367,43 @@ class RaidMixin:
             dest = tgt
             if id(sq) in combine_ids:
                 # Gather outside the prize's defence, strike together.
+                fast = "fastgather" in FLAGS
                 if sq["gather"] is None:
-                    dx, dz = center[0] - tgt[0], center[1] - tgt[1]
-                    n = math.hypot(dx, dz) or 1.0
-                    sq["gather"] = (tgt[0] + dx / n * 750.0, tgt[1] + dz / n * 750.0)
+                    if fast:
+                        centers = [c for o in squads if id(o) in combine_ids
+                                   and (c := self._squad_center(o["members"])) is not None]
+                        sq["gather"] = self.squad_meeting_point(centers, tgt)
+                    else:
+                        dx, dz = center[0] - tgt[0], center[1] - tgt[1]
+                        n = math.hypot(dx, dz) or 1.0
+                        sq["gather"] = (tgt[0] + dx / n * 750.0, tgt[1] + dz / n * 750.0)
                     sq["gframe"] = self.frame
                 ready = all(
                     (c := self._squad_center(o["members"])) is not None
-                    and self.dist(c, o["gather"] or c) < 450.0
+                    and self.dist(c, o["gather"] or c) < (SQUAD_READY_RADIUS if fast else 450.0)
                     for o in squads
                     if id(o) in combine_ids
                 )
-                if not ready and self.frame - sq["gframe"] < 900:
+                if not ready and self.frame - sq["gframe"] < (SQUAD_WAIT if fast else 900):
                     dest = sq["gather"]
             elif sq["via"] is not None:
                 if self.dist(center, sq["via"]) < 350.0:
                     sq["via"] = None
                 else:
                     dest = sq["via"]
+            if probe and id(sq) not in combine_ids:
+                dest = self.coverage_waypoint(center, dest) or dest
+            mode = None
+            if hitrun:
+                if id(sq) in combine_ids:
+                    mode = "fight"
+                elif not self.squad_running(sq):
+                    mode = self.raid_mode(center, tgt)
             for uid in members:
                 u = self.units.get(uid)
                 if u is None:
                     continue
-                at = self.dist(u.pos, stage) < 900.0 or self.dist(u.pos, dest) < 1000.0
+                stage_radius = RAID_STAGE_RADIUS if "fastgather" in FLAGS else 900.0
+                at = self.dist(u.pos, stage) < stage_radius or self.dist(u.pos, dest) < 1000.0
                 out[uid] = (dest, at or self.dist(u.pos, dest) < self.dist(stage, dest))
+                self.raid_modes[uid] = mode

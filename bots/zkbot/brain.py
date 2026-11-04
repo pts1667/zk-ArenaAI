@@ -15,10 +15,12 @@ from .build_resources import ResourceBuildMixin
 from .build_facilities import FacilityBuildMixin
 from .build_support import SupportBuildMixin
 from .build_defense import DefenseBuildMixin
+from .hazards import Hazards
 from .intel import IntelMixin
 from .mapdata import MapData
 from .military import MilitaryMixin
 from .models import Task, UnitInfo
+from .params import flag
 from .production import ProductionMixin
 from .scouting import ScoutingMixin
 from .strategy import StrategyMixin
@@ -30,14 +32,34 @@ from .raiding import RaidMixin
 from .snipers import PhantomMixin
 from .blips import BlipMixin
 from .raidmicro import RaiderMicroMixin
+from .raidprobe import RaidProbeMixin
+from .nearbuild import NearBuildMixin
+from .mexpatrol import MexPatrolMixin
+from .smoothorders import SmoothOrdersMixin
+from .buildfocus import BuildFocusMixin
+from .reclaim import ReclaimMixin
+from .pylongrid import PylonGridMixin
+from .attackline import AttackLineMixin
+from .heavycounter import HeavyCounterMixin
 from .resign import ResignMixin
 from .behaviours import UnitBehaviourMixin
 from .armyplan import ArmyPlannerMixin
 from .engagements import EngagementLogMixin
+from .fightnet import FightLogMixin
+from .statelog import StateLogMixin
 
 
 class Brain(
     ThreatMixin,
+    RaidProbeMixin,
+    NearBuildMixin,
+    MexPatrolMixin,
+    SmoothOrdersMixin,
+    BuildFocusMixin,
+    ReclaimMixin,
+    PylonGridMixin,
+    AttackLineMixin,
+    HeavyCounterMixin,
     IntelMixin,
     EconomyMixin,
     ResourceBuildMixin,
@@ -60,6 +82,8 @@ class Brain(
     UnitBehaviourMixin,
     ArmyPlannerMixin,
     EngagementLogMixin,
+    FightLogMixin,
+    StateLogMixin,
     MilitaryMixin,
 ):
     def __init__(self, client: Client, team_id: int, log):
@@ -67,6 +91,7 @@ class Brain(
         self.team_id = int(team_id)
         self.log = log
         self.map = MapData()
+        self.hazards: Hazards | None = None
         self.game_info: dict[str, Any] = {}
         self.spawn_boxes: dict[str, Any] = {}
         self.metadata: dict[str, Any] = {}
@@ -281,6 +306,7 @@ class Brain(
         if self.units:
             self.read_battle_events(obs)
             self.note_event_topics(obs)
+            self.note_damage_events(obs)
         # Synchronous ControllerAI blocks the engine for every observation.
         # Processing every Nth observation (while still acknowledging every
         # frame) roughly halves the Python work without meaningfully changing
@@ -316,6 +342,7 @@ class Brain(
             return
         self.read_enemies(obs)
         self.resolve_enemy_deaths()
+        self.learn_weapon_defs()
         if self.frame - self.last_spot_frame >= 15:
             self.last_spot_frame = self.frame
             self.update_spot_status()
@@ -346,6 +373,8 @@ class Brain(
             if hasattr(self, "gremlin_step"):
                 self.gremlin_step()
         self.engagement_step()
+        self.fightlog_step()
+        self.statelog_step()
 
         if self.frame - self.last_query_frame >= 60:
             self.last_query_frame = self.frame
@@ -385,10 +414,12 @@ class Brain(
         self.choose_enemy_base()
         self.ensure_strategy()
         self.factory_def_id, self.factory_name = self.choose_factory()
+        if flag("avoidlava") and self.map.water_is_harmful:
+            self.hazards = Hazards.build(self.client, self.map, self.log)
         self.log(
             f"start base={tuple(round(v) for v in self.base_pos)} "
             f"map={self.map.width:.0f}x{self.map.height:.0f} "
-            f"water={self.map.water_fraction:.2%} "
+            f"water={self.map.water_fraction:.2%} damage={self.map.water_damage:.0f} "
             f"factory={self.factory_name} enemy_guess={tuple(round(v) for v in self.enemy_base or (0,0))}"
         )
         from . import params
@@ -444,9 +475,8 @@ class Brain(
 
     def choose_factory(self) -> tuple[int, str]:
         ground = self.map.ground_height(*self.base_pos)
-        water = self.map.water_fraction
         name = "factorycloak"
-        if ground < -1.0 or water > 0.25:
+        if self.map.favours_hover(ground):
             name = "factoryhover"
         # Test override: start with another factory (generalisation tests).
         forced = os.environ.get("ZKBOT_FACTORY")

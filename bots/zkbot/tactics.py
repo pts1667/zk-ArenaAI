@@ -10,12 +10,18 @@ from __future__ import annotations
 import collections
 import math
 
-from . import units
+from . import catalog, units
 from .defense import _is_real_aircraft
+from .heavycounter import is_armored_heavy
 from .models import UnitInfo
 from .threat import ground_dps, weapon_range
 
-from .params import FLAGS
+from .params import FLAGS, P
+from .raidprobe import ACCEPT_SHARE, RAID_SHARE, RIOT_MEMORY, RIOT_VETO, is_ground_turret
+
+RETREAT_HP_CHEAP = P("retreat.hp_cheap", 0.30, 0.1, 0.6, "base retreat HP fraction for cheap units")
+RETREAT_HP = P("retreat.hp", 0.45, 0.2, 0.7, "base retreat HP fraction for other units")
+REGEN_RETREAT_HP = P("retreat.regen_hp", 0.55, 0.3, 0.6, "retreat HP for idle-regenerating units (flag regenretreat)")
 
 
 class TacticsMixin:
@@ -147,6 +153,11 @@ class TacticsMixin:
             "assault": 0.20,
             "arty": 0.08,
         }
+        spendmix = "spendmix" in FLAGS
+        if spendmix:
+            # CircuitAI's army metal after minute 12 (o2 observer games):
+            # assault 12%, skirm 8%, raid 7%, arty 7%, riot 4% of all spend.
+            late = {"raid": 0.18, "skirm": 0.24, "riot": 0.12, "assault": 0.30, "arty": 0.16}
         # Early game is about map control: lots of raiders, a little riot
         # and assault, no artillery.  (A human review: too few Glaives, and
         # the bot lost the map to a handful of Kodachis.)  Blend toward the
@@ -191,6 +202,10 @@ class TacticsMixin:
             desired.update(raid=0.40, skirm=0.35, riot=0.07, assault=0.10, arty=0.08)
         for key in list(desired):
             desired[key] = max(0.04, min(0.62, desired[key]))
+        ramp = self.raid_ramp()
+        if ramp < 1.0:
+            desired["riot"] *= ramp
+            desired["assault"] *= ramp
         if "staticmix" not in FLAGS:
             desired["arty"] = desired["arty"] if phase > 0.2 or ec["static"] >= 3 else 0.0
             # Skirmishers exist to kite slow units (riots, assaults).  Until
@@ -202,6 +217,7 @@ class TacticsMixin:
                 desired["skirm"] = 0.0
             elif phase < 1.0:
                 desired["skirm"] = max(desired["skirm"], min(0.24, 0.04 * slow))
+        desired = self.armored_counter_mix(desired)
         # Explicit AA minimum: no ground army can shoot down an air wave.
         # The historical aircraft-seen flag, rather than a commander drone,
         # is what makes this active.
@@ -217,13 +233,22 @@ class TacticsMixin:
             # tie once aircraft had been seen.
             "aa": oc["aa"],
         }
+        if spendmix:
+            # Shares of metal started in the last 4 minutes, not of the
+            # standing army: raiders are cheap and die first, so a head-count
+            # quota refilled them without end (~150 dead Glaives a game,
+            # 20% of all metal vs CircuitAI's 5-7%).
+            spend = self.recent_army_spend()
+            total = sum(spend.values())
+            if total >= 300.0:
+                current = {k: spend.get(k, 0.0) / total * combat for k in current}
         best_role = None
         best_deficit = 0.0
         for role, want in desired.items():
             deficit = want * combat - current.get(role, 0)
             # A small preference for the role that counters the largest
             # visible category avoids ties producing a random composition.
-            if role == "riot" and ec["raider"] > 0:
+            if role == "riot" and ec["raider"] > 0 and ramp >= 1.0:
                 deficit += min(1.0, ec["raider"] * 0.05)
             if role == "skirm" and ec["assault"] > 0:
                 deficit += min(1.0, ec["assault"] * 0.04)
@@ -315,12 +340,26 @@ class TacticsMixin:
         while the local fight is clearly won, leave earlier when it is lost,
         when the unit is expensive, or when our whole army is behind.
         """
-        base = 0.30 if cheap else 0.45
+        base = RETREAT_HP_CHEAP if cheap else RETREAT_HP
         if "staticretreat" in FLAGS:
             return base
         ours, theirs = self.local_balance(u.pos, 700.0)
         ratio = ours / max(1.0, theirs)
-        if ratio >= 3.0:
+        ev = self.fight_eval(u.pos, commit=True) if "fightnet" in FLAGS else None
+        if ev is not None:
+            # Learned trade instead of the power ratio (docs/ML.md stage 1).
+            from .fightnet import RETREAT_LOSE_EXCH, RETREAT_WIN_EXCH
+            x = ev["exchange"]
+            ratio = x
+            if x >= RETREAT_WIN_EXCH:
+                f = 0.55
+            elif x >= 0.5 * (1.0 + RETREAT_WIN_EXCH):
+                f = 0.75
+            elif x < RETREAT_LOSE_EXCH:
+                f = 1.25
+            else:
+                f = 1.0
+        elif ratio >= 3.0:
             f = 0.55
         elif ratio >= 1.8:
             f = 0.75
@@ -363,6 +402,12 @@ class TacticsMixin:
         if u.alive_frac >= 0.60:
             return False, None
         threshold = self.retreat_threshold(u, cheap)
+        if "regenretreat" in FLAGS and "regen" in catalog.tags(u.name):
+            # Glaives and Reavers heal 20 HP/s after 5 s out of combat (full
+            # in ~12 s).  At the cheap-unit threshold (~0.2-0.35) they died
+            # within a second of turning back: 40% of losses in the first
+            # 10 minutes were on retreat branches (h121-x3).
+            threshold = max(threshold, REGEN_RETREAT_HP)
         if u.alive_frac >= threshold:
             return False, None
         recent_threat = self.frame - self.threat_frame < 600
@@ -527,23 +572,42 @@ class TacticsMixin:
         r2 = radius * radius
         total = 0.0
         seen: set[int] = set()
+        probe = "raidprobe" in FLAGS
+        see_turrets = probe or "seeturrets" in FLAGS
+        armored = "armorcounter" in FLAGS
+        hitrun = "hitrun" in FLAGS
         for e in self.contacts().values():
             seen.add(e.uid)
-            if e.is_air or not self.is_dangerous(e):
+            turret = see_turrets and is_ground_turret(e)
+            if e.is_air or not (turret or self.is_dangerous(e)):
                 continue
-            if (e.x - pos[0]) ** 2 + (e.z - pos[1]) ** 2 > r2:
+            if turret and probe:
+                if not self.turret_covers(e, pos):
+                    continue
+            elif (e.x - pos[0]) ** 2 + (e.z - pos[1]) ** 2 > r2:
                 continue
             c = units.cost(e.data)
             role = units.role_of(e.data)
             if "dyntrainer" in e.name or "commander" in e.name:
                 c = 900.0
+            elif hitrun and (role == "riot" or (armored and is_armored_heavy(e.name))):
+                c = RIOT_VETO
             elif role == "riot" or (not e.is_mobile and units.is_defense(e.data)):
                 c *= 1.5
             total += c
+        if hitrun:
+            for uid, (e, f) in getattr(self, "enemy_memory", {}).items():
+                if (uid not in seen and self.frame - f <= RIOT_MEMORY
+                        and (units.role_of(e.data) == "riot" or (armored and is_armored_heavy(e.name)))
+                        and (e.x - pos[0]) ** 2 + (e.z - pos[1]) ** 2 <= r2):
+                    total += RIOT_VETO
         for uid, (e, _f) in getattr(self, "enemy_structures", {}).items():
             if uid in seen or not units.is_defense(e.data):
                 continue
-            if (e.x - pos[0]) ** 2 + (e.z - pos[1]) ** 2 <= r2:
+            if probe:
+                if is_ground_turret(e) and self.turret_covers(e, pos):
+                    total += units.cost(e.data) * 1.5
+            elif (e.x - pos[0]) ** 2 + (e.z - pos[1]) ** 2 <= r2:
                 total += units.cost(e.data) * 1.5
         return total
 
@@ -552,7 +616,9 @@ class TacticsMixin:
         big group ignores a lone turret or riot while a pair of raiders
         does not."""
         value = sum(units.cost(self.units[uid].data) for uid in squad if uid in self.units)
-        return 0.5 * value
+        if "hitrun" in FLAGS:
+            return RAID_SHARE * value
+        return (ACCEPT_SHARE if "raidprobe" in FLAGS else 0.5) * value
 
     def update_raid_squads(
         self,
@@ -675,6 +741,8 @@ class TacticsMixin:
                 best = e.pos
         if best is not None:
             return best
+        if "raidprobe" in FLAGS:
+            return self.probe_target(ready, self._squad_center(ready) or rep.pos, exclude)
         # Nothing visible: head for the enemy-side extractors/base.
         if new:
             return self.pick_raid_target(rep, exclude=exclude) or self.enemy_base

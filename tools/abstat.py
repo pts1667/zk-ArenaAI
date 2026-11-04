@@ -15,6 +15,8 @@ import math
 import pathlib
 import sys
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+
 
 def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
     if n == 0:
@@ -69,6 +71,76 @@ def load(d: pathlib.Path) -> dict[int, bool]:
     return {g: r["won"] for g, r in load_rows(d).items()}
 
 
+MARKS = (600, 900)
+
+
+def game_metrics(r: dict) -> dict[str, float]:
+    """Continuous per-game measures, for batches where almost every game is
+    lost and win counts cannot tell arms apart:
+
+      M<min>  our / CircuitAI cumulative metal produced (demo team stats)
+      X<min>  metal exchange: enemy value we killed / our value lost
+              (the bot's metrics CSV; enemy deaths are attributed from
+              EVENT_ENEMY_DESTROYED, so absolute values are approximate)
+    """
+    out: dict[str, float] = {}
+    gdir = pathlib.Path(r.get("dir") or "")
+    demo = pathlib.Path(r.get("demo") or "")
+    if demo.is_file():
+        try:
+            from demostats import read_demo_stats, summarize
+            from report import our_team
+            s = read_demo_stats(demo)
+            me = our_team(s["script"])
+            for t in MARKS:
+                if s["game_time"] >= t:
+                    a = summarize(s, me, t).get("metalProduced", 0.0)
+                    b = summarize(s, 1 - me, t).get("metalProduced", 0.0)
+                    if a > 0 and b > 0:
+                        out[f"M{t // 60}"] = a / b
+        except Exception:
+            pass
+    mfiles = sorted(gdir.glob("metrics-team*.csv")) if gdir.is_dir() else []
+    if mfiles:
+        with mfiles[0].open() as f:
+            rows = list(csv.DictReader(f))
+        for t in MARKS:
+            cand = [x for x in rows if float(x["t"]) <= t]
+            if cand and float(rows[-1]["t"]) >= t:
+                lost = float(cand[-1]["own_lost_value"] or 0)
+                kill = float(cand[-1]["enemy_killed_value"] or 0)
+                out[f"X{t // 60}"] = (kill + 50.0) / (lost + 50.0)
+    return out
+
+
+def metric_table(arms: list[tuple[pathlib.Path, dict]]) -> None:
+    rows = {d: load_rows(d) for d, _ in arms}
+    mets = {d: {g: game_metrics(r) for g, r in rs.items()} for d, rs in rows.items()}
+    keys = [f"{k}{t // 60}" for k in ("M", "X") for t in MARKS]
+
+    def gmean(v):
+        return math.exp(sum(math.log(x) for x in v) / len(v)) if v else float("nan")
+
+    print("geometric means (M = our/their metal, X = metal killed/lost; >1 favours us):")
+    for d, _ in arms:
+        print(f"  {d.name:<24} " + "  ".join(
+            f"{k}={gmean([m[k] for m in mets[d].values() if k in m]):.2f}"
+            f"(n={sum(1 for m in mets[d].values() if k in m)})" for k in keys))
+    if len(arms) == 2:
+        (da, _), (db, _) = arms
+        common = sorted(set(mets[da]) & set(mets[db]))
+        parts = []
+        for k in keys:
+            diffs = [math.log(mets[da][g][k] / mets[db][g][k]) for g in common
+                     if k in mets[da][g] and k in mets[db][g]]
+            if not diffs:
+                continue
+            better = sum(1 for x in diffs if x > 0)
+            p = binom_two_sided(better, len(diffs))
+            parts.append(f"{k} x{math.exp(sum(diffs) / len(diffs)):.2f} ({better}/{len(diffs)}, p={p:.2f})")
+        print(f"paired {da.name} vs {db.name}: " + "  ".join(parts))
+
+
 def binom_two_sided(k: int, n: int) -> float:
     if n == 0:
         return 1.0
@@ -107,6 +179,7 @@ def main(argv: list[str]) -> int:
         p = binom_two_sided(only_a, n)
         print(f"paired games={len(common)}: only {da.name} won {only_a}, only {db.name} won {only_b}, "
               f"sign-test p={p:.2f}")
+    metric_table(arms)
     return 0
 
 
