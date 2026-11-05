@@ -17,6 +17,7 @@ Current status:
   in the last A/B, section 6e), so the user asked for a Pluto-style self-play policy
   trained in a simplified simulator.  The implementation plan is on branch
   `learned-policy-plan`, starting at `docs/learned-policy/00-overview.md`; the flags below remain the rules bot's baseline, none adopted.
+  Stage 1 is built, and **Gate 1 did not pass** (section 6f); stage 2 awaits the user's decision.
 - **CircuitAI:Normal**: consistently beaten (n28, n29).
 - **Caveat (2026-11-03, h120): all win rates below were measured at 10–16x
   game speed, where CircuitAI is much weaker.** At 1x (human speed) the
@@ -1101,6 +1102,38 @@ flat-slope, level-size and choke limits were set by eye on a few maps.
 First wiring to try, behind a flag and A/B tested: `path_threat` along real
 routes instead of straight lines.  Testing it needs several maps; prun defaults
 to TitanDuel only.
+
+## 6f. Session 2026-11-04 (later) — learned policy, stage 1: Gate 1 not passed
+
+Stage 1 of `docs/learned-policy/` is built: a C++17 combat and movement simulator with a ctypes binding, unit and map
+data from an in-engine dump, a scripted engine battery, and the fight-replay gate.  The bot is unchanged.  **Stage 2
+waits for the user's decision.**  All numbers and deviations: `docs/learned-policy/01-simulator.md` section 8.
+
+- **Gate 1(a), replay of 44,733 logged fights: fail.**  20 s AUC: sim 0.591, out-of-fold fightnet 0.665, tracked value
+  0.564.  Sim minus fightnet -0.074 [-0.092, -0.053]; sim minus value +0.027 [+0.011, +0.045].  At 10 s it ties
+  fightnet.  Sim fights run far closer to the death than real ones (0.86 to 0.91 predicted against 0.39 to 0.46 measured
+  in the top bin).  Don't tune the sim against these snapshots.
+- **Gate 1(b), engine battery: 108/113.**  Misses: 4 blocked-move walk times and 1 detour length, from route
+  choice; speed along engine paths matches.
+- **Finding for the rules bot, not yet used:** a plain move order stops a unit until its next slow update (15 frames;
+  a tank keeps 0.65 of its distance when re-ordered every second, 0.26 at every 0.5 s), while fight orders cost
+  nothing.  This is the likely cause of the stop-start the user saw.  `smoothorders` isn't in the frozen baseline, and
+  its docstring gives a different cause.  Without it the bot repeats unchanged orders after 90 frames if moved under
+  150 elmos (`military.py:750-760`).  Any change goes behind a flag and an A/B.
+- **Budget:** 423 µs per 400-unit tick with shared fight goals on Titan Duel against a 370 µs plan; 17.7 ms when each
+  unit paths to its own enemy, because of run-time Dijkstra.  The pathing change below removed that.  Profile with
+  `cmake -S sim -B ~/zksim/build-prof -DZKSIM_PROFILE=ON`, then `tools/sim_profile.py`.
+- **Pathing (2026-11-05):** no pathfinding at run time.  `sim/py/zknav.py` splits per-class terrain segments to a limit (4 parts, 90% seen)
+  and builds gates and a next-hop table when a map is exported.  Units walk straight, or along the route via gates and centres.  57 MB of
+  fields became 1.3 MB on Titan Duel, and 1.2 GB became 8.7 MB on Carabanossi.  122 to 247 µs per 400-unit tick, against 370 planned.  A unit making
+  no progress for 3 s aims straight at its next gate or goal, for longer each time.  Battery 105/113.  Same-segment arrival 98 to 100%; other-segment
+  91 to 100% on both maps.  About 8% of long tank moves on Titan Duel still never arrive, so watch this in self-play.  Gate 1(a) rerun unchanged, and still
+  awaits the user's decision (`01-simulator.md` 8.6).
+
+Setup, in WSL from the repo: `cmake -S sim -B ~/zksim/build && cmake --build ~/zksim/build`; the library is
+`~/zksim/build/libzksim.so` (`ZKSIM_LIB` overrides).  `~/zkml/bin/python sim/tests/test_sim.py` runs the tests.
+`python tools/sim_data.py {catalog,maps,splits}` rebuilds the data; maps are gitignored.  `tools/sim_engine.py` uses its
+own write dir and port.  To stop a stuck run, stop only the process whose command line contains `results\simtools`.
 
 ## 7. Test evidence from latest changes
 

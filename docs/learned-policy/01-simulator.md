@@ -1,8 +1,9 @@
 # 01. Simplified Zero-K simulator: implementation plan
 
-Status: plan only. Nothing is built. Engine and game facts are cited `path:line` against
+Status: stage 1 built; **Gate 1 not passed, awaiting a decision** (results in section 8, which overrides older text
+here).  Stage 2 hasn't started.  Engine and game facts are cited `path:line` against
 `C:\Users\Thoma\Documents\sources\RecoilEngine` (RE), `...\Zero-K` (ZK) and this repo (zk-ArenaAI).
-Numbers marked **measured** come from a throwaway Python pass over the repo's data in this session
+Numbers marked **measured** come from a throwaway Python pass over the repo's data while planning
 (method stated where used). Everything else is from reading source, or is marked unverified.
 
 **Reconciled with the other plans:** [00-overview.md](00-overview.md) lists what changed and wins any remaining disagreement.
@@ -44,7 +45,7 @@ likely way RL would find the error. Tags: **E** exact in the sim (formula copied
 | Terrain type multipliers (`tt.kbotSpeed`) | O | `terrain.py` does not expose them; TitanDuel's typemap is unverified. | `MoveMath.cpp:81-104`, `terrain.py` docstring | Low if the map has none; check on TitanDuel |
 | Speed sampled at the centre square only | E | Same as engine: `GroundMoveType.cpp:1300-1305`. | | Low |
 | Raw move | A | ZK replaces a ground `CMD_MOVE` with `CMD_RAW_MOVE` (`cmd_raw_move.lua:555-560, 759-763`): the unit walks straight if `IsPathFree` holds in 16-elmo steps, re-checked every 500 elmos of travel when blocked (`:170, :180, :474-485`). Sim: the same line test on the passability grid, flow field otherwise. FIGHT and ATTACK use the path branch; to be checked in S-M4. | `cmd_raw_move.lua` | **High**: without it paths and arrival times are wrong on open ground |
-| Re-order cost | A | Each new order on a moving unit costs speed, which the user saw as stop-start every 1-2 s. The cause isn't established: `WAIT_FOR_PATH` is compiled out (`GroundMoveType.cpp:85`), while `StartMoving` resets waypoints and requests a path (`:986-1013`), and raw move delays through command replacement. Measure average speed against re-order interval in the S-M4 battery, per move class, and apply that as the sim's penalty. | S-M4 battery | **High**: if free, the policy re-orders constantly and loses speed live |
+| Re-order cost | A | Each new order on a moving unit costs speed, which the user saw as stop-start every 1-2 s. **Measured** in the S-M4 battery (8.3): a plain move stops the unit until its next slow update, while fight orders cost nothing. The sim reproduces this. | S-M4 battery | **High**: if free, the policy re-orders constantly and loses speed live |
 | Pathfinding | A | Engine path is QTPFS for ZK (`modrules.lua:19-22`; the engine default is HAPFS, `ModInfo.cpp:130`; the mapping was not fully traced). Replaced by a Dijkstra flow field per (move class, goal region) on the 16-elmo grid using `speed_field` costs, precomputed per map and shared read-only (4.5). Region gates (`terrain.py:Gate`, `Edge.best_gate`) give the policy's region tokens and a coarse route length for long moves. | `terrain.py:289-300` | **High**: corridor squeezes and route cheating. Detect with 5.3. |
 | Move classes | E | Six classes from `terrain.py:MOVE_CLASSES` (kbot, tank, spider, amph, hover, ship), which match `Zero-K/gamedata/movedefs.lua`. | `movedefs.lua` | Low |
 | Blocking by structures and features | A | Structures are blocked cells; wrecks and rocks are ignored (`terrain.py` docstring: features not modelled). | `terrain.py` docstring | Medium on maps with features; check |
@@ -585,6 +586,252 @@ live-play budget is a separate constraint.
 | Non-determinism | Noise looks like skill | Determinism test (4.4) | Per-game RNG, no shared state |
 | Fog cost | LOS cache gets expensive with 400 units | Measured in M6 | Coarser LOS update cadence if needed |
 
+## 8. Stage 1 results (2026-11-04)
+
+Built: S-M0 to S-M4, in `sim/`, `tools/sim_data.py`, `tools/sim_engine.py`, `tools/simgame/`,
+`tools/sim_battery.py` and `tools/sim_fight_gate.py`.  **Gate 1 did not pass** (rerun after the pathing change in 8.6: unchanged).  Under "Stages and gates" in the
+overview that stops the work for a decision by the user; stage 2 has not started.  Sections 0 to 7 above are
+the plan as written, and this section overrides them where they differ.
+
+Run again with:
+
+```
+python tools/sim_battery.py engine                                # Windows, about 70 s
+wsl: ~/zkml/bin/python tools/sim_battery.py compare               # results/simbattery/
+wsl: ~/zkml/bin/python tools/sim_fight_gate.py --tag gate         # results/simgate/; about 2 min of replay, fightnet 45 s per fold if not saved
+wsl: ~/zkml/bin/python sim/tests/test_sim.py
+```
+
+### 8.1 Gate 1(a): replay of logged fights, fail
+
+44,733 snapshots, 184 games, 8 seeds, no unknown unit names.  95% intervals from 1000 resamples of whole games.
+
+| Score | AUC at 10 s | AUC at 20 s (primary) |
+|---|---|---|
+| Sim, advance | 0.631 [0.621, 0.642] | **0.591** [0.580, 0.604] |
+| Sim, hold | 0.617 [0.607, 0.627] | 0.589 [0.580, 0.599] |
+| fightnet, out of fold | 0.644 [0.632, 0.657] | **0.665** [0.654, 0.677] |
+| Value ratio, tracked | 0.506 [0.494, 0.516] | 0.564 [0.552, 0.576] |
+
+| Difference | 10 s | 20 s |
+|---|---|---|
+| advance - fightnet | -0.013 [-0.030, +0.005] | **-0.074 [-0.092, -0.053]** |
+| advance - value | +0.125 [+0.110, +0.141] | **+0.027 [+0.011, +0.045]** |
+
+The pass needs both 20 s differences above 0.  The sim beats counting value and loses to fightnet.  At 10 s it
+ties fightnet.  Subsets at 20 s, advance / fightnet / value:
+
+| Subset | Share | AUCs | advance - fightnet |
+|---|---|---|---|
+| No retreat flag | 86% | 0.595 / 0.662 / 0.564 | -0.068 [-0.088, -0.046] |
+| No blip or memory | 40.8% | 0.598 / 0.656 / 0.498 | -0.058 [-0.075, -0.042] |
+| Both | 35.6% | 0.598 / 0.657 / 0.494 | -0.059 [-0.077, -0.041] |
+
+So removing retreats, blips and memory doesn't close the gap.
+
+What the misses look like (advance, 20 s):
+
+- Mean loss per snapshot: predicted 358 ours, 302 theirs; measured 240 and 136.
+- In snapshots predicted to lose 0.4 to 1.0 of the tracked value, the sim predicts 0.855 of ours and measures 0.464
+  (n = 23,366), and 0.908 of theirs against 0.393 (n = 28,013).  **Sim fights go much closer to the death than real
+  ones do.**
+- Sign agreement on who loses more is 0.585 (hold 0.420).  Spearman on loss size is 0.593 ours and 0.592 theirs.
+
+Possible causes, none tested: real units retreat, disengage or get ordered away, while replayed units keep
+fighting under a fixed behaviour; reinforcements enter real fights and not replayed ones; enemy losses out of view
+aren't in the label; targeting or damage is wrong in ways the duels don't show.  The 20 s score falling below the
+10 s score fits a replay whose units stop resembling what real units did, but doesn't prove it.
+
+fightnet's out-of-fold 0.665 is above the 0.59 to 0.62 the plan assumed, which came from single
+splits.  It is also a statistical model trained on the same kind of labels, so it learns how the
+bot's fights tend to go, including retreats.  The replay has to get there from unit stats alone.
+
+The full gate ran once, after the battery fixes.  A 2,000-snapshot smoke test had been seen earlier; every sim
+change after it came from engine evidence.  **Don't tune the sim against these snapshots**: they would stop being a
+test.
+
+Data notes: 1,316 of 812,071 logged entities have negative health (lowest -5.5; the cause isn't traced).  They put
+570 tracked entities in 550 snapshots and made 3 value scores non-finite.  Clamping changes no table above at three
+decimals, and `sim_fight_gate.py` now clamps at load.  The published numbers come from the run before the clamp.
+
+### 8.2 Gate 1(b): engine battery, 108 of 113
+
+165 scenarios on Titan Duel 2.2; duels are repeated 5 times.
+
+| Check | Result | Note |
+|---|---|---|
+| Straight line | 4/4 | |
+| Turn-around | 4/4 | |
+| Duel time to kill | 8/8 | see deviation 6 |
+| Blast | 9/9 | |
+| Slope speed | 8/8 | |
+| Re-order, per class and rate | 64/64 | |
+| Path length around a wall | 7/8 | route/tank/1: engine 3738, sim 2980, a long detour |
+| Blocked-move walk frames | 4/8 | route/kbot/1 225.7 vs 252.8; route/tank/1 1314 vs 1015; route/spider/0 708 vs 760; route/spider/1 572 vs 697 |
+
+Sim speed along the engine's own paths matches in every slope bucket, so the walk-time misses come from which route
+is taken, not from the speed formula.  Unexplained: in 2 of 5 repeats of the cloakassault against vehassault duel, the
+Knight does no damage to the Ravager for 700 frames.
+
+### 8.3 Measured engine facts
+
+Plain move orders cost speed, and fight orders don't.  **A CMD_MOVE stops the unit until its next slow update**
+(`UNIT_SLOWUPDATE_RATE = 15`, `rts/Sim/Misc/GlobalConstants.h`); braking starts about 2 frames after the order and
+walking restarts at the slow update (absolute frame %15 == 4 in 106 of 106 samples, in a small game).  FIGHT orders
+kept 1.00 of the distance at every rate, even with a shifting goal.  This settles the open question in row "Re-order
+cost" of 1.1.  `bots/zkbot/smoothorders.py`'s docstring says a unit slows "while it waits for a path"; the measurement
+says otherwise.
+
+Share of the no-reorder distance kept, ORDER_FRAME = 5:
+
+| Class | 0.5 s | 1 s | 2 s | 4 s |
+|---|---|---|---|---|
+| kbot | 0.77 | 0.89 | 0.95 | 0.98 |
+| tank | 0.26 | 0.65 | 0.82 | 0.93 |
+| spider | 0.34 | 0.68 | 0.84 | 0.94 |
+| hover | 0.10 | 0.55 | 0.77 | 0.91 |
+
+The numbers depend on the order's phase against the slow update (another phase gave tank 0.01/0.52/0.76/0.90, kbot
+0.51/0.76/0.88/0.95).  A goal shifted by 60 elmos behaves like the same goal.  The sim reproduces the class differences with one
+delay rule and each class's acceleration.
+
+Other corrections to the plan:
+
+- Speed on a slope is directional (`CMoveMath::GetPosSpeedMod`, `GroundMoveMath.cpp:48`), and descending isn't
+  slowed.
+- Spray scatters sideways only.
+- Burning ground and burn damage matter in duels (`weapon_area_damage.lua`, `unit_is_on_fire.lua`), so both are
+  in the sim, along with script burst weapons (`script_reload`, `script_burst`).
+- Units stop up to about 50 elmos short of a move goal.
+- Level 1 trainer commanders have only the first weapon listed: heavy machine gun, or light particle beam for support.
+
+### 8.4 Budget: missed for now
+
+Single thread, 400 units, 200 ticks, mixed armies:
+
+| Scenario | Flat map | Titan Duel |
+|---|---|---|
+| Hold | 57 µs | 70 µs |
+| Fight orders, one shared goal per side | 151 µs | **423 µs** |
+| Advance, each unit to its nearest enemy | 194 µs | **17,721 µs** |
+
+`test_budget_400_units` in `test_sim.py` reports about 1250 µs: advance, with units spread over the whole map.  Plan: 325
+to 370 µs.  No optimisation has been done.  These are single-thread numbers, and the plan's figure was with 16 busy threads,
+so a loaded machine may be slower.
+
+**Where it goes (2026-11-05):** building distance fields at run time.  `tools/sim_profile.py` on a `-DZKSIM_PROFILE=ON` build,
+200 ticks (its armies differ slightly from the table above, and the timers add some cost of their own):
+
+| Scenario | Total µs/tick | Dijkstra | Everything else | Dijkstra with a cache of 256 fields |
+|---|---|---|---|---|
+| Fight, one goal per side | 481 | 260 | 221 | 261 |
+| Fight, 9 group goals | 128,637 | 128,317 | 320 | 727 (977 total) |
+| Fight, every unit its own goal | 327,416 | 327,031 | 385 | 4,179 (4,461 total) |
+| Advance, two armies | 9,693 | 9,411 | 282 | 6,032 (6,309 total) |
+| Advance, whole map | 1,343 | 1,208 | 135 | 1,102 (1,230 total) |
+
+One build is about 4.6 ms: Dijkstra with a binary heap over a window of up to 257 x 257 cells.  With 9 group goals and 4 move classes, 36 fields compete
+for the 16 in `FIELD_CACHE`, so the cache thrashes: 28 builds per tick.  A larger cache gives identical runs, since results depend
+only on map, class and goal.
+
+The rest is within budget.  In the first scenario: movement frames 43, targeting 38, `line_free` 35, separation 20,
+lookahead 17, all other phases under 7 each.
+
+So self-play doesn't need faster combat code; it needs goals from a bounded set with fields built ahead of time, as 4.5 planned
+(region centres per class, shared read-only between threads).  Replay's per-unit goals can stay slow.  Section 8.6 has what
+was built, and these numbers are from before it.
+
+### 8.5 Deviations from section 5, all chosen before seeing the full gate
+
+1. Units start with a random weapon phase, not "no cooldown", since a logged fight is already under way.
+2. The score uses mean losses over the seeds.
+3. The label uses the logged `out` as it stands.
+4. The battery lane is a levelled patch of Titan Duel (x 64-2064, z 576-1088, height 175.5), so slope doesn't enter
+   the speed and order checks.
+5. Battery metrics start when the unit leaves the start, and turning uses the half-turn rate, to remove slow-update phase.
+6. Duel limit is max(10%, one 5-frame tick): a sim death is only seen at a tick's end, so short duels can't be closer.
+7. Orders go on the tick grid, at frame 5.
+8. Fire damage, sideways scatter and script bursts were added after the battery showed them missing.
+
+### 8.6 Pathing: segment centres and a next-hop table (2026-11-05)
+
+This replaces the per-goal fields that 8.4 profiled.  A run does no pathfinding: `tools/sim_data.py` works out routes when it
+exports a map (`sim/py/zknav.py`), and they load with it.
+
+**Segments.**  Start from a connected piece of a `terrain.py` region per move class (`fine_label`), with pockets under 64 cells
+joined to a neighbour.  Split each one until its centres see 90% of it, or into 4 parts at most.  Leftover tiles go to the nearest
+centre that sees them, even another segment's, and otherwise to the nearest in their own.  Parts under 16 cells join a neighbour.
+Titan Duel: 24 regions, segments kbot 30, tank 53, spider 25, amph 30, hover 53.  Carabanossi: 76 regions, 113, 182, 81, 113, 182.
+
+**Routes.**  Each pair of touching segments gets a gate on the far side, chosen so both centres see it where possible.  A next-hop
+table gives the gate to take from any segment towards any other.  Rules in `World::waypoint`:
+
+1. Line to the goal clear: walk straight.
+2. Otherwise look up to 4 segments along the route and aim at the farthest gate or centre in sight.
+3. Nothing in sight: aim at the segment's own centre.  Within 64 elmos of it, aim at the gate or goal anyway, since a turning circle can
+   keep a unit from getting closer.
+4. Stuck: a unit that covers under 20% of its top-speed distance in 3 s aims straight at the next gate or the goal, alternating, for 3 s, doubling
+   with each attempt up to 24 s, and sliding along what blocks it.  Attempts reset when it enters a new segment.
+
+**Memory**, in the C++ map:
+
+| Map | One float per tile per field (before) | Label grid | Routes |
+|---|---|---|---|
+| Titan Duel | 57 MB, plus up to 68 MB per thread | 1.2 MB | 0.05 MB |
+| Carabanossi | 1.2 GB, plus up to 68 MB per thread | 8.3 MB | 0.43 MB |
+
+The grid is one short per tile per class, so a unit knows its segment.
+
+**Speed**, µs per tick (`tools/sim_profile.py`, 400 units, 200 ticks).  There are no builds, so this is also the cold-start cost.
+
+| Scenario | Original | Per-segment fields, total / long run | Now |
+|---|---|---|---|
+| Fight, one goal per side | 481 | 695 / 243 | 219 |
+| Fight, 9 group goals | 128,637 | 2,106 / 270 | 247 |
+| Fight, every unit its own goal | 327,416 | 2,797 / 263 | 234 |
+| Advance, two armies | 9,693 | 1,039 / 273 | 246 |
+| Advance, whole map | 1,343 | 636 / 132 | 122 |
+
+The fight replay takes 32 s, down from 98 s originally.  With the timers on, `move.waypoint` is about 30% of a tick, and targeting 18%.
+
+**Arrival** (`tools/sim_segment_check.py`, 300 reachable goals per class, within 4x the straight walk), same / other segment:
+
+| Class | Titan Duel, now | Titan Duel, fields | Carabanossi, now | Carabanossi, fields |
+|---|---|---|---|---|
+| kbot | 99.3% / 96.0% | 99.3% / 100% | 98.7% / 91.3% | 96.0% / 93.3% |
+| tank | 97.7% / 91.3% | 98.7% / 98.7% | 98.0% / 91.0% | 97.7% / 96.3% |
+| spider | 100% / 100% | 100% / 100% | 100% / 98.3% | 98.3% / 99.0% |
+| hover | 98.0% / 93.0% | 98.7% / 97.7% | 98.7% / 93.0% | 94.7% / 93.7% |
+
+**The remaining misses are mostly stuck units, not slow routes.**  Of 200 Titan Duel tank goals across segments, 183 arrived on time, 1 late, and 16
+never arrived within 16x: 10 stopped, 5 wandered, 1 circled.  For kbot, 197 arrived on time and 3 stopped.  That's with the rule above; before it,
+tank was 182 on time with 18 failing, and kbot 194 with 5.  Tank and hover are the weak classes.  A policy could learn around this, so it needs watching in self-play.
+
+**Engine battery: 105/113.**  Misses: route/tank/1 (never arrives; length 1626 against 3738), route/spider/0 (1228 against 1317, 811 against
+708 frames), route/spider/1 (675 against 572 frames), route/hover/0 (1362 against 953, 274 against 195 frames), route/hover/1 (950 against 902).
+
+**Gate 1(a) rerun (`--tag gate-stuck`): unchanged, still fail.**  20 s: advance 0.591, fightnet 0.665, value 0.564.  Advance minus
+fightnet -0.075 [-0.092, -0.055]; minus value +0.027 [+0.010, +0.044].  The limit was chosen before this run, and the score hasn't moved
+through three pathing designs, so pathing isn't what this gate responds to.
+
+**Limits swept**, Titan Duel (`--max-parts`, `--seen-share`, `--height-band`, `--slope-band`).  Figures for tank, measured before the stuck rule; after the
+visible-leftover and turning-circle fixes, except the first row:
+
+| Limit | Segments, kbot / tank | Battery | Tank arrival, same / other |
+|---|---|---|---|
+| One centre per segment, before the fixes | 24 / 34 | 103 | 84.0% / 82.0% |
+| 2 parts, 80% | 26 / 41 | 104 | 95.7% / 90.3% |
+| **4 parts, 90% (chosen)** | 30 / 53 | 105 | 97.7% / 90.3% |
+| 8 parts, 95% | 34 / 57 | 104 | 99.0% / 93.0% |
+| 16 parts, 98% | 43 / 73 | 104 | 99.7% / 89.3% |
+| Bands 80 / 0.2, 32 parts, 95% | 11 / 32 | 99 | 98.3% / 74.3% |
+
+An exact split (no limit) did not finish within 500 s for 2 maps and 3 settings, so it was dropped.  Loose bands give the fewest segments,
+but the worst routes and arrival, so they stay off.  Differences of 1-3 points are within this test's noise at 300 goals.
+
+**Tried and replaced:** straight-only inside a segment (14-25% of kbot, tank and hover goals never arrived, battery 104); per-segment
+whole-map fields plus a cached goal field (better arrival, battery 106, but 1.2 GB on Carabanossi and run-time builds).
+
 ## Objections to the shared contract
 
 All seven are accepted in the overview.
@@ -642,4 +889,4 @@ From 03-training.md:
 - The value-ratio AUC baseline (section 5.1) was computed in this session on the logs (measured); a few
   snapshots gave non-finite scores that I did not trace.
 - LOS cost estimate (section 4.7): arithmetic, not measured.
-- No engine run, sim build or game was done. No files in the repo were changed other than this plan.
+- This list and the plan above predate the build; section 8 records what the build measured.
