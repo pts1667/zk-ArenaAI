@@ -10,13 +10,13 @@ namespace zk::prof {
 // Dots show nesting: a child's time is also in its parent's.
 enum Phase {
     GRID, NEAREST, TARGETS, FIRE, SHOTS, BURN, DEATHS, STATUS,
-    MOVE, MOVE_WANT, MOVE_WAYPOINT, WAYPOINT_LINE, WAYPOINT_ROUTE, MOVE_FRAMES, MOVE_SEPARATE,
+    MOVE, MOVE_WANT, MOVE_WAYPOINT, WAYPOINT_LINE, WAYPOINT_ROUTE, MOVE_FRAMES, MOVE_SEPARATE, FOG,
     PHASE_COUNT
 };
 
 inline constexpr const char* NAMES[PHASE_COUNT] = {
     "grid", "nearest", "targets", "fire", "shots", "burn", "deaths", "status",
-    "move", "move.wants_to_walk", "move.waypoint", "move.waypoint.goal_line", "move.waypoint.route", "move.frames", "move.separate",
+    "move", "move.wants_to_walk", "move.waypoint", "move.waypoint.goal_line", "move.waypoint.route", "move.frames", "move.separate", "fog",
 };
 
 inline thread_local long long nanos[PHASE_COUNT];

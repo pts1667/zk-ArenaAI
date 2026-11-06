@@ -21,6 +21,7 @@ from .mapdata import MapData
 from .military import MilitaryMixin
 from .models import Task, UnitInfo
 from .params import flag
+from .policy.runtime import PolicyMixin
 from .production import ProductionMixin
 from .scouting import ScoutingMixin
 from .strategy import StrategyMixin
@@ -84,6 +85,7 @@ class Brain(
     EngagementLogMixin,
     FightLogMixin,
     StateLogMixin,
+    PolicyMixin,
     MilitaryMixin,
 ):
     def __init__(self, client: Client, team_id: int, log):
@@ -182,6 +184,7 @@ class Brain(
             self.block_setting = (max(1, _f), max(1, _c))
         except ValueError:
             self.block_setting = (6, 10)
+        self.policy_init()
         self.last_combat_frame = -10**9
         self.last_spot_frame = -10**9
         self.last_threat_frame = -10**9
@@ -301,6 +304,7 @@ class Brain(
         self.frame = int(obs.get("frame") or 0)
         self.client.frame = self.frame
         self.store_economy(obs)
+        self.policy_events(obs)
         # Events arrive with every observation; consume them before the
         # stride return so damage/destroyed events are never lost.
         if self.units:
@@ -375,6 +379,7 @@ class Brain(
         self.engagement_step()
         self.fightlog_step()
         self.statelog_step()
+        self.policy_step(obs)
 
         if self.frame - self.last_query_frame >= 60:
             self.last_query_frame = self.frame

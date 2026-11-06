@@ -2,7 +2,8 @@
 
   python tools/sim_engine.py dump           # writes results/simtools/simdump (engine, 20-45 s)
   python tools/sim_data.py catalog          # sim/data/catalog.json, priority.npz; cross-checks
-  python tools/sim_data.py maps "TitanDuel 2.2" "Carabanossi 1.0"     # sim/data/maps/*.npz
+  python tools/sim_data.py maps "TitanDuel 2.2" "Carabanossi 1.0"     # sim/data/maps/*.npz: the gate's
+  python tools/sim_data.py maps "Agalta v1.0" "Faultline v1.0" "FrostyCove v1.13" "Red Comet Remake 1.7"     # and training's: policy_sim_env.py
   python tools/sim_data.py splits           # tools/splits.json: game folds for the stage 1 gate
 
 Runs in Windows Python: map reading needs 7-Zip.  Everything is converted here to frames and
@@ -45,9 +46,14 @@ SM_TANK, SM_KBOT, SM_HOVER, SM_SHIP = 0, 1, 2, 3
 KIND_INSTANT, KIND_PROJECTILE, KIND_GUIDED, KIND_SHIELD = 0, 1, 2, 3
 INSTANT_TYPES = {"BeamLaser", "LightningCannon", "Melee"}
 MISSILE_TYPES = {"MissileLauncher", "StarburstLauncher", "TorpedoLauncher"}
+W_DISARM_ONLY, W_MANUAL, W_STOCKPILE, W_UNMODELLED = 256, 512, 1024, 2048
 W_IMPACT_ONLY, W_TURRET, W_PARALYZER, W_NO_SELF_DAMAGE, W_NO_AUTO_TARGET, W_NO_FRIENDLY_FIRE, W_SLOW_ONLY, W_AREA_SLOWS = 1, 2, 4, 8, 16, 32, 64, 128
 U_MOBILE, U_AIR, U_ARMED, U_FIREPROOF = 1, 2, 4, 8
 DEFAULT_BURN_FRAMES = 450.0          # fire_defs.lua
+SLOW_DECLINE_PER_FRAME = 0.04 / FRAMES   # timeslow_defs.lua DEGRADE_FACTOR
+# Weapons that would rather hit something not yet disarmed: the penalty, and the status above which
+# it counts (target_priority_defs.lua disarmPenaltyDefs, disarmWeaponTimeDefs after its conversion).
+DISARM_TARGETING = {"shieldarty_emp_rocket": (200.0, 0.4), "shipscout_missile": (10.0, 0.33)}
 DEFAULT_BURN_RANDOM = 0.3
 DEFAULT_BURN_DAMAGE = 0.5
 SHIELD_ARMOR = "4"
@@ -93,15 +99,29 @@ def _weapon_record(w: dict, velocity: tuple[float, float, float], alpha: float) 
         salvo = _custom(w, "script_burst", 1.0)
         salvo_delay_s = reload_s
         reload_s = _custom(w, "script_reload")
-    flags = W_TURRET if w.get("turret") else 0
+    # Starburst missiles leave straight up, so the launcher needn't face the target.
+    starburst = w["type"] == "StarburstLauncher"
+    flags = W_TURRET if w.get("turret") or starburst else 0
     if w.get("impactOnly"):
         flags |= W_IMPACT_ONLY
-    disarm_only = "disarmdamageonly" in custom
-    if w.get("paralyzer") or disarm_only:
-        flags |= W_PARALYZER          # disarm doesn't stop movement in the game; rare enough for now
+    if w.get("paralyzer"):
+        flags |= W_PARALYZER
+    # A disarm weapon has the multiplier; "only" can be there and still be 0 (shipscout_missile).
+    disarm_mult = _custom(w, "disarmdamagemult")
+    if disarm_mult > 0.0 and _custom(w, "disarmdamageonly") > 0.0:
+        flags |= W_DISARM_ONLY
+    disarm_penalty, disarm_time = DISARM_TARGETING.get(w["name"], (0.0, 0.0))
     if w.get("noSelfDamage"):
         flags |= W_NO_SELF_DAMAGE
     if w.get("noAutoTarget") or w.get("manualFire"):
+        flags |= W_NO_AUTO_TARGET
+    if w.get("manualFire"):
+        flags |= W_MANUAL
+    if w.get("stockpile"):
+        flags |= W_STOCKPILE
+    # A script's AimWeapon returns false for these, so they never fire (amphfloater.lua).  The harmless
+    # ones stay: commanders aim with them.
+    if "fake_weapon" in custom and max(float(damages[str(i)]) for i in range(5)) >= 1.0:
         flags |= W_NO_AUTO_TARGET
     if "nofriendlyfire" in custom:
         flags |= W_NO_FRIENDLY_FIRE
@@ -114,6 +134,19 @@ def _weapon_record(w: dict, velocity: tuple[float, float, float], alpha: float) 
     on_fire = "setunitsonfire" in custom
     fire_starter = float(w.get("fireStarter") or 0.0)
     damage = [float(damages[str(i)]) for i in range(5)]
+    # What these are for isn't in the sim, so no army may rely on them: capture (a capture weapon does
+    # no health damage, unit_capture.lua), spawned units, pushing and pulling, throwing.
+    if {"is_capture", "spawns_name", "impulse", "thower_weapon", "area_damage_is_impulse"} & custom.keys():
+        flags |= W_UNMODELLED
+    if "is_capture" in custom:
+        damage = [0.0] * 5
+    # Slow: timeslow_defs.lua.  Slow-only weapons default to 1; an absolute amount scales with the damage.
+    raw_damage = _custom(w, "raw_damage")
+    slow_factor = _custom(w, "timeslow_damagefactor", 1.0 if "timeslow_onlyslow" in custom else 0.0)
+    if "timeslow_damage" in custom and raw_damage > 0.0:
+        slow_factor = _custom(w, "timeslow_damage") / raw_damage
+    # The Felon's gun fires from its shield's charge (shieldfelon.lua).  On shields this is an energy cost.
+    shield_cost = _custom(w, "shield_drain") if not w.get("isShield") else 0.0
     if "shield_damage" in custom:
         damage[int(SHIELD_ARMOR)] = _custom(w, "shield_damage")
     para_seconds = _custom(w, "emp_paratime", _custom(w, "disarmtimer", float(damages.get("paralyzeDamageTime") or 0.0)))
@@ -128,7 +161,13 @@ def _weapon_record(w: dict, velocity: tuple[float, float, float], alpha: float) 
         "edge": w["edgeEffectiveness"], "height_mod": w["heightMod"],
         "spray": w["sprayAngle"], "accuracy": w["accuracy"], "moving_accuracy": w.get("movingAccuracy") or 0.0,
         "para_seconds": para_seconds, "extra_para": _custom(w, "extra_damage"),
-        "slow_factor": _custom(w, "timeslow_damagefactor"),
+        "slow_factor": slow_factor,
+        "disarm_mult": disarm_mult, "disarm_penalty": disarm_penalty, "disarm_time": disarm_time,
+        "overstun_seconds": _custom(w, "overstun_time"),
+        "overslow": _custom(w, "timeslow_overslow_frames") * SLOW_DECLINE_PER_FRAME,
+        "shield_cost": shield_cost,
+        "climb_frames": float(w.get("uptime") or 0.0) * FRAMES if starburst else 0.0,
+        "dyn_exp": float(w.get("dynDamageExp") or 0.0), "dyn_range": float(w.get("dynDamageRange") or 0.0),
         "shield_power": w["shieldPower"], "shield_regen": _custom(w, "shield_rate") / FRAMES,
         "shield_radius": w["shieldRadius"],
         "vel_threshold": velocity[0], "vel_base": velocity[1], "vel_scale": velocity[2], "alpha_damage": alpha,
@@ -212,7 +251,8 @@ def _unit_record(u: dict, weapon_index: dict[str, int], weapons_by_id: dict[int,
     slow_turn = u.get("turnInPlaceSpeedLimit") or speed
     explosion = u.get("deathExplosion") or ""
     flags = (U_MOBILE if mobile else 0) | (U_AIR if air else 0) | (U_ARMED if armed else 0)
-    if (u.get("customParams") or {}).get("fireproof") == "1":
+    custom = u.get("customParams") or {}
+    if custom.get("fireproof") == "1":
         flags |= U_FIREPROOF
     return {
         "name": u["name"], "cost": u["cost"], "hp": u["health"], "speed": speed,
@@ -220,6 +260,11 @@ def _unit_record(u: dict, weapon_index: dict[str, int], weapons_by_id: dict[int,
         "footprint_radius": footprint, "hit_radius": hit_radius,
         "armored_mult": u.get("armoredMultiple", 1.0), "auto_heal": (u.get("autoHeal") or 0.0) / SLOW_UPDATE_FRAMES,
         "max_range": max_range, "armor_class": int(u["armorType"]), "move_class": _move_class(u),
+        "def_id": int(u["id"]), "los_radius": u.get("losRadius", 0.0), "air_los_radius": u.get("airLosRadius", 0.0),
+        "radar_radius": u.get("radarRadius", 0.0), "los_height": u.get("losHeight", 0.0),
+        # Costs nothing until the sim has an economy (unit_stockpile.lua: seconds, then frames).
+        "stockpile_frames": float(custom.get("stockpiletime") or 0.0) * FRAMES,
+        "reload_move_penalty": float(custom.get("reload_move_penalty") or 1.0),
         "category": _mask(u.get("modCategories"), categories), "flags": flags,
         "explode_weapon": weapon_index.get(explosion.lower(), -1),
         "mount_weapon": [weapon_index[n] for n, _ in picked],
@@ -310,6 +355,8 @@ def catalog() -> None:
     DATA.mkdir(parents=True, exist_ok=True)
     (DATA / "catalog.json").write_text(json.dumps({"units": units, "weapons": weapons}), "utf8")
     np.savez_compressed(DATA / "priority.npz", priority=table)
+    moves = {u["name"]: MOVE_CLASS_NAMES[u["move_class"]] for u in units if u["move_class"] >= 0}
+    (ROOT / "bots/zkbot/data/moveclass.json").write_text(json.dumps(moves, indent=0, sort_keys=True), "utf8")
     print(f"{len(units)} units, {len(weapons)} weapons, priority {table.shape}; more than {MAX_MOUNTS} mounts: {truncated}")
     bad = _cross_check(units, weapons)
     print(f"cross-check against bots/zkbot/data: {bad} mismatches")
@@ -429,6 +476,8 @@ def maps(names: list[str], height_band: float = HEIGHT_BAND, slope_band: float =
         routes = {f"class{c}_{k}": v for c, (_, r) in enumerate(built) for k, v in r.items()}
         np.savez_compressed(out / f"{_slug(name)}.npz", height=h16.astype(np.float32), speed=speed.astype(np.float32),
                             slope=slope, slope_mod=slope_mod, segments=segments, cell=16.0, name=name, **routes)
+        from zkbot.policy import bundle as policy_bundle
+        policy_bundle.from_terrain(terrain).save(out / f"{_slug(name)}.bundle.npz")
         print(f"  {len(terrain.regions)} regions; segments per class " + " ".join(f"{c} {len(r['centres'])}" for c, (_, r) in zip(MOVE_CLASS_NAMES, built)))
         print(f"{name}: {cols}x{rows}, classes {MOVE_CLASS_NAMES}, passable " +
               " ".join(f"{(s > 0).mean():.2f}" for s in speed))

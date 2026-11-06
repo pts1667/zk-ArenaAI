@@ -66,6 +66,10 @@ end
 
 local function begin(scenario)
 	units = {byKey = {}, order = {}, ids = {}}
+	local pool = scenario.pool
+	if pool then
+		Spring.LevelHeightMap(pool.x1, pool.z1, pool.x2, pool.z2, pool.h)
+	end
 	for _, spec in ipairs(scenario.units) do
 		local u = Spring.CreateUnit(spec.unit, spec.x, ground(spec.x, spec.z), spec.z, spec.facing or 0, spec.team)
 		if u then
@@ -79,6 +83,9 @@ local function begin(scenario)
 			if spec.hp then
 				Spring.SetUnitMaxHealth(u, spec.hp)
 				Spring.SetUnitHealth(u, spec.hp)
+			end
+			if spec.stock then
+				Spring.SetUnitStockpile(u, spec.stock, spec.queue or 0)
 			end
 		else
 			Spring.Echo("SIMERROR," .. scenario.name .. ",cannot create " .. spec.unit)
@@ -109,6 +116,10 @@ local function give(scenario, rel)
 					Spring.GiveOrderToUnit(u, CMD.FIGHT, {o.x, ground(o.x, o.z), o.z}, 0)
 				elseif o.c == "kill" then
 					Spring.DestroyUnit(u, false, false)
+				elseif o.c == "attack" then
+					Spring.GiveOrderToUnit(u, CMD.ATTACK, {units.byKey[o.t]}, 0)
+				elseif o.c == "manual" then
+					Spring.GiveOrderToUnit(u, CMD.MANUALFIRE, {units.byKey[o.t]}, 0)
 				end
 			end
 		end
@@ -119,15 +130,19 @@ local TWO_PI_OVER_CIRCLE = 2 * math.pi / 65536
 
 local function log(scenario, rel)
 	local anyDead = false
+	local frameNow = Spring.GetGameFrame()
 	for _, key in ipairs(units.order) do
 		local u = units.byKey[key]
 		if Spring.ValidUnitID(u) and not Spring.GetUnitIsDead(u) then
 			if rel % scenario.log == 0 then
 				local x, _, z = Spring.GetUnitBasePosition(u)
 				local _, _, _, speed = Spring.GetUnitVelocity(u)
-				local hp = Spring.GetUnitHealth(u)
-				Spring.Echo(string.format("SIMLOG,%d,%d,%s,%.2f,%.2f,%.4f,%.3f,%.2f", index, rel, key, x, z,
-					Spring.GetUnitHeading(u) * TWO_PI_OVER_CIRCLE, speed or 0, hp))
+				local hp, maxHp, paralyze = Spring.GetUnitHealth(u)
+				local disarmFrame = Spring.GetUnitRulesParam(u, "disarmframe") or -1
+				-- As the sim's level: 1 is the threshold, 1200 frames to fall by 1.
+				local disarm = disarmFrame > frameNow and (disarmFrame - frameNow) / 1200 or 0
+				Spring.Echo(string.format("SIMLOG,%d,%d,%s,%.2f,%.2f,%.4f,%.3f,%.2f,%.4f,%.4f", index, rel, key, x, z,
+					Spring.GetUnitHeading(u) * TWO_PI_OVER_CIRCLE, speed or 0, hp, paralyze / maxHp, disarm))
 			end
 		else
 			anyDead = true

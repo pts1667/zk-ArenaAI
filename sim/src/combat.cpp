@@ -14,6 +14,12 @@ namespace {
 constexpr float BAD_CATEGORY = 1000.0f;   // tried only if nothing better is in range (Weapon.cpp:720-776)
 constexpr float DOOMED_PRIORITY = 60.0f;  // pending shots already kill it
 constexpr float STUN_PRIORITY = 2.0f;
+// A disarmed target's status, which counts double as a stunned one's does (unit_target_priority.lua).
+constexpr float DISARM_STATUS = 0.3f;
+constexpr float DISARM_STATUS_ADD = 0.2f;
+constexpr float DISARM_STATUS_FRAMES = 1500.0f;
+constexpr float DISARM_DECLINE_FRAMES = 1200.0f;
+constexpr int STUN_ATTACKERS_ALLOWED = 3;
 constexpr float UNBUILT_PRIORITY = 15.0f;
 constexpr float UNFINISHED_PRIORITY = 3.0f;
 constexpr float ARMORED_PRIORITY = 2.0f;
@@ -23,7 +29,6 @@ constexpr float STOPPED_SPEED = 0.05f;
 constexpr float SEARCH_MARGIN = 80.0f;    // targets near the edge of a grid query
 constexpr float BLAST_MARGIN = 80.0f;     // the largest hit radius, near enough
 constexpr float SHIELD_SEARCH = 450.0f;   // the largest shield radius, near enough
-constexpr float MAX_SLOW = 0.5f;
 constexpr float PARA_DECLINE_SECONDS = 40.0f;
 constexpr float FORWARD_COS = 0.96f;      // a default tolerance of 3000 heading units
 constexpr float FRAMES_PER_SECOND = 30.0f;
@@ -46,15 +51,40 @@ float ball_axis(Rng& rng) {
     return ox;
 }
 
+// Stun and disarm work alike: 1 is the threshold, the level declines over 40 s, and a weapon can't take
+// it past its own time, or by overstun past what's left if that is close to it.
+float stun_level(float level, float added, float seconds, float overstun) {
+    const float left = (level - 1.0f) * PARA_DECLINE_SECONDS;
+    const float longest = std::max(seconds, std::min(seconds, left) + overstun);
+    return std::max(level, std::min(1.0f + longest / PARA_DECLINE_SECONDS, level + added));
+}
+
+// Share of a shot's damage left at a distance (DamageArray.cpp).  Heat rays fade to nothing at range.
+float range_falloff(const zk_weapon_rec& w, float dist) {
+    if (w.dyn_exp <= 0.0f || w.dyn_range <= 0.0f) return 1.0f;
+    return 1.0f - std::pow(std::min(w.dyn_range, dist) / w.dyn_range, w.dyn_exp);
+}
+
+bool hurts_health(const zk_weapon_rec& w) { return !(w.flags & (ZK_W_PARALYZER | ZK_W_SLOW_ONLY | ZK_W_DISARM_ONLY)); }
+
 int flight_frames(const zk_weapon_rec& w, float dist) {
     if (w.kind == ZK_WEAPON_INSTANT || w.speed <= 0.0f) return 0;
-    const float v = w.start_speed;
-    if (w.accel <= 0.0f || v >= w.speed) return int(std::ceil(dist / w.speed));
+    float v = w.start_speed;
+    int climb = 0;
+    if (w.climb_frames > 0.0f) {
+        // Up first, then a straight line from up there, already moving.
+        const float top = std::min(w.speed, v + w.accel * w.climb_frames);
+        const float height = (v + top) * 0.5f * w.climb_frames;
+        climb = int(w.climb_frames);
+        dist = std::hypot(dist, height);
+        v = top;
+    }
+    if (w.accel <= 0.0f || v >= w.speed) return climb + int(std::ceil(dist / w.speed));
     // Missiles accelerate up to their top speed.
     const float t_acc = (w.speed - v) / w.accel;
     const float d_acc = v * t_acc + 0.5f * w.accel * t_acc * t_acc;
-    if (dist <= d_acc) return int(std::ceil((std::sqrt(v * v + 2.0f * w.accel * dist) - v) / w.accel));
-    return int(std::ceil(t_acc + (dist - d_acc) / w.speed));
+    if (dist <= d_acc) return climb + int(std::ceil((std::sqrt(v * v + 2.0f * w.accel * dist) - v) / w.accel));
+    return climb + int(std::ceil(t_acc + (dist - d_acc) / w.speed));
 }
 }  // namespace
 
@@ -73,7 +103,7 @@ bool World::faces(int u, const zk_weapon_rec& w, int t) const {
     return (std::sin(heading[size_t(u)]) * dx + std::cos(heading[size_t(u)]) * dz) / dist >= FORWARD_COS;
 }
 
-float World::target_score(int u, int slot, int t) const {
+float World::target_score(int u, int slot, int t) {
     const auto& d = type_of(u);
     const auto& w = cat->weapons[size_t(d.mount_weapon[slot])];
     const auto& td = type_of(t);
@@ -82,7 +112,21 @@ float World::target_score(int u, int slot, int t) const {
     if (td.category & d.mount_bad[slot]) p += BAD_CATEGORY;
     const float v = speed[size_t(t)];
     if (w.vel_threshold > 0.0f && v > w.vel_threshold) p += w.vel_base + v * w.vel_scale;
-    if (stunned(t)) p += STUN_PRIORITY;
+    // 1 for stunned, less for a unit that has only lost its weapons.
+    const float status = stunned(t) ? 1.0f
+                         : disarmed(t) ? DISARM_STATUS + std::min(DISARM_STATUS_ADD, (disarm[size_t(t)] - 1.0f) * DISARM_DECLINE_FRAMES / DISARM_STATUS_FRAMES)
+                                       : 0.0f;
+    p += status * STUN_PRIORITY;
+    if (w.disarm_penalty > 0.0f) {
+        // A few may share a target; the rest look for one that can still shoot.
+        p += w.disarm_penalty;
+        if (build[size_t(t)] >= 1.0f && stun_attackers[size_t(t)] < STUN_ATTACKERS_ALLOWED) {
+            ++stun_attackers[size_t(t)];
+            p -= status * STUN_PRIORITY;
+        } else if (status > w.disarm_time) {
+            p += w.disarm_penalty;
+        }
+    }
     if (build[size_t(t)] < 1.0f) p += UNBUILT_PRIORITY * (1.0f - build[size_t(t)]) + UNFINISHED_PRIORITY;
     if (hp[size_t(t)] <= pending[size_t(t)]) p += DOOMED_PRIORITY;
     const float armor = armor_of(*this, t);
@@ -98,12 +142,20 @@ float World::target_score(int u, int slot, int t) const {
 
 void World::pick_targets() {
     const int n = count();
+    std::fill(stun_attackers.begin(), stun_attackers.end(), 0);
     for (int u = 0; u < n; ++u) {
         if (!alive[size_t(u)] || !active(u)) continue;
         const auto& d = type_of(u);
         for (int m = 0; m < d.n_mounts; ++m) {
             const auto& w = cat->weapons[size_t(d.mount_weapon[m])];
             int& current = weapon_target[size_t(u) * ZK_MAX_MOUNTS + size_t(m)];
+            // A manual weapon answers only to a manual-fire order, and the others don't take that order's
+            // target (Weapon.cpp:1023).
+            if (w.flags & ZK_W_MANUAL) {
+                const int t = order[size_t(u)] == ZK_ORDER_MANUAL_FIRE ? order_target[size_t(u)] : -1;
+                current = t >= 0 && alive[size_t(t)] && in_range(u, w, t) && (type_of(t).category & d.mount_only[m]) ? t : -1;
+                continue;
+            }
             if (w.kind == ZK_WEAPON_SHIELD || (w.flags & ZK_W_NO_AUTO_TARGET)) {
                 current = -1;
                 continue;
@@ -137,6 +189,8 @@ void World::fire_one(int u, int slot, int frame_offset) {
     const float tx = x[size_t(t)], tz = z[size_t(t)];
     const float dist = std::hypot(tx - x[size_t(u)], tz - z[size_t(u)]);
     const int flight = flight_frames(w, dist);
+    // Measured from muzzle to where it hits, not centre to centre (the battery's Scorcher duels).
+    const float power = range_falloff(w, std::max(0.0f, dist - d.hit_radius - type_of(t).hit_radius));
     const float aim_error = speed[size_t(u)] > STOPPED_SPEED && w.moving_accuracy > 0.0f ? w.moving_accuracy : w.accuracy;
     const float spread = (w.spray + aim_error) * dist;
     const auto& td = type_of(t);
@@ -154,11 +208,12 @@ void World::fire_one(int u, int slot, int frame_offset) {
             ax += (tz - z[size_t(u)]) / dist * side_error;
             az -= (tx - x[size_t(u)]) / dist * side_error;
         }
-        Shot s{weapon, u, side[size_t(u)], t, ax, az, 0.0f, w.kind == ZK_WEAPON_GUIDED, (td.flags & ZK_U_AIR) != 0};
+        Shot s{weapon, u, side[size_t(u)], t, ax, az, 0.0f, w.kind == ZK_WEAPON_GUIDED, (td.flags & ZK_U_AIR) != 0, power};
         if (w.kind == ZK_WEAPON_INSTANT) {
             apply_shot(s);
         } else {
-            s.pending = w.damage[td.armor_class] * armor_of(*this, t);
+            // Only what will take health away can doom a target.
+            s.pending = hurts_health(w) ? w.damage[td.armor_class] * armor_of(*this, t) * power : 0.0f;
             pending[size_t(t)] += s.pending;
             // To the nearest tick, so landing times aren't biased late.
             const int ahead = std::clamp((frame_offset + flight + ZK_TICK_FRAMES / 2) / ZK_TICK_FRAMES, 1, slots - 1);
@@ -167,14 +222,30 @@ void World::fire_one(int u, int slot, int frame_offset) {
     }
 }
 
+bool World::pay_for_shot(int u, const zk_weapon_rec& w) {
+    if ((w.flags & ZK_W_STOCKPILE) && stock[size_t(u)] < 1) return false;
+    if (shield[size_t(u)] < w.shield_cost) return false;
+    if (w.flags & ZK_W_STOCKPILE) --stock[size_t(u)];
+    shield[size_t(u)] -= w.shield_cost;
+    return true;
+}
+
+int World::manual_mount(int u) const {
+    const auto& d = type_of(u);
+    for (int m = 0; m < d.n_mounts; ++m)
+        if (cat->weapons[size_t(d.mount_weapon[m])].flags & ZK_W_MANUAL) return m;
+    return -1;
+}
+
 void World::fire_weapons() {
     const int n = count();
     for (int u = 0; u < n; ++u) {
         // A unit killed earlier this tick still fires: within a tick both sides shoot together.
         if (!alive[size_t(u)]) continue;
         const auto& d = type_of(u);
-        const bool can_fire = active(u);
-        const float rate = 1.0f - slow[size_t(u)];
+        // Disarm stops the reload as well (unit_attributes.lua reloadMult), and stun doesn't.
+        const bool can_fire = active(u) && !disarmed(u);
+        const float rate = disarmed(u) ? 0.0f : 1.0f - slow_now(u);
         for (int m = 0; m < d.n_mounts; ++m) {
             const auto& w = cat->weapons[size_t(d.mount_weapon[m])];
             if (w.kind == ZK_WEAPON_SHIELD) continue;
@@ -185,18 +256,20 @@ void World::fire_weapons() {
                 if (salvo_left[i] > 0) {
                     salvo_timer[i] -= 1.0f;
                     if (salvo_timer[i] <= 0.0f) {
-                        fire_one(u, m, f);
+                        if (pay_for_shot(u, w)) fire_one(u, m, f);
                         --salvo_left[i];
                         salvo_timer[i] = w.salvo_delay;
                     }
                 } else if (cooldown[i] <= 0.0f && weapon_target[i] >= 0 && alive[size_t(weapon_target[i])]) {
                     if (!in_range(u, w, weapon_target[i])) {
                         weapon_target[i] = -1;
-                    } else if (faces(u, w, weapon_target[i])) {
+                    } else if (faces(u, w, weapon_target[i]) && pay_for_shot(u, w)) {
                         fire_one(u, m, f);
                         cooldown[i] = w.reload;
                         salvo_left[i] = int(w.salvo) - 1;
                         salvo_timer[i] = w.salvo_delay;
+                        // Firing finishes the order (CommandAI.cpp WeaponFired).
+                        if ((w.flags & ZK_W_MANUAL) && order[size_t(u)] == ZK_ORDER_MANUAL_FIRE) order[size_t(u)] = ZK_ORDER_NONE;
                     }
                 }
             }
@@ -231,14 +304,21 @@ bool World::absorbed_by_shield(const zk_weapon_rec& w, float px, float pz, const
 void World::damage_unit(int u, const zk_weapon_rec& w, float mult) {
     const auto& d = type_of(u);
     const float amount = w.damage[d.armor_class] * mult * armor_of(*this, u);
+    // Stun, disarm and slow all go by current health, so hurt units fall to them sooner.
+    const float seconds = std::max(w.para_seconds, 1.0f);
+    const auto add_slow = [&](float added) {
+        const float cap = MAX_SLOW + w.overslow;
+        slow[size_t(u)] = std::max(slow[size_t(u)], std::min(cap, slow[size_t(u)] + added / std::max(hp[size_t(u)], 1.0f)));
+    };
+    if (w.disarm_mult > 0.0f)
+        disarm[size_t(u)] = stun_level(disarm[size_t(u)], amount * w.disarm_mult / std::max(hp[size_t(u)], 1.0f), seconds, w.overstun_seconds);
+    if (w.flags & ZK_W_DISARM_ONLY) return;
     if (w.flags & ZK_W_PARALYZER) {
-        // Fraction of max HP, capped by the weapon's stun time (paralyzeOnMaxHealth).
-        const float cap = 1.0f + w.para_seconds / PARA_DECLINE_SECONDS;
-        para[size_t(u)] = std::max(para[size_t(u)], std::min(cap, para[size_t(u)] + amount / d.hp));
+        para[size_t(u)] = stun_level(para[size_t(u)], amount / std::max(hp[size_t(u)], 1.0f), seconds, w.overstun_seconds);
         return;
     }
     if (w.flags & ZK_W_SLOW_ONLY) {
-        slow[size_t(u)] = std::min(MAX_SLOW, slow[size_t(u)] + amount * w.slow_factor / d.hp);
+        add_slow(amount * w.slow_factor);
         return;
     }
     hp[size_t(u)] -= amount;
@@ -251,14 +331,12 @@ void World::damage_unit(int u, const zk_weapon_rec& w, float mult) {
             burn_rate[size_t(u)] = w.burn_damage;
         }
     }
-    if (w.extra_para > 0.0f) {
-        const float cap = 1.0f + std::max(w.para_seconds, 1.0f) / PARA_DECLINE_SECONDS;
-        para[size_t(u)] = std::max(para[size_t(u)], std::min(cap, para[size_t(u)] + w.extra_para * mult / d.hp));
-    }
-    if (w.slow_factor > 0.0f) slow[size_t(u)] = std::min(MAX_SLOW, slow[size_t(u)] + amount * w.slow_factor / d.hp);
+    if (w.extra_para > 0.0f)
+        para[size_t(u)] = stun_level(para[size_t(u)], w.extra_para * mult / std::max(hp[size_t(u)], 1.0f), seconds, w.overstun_seconds);
+    if (w.slow_factor > 0.0f) add_slow(amount * w.slow_factor);
 }
 
-void World::explode(int weapon, float px, float pz, int source, int source_side, bool air) {
+void World::explode(int weapon, float px, float pz, int source, int source_side, bool air, float power) {
     const auto& w = cat->weapons[size_t(weapon)];
     const float radius = std::max(w.blast_radius, 1.0f);
     const float edge = w.edge;
@@ -281,9 +359,9 @@ void World::explode(int weapon, float px, float pz, int source, int source_side,
         // Engine falloff (GameHelper.cpp:146-150).
         const float rim = surface * edge;
         const float mod = (edge >= 1.0f || surface < 1.0f) ? 1.0f : (radius + 0.001f - surface) / (radius + 0.001f - rim);
-        damage_unit(u, w, mod);
+        damage_unit(u, w, mod * power);
     });
-    if (impact_only && direct >= 0) damage_unit(direct, w, 1.0f);
+    if (impact_only && direct >= 0) damage_unit(direct, w, power);
     if (w.area_dps > 0.0f) areas.push_back({&w, px, pz, w.area_dps / FRAMES_PER_SECOND, int(w.area_frames)});
 }
 
@@ -305,7 +383,7 @@ void World::burn_areas() {
                 amount -= amount * w.area_plateau_fall * (w.area_plateau - dist) / w.area_plateau;
             amount *= frames;
             if (w.flags & ZK_W_AREA_SLOWS) {
-                slow[size_t(u)] = std::min(MAX_SLOW, slow[size_t(u)] + amount / type_of(u).hp);
+                slow[size_t(u)] = std::max(slow[size_t(u)], std::min(MAX_SLOW, slow[size_t(u)] + amount / std::max(hp[size_t(u)], 1.0f)));
             } else {
                 hp[size_t(u)] -= amount;
                 damage_taken[size_t(u)] += amount;
@@ -327,7 +405,7 @@ void World::apply_shot(const Shot& s) {
         pz = z[size_t(s.target)];
     }
     if (absorbed_by_shield(w, px, pz, s)) return;
-    explode(s.weapon, px, pz, s.source, s.source_side, s.air);
+    explode(s.weapon, px, pz, s.source, s.source_side, s.air, s.power);
 }
 
 void World::resolve_shots() {

@@ -2,7 +2,7 @@
 
 **Reconciled with the other plans:** [00-overview.md](00-overview.md) lists what changed and wins any remaining disagreement.
 
-Status: plan only.  Nothing under `bots/` or `tools/` changes.  Shared decisions are in
+Status: P-M0 to P-M2 built, behind flags `rawframe` and `policyshadow`, and no commands are sent yet (section 13).  Shared decisions are in
 [00-overview.md](00-overview.md); this file follows them and lists objections separately.
 
 Citations are repo-relative (`bots/zkbot/...`) unless prefixed `ControllerAI/`, `Zero-K/` or
@@ -24,7 +24,7 @@ Anything not checked is marked **unverified**.
    does not support 100M decisions/day with two passes (3.5).  The target is 50M/day with two passes, or
    100M/day with one.  This is an objection to the contract.
 5. **Stage 2 hand-off is one call in `military_step` plus one skip in its loop.**  The policy takes up to
-   128 ground units.  Air, phantoms, Gremlins, the commander, factories and any units past the cap keep
+   256 ground units.  Air, phantoms, Gremlins, the commander, factories and any units past the cap keep
    the rules.  With `ZKBOT_FLAGS` lacking `policy`, the path is unchanged.
 
 ## 1. What the live bot can give the policy
@@ -116,10 +116,10 @@ Per decision, one frame:
 
 | Record | Fields | Note |
 |---|---|---|
-| UNIT (array) | `uid` i8 (pointer identity only), `side` u1 (0 own, 1 enemy in LOS, 2 radar blip, 3 remembered structure, 4 hidden, critic only), `def_id` i4 (-1 unknown), `pos` f4x3, `vel` f4x2, `hp_frac` f4 (NaN blip), `build_frac` f4, `flags` u2 (BEING_BUILT 1, CLOAKED 2, PARALYZED 4, IN_LOS 8, IDLE 16, TYPE_KNOWN 32), `experience` f4, `blip_top_speed` f4, `ord_kind` i1 (-1 none), `ord_age` f4 (frames), `ord_x,ord_z` f4, `ord_target` i8 (uid or -1) | own-only fields are zero for other sides |
+| UNIT (array) | `uid` i8 (pointer identity only), `player` i2 and `ally_team` i2 (the game's numbers, -1 unknown; `player` is the engine's team), `knowledge` u1 (0 in LOS, 1 radar, 2 remembered, 3 hidden, critic only), `def_id` i4 (-1 unknown), `pos` f4x3, `vel` f4x2, `hp_frac` f4 (NaN blip), `build_frac` f4, `flags` u2 (BEING_BUILT 1, CLOAKED 2, PARALYZED 4, IN_LOS 8, IDLE 16, TYPE_KNOWN 32), `experience` f4, `blip_top_speed` f4, `ord_kind` i1 (-1 none), `ord_age` f4 (frames), `ord_x,ord_z` f4, `ord_target` i8 (uid or -1) | order fields count only on the viewer's own units |
 | SITE (array) | `site_id` i4, `x,z` f4, `income` f4, `status` u1 (free, ours, enemy, building), `region_id` i2 | from `map.spots` and `update_spot_status` (`intel.py:211`) |
 | FEATURE (array, stage 3 only) | `feat_id` i8, `x,z` f4, `metal` f4, `def_id` i4 | reclaimable wrecks with at least 1 metal: observation `features` (`ControllerAI/docs/api/state.md`) |
-| GLOBAL (vector) | named by `GLOBAL_FIELDS`: frame, metal and energy current/income/storage, commander hp, commander uid, base x,z, map w,h, frames since last enemy contact, count of unfinished own structures, count of idle own builders | |
+| GLOBAL (vector) | named by `GLOBAL_FIELDS`: frame, metal and energy current/income/storage, commander hp, commander uid, base x,z, map w,h, frames since last enemy contact, count of unfinished own structures, count of idle own builders, the viewer's own `player` and `ally_team` | the last two aren't net inputs: they say who the frame belongs to |
 | EVENTS | `idle_uids` (own units with UNIT_IDLE since the last decision) | |
 | STATIC BUNDLE (once per game) | region records (centre, area, height, domain, tags, access per class, spots); gate records per edge (width per class, walking length, choke, ramp and shore tags); spot list; 16-elmo passability for kbot; ground heights | built by `terrain.TerrainMap` in both paths |
 
@@ -132,11 +132,13 @@ the region graph differs between sim and live (unverified which maps are affecte
 | Tensor | Shape | Content |
 |---|---|---|
 | `unit_x` | U x 140 | type stats (below), instance state, order-memory block, 24 ray values, name id |
-| `reg_x` | R x 40 | centre, area, height, domain, tags, access per class, metal spots and income, ramp and choke counts, own/enemy/blip value this decision |
+| `reg_x` | R x 40 | centre, area, height, domain, tags, access per class, metal spots and income, ramp and choke counts, value this decision of own alliance, other alliances in LOS and on radar |
 | `site_x` | S x 12 | income, status one-hot, region centroid distance |
 | `glob_x` | 40 | GLOBAL fields, normalised |
-| `tok_kind` | N | 0 own unit, 1 enemy, 2 blip, 3 memory structure, 4 summary, 5 region, 6 site, 7 global, 8 feature (stage 3) |
-| `pair_bucket` | N x N int8 | unit-unit: log2 distance (12) x same side (2); unit-region: same region or hop 1-6+ (8); region-region: hop 0-6+ (7); all else one bucket per token-kind pair |
+| `unit_ally`, `unit_player` | U each | ids as the viewer has them, each through a learned embedding: own is 0, others count from 1 skipping own, and an unknown id or one past the table shares the last row (16 alliances, 32 players).  Both seats of a 1v1 see the same numbers |
+| `tok_kind` | N | what is known, not whose: 0 seen, 1 blip, 2 remembered, 3 summary, 4 region, 5 site, 6 global, 7 feature (stage 3), 8 hidden (critic), 9 memory state |
+| `enemy_tokens` | E | the unit tokens that can be aimed at: any other alliance's, in LOS or on radar |
+| `pair_bucket` | N x N int8 | unit-unit: log2 distance (12) x hostile, same alliance or same player (3), and in place of those, a unit and what it's ordered to shoot, each way (2); unit-region: same region or hop 1-6+ (8); region-region: hop 0-6+ (7); all else one bucket per token-kind pair |
 | `kind_mask` | U x 16 | legal action kinds, see 4.1 and 4.4 |
 | `ptr_*_mask` | U x E, U x U, U x R, U x S, U x T | legal pointer targets; T is the candidate type list |
 | `route_bias` | U x R | walking cost from the unit's region to each region; class-specific, a per-game region-to-region table on the gate graph (3.3) |
@@ -144,6 +146,11 @@ the region graph differs between sim and live (unverified which maps are affecte
 Normalisation is fixed, not learned, so it does not drift with training: positions over map size
 (to -1..1), velocities over the unit's own catalog speed (clipped to +-2), log1p for costs, hp and
 dps over constants, log for times.  Stats are read from catalog data, not from the live game.
+
+Order memory is what the bot last told a unit, on own units only, not the engine's command queue: the kind (16, one-hot), its age, the direction and distance to
+its goal, whether it has a target, whether that target is in sight, and whether the commit lock holds.  For an order with a target, the goal is where the target is now, in LOS or
+on radar; if it's in neither, those columns are zero.  The pair buckets mark which token it is, so a target's token can count who is shooting it.  A target out of sight reads
+the same as a dead one and releases the lock.
 
 Type stats (catalog, `bots/zkbot/catalog.py`): log cost, log hp, log dps ground and air, range, max
 speed, aoe, flags (air, mobile, builder, factory, defence, unarmed), build speed and range, footprint,
@@ -162,18 +169,35 @@ in training.  A checkpoint stores the vocabulary and the training catalog hash, 
 
 | Group | Cap | Over the cap |
 |---|---|---|
-| Own controllable (ground combat, see 5.1) | 128 | Sorted by cost, then distance to the army centre.  The rest keep the rules (stage 2) and are summarised in the summary tokens. |
-| Own other (builders, factories, static, air) | 32 | Summary tokens |
-| Enemy in LOS | 64 | Sorted by cost x proximity to our army centre; the rest summarised |
-| Radar blips | 32 | Sorted by recency; the rest summarised |
-| Remembered structures | 16 | Summarised |
-| Summary tokens | up to 12 | One per (side, coarse role) with count, hp sum, dps sum, centroid |
+| Own controllable (ground combat, see 5.1) | 256 | Sorted by cost, then distance to the army centre.  The rest keep the rules (stage 2) and join the pool below. |
+| All units, of any player or alliance | 592, controllable first | In order: other alliances' units in LOS, then theirs on radar, then everything else (own builders, factories, static and air, allies, remembered structures).  Within each, by max(cost, 100) / (distance to our army + 200).  The rest are summarised. |
+| Summary tokens | up to 12 | One per (whose, what's known of it, coarse role) with count, hp sum, dps sum, centroid.  The twelve largest are kept. |
 | Regions | all | 31 median, 120 max across 111 maps (`HANDOFF.md` 6e) |
 | Sites | 24 | Nearest to the base first |
 
-Typical N is about 150-250.  Worst case is about 420.  Army size from 611 rules-bot runs
+There is one pool, not one per side, so the same model reads a 1v1, a 5v5, a 3v3v3 or a free-for-all: who a unit belongs to is an id on the unit (2.3), and only the
+viewer's own player's units get actions.  Any fight against up to 336 targets keeps them all, however far off they are, at 256 controllable.
+
+Typical N is about 110-220 on recorded games.  Worst case is about 750 (the whole pool on a 120-region map).  Army size from 611 rules-bot runs
 (`results/*/metrics-team0.csv`, 100k samples of 10 s, **measured**): median 24, p90 79, p95 107,
 p99 243; 3.5% of samples exceed 128.  Per-game peak: median 44, p90 115, max 969 (`results/h127-circmax/game-003`).
+
+The caps were first 128 controllable and 64 enemies, then 256 and 256 in separate pools, then this one pool.  The weights don't depend on them.
+Cost with every enemy seen, on a 30-region map (**measured**, numpy, random weights, median of 20; one thread or sixteen made no real difference):
+
+| Units a side | Tokens | Targets | Featurize + forward | Training, 256 games, concurrent, one pass |
+|---|---|---|---|---|
+| 40 | 135 | 40 | 10 ms | 584-644/s, 7.3 GB |
+| 128 | 311 | 128 | 32-34 ms | not run |
+| 192 | 439 | 192 | 58-59 ms | not run |
+| 256 | 567 | 256 | 81 ms | 58-61/s, 8.0 GB |
+| 400 | 649 | 336 | 99-101 ms | not run |
+
+GPU memory is peak allocated, against a limit of 10.2 GB.  On recorded games the same pass takes 8-22 ms at 110-221 tokens.
+
+An earlier run on a 76-region map gave 46 ms at 485 tokens against the 58-59 ms here at 439.  Part of that may be noise: in one later run the same decision took 44 ms at best and 50 ms at the median.  It isn't explained, so take the table above.
+
+So the 60 ms `policy.budget_ms` (5.3) falls at about 192 a side, with everything in view, and five decisions over it in a row lower the caps for 30 s (5.3).  P-M2 has to measure how often that happens in real games.
 
 ### 2.5 Generalisation to unseen or rebalanced units
 
@@ -272,7 +296,7 @@ passes (about 87% of this GPU, measured rates) but not 100M/day with two.  v1 us
 
 ### 3.6 Critic and privileged information
 
-The critic sees the same frame plus hidden enemy units (side 4) and enemy state the actor cannot
+The critic sees the same frame plus hidden enemy units (`knowledge` 3) and enemy state the actor cannot
 observe, and the actor's GRU state.  It is a separate network, so no privileged input can reach the
 actor's trunk.  Training only; there is no critic at inference.  The value is zero-sum from the
 reward (03).  An auxiliary head predicting the enemy's visible-value share is optional.
@@ -352,7 +376,7 @@ is a no-op on the wire.
 
 The policy factorises per unit: the joint log-probability of a decision is the sum over units of
 log pi(kind_i) + log pi(target_i | kind_i) + log pi(fine_i | kind_i).  A KEEP unit contributes only the
-KEEP term.  For PPO, the joint ratio is exp of a sum over up to 128 units, so a small change in each
+KEEP term.  For PPO, the joint ratio is exp of a sum over up to 256 units, so a small change in each
 unit pushes the joint far outside the clip.  The v1 loss therefore uses a per-unit ratio, clipped
 separately, averaged over units in the decision (the MAPPO-style per-agent clip with a shared
 advantage).  The entropy bonus is averaged per unit too.
@@ -361,7 +385,7 @@ Variance sources, and the controls:
 
 | Source | Control |
 |---|---|
-| Credit spread over 128 units sharing one advantage | per-decision advantage normalised by batch; loss averaged over units, so the step does not grow with army size |
+| Credit spread over 256 units sharing one advantage | per-decision advantage normalised by batch; loss averaged over units, so the step does not grow with army size |
 | Long horizon at 2 Hz | GAE lambda 0.95; value per decision |
 | Dog-piling and herding (many units on one region or enemy) | monitored (section 6); shaping only if it appears |
 | KEEP-dominated decisions | low-variance by design; most units contribute little gradient |
@@ -401,12 +425,12 @@ Hook points, all in `bots/zkbot/`:
 | `brain.py` `on_startup` | construct the policy object if `policy` is in `FLAGS` | none |
 
 Policy-controlled units: army minus air, `gremlin_scouts`, cloaksnipe phantoms, and the commander
-(not in the army anyway), in priority order, capped at 128.  Factories are not in the army.  The
+(not in the army anyway), in priority order, capped at 256.  Factories are not in the army.  The
 policy's own commands use `_order`-like helpers, so `unit_order` is the single memory.
 
 Flags (`bots/zkbot/params.py`): `policy` (stage 2 army), `policyshadow` (build and log, send no commands),
 `policyview` (write the spectating log), `policyeco` (stage 3), `rawframe` (record raw frames for golden
-tests).  Parameters through `P()`: `policy.max_units` (128), `policy.commit_decisions` (6),
+tests).  Parameters through `P()`: `policy.max_units` (256), `policy.commit_decisions` (6),
 `policy.temperature` (1.0), `policy.budget_ms` (60), `policy.build_cap`.
 
 ### 5.2 Inference runtime
@@ -439,7 +463,9 @@ Failure behaviour, in order:
 2. Exception in featurize or forward: logged with traceback, `policy_units` empty for this decision, the
    rules run for everything, and the policy is retried next decision.  `main.py:104-109` already sends
    commands after a frame error, so a policy exception cannot stop the frame loop.
-3. Over budget: five consecutive decisions over `policy.budget_ms` disable the policy for 30 s and log it.
+3. Over budget: five consecutive decisions over `policy.budget_ms` lower the caps to 128 controllable and a pool of 192 units for 30 s
+   (about 300 tokens at most on a 76-region map, so under 35 ms, section 2.4; not measured at exactly these caps) and log it.  The weights don't depend on the caps, and units past them keep the rules, as past any cap.  If it
+   is still over budget at the lower caps, the policy is off for 30 s.
 4. Two exceptions in a row: policy off until the next game.
 
 ## 6. Testing and spectating
@@ -510,7 +536,7 @@ do not train until M5.
 
 ## 10. Objections to the shared contract
 
-Resolved in the overview: 1 (two passes, 50M/day), 2 (tick 5, block 5), 3 (cap 128), 4 (exact vocabulary), 6
+Resolved in the overview: 1 (two passes, 50M/day), 2 (tick 5, block 5), 3 (cap 256, first 128), 4 (exact vocabulary), 6
 (same `terrain.py` and heights in both paths).  Objection 5 stays open: training starts with no prior, and one is
 added only if the exploration diagnostics in section 9 fire, with the user's decision, because it bends "no scripted play".
 
@@ -524,7 +550,7 @@ added only if the exploration diagnostics in section 9 fire, with the user's dec
    under its current block rates (1.2).  Proposal: sim tick 5 frames (decision every 3 ticks); live
    `block_n_frames` 5 in policy mode.  01 and 03 must agree.
 3. **"Every controllable unit gets its own output" (00).**  Units are unbounded (969 in one logged game).
-   Proposal: a cap of 128 controllable units with the rules for the rest (2.4).  This is an addition to
+   Proposal: a cap of 256 controllable units (first 128) with the rules for the rest (2.4).  This is an addition to
    the contract, not a change to its intent.
 4. **Hashed name embedding (00).**  Followed as written.  The catalog has about 615 names, so an exact
    vocabulary with an unknown row is smaller and collision-free.  The hash is the one `fightnet.py` uses,
@@ -540,7 +566,7 @@ added only if the exploration diagnostics in section 9 fire, with the user's dec
 
 From 01:
 
-* Field names and enums exactly as in 2.2, with `side`, `def_id` (-1 for blips without identity),
+* Field names and enums exactly as in 2.2, with `player`, `ally_team`, `knowledge`, `def_id` (-1 for blips without identity),
   `flags` bits, and `ord_kind`, `ord_age`, `ord_x`, `ord_z`, `ord_target` written by the controller's own
   command log.  Commands take effect at the next tick after issue.
 * UNIT_IDLE-equivalent `idle_uids` each decision (topic 7 semantics: a unit with no orders).
@@ -550,7 +576,7 @@ From 01:
 * Blips: `vel` and `pos` every tick; `def_id` = -1 until the unit has been in LOS of that team, if that is
   the engine rule (unverified).  Blip top speed on the same 2 s window as `blips.py`.
 * Enemy structures stay as ghost memory until seen dead, with their last-seen frame.
-* Hidden enemy units exposed only to the critic, as side 4.
+* Hidden enemy units exposed only to the critic, as `knowledge` 3.
 * No pending projectile or shell records to the policy.
 * Static bundle built by the same `terrain.py` code on the same height arrays as live (2.2, objection 6).
 * Critic-only records must not reach the actor's inputs.
@@ -568,6 +594,9 @@ From 03:
 
 * Blip position accuracy, and that `springai::Unit::GetDef` reaches `CAICallback::GetUnitDef` (identity rule read at `AICallback.cpp:593-597`).
 * Whether `GetFriendlyUnits` includes allied units (the plan assumes own only, which is true in 1v1).
+* Games past 1v1.  The model and the frame carry per-unit ids, and a test runs three alliances and six players through the net, but nothing is trained on such
+  frames.  The sim has two sides of one player each.  Live, the observation has `allyTeam` per unit and no per-unit `team`, so a hostile unit's player falls back to its
+  alliance; `springai::Unit::GetTeam()` exists, so ControllerAI could send it, and `from_brain` reads `team` when it's there.
 * Whether the observation's `radarBlips` includes static buildings.
 * The `JUMP` (38521) and `WANT_CLOAK` (37382) parameter formats; the cloak state convention is inferred
   from `customCmdTypes.lua:40`.
@@ -582,3 +611,43 @@ From 03:
 * Army-size statistics come from the rules bot; the policy's army will differ.
 * Live and archive heights on water maps (objection 6).
 * The 20-minute memory requirement, which is a risk to test, not a result.
+
+## 13. As built (P-M0 to P-M2, 2026-11-05)
+
+Code is in `bots/zkbot/policy/` (`rawframe`, `bundle`, `tables`, `featurize`, `net`, `actions`, `runtime`).  With no policy flag
+set, the heavy modules aren't imported, and the bot's only new calls return at once.
+
+**Measured live, whole forward with untrained weights, 3 games on TitanDuel at 3x:**
+
+| Measure | Result | Budget |
+|---|---|---|
+| Forward, mean | 16-17 ms | 35 ms |
+| Forward, p99 | 28-37 ms | 60 ms |
+| Forward, max | 133 ms; over 60 ms in 0.2-0.3% of decisions | |
+| Game speed | 2.74, 2.87, 2.89x; recording only 2.91, 2.90, 2.85x | at least 2.7x |
+| Featurizing, real frames | 0.9-2.2 ms | 1.3 ms (synthetic estimate) |
+| Tokens, controllable | Mean about 130, most 214; up to 87 controllable | |
+| Numpy against torch | Worst 7e-06 over 100 frames of 10 recurrent steps | 1e-04 |
+| Parameters | Actor 2,937,194; critic 477,505 | 2.71M plus extras; 0.44M |
+
+**Changes from the plan above:**
+
+* Dimensions: unit 126 (type 58, instance 18, order 23, rays 24, summary 3), region 33, site 9, global 16.
+* Names are a separate `unit_name` input, not part of `unit_x`.
+* Added flags DAMAGED and RESERVED; `ord_age` on a memory record is frames since seen.
+* `experience` is in the frame but isn't an input: the sim has none.
+* `ptr_enemy` has one mask per pointer kind (attack unit, attack ground, manual fire).  Only enemy and region pointers exist so far.
+* Rays are per move class, from a compact bitmask at 16 elmos.
+* `economy=False` is the default: metal, energy, unfinished structures, idle builders and site ownership all read as zero or
+  free.  The sim has no economy at stage 2, and an input training never saw vary could only mislead the net in a real game.
+* Altitude has a 40-elmo dead zone (01 section 8.7).
+* `route_scale` starts at -3.0, about 0.05 nats per walking second.  It first started at 0.74 nats per second, under which a
+  30-second walk cost 22 nats and no far region was ever sampled.
+
+**Golden tests:** `tests/policy/test_golden.py` holds 5 live frames and 4 sim frames against reviewed output, at 1e-6, in 248 KB.
+Rewrite them with `tools/policy_golden.py` only after a change you meant.
+
+**Section 12 items now answered:** move class comes from `smClass`, depth and `maxSlope` (`tools/sim_data.py`, written to
+`data/moveclass.json`), which separates kbot, tank, spider, amph, hover and ship.  Featurizer cost on real frames is above.  Ghost
+buildings do persist in recordings: up to 69, over the token cap of 16, so the cap is in use.  Live and archive heights match on
+TitanDuel, though not yet checked on a water map.  Still open: the JUMP and cloak parameter formats, which S-M7 and P-M3 reach.

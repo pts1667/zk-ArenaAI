@@ -12,7 +12,7 @@ set(CMAKE_CXX_FLAGS_RELEASE "-O3 -ffp-contract=off")
 option(ZKSIM_PROFILE "Time each tick phase (tools/sim_profile.py)" OFF)
 
 find_package(Threads REQUIRED)
-add_library(zksim SHARED src/world.cpp src/combat.cpp src/movement.cpp src/capi.cpp)
+add_library(zksim SHARED src/world.cpp src/combat.cpp src/movement.cpp src/views.cpp src/capi.cpp)
 target_include_directories(zksim PUBLIC include)
 target_link_libraries(zksim PRIVATE Threads::Threads)
 target_compile_options(zksim PRIVATE -Wall -Wextra)

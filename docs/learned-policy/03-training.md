@@ -2,7 +2,7 @@
 
 **Reconciled with the other plans:** [00-overview.md](00-overview.md) lists what changed and wins any remaining disagreement.
 
-Status: plan only; nothing is implemented.  Follows [00-overview.md](00-overview.md).  Where
+Status: T-M0 and T-M1 built (section 10).  **The learner is about 4x slower than section 2.6 assumes.**  Follows [00-overview.md](00-overview.md).  Where
 [01-simulator.md](01-simulator.md) and [02-policy.md](02-policy.md) (written in parallel) agree with each
 other against the overview, this plan follows them and says so.  Their open questions to this plan are
 answered in section "Needed from 01 and 02".
@@ -21,8 +21,8 @@ source (path given); **[E]** estimate, arithmetic shown; **[U]** unverified.
    (objection 2).
 3. **Discount gamma = 1, GAE lambda = 0.95.**  At gamma 0.99 a win/loss at minute 20 is discounted to
    `0.99^2400`, about 1e-10.  Finite episodes and a telescoping reward need no discount.
-4. **Per-unit PPO ratios, one advantage per decision.**  A joint ratio over up to 128 units is a sum of
-   up to 128 log-ratios; per-unit clipping keeps the trust region meaningful.
+4. **Per-unit PPO ratios, one advantage per decision.**  A joint ratio over up to 256 units is a sum of
+   up to 256 log-ratios; per-unit clipping keeps the trust region meaningful.
 5. **Budget.**  With 02's measured training rate and two passes, about 45-50M decisions/day at 70% of the
    GPU.  100M/day needs one pass or a faster model; it is not the planning number (section 2.6).  The
    real engine gives 2.6-4.4M learnable decisions per day, so it fine-tunes and does not train from
@@ -53,7 +53,7 @@ each head's entropy stays above 30% of its maximum.
 
 Critic: 02's design (3.6): a separate encoder over the privileged frame (all enemies, hidden or not) plus
 the actor's GRU state.  The actor never sees privileged inputs (02 section 11 requires this; 01 provides
-the side-4 records).  Its 0.44M parameters are about 16% of the actor's 2.71M [O, 02 section 3.6].
+the hidden records).  Its 0.48M parameters are about 16% of the actor's 2.94M [measured].
 
 ### 1.2 Discount and advantages
 
@@ -143,11 +143,12 @@ per-region GRUs (02 section 3.4).
 
 ### 1.6 Minibatching, precision, compile
 
-Token counts vary by decision (about 150-250 typical, about 420 worst case under 02's caps; 2.4).  Minibatches are built by token budget:
-segments are sorted by length into buckets and each minibatch takes whole segments up to 115k tokens.
+Token counts vary by decision (about 110-220 typical, about 750 worst case under 02's caps; 2.4).  Minibatches are built by token budget:
+segments are sorted by size and each minibatch takes whole segments up to a budget of padded tokens, with big frames weighed
+more for attention's pairs (`memory_tokens` in `tools/policy_train.py`).  While playing, a forward pass is limited to `ACT_PAIRS`
+padded pairs, and seats past that go in another pass.  Peak memory stayed under the 10.2 GB limit at 256 units a side, every enemy seen, with concurrent collection.
 Padding is masked.  The step is run in bf16 autocast (no GradScaler), with softmax and log-probabilities in
-fp32.  `torch.compile` with shape buckets: pad token counts to multiples of 128 up to 768, then 1,024; each
-bucket compiles once.  Dynamic shapes are not used; they recompile on each new length.
+fp32.  `torch.compile` was planned here and isn't used: it gained nothing and could hang (10.3).  The table's compile rows are from a plain transformer.
 
 Measured on the RTX 4070 in WSL, PyTorch 2.15 cu132 [M, `gpu_train.py`, `gpu_rnn.py`]:
 
@@ -201,7 +202,7 @@ KL averages above 0.02 [E].
 ### 2.4 Buffer size
 
 **Reconciled decision: raw frames only, in RAM for one iteration, featurized per minibatch by data workers.**
-A record in 02's schema is about 72 bytes [E, summed from 02 section 2.2], so about 12-20 KB per decision and
+A record in 02's schema is 80 bytes, so about 12-20 KB per decision and
 about 1 GB per iteration, plus stored GRU states.  Storing tensors isn't viable: 02's tokens are 140-d with an
 N x N bucket table and pointer masks, about 140 KB per decision and 9 GB per iteration [E], against the 5 GB
 ceiling.  At 1.3 ms per decision (02), with one featurization for inference and K=2 for training, 50M/day takes
@@ -344,6 +345,12 @@ Stage 1 trains no policy.  It is the fidelity gate: the sim's combat must predic
 
 Notes:
 
+* **Maps, for now.**  Five from the 1v1 matchmaker pool (`maps.json`), `TRAINING_MAPS` in `tools/policy_sim_env.py`: TitanDuel 2.2 (24 regions,
+  182 of the 188 games with logged fights), Red Comet Remake 1.7 (22, narrow), Agalta v1.0 (16, open), FrostyCove v1.13 (30, hills and
+  chokes), Faultline v1.0 (31, 17% water).  Left out: harmful liquid, mostly water, heights generated in-game, and more than about 35 regions, since
+  playing pads every seat to the map with the most regions, and a big map's frames also cost more themselves.  Carabanossi stays exported for the gate only.
+* **Early end.**  From 2 minutes of game time, a side with more than 2.5x the other's metal value (cost x build progress, as in 1.3) wins
+  there and then.  The engine doesn't have this rule, so win rates in the sim aren't comparable with the engine's without it.
 * **Seats and starts.**  One set of weights controls both sides.  Each game draws a seat and a start for each
   side, so TitanDuel's asymmetry averages out.  Report by seat.  Sanity check (M2): self-play with the
   start-A seat wins 45-55% over 200 games.
@@ -700,7 +707,7 @@ From 01 (names as in 01 section 4 where given; 03 adds nothing new):
 * Determinism per seed (01's test).
 * Confirmation that any `maps.json` terrain loads (3, [U]).
 * The scripted attack-nearest baseline lives in 01's package.
-* The side-4 (critic-only) records must not reach the actor's inputs (02 section 11).
+* The hidden (critic-only) records must not reach the actor's inputs (02 section 11).
 
 From 02 (names as in 02 sections 2 and 11):
 
@@ -726,3 +733,174 @@ From 02 (names as in 02 sections 2 and 11):
 * Self-play throughput at max speed and the 60 ms latency it needs (5.3).
 * Whether the trainer stays under its memory and VRAM caps in a real run.
 * Burn-in value and whether stored GRU states are good enough without it (1.5).
+
+## 10. As built (T-M0, T-M1; 2026-11-05)
+
+`tools/policy_train.py`, with `policy_model.py`, the toy in `policy_toy.py` and `policy_toy_env.py`, and the sim in `policy_sim_env.py`.
+
+### 10.1 What changed from the plan
+
+* Featurizing runs in forked worker processes, which run ahead of the GPU during training.  Threads couldn't help under the GIL.
+* Games carry on across iterations with their recurrent state.  Real games last far longer than an iteration collects per seat,
+  so restarting them would never reach the late game.
+* Minibatches group segments of similar size, jittered by 15%, so padding stays small, and then go in random order.
+* Evaluation counts each slot's first game only.  Otherwise games that end soonest count most.
+* `--token-budget` is a setting.  A toy decision has a fifth of the tokens, so 16,000 gives it the real game's decisions per minibatch.
+* The toy's tick is whole-array and decided from the tick's starting positions.  The earlier per-unit loop moved one side first,
+  which leaned 60-40 in a mirror; now 516-481 over 1,000 games.
+
+### 10.2 Checks
+
+| Check | Result |
+|---|---|
+| One iteration twice | 0 difference with `use_deterministic_algorithms`; 6e-04 without, from scatter adds accumulating in no fixed order, which Adam magnifies on near-zero gradients.  Long runs use the fast mode. |
+| Killed while saving, 12 times | `latest.json` named a loadable checkpoint every time; leftover `.tmp` files are removed on the next save |
+| Toy scripts | focus beats nearest 1000-0, nearest beats random 994-6 |
+| Toy learning | The win marks are met, but the policy didn't find the tactic the toy was built to teach; see below |
+| One iteration on sim frames | 4,131 decisions, no masked action chosen, collection 1,085/s at 64 games |
+
+**What the toy showed.**  Two runs, 8 against 8.  Wins are from 64 games each; the scripts are 200 games, and focus beats nearest in all of them.
+
+| | Beats nearest | Beats focus | Enemies sharing its fire | Its first kill | Its first loss |
+|---|---|---|---|---|---|
+| Script: nearest | 50% | 0% | 2.78 | decision 7.3 | 7.5 |
+| Script: focus | 100% | | 1.30 | 3.0 | 8.5 |
+| `toy-1`: all kinds, 848k decisions | 95% | 36-41% | 2.80 | 7.7 | 12.3 |
+| `toy-focus`: KEEP and ATTACK_UNIT only, 1.0M decisions | 89% | 16-22% | 1.90 | 5.6 | 7.0 |
+
+- **The pointer head learns.**  Given only targets to choose, `toy-focus` concentrates its fire and kills sooner, without being told to.
+  It got less than halfway to the script's concentration in 1M decisions, and reached 84-89% against nearest rather than 90%.
+- **`toy-1` won another way.**  It kills no sooner than nearest and spreads its fire just as widely, but loses its first unit 5 decisions later.
+  ATTACK_UNIT is 2% of its orders, with STOP 27% and ATTACK_GROUND 21%.  That points to dodging the script's fire, perhaps by pulling hurt
+  units back so the script retargets, but this wasn't measured directly.
+- **What this means for later stages.**  Winning against a fixed script says little about the tactic behind it: an exploit can get there
+  first, and `toy-1` still loses to focus fire.  So Gate 2 should test against several scripts, including one that focuses fire, as well as
+  measuring how the policy wins.  Self-play ought to punish script exploits, but nothing here shows it does.
+
+**Learning, on the model with one pool and attack-target inputs (2026-11-05).**  One seed can't rank settings.  Targets only, wins against nearest during training at about 490k decisions:
+
+| Run | Pair table trained | Minibatch | Wins |
+|---|---|---|---|
+| `toy-focus`, earlier model, seed 1 | every step | 749 | about 55% |
+| `toy-aim-focus`, seed 1 | 1 in 8 steps | 548 | 17% |
+| Same settings, seed 2 | 1 in 8 steps | 551 | 55% |
+| Pair table every step, seed 1 | every step | 550 | 25% |
+| Bigger minibatch, seed 1 | 1 in 8 steps | 751 | 37% |
+| Both, seed 1 | every step | 749 | 65% |
+
+To 850k-1M decisions, `toy-aim` beat nearest 73% and focus 17-22%, with 2.70 enemies sharing its fire; `toy-aim-focus` beat nearest 55-61% and focus 0-3%, with 2.10-2.27.
+Neither found focus fire.  Whether the attack-target inputs help isn't known: a comparison with them on and off, four seeds each, ran out of memory with seven trainings at once, and its partial curves show no clear difference.
+
+**First sim run, `sim-short` (2026-11-05).**  2M decisions on the five maps, 256 games, concurrent, one pass, 40 units a side, fog on, 978 decisions/s, no masked action chosen.  Wins against the fight script rose from about 3% to about 15-20% during training; tests of 64 games
+gave 5%, 8% and 14% at 660k, 1.3M and 2.0M.  Explained variance stayed between 0.06 and 0.56 with no steady rise, and entropy rose on the kind, enemy and region heads.  It isn't tested against anything else, or in the engine.
+
+### 10.3 Training rate: the miss
+
+Real frames from live games (about 160 tokens, 33 controllable), 24 segments of 32 steps, 6.3 GB of GPU memory:
+
+| Part of a minibatch | Seconds |
+|---|---|
+| Backward | 0.94 |
+| Encoder | 0.43 |
+| Heads | 0.28 |
+| Critic | 0.24 |
+| Transfers and waiting on workers | 0.19 |
+| **Rate** | **about 360-400 decisions/s per pass** (plan: 1,700/s) |
+
+What helped: backward through `index_select`, whose backward is an `index_add`, where plain indexing's took 1.65 s; a lookup in a
+small pair table.  What didn't: `torch.compile` on the attention blocks (405/s against 400/s, though it may have run uncompiled past the recompile limit; see below).  Bigger minibatches don't either:
+230k tokens needs 15.8 GB against the card's 12 GB, and fell to 139/s.
+
+The cost is mostly per recurrent step, not per frame, because the toy's far smaller frames cost nearly the same per step:
+
+| Segments x steps | Decisions/s per pass | Peak GPU |
+|---|---|---|
+| 24 x 32 (the plan) | 359 | 6.3 GB |
+| **48 x 16** | **597** | 6.5 GB |
+| 96 x 8 | 655 | 6.5 GB |
+
+Estimated decisions per day with 65,536-decision iterations, using the measured 1,085/s collection and no evaluation.  Collection
+at 256 games isn't measured and should be faster, so these are floors:
+
+| Setting | Iteration | Per day |
+|---|---|---|
+| 32 steps, two passes (the plan) | about 400 s | **about 15M** (plan: 45-50M) |
+| 32 steps, one pass | about 225 s | about 25M |
+| 16 steps, two passes | about 280 s | about 20M |
+| 16 steps, one pass | about 170 s | about 33M |
+
+Shorter segments cut how far gradients reach through memory: 16 steps is 8 seconds of game instead of 16.  Whether that costs
+anything isn't known yet.  Stage 2 can test it, because the toy has no fog and can't.
+
+Where it stands (2026-11-05, 256 sim games, concurrent, 32 steps, one pass, 40 units a side, measured over a few iterations; the sim's rates, not the real frames' above):
+
+| Change | Decisions/s, overall | Per day |
+|---|---|---|
+| Caps at 256 and 256, all maps | 679 | 58.7M |
+| The five training maps (`TRAINING_MAPS`) | 841 | 72.7M |
+| One pool with per-unit ids | 831 | 71.8M |
+
+These frames have fog, so few enemies are in them.  With every enemy seen, the same setup gave 584-644/s at 40 a side and 58-61/s at 256 a side (02 section 2.4).
+
+**`torch.compile`, tried properly and removed (2026-11-06).**  On the sim, `--concurrent`, 12 iterations each, last six:
+
+| Setup | Decisions/s | Training | Collecting | Recompiles | Past the limit |
+|---|---|---|---|---|---|
+| No compile | 866 | 37.2 s | 32.2 s | 0 | |
+| Attention blocks, one shared compile | 817 | 39 s | 34.8 s | 8 | yes, so mostly uncompiled |
+| Blocks, compiled apart for training and playing, each with its own limit | 799 (8 iterations, then hung) | 40.5 s | 33.0 s | 17 | no |
+| The same, `dynamic=True` | 760 | 41.7 s | 31.5 s | 22 | no |
+
+* Recompiles came from grad mode, the actor and critic sharing a `forward`, `bias` needing gradients on only some steps, frames of one decision, token counts divisible by 16, and sizes.  `dynamic=True` traded the last for more of the others.
+* Compiled and plain blocks agree to within rounding.  `expandable_segments` and `garbage_collection_threshold` work with it.
+* It didn't speed up training, one run froze just after a recompile (probably two threads, no stack trace), and with `dynamic=True` the main process grew from 3.3 to 4.6 GB in 12 iterations.
+
+**Memory between runs.**  Nothing leaks: after an iteration a run holds 51 MB (toy) or 67 MB (sim), with live tensors flat.  What grew was reserved memory, by fragmentation, as batch shapes changed: 7.9 to 9.3 GB in 4 iterations on the sim, against a peak in use of 6.7 GB.
+Past the card, memory spills into system memory at about a fifth of the speed, and training took about 10x longer per iteration.  `expandable_segments`, `garbage_collection_threshold:0.8` and `empty_cache` after each iteration are now defaults: peak reserved stays within 7.5 GB.  The limit is per process, so runs sharing the card must pass `--gpu-runs`.
+They cost no speed: over the same 12 iterations on the sim, 866 decisions/s with them and 865 without, with peak reserved at 7.5 and 9.8 GB.  So they don't explain why `sim-short` ran at 978/s; that difference is still unexplained.
+
+### 10.4 Considered and not adopted (2026-11-05)
+
+Measured on the same real frames, 24 x 32:
+
+| | Decisions/s per pass | Peak GPU |
+|---|---|---|
+| Actor and critic, as now | 405-413 | 6.28 GB |
+| No critic at all, the most a critic-free method can save | 461-469 | 5.01 GB |
+| Critic trained after the recurrent loop, in flat batches | 283-289 | 5.01 GB |
+
+* **GaLore 2:** gradients are 13 MB and Adam's state 26 MB, together 0.6% of the 6.28 GB peak, and `optimizer.step` takes 0.003 s of
+  a 1.9 s minibatch.  The memory is the graph of activations kept for backward through 32 steps, which low-rank gradients don't touch.
+  It targets models whose optimizer state dominates, and it would add subspace updates here.
+* **GRPO:** dropping the critic gains about 14% speed and 1.3 GB.  In exchange it needs a group of samples from the same state with
+  comparable rewards.  Here that means branching the sim, which it can't yet do, and rolling each branch out, so collection costs
+  the group size times over for the same number of distinct states.  One advantage would then cover every action of every unit in
+  a rollout.  It would also lose the privileged critic, which is how training handles fog (section 3.6 of 02).  16-step segments
+  gain 66% with no such cost.
+* **The flat critic** was my own idea for removing the critic's per-step overhead.  It's slower, because it featurizes every frame
+  again and pads to the largest.
+
+### 10.5 Linear attention, for memory between frames (2026-11-05)
+
+Not adopted.  Attention within a frame stays: tokens are an unordered set and the pair bias needs a per-pair score.  Swapping the
+GRU in place gains nothing, because each frame's attention reads the previous memory, so fused kernels can't span frames.  A flat
+design with no memory input to attention reached 784-844 decisions/s against about 495 (actor only, heads without memory), with
+the plain GRU.  That gain comes from going flat and sorting frames by size, not from linear attention.
+
+One layer each, d=192, 4 heads, random input, forward + backward + Adam under bf16, `flash-linear-attention` 0.6.0 in chunk mode.
+Memory is peak above the weights and Adam state.
+
+| Model | 24 x 32 | 24 x 160 | 8 x 1024 | 2 x 4096 | Memory at 8,192 tokens |
+|---|---|---|---|---|---|
+| Self-attention, causal, torch SDPA | 474k tokens/s | 2,097k | 4,618k | 4,081k | 47 MB |
+| MLA, ours on torch SDPA, not linear | 384k | 1,535k | 3,123k | 3,514k | 51 MB |
+| GRU, torch | 226k | 358k | 229k | 51k | 62 MB |
+| **DeltaNet** | **129k** | **555k** | **886k** | **1,138k** | **76 MB** |
+| Gated DeltaNet | 87k | 445k | 955k | 1,027k | 86 MB |
+| Kimi Delta Attention | 70k | 374k | 748k | 770k | 139 MB |
+| RWKV-7 | 72k | 208k | 792k | 783k | 237 MB |
+| Mamba2, slow fallback only | 17k | 75k | 117k | 116k | 3,432 MB |
+
+Mamba2's fast path and `fla`'s own MLA need `mamba-ssm`, `causal-conv1d` or `flash-attn`.  None has a prebuilt wheel, and there's no
+CUDA toolkit here to compile them.  If long memory becomes the limit, try Gated DeltaNet first: it's close to DeltaNet and can
+forget stale sightings.  Self-attention over a window is faster in training, but its live cost grows with the window.

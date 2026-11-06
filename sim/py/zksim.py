@@ -16,23 +16,26 @@ import numpy as np
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
 sys.path.insert(0, str(ROOT / "py"))
+sys.path.insert(0, str(ROOT.parent / "bots"))
 import zknav  # noqa: E402
-ABI_VERSION = 1
+from zkbot.policy import rawframe  # noqa: E402
+ABI_VERSION = 4
 MAX_MOUNTS = 8
 TICK_FRAMES = 5
 FRAMES_PER_SECOND = 30
 MOVE_CLASSES = ("kbot", "tank", "spider", "amph", "hover", "ship")
 ADVANCE, HOLD, ORDERS = 0, 1, 2
-ORDER_NONE, ORDER_MOVE, ORDER_FIGHT, ORDER_ATTACK = 0, 1, 2, 3
+ORDER_NONE, ORDER_MOVE, ORDER_FIGHT, ORDER_ATTACK, ORDER_MANUAL_FIRE = 0, 1, 2, 3, 6
 MOBILE, AIR, ARMED, FIREPROOF = 1, 2, 4, 8
-W_TURRET = 2
+W_TURRET, W_NO_AUTO_TARGET, W_MANUAL, W_UNMODELLED = 2, 16, 512, 2048
 
 
 class WeaponRec(ct.Structure):
     _fields_ = [("damage", ct.c_float * 5)] + [(n, ct.c_float) for n in (
         "range", "reload", "salvo", "salvo_delay", "projectiles", "speed", "accel", "start_speed",
         "blast_radius", "edge", "height_mod", "spray", "accuracy", "moving_accuracy",
-        "para_seconds", "extra_para", "slow_factor", "shield_power", "shield_regen", "shield_radius",
+        "para_seconds", "extra_para", "slow_factor", "disarm_mult", "disarm_penalty", "disarm_time", "overstun_seconds",
+        "overslow", "shield_cost", "dyn_exp", "dyn_range", "climb_frames", "shield_power", "shield_regen", "shield_radius",
         "vel_threshold", "vel_base", "vel_scale", "alpha_damage",
         "area_dps", "area_radius", "area_plateau", "area_range_fall", "area_plateau_fall", "area_time_fall", "area_frames",
         "burn_frames", "burn_random", "burn_chance", "burn_damage")] + [(n, ct.c_int32) for n in (
@@ -42,16 +45,17 @@ class WeaponRec(ct.Structure):
 class TypeRec(ct.Structure):
     _fields_ = [(n, ct.c_float) for n in (
         "cost", "hp", "speed", "accel", "brake", "turn_rate", "slow_turn_speed",
-        "footprint_radius", "hit_radius", "armored_mult", "auto_heal", "max_range")] + [(n, ct.c_int32) for n in (
-            "armor_class", "move_class", "category", "flags", "explode_weapon", "n_mounts")] + [
+        "footprint_radius", "hit_radius", "armored_mult", "auto_heal", "max_range",
+        "los_radius", "air_los_radius", "radar_radius", "los_height", "stockpile_frames", "reload_move_penalty")] + [(n, ct.c_int32) for n in (
+            "def_id", "armor_class", "move_class", "category", "flags", "explode_weapon", "n_mounts")] + [
         ("mount_weapon", ct.c_int32 * MAX_MOUNTS), ("mount_only", ct.c_int32 * MAX_MOUNTS),
         ("mount_bad", ct.c_int32 * MAX_MOUNTS)]
 
 
 class UnitState(ct.Structure):
     _fields_ = [(n, ct.c_float) for n in (
-        "x", "z", "vx", "vz", "heading", "speed", "hp", "damage_taken", "para", "shield")] + [
-        (n, ct.c_int32) for n in ("alive", "order", "target")]
+        "x", "z", "vx", "vz", "heading", "speed", "hp", "damage_taken", "para", "shield", "disarm")] + [
+        (n, ct.c_int32) for n in ("alive", "order", "target", "stock")]
 
 
 def _load_library() -> ct.CDLL:
@@ -80,10 +84,21 @@ def _load_library() -> ct.CDLL:
     lib.zk_world_get.argtypes = [cvp, it, ct.POINTER(UnitState)]
     lib.zk_world_ready_weapons.argtypes = [vp]
     lib.zk_world_kill.argtypes = [vp, it]
+    lib.zk_world_view.restype = it
+    lib.zk_world_view.argtypes = [vp, it, vp, it, fp, it, fp]
+    lib.zk_batch_new.restype = vp
+    lib.zk_batch_new.argtypes = [cvp, it, it]
+    lib.zk_batch_free.argtypes = [vp]
+    lib.zk_batch_reset.argtypes = [vp, it, cvp, ct.c_uint64, it, it, ip, ip, fp, fp, fp, fp, fp, ip, fp]
+    lib.zk_batch_world.restype = vp
+    lib.zk_batch_world.argtypes = [vp, it]
+    lib.zk_batch_step.argtypes = [vp, ip, it, vp, ip, it, vp, it, ip, fp, fp]
     lib.zk_replay.argtypes = [cvp, ct.POINTER(vp), ip, it, ip, ip, ip, fp, fp, fp, fp, ct.POINTER(ct.c_uint8), it,
                               ct.c_uint64, ip, it, it, it, fp]
     if lib.zk_abi_version() != ABI_VERSION:
         raise RuntimeError("libzksim has another ABI version: rebuild it")
+    if lib.zk_sizeof_unit_record() != rawframe.UNIT_DTYPE.itemsize or lib.zk_global_count() != len(rawframe.GLOBAL_FIELDS):
+        raise RuntimeError("libzksim was built from another raw frame schema: rebuild it")
     for got, want in ((lib.zk_sizeof_weapon(), WeaponRec), (lib.zk_sizeof_type(), TypeRec), (lib.zk_sizeof_state(), UnitState)):
         if got != ct.sizeof(want):
             raise RuntimeError(f"{want.__name__}: {ct.sizeof(want)} bytes here, {got} in libzksim: rebuild it")
@@ -101,10 +116,12 @@ def _fill(rec: ct.Structure, values: dict) -> None:
 
 
 def _floats(a: np.ndarray):
+    assert a.flags.c_contiguous, "a column of a record array has gaps in it: C would read past each value"
     return a.ctypes.data_as(ct.POINTER(ct.c_float))
 
 
 def _ints(a: np.ndarray):
+    assert a.flags.c_contiguous, "a column of a record array has gaps in it: C would read past each value"
     return a.ctypes.data_as(ct.POINTER(ct.c_int))
 
 
@@ -225,6 +242,9 @@ class World:
     def attack(self, unit: int, target: int) -> None:
         _lib.zk_world_order(self.handle, unit, ORDER_ATTACK, 0.0, 0.0, target)
 
+    def manual_fire(self, unit: int, target: int) -> None:
+        _lib.zk_world_order(self.handle, unit, ORDER_MANUAL_FIRE, 0.0, 0.0, target)
+
     def ready_weapons(self) -> None:
         _lib.zk_world_ready_weapons(self.handle)
 
@@ -238,10 +258,86 @@ class World:
     def set_frame(self, frame: int) -> None:
         _lib.zk_world_set_frame(self.handle, frame)
 
+    def view(self, side: int, commander: int = -1, base: tuple[float, float] = (0.0, 0.0), cap: int = 1024) -> "rawframe.Frame":
+        """This side's raw frame as of now."""
+        records = np.zeros(cap, rawframe.UNIT_DTYPE)
+        glob = np.zeros(len(rawframe.GLOBAL_FIELDS), np.float32)
+        where = np.array(base, np.float32)
+        n = _lib.zk_world_view(self.handle, side, records.ctypes.data, cap, _floats(glob), commander, _floats(where))
+        return rawframe.Frame(records[:n], np.zeros(0, rawframe.SITE_DTYPE), glob)
+
     def get(self, unit: int) -> UnitState:
         state = UnitState()
         _lib.zk_world_get(self.handle, unit, ct.byref(state))
         return state
+
+
+ORDER_DTYPE = np.dtype([("unit", "i4"), ("kind", "i4"), ("x", "f4"), ("z", "f4"), ("target", "i4")], align=True)
+STATS = 2      # per side: tracked value, live units
+
+
+class Batch:
+    """Games stepping across threads.  `step` leaves frames in preallocated arrays, so reading one is a view, not a copy."""
+
+    def __init__(self, catalog: Catalog, games: int, threads: int = 16, cap: int = 1024):
+        self.catalog, self.games, self.cap = catalog, games, cap
+        self.handle = _lib.zk_batch_new(catalog.handle, games, threads)
+        self.records = np.zeros((games, 2, cap), rawframe.UNIT_DTYPE)
+        self.counts = np.zeros((games, 2), np.int32)
+        self.globs = np.zeros((games, 2, len(rawframe.GLOBAL_FIELDS)), np.float32)
+        self.stats = np.zeros((games, 2, STATS), np.float32)
+        self.sites: list[np.ndarray] = [np.zeros(0, rawframe.SITE_DTYPE)] * games
+        self.positions = np.arange(games, dtype=np.int32)
+
+    def __del__(self):
+        if getattr(self, "handle", None):
+            _lib.zk_batch_free(self.handle)
+            self.handle = None
+
+    def reset(self, game: int, world_map: Map, seed: int, type_: np.ndarray, side: np.ndarray, x: np.ndarray, z: np.ndarray,
+              heading: np.ndarray | None = None, hp: np.ndarray | None = None, build: np.ndarray | None = None,
+              commander: tuple[int, int] = (-1, -1), base: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0),
+              sites: np.ndarray | None = None, behaviour: int = ORDERS) -> None:
+        n = len(type_)
+        i32 = lambda a: np.require(a, np.int32, "C")  # noqa: E731
+        f32 = lambda a: np.require(a, np.float32, "C")  # noqa: E731
+        zeros, ones = np.zeros(n, np.float32), np.ones(n, np.float32)
+        _lib.zk_batch_reset(self.handle, game, world_map.handle, seed, behaviour, n, _ints(i32(type_)), _ints(i32(side)), _floats(f32(x)), _floats(f32(z)),
+                            _floats(zeros if heading is None else f32(heading)), _floats(ones if hp is None else f32(hp)),
+                            _floats(ones if build is None else f32(build)), _ints(i32(commander)), _floats(f32(base)))
+        if sites is not None:
+            self.sites[game] = sites
+
+    def step(self, orders: np.ndarray | None = None, order_offsets: np.ndarray | None = None, games: np.ndarray | None = None, ticks: int = 3) -> None:
+        """orders: ORDER_DTYPE, grouped by listed game; order_offsets: where each listed game's begin, plus the end."""
+        listed = self.positions if games is None else np.asarray(games, np.int32)
+        if orders is None:
+            orders = np.zeros(0, ORDER_DTYPE)
+            order_offsets = np.zeros(len(listed) + 1, np.int32)
+        _lib.zk_batch_step(self.handle, _ints(listed), len(listed), orders.ctypes.data, _ints(np.asarray(order_offsets, np.int32)), ticks,
+                           self.records.ctypes.data, self.cap, _ints(self.counts), _floats(self.globs), _floats(self.stats))
+
+    def refresh(self, game: int) -> None:
+        """This game's frames, in place, without stepping: after a reset, while the rest of the batch stays as it was."""
+        empty = np.zeros(1, ORDER_DTYPE)
+        _lib.zk_batch_step(self.handle, _ints(self.positions[game:game + 1]), 1, empty.ctypes.data, _ints(np.zeros(2, np.int32)), 0,
+                           self.records[game:].ctypes.data, self.cap, _ints(self.counts[game:]), _floats(self.globs[game:]), _floats(self.stats[game:]))
+
+    def frame(self, position: int, side: int, game: int | None = None) -> rawframe.Frame:
+        """The frame of the position-th listed game, a view into this batch's buffers, so valid until the next step."""
+        n = int(self.counts[position, side])
+        return rawframe.Frame(self.records[position, side, :n], self.sites[position if game is None else game], self.globs[position, side])
+
+    def frame_hash(self) -> int:
+        """Of everything the last step wrote, to compare runs."""
+        import hashlib
+        h = hashlib.sha256()
+        for position in range(self.games):
+            for side in (0, 1):
+                n = int(self.counts[position, side])
+                h.update(self.records[position, side, :n].tobytes())
+        h.update(self.stats.tobytes())
+        return int.from_bytes(h.digest()[:8], "little")
 
 
 def replay(catalog: Catalog, maps: list[Map], snapshot_map: np.ndarray, offsets: np.ndarray, type_: np.ndarray,
@@ -249,8 +345,8 @@ def replay(catalog: Catalog, maps: list[Map], snapshot_map: np.ndarray, offsets:
            seeds: int, seed: int, horizons: list[int], behaviour: int, threads: int) -> np.ndarray:
     """Losses per snapshot, seed, horizon and side; horizons are in ticks."""
     n = len(snapshot_map)
-    i32 = lambda a: np.asarray(a, np.int32)  # noqa: E731
-    f32 = lambda a: np.asarray(a, np.float32)  # noqa: E731
+    i32 = lambda a: np.require(a, np.int32, "C")  # noqa: E731
+    f32 = lambda a: np.require(a, np.float32, "C")  # noqa: E731
     snapshot_map, offsets, type_, side = i32(snapshot_map), i32(offsets), i32(type_), i32(side)
     x, z, hp, build = f32(x), f32(z), f32(hp), f32(build)
     tracked = np.asarray(tracked, np.uint8)

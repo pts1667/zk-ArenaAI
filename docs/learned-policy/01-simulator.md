@@ -1,7 +1,7 @@
 # 01. Simplified Zero-K simulator: implementation plan
 
-Status: stage 1 built; **Gate 1 not passed, awaiting a decision** (results in section 8, which overrides older text
-here).  Stage 2 hasn't started.  Engine and game facts are cited `path:line` against
+Status: stage 1 built, Gate 1 waived by the user; S-M5 and S-M6 built (section 8.7).  Results in section 8 override older
+text here.  S-M7 hasn't started.  Engine and game facts are cited `path:line` against
 `C:\Users\Thoma\Documents\sources\RecoilEngine` (RE), `...\Zero-K` (ZK) and this repo (zk-ArenaAI).
 Numbers marked **measured** come from a throwaway Python pass over the repo's data while planning
 (method stated where used). Everything else is from reading source, or is marked unverified.
@@ -74,7 +74,7 @@ likely way RL would find the error. Tags: **E** exact in the sim (formula copied
 | Shields (`Shield` weapon type, 3 factory units) | A | Absorb damage up to a stored amount with regen. Projectile interception not modelled. | `Zero-K/units/*.lua` | Medium for shield units |
 | EMP | A | Engine: `paralyzeDamage` accumulates; stun while it exceeds max health; decays at `maxHealth x (15/30) x empDeclineRate` per slow update (`Unit.cpp:992-1009`). ZK uses `paralyzeOnMaxHealth = true` (`modrules.lua:92-93`). Sim copies this, with `empDeclineRate` read from the engine dump. | `Unit.cpp:992-1009` | Medium |
 | Slow (`timeslow`) | A | Multiplies speed and reload for a duration; ZK applies it via rules params read by unit scripts (`unit_timeslow.lua`). Duration and factor from the unit file. | `unit_timeslow.lua` | Low |
-| Disarm | A | Disables weapons for the duration (`disarmed` rules param, read by `unit_mex_overdrive.lua`). | `disarm_defs.lua` | Low |
+| Disarm | A | Disables weapons and their reload, not walking, with its own level and timer. Built, see 8.8. | `disarm_defs.lua`, `unit_boolean_disable.lua` | Low |
 | Death explosion | A | `explodeAs` weapon fired at death (`UnitDef.cpp:649`); self-destruct via `selfDestructAs` (`UnitDef.cpp:650`). | `UnitDef.cpp:649-650` | Low |
 | Jump | O (stage 2 approx) | Seven factory units have `jump`. Timed parabolic move with no stun. Needed before factoryjump units are fielded in army play. | `jump_defs.lua`, `unit_jumpjets.lua` (794 lines) | **High** if omitted and used by the policy |
 | Experience | O | ZK sets `experienceMult = 0`, `powerScale = healthScale = reloadScale = 0` (`modrules.lua:132-137`). Engine XP effects are read at `ModInfo.cpp:346-348` and guarded in `Unit.cpp:1453-1460`. `unit_xp.lua` only records XP. | `modrules.lua:132-137` | None |
@@ -107,9 +107,9 @@ likely way RL would find the error. Tags: **E** exact in the sim (formula copied
 | Metal in wrecks | A | Wreck feature from `corpse` (`UnitDef.cpp:292`), metal value from the feature def, not verified. Sim: wreck value = fraction of cost. | `Unit.cpp:153, 452` | Medium: reclaim farming |
 | Reclaim | O | Stage 3. `modrules.lua` reclaim block (lines 62-74) sets `featureEnergyCostFactor` and `reclaimMethod`. | `modrules.lua:62-74` | Medium |
 | Assist and repair | A | Same build-step formula; repair via `repairSpeed` (`UnitDef.cpp:366`). | `UnitDef.cpp:366` | Low |
-| Resurrect, capture | O | Not on the stage 1-3 roster. Capture (`capture_defs.lua`) is stage 4. | | Low |
+| Resurrect, capture | O | Not on the stage 1-3 roster. Capture (`capture_defs.lua`) is stage 4. For now a capture weapon does nothing and its unit is out of armies (8.8). | | Low |
 | Commander, morph | O (stage 3) | `unit_morph` (1266 lines) and `unit_commander_upgrade` (755 lines) are not read in full. | | Medium at game start |
-| Stockpile | O (stage 3) | `unit_stockpile.lua`. | | Low |
+| Stockpile | A, without its cost | `unit_stockpile.lua`. Built with manual fire, see 8.8; the metal cost waits for the economy. | | Low |
 
 ### 1.5 Terrain hazards
 
@@ -346,7 +346,8 @@ generated from that file, and a test compares the field lists.  The live produce
 
 What the sim must emit each decision, beyond positions and health:
 
-- `side`: 0 own, 1 enemy in LOS, 2 radar blip, 3 remembered structure, 4 hidden enemy (critic only).  Side 4
+- `player`, `ally_team`: whose it is, in the game's numbers.  For now each of the sim's two sides is one player and one alliance.
+- `knowledge`: 0 in LOS, 1 radar blip, 2 remembered structure, 3 hidden enemy (critic only).  Hidden records
   must never reach the actor's inputs.
 - Blip identity: `def_id` is -1 unless the unit is in LOS, or was seen and has stayed in radar contact since
   (`rts/ExternalAI/AICallback.cpp:593-597`, LOS_PREVLOS with LOS_CONTRADAR).
@@ -383,7 +384,7 @@ LOS cost: a raycast per unit per decision is too expensive (estimate, not measur
 per unit at 560 elmo and 16-elmo cells). Plan: cache per (cell, quantised height of eye) with
 invalidation when a unit moves across a cell, and report the measured cost in M6.
 
-Actions: 02 section 4.1 is the list, one slot per own controllable unit (at most 128) and factory each
+Actions: 02 section 4.1 is the list, one slot per own controllable unit (at most 256) and factory each
 decision.  Sim behaviour for each kind, with the ack the sim records for diagnostics:
 
 | Kind | Sim behaviour | Ack when it cannot be honoured |
@@ -590,7 +591,7 @@ live-play budget is a separate constraint.
 
 Built: S-M0 to S-M4, in `sim/`, `tools/sim_data.py`, `tools/sim_engine.py`, `tools/simgame/`,
 `tools/sim_battery.py` and `tools/sim_fight_gate.py`.  **Gate 1 did not pass** (rerun after the pathing change in 8.6: unchanged).  Under "Stages and gates" in the
-overview that stops the work for a decision by the user; stage 2 has not started.  Sections 0 to 7 above are
+overview that stopped the work for a decision by the user, who waived it on 2026-11-05 and skipped the wider engine comparison, so Phase B went ahead.  Sections 0 to 7 above are
 the plan as written, and this section overrides them where they differ.
 
 Run again with:
@@ -831,6 +832,104 @@ but the worst routes and arrival, so they stay off.  Differences of 1-3 points a
 
 **Tried and replaced:** straight-only inside a segment (14-25% of kbot, tank and hover goals never arrived, battery 104); per-segment
 whole-map fields plus a cached goal field (better arrival, battery 106, but 1.2 GB on Carabanossi and run-time builds).
+
+### 8.7 Batch, raw frames and fog (S-M5, S-M6; 2026-11-05)
+
+`zksim.Batch` steps games across threads and leaves both sides' frames in preallocated arrays (`sim/src/views.cpp`, ABI 2).
+`sim/include/zksim/rawframe.hpp` is generated from `bots/zkbot/policy/rawframe.py`, which owns the schema.
+
+| Measure | Result | Budget |
+|---|---|---|
+| 256 games, about 390 units each, 16 threads | 0.339 ms per game decision, frames for both sides included | 0.5 ms; 1.0 allowed |
+| The same games as armies thin out, 240 decisions | 0.194 ms average | |
+| Fog, one thread, starting at 400 units | 339 us per game decision for two sides, 5.7% of a tick's cost | Estimate was 40 us per tick, or 120 us per decision: 2.8x over, and it doesn't matter yet |
+| Thread count | Same frame hashes at 1, 5 and 16 threads | Determinism |
+
+Fog is one height-map ray per pair, within each unit's sight radius, with radar as a plain circle.  **A live frame recreated in
+the sim** (`tools/policy_golden.py sim`, also in `sim/tests/test_sim.py`), over 5 frames and 329 units:
+
+* Type, position, build, free-space rays: exactly the same features.  Health is within 1%.
+* Ground altitude matched only after a change: live `y` is a unit's middle, up to 35 elmos up by type, and the sim's is the ground.
+  The feature now has a 40-elmo dead zone, so it means "flying or not" in both.  Air units still differ, since the sim flies all
+  of them at 150 elmos.
+* **Sight: the sim saw 18 of the 23 enemies the live game saw, and none it didn't.**  Its fog is a little tighter.  Five frames is
+  too few to tune against, so it stays.
+
+Live against archive bundle on TitanDuel (objection 6 of 02): the same regions once renumbered, because the spot list comes in a
+different order.  Heights and passability are identical and walking distances differ by at most 0.23 elmos.  The net has no
+region ids, so numbering doesn't reach it.
+
+Bug found by the recreate check: `Batch.reset` passed record-array columns to C, which read past each value because the columns
+have gaps.  `zksim._floats` and `_ints` now refuse such arrays and `reset` copies them.
+
+S-M7 is not started, so the sim obeys only KEEP, MOVE, FIGHT, ATTACK_UNIT and MANUAL_FIRE (8.8).  `tools/policy_sim_env.py`'s start, two
+mirrored armies from far-apart spots, is a binding test and not the army game of 03 section 3.
+
+### 8.8 Special weapons (2026-11-05)
+
+The exporter read weapon fields without knowing the `customParams` that give them their meaning, so a scan of all 152 custom
+parameters on the 748 weapons, against what `tools/sim_data.py` reads and which game code reads them, found more than capture and
+disarm.  Fixed, each from the game's source:
+
+| What | Was | Now | Source |
+|---|---|---|---|
+| Capture (`is_capture`) | Dominatrix did 660 DPS of real damage | No damage.  Out of armies until capture is built | `unit_capture.lua` |
+| Disarm | Treated as stun: stopped walking, no separate timer | Own level and timer.  Stops firing and reload, not walking.  Reads `disarmdamagemult`, so `shipscout_missile`, which has `disarmdamageonly = 0`, also does damage | `unit_boolean_disable.lua`, `disarm_defs.lua`, `unit_attributes.lua:86-90` |
+| Disarm targeting | None | Up to 3 weapons share a target, others prefer one still armed; a disarmed unit is a worse target for everyone else | `unit_target_priority.lua:285-299` |
+| Reef missile, and any manual or stockpile weapon | Never fired | `ZK_ORDER_MANUAL_FIRE`, numbered as the raw frame's kind 6.  Walks to range, fires, order done.  Stockpile by unit `stockpiletime`, stopped by stun and disarm, free until the sim has an economy | `CommandAI.cpp` `WeaponFired`, `Weapon.cpp:1023`, `unit_stockpile.lua` |
+| Starburst missiles | Launcher had to face the target; flew straight | Launcher needn't face; climbs for `uptime`, then flies | `StarburstProjectile.cpp` |
+| Heat rays (`dynDamageExp`): Scorcher, Desolator, Dante | Full damage at any range | Falls to nothing at range, muzzle to hit | `DamageArray.cpp:82-110` |
+| Fake guns that do damage: Grizzly, Buoy, Bulkhead | Fired as well as the real gun | Never fire: the script's `AimWeapon` returns false | `amphfloater.lua:227-241` |
+| Slow-only beams: Cyclops, commanders, missile | No slow: factor defaulted to 0 | Factor 1, as the game | `timeslow_defs.lua` |
+| `timeslow_damage` (Sunlance), `timeslow_overslow_frames` | Ignored | Read | `timeslow_defs.lua`, `unit_timeslow.lua:61` |
+| Stun, disarm and slow level | By max HP | By current HP, so hurt units fall sooner | `unit_paralysis_damage.lua`, `unit_boolean_disable.lua` |
+| `overstun_time` | Ignored | Stun can run past the weapon's time, near the threshold | `unit_paralysis_damage.lua` |
+| Doomed-target bookkeeping | Counted stun and disarm damage as health damage | Only what takes health | |
+| Felon's gun (`shield_drain`) | Free | Takes charge from its own shield, and can't fire without it | `shieldfelon.lua` |
+| Ronin, Phantom (`reload_move_penalty`) | Ignored | Slower while the main weapon reloads | `cloakskirm.lua` |
+
+Checked and needing nothing: `extra_paratime` equals `emp_paratime` on all 5 playable weapons that carry it, and
+`shieldstartingpower` equals `shieldPower` on all 3.
+
+**Armies** (`policy_sim_env.army_types`) drew from every def: chickens, test units, and AA that can't hit the ground.  Now 40 types:
+factory-built, can hit the ground, nothing flagged `ZK_W_UNMODELLED` (capture, spawned units, pushing or pulling, throwing).
+
+**Re-order boundary.**  New battery phases showed a move order up to 2 frames before a slow update costs the engine a full cycle, and
+in the sim it cost nothing.  A policy re-ordering each decision would have kept those units at full speed.  It now waits for the next
+update.  The phases just above that are still nearly free in the sim (0.83 and 0.94 of full speed for a raider re-ordered every decision;
+the median is 0.43).  The battery doesn't measure those phases, so watch for it in self-play.
+
+**Engine battery, 194 scenarios: 119 of 138.**  The 25 new checks (`status/*` and 4 duels), engine against sim:
+
+| Check | Engine | Sim |
+|---|---|---|
+| Disarmed unit walks (elmos; unhindered, engine / sim: 578 / 588) | 578 | 587 |
+| Disarm lasts (frames, of 600) | 180 | 175 |
+| Damage dealt in 600 frames, free / while a Racketeer disarms it | 2037 / 819 | 2090 / 861 |
+| Reef missile: lands (frame), disarmed for (frames) | 100, 295 | 95, 295 |
+| Scorcher kills a Glaive at 225 elmos (frames) | 97 | 105 |
+| Grizzly against Ravager; Buoy against Knight (frames) | 202; 913 | 185; 910 |
+| Ronin walking and firing (elmos) | 650 | 642 |
+
+The 19 misses: 9 are the routing misses of 8.6, unchanged.  10 are new:
+
+- **First Racketeer missile lands 35 frames late in the engine** (2 checks), about 1.2 s.  Later shots keep the 10 s rhythm.  Cause unknown.
+- **Sitting on the stun threshold** (`status/emp-walk`, 2 checks): levels agree (peak 1.05 against 1.04), but a turret that holds a unit
+  at 1.00-1.05 flips it over and under; it walks 300 elmos in the engine against 172.
+- **Bantha's manual salvo** (3 checks): 12 missiles fly further and land later in the engine, and differ between runs.  10,000 metal,
+  in no army.  Left alone.
+- **Scorcher at 90 elmos**, 31.8 against 40 frames (1 check).  Close to the tick's size.
+- **Kbot re-order at 0.5 s** (2 checks), 0.03 against 0.09 of full speed: both nearly stopped, but the check is a share.
+
+**Known gaps**, all named so they aren't mistaken for modelled:
+
+- Reef's drones: no carrier logic.  It has its missile only, and ships are out of armies.
+- The policy can't see disarm: the raw frame has a paralysed flag and no disarmed one.  It sees the target stop firing, not the status.
+- Gauss rifles (`single_hit`: Dagger, Gauss turret) hit only their target, not everything along the line.
+- Mines, capture, impulse, throwing: out of armies via the flag.  Bulkhead's deploy-to-fire script isn't modelled, and it stays in armies.
+- Stockpiling costs no metal, and a paralyser hit doesn't also extend a partial disarm.
+- Air-only (`reammoseconds`, `shots_per_refuel`, thermite), water (`stays_underwater`), terraform and visual parameters are for later
+  stages or have no effect on a fight.
 
 ## Objections to the shared contract
 

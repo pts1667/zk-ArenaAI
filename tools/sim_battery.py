@@ -34,8 +34,18 @@ LANE_PAD = 256.0
 MOVERS = {"kbot": "cloakraid", "tank": "tankraid", "spider": "spiderassault", "hover": "hoverraid"}
 DUELS = (("cloakraid", "cloakraid", 150.0), ("cloakassault", "vehassault", 250.0), ("shieldassault", "spiderassault", 260.0),
          ("hoverraid", "tankraid", 190.0), ("spiderscout", "cloakraid", 140.0), ("cloakskirm", "cloakskirm", 400.0),
-         ("tankriot", "tankassault", 300.0), ("jumpassault", "vehassault", 115.0))
+         ("tankriot", "tankassault", 300.0), ("jumpassault", "vehassault", 115.0),
+         # Heat rays fade with distance; amphibious bots carry a second gun that never fires.
+         ("vehraid", "cloakraid", 90.0), ("vehraid", "cloakraid", 225.0),
+         ("amphfloater", "cloakassault", 400.0), ("amphassault", "vehassault", 500.0))
 DUEL_REPEATS = 5
+STATUS_FRAMES = 600
+STATUS_TARGET = "cloakassault"
+STATUS_WALK_FRAME = 240      # by then the first shot has landed
+STATUS_SHARE = 0.20
+STATUS_FRAME_LIMIT = 15.0    # frames; shots are in the air for different times
+DUMMY_HP = 1000000.0
+POOL_DEPTH = -60.0
 DUEL_FRAMES = 1200
 BLAST_BOMBS = ("jumpbomb", "shieldbomb", "energyfusion")
 BLAST_TARGET = "staticstorage"
@@ -195,9 +205,14 @@ def build_scenarios() -> list[dict]:
         out.append({"name": f"turn/{cls}", "kind": "turn", "duration": 120, "log": 1,
                     "units": [{"key": "a", "unit": name, "team": 0, "x": x0 + 900, "z": z0, "facing": 1}],
                     "orders": [{"f": ORDER_FRAME, "u": "a", "c": "move", "x": x0 + 300, "z": z0}]})
+    named: dict[str, int] = {}
     for a, b, gap in DUELS:
+        # The same pair again is at another distance.
+        pair = f"{a}-{b}"
+        label = pair if pair not in named else f"{pair}-at-{int(gap)}"
+        named[pair] = 1
         for r in range(DUEL_REPEATS):
-            out.append({"name": f"duel/{a}-{b}/{r}", "kind": "duel", "duration": DUEL_FRAMES, "log": 5, "stop_on_death": True,
+            out.append({"name": f"duel/{label}/{r}", "kind": "duel", "duration": DUEL_FRAMES, "log": 5, "stop_on_death": True,
                         "units": [{"key": "a", "unit": a, "team": 0, "x": x0 + 500, "z": z0, "facing": 1, "hold": True},
                                   {"key": "b", "unit": b, "team": 1, "x": x0 + 500 + gap, "z": z0, "facing": 3, "hold": True}]})
     target_hit = units[BLAST_TARGET]["hit_radius"]
@@ -238,12 +253,52 @@ def build_scenarios() -> list[dict]:
                     out.append({"name": f"reorder/{cls}/{label}/{seconds}", "kind": "reorder", "duration": REORDER_FRAMES, "log": 5,
                                 "units": [{"key": "a", "unit": name, "team": 0, "x": x0, "z": z0, "facing": 1}],
                                 "orders": orders, "group": f"{cls}/{label}", "seconds": seconds})
+    out += _status_scenarios(x0, z0, patch)
     for name in ORDER_DELAY_UNITS:
         if name in units:
             out.append({"name": f"orderdelay/{name}", "kind": "orderdelay", "duration": ORDER_DELAY_FRAMES, "log": 1,
                         "units": [{"key": "a", "unit": name, "team": 0, "x": x0, "z": z0, "facing": 1}],
                         "orders": [{"f": f, "u": "a", "c": "move", "x": x0 + LANE_LENGTH - 50, "z": z0} for f in range(ORDER_FRAME, ORDER_DELAY_FRAMES, 35)]})
     return out
+
+
+def _status_scenarios(x0: float, z0: float, patch: dict) -> list[dict]:
+    """What special weapons do to a unit: whether it walks, whether it shoots, and for how long.  The Reef
+    is last: its pool stays dug, and no other scenario's terrain knows about it."""
+    def walker(attacker: str, gap: float, order: str, name: str, unit: str = STATUS_TARGET, walk_frame: int = STATUS_WALK_FRAME) -> dict:
+        ax, tx = x0 + 100, x0 + 100 + gap
+        return {"name": name, "kind": "status", "duration": STATUS_FRAMES, "log": 5,
+                "units": [{"key": "a", "unit": attacker, "team": 0, "x": ax, "z": z0, "facing": 1, "hold": True},
+                          {"key": "t", "unit": unit, "team": 1, "x": tx, "z": z0, "facing": 1, "fire": 0}],
+                "orders": [{"f": ORDER_FRAME, "u": "a", "c": order, "t": "t"},
+                           {"f": walk_frame, "u": "t", "c": "move", "x": x0 + LANE_LENGTH - 50, "z": z0}]}
+
+    def shooter(name: str, with_arty: bool) -> dict:
+        rows = [{"key": "t", "unit": "cloakraid", "team": 1, "x": x0 + 800, "z": z0, "facing": 1, "hold": True},
+                {"key": "dummy", "unit": BLAST_TARGET, "team": 0, "x": x0 + 800 + 120, "z": z0, "facing": 0, "fire": 0, "hp": DUMMY_HP}]
+        orders = []
+        if with_arty:
+            rows.append({"key": "a", "unit": "shieldarty", "team": 0, "x": x0 + 100, "z": z0, "facing": 1, "hold": True})
+            orders.append({"f": ORDER_FRAME, "u": "a", "c": "attack", "t": "t"})
+        return {"name": name, "kind": "status-fire", "duration": STATUS_FRAMES, "log": 5, "units": rows, "orders": orders}
+
+    free = {"name": "status/free-walk", "kind": "status", "duration": STATUS_FRAMES, "log": 5,
+            "units": [{"key": "t", "unit": STATUS_TARGET, "team": 1, "x": x0 + 700, "z": z0, "facing": 1, "fire": 0}],
+            "orders": [{"f": STATUS_WALK_FRAME, "u": "t", "c": "move", "x": x0 + LANE_LENGTH - 50, "z": z0}]}
+    ronin = {"name": "status/ronin-reload", "kind": "status", "duration": 360, "log": 5,
+             "units": [{"key": "t", "unit": "cloakskirm", "team": 1, "x": x0 + 100, "z": z0, "facing": 1},
+                       {"key": "dummy", "unit": BLAST_TARGET, "team": 0, "x": x0 + 500, "z": z0 + 60, "facing": 0, "fire": 0, "hp": DUMMY_HP}],
+             "orders": [{"f": ORDER_FRAME, "u": "t", "c": "move", "x": x0 + LANE_LENGTH - 50, "z": z0}]}
+    pool = {"x1": x0 + 100, "z1": patch["z2"] + 64, "x2": x0 + 900, "z2": patch["z2"] + 664, "h": POOL_DEPTH}
+    reef = {"name": "status/reef-missile", "kind": "status", "duration": 1500, "log": 5, "pool": pool,
+            "units": [{"key": "a", "unit": "shipcarrier", "team": 0, "x": x0 + 500, "z": patch["z2"] + 364, "facing": 0, "hold": True, "fire": 0, "stock": 1},
+                      {"key": "t", "unit": STATUS_TARGET, "team": 1, "x": x0 + 900, "z": z0, "facing": 1, "fire": 0}],
+            "orders": [{"f": ORDER_FRAME, "u": "a", "c": "manual", "t": "t"},
+                       {"f": 900, "u": "t", "c": "move", "x": x0 + LANE_LENGTH - 50, "z": z0}]}
+    return [free, walker("shieldarty", 700.0, "attack", "status/disarm-walk"), walker("turretemp", 300.0, "attack", "status/emp-walk"),
+            # Its main gun kills the target soon, so this one walks from the start.
+            walker("tankheavyassault", 300.0, "attack", "status/slow-beam-walk", walk_frame=ORDER_FRAME), walker("striderbantha", 1000.0, "manual", "status/manual-stun"),
+            shooter("status/shooter-free", False), shooter("status/shooter-disarmed", True), ronin, reef]
 
 
 def _lua_value(v) -> str:
@@ -260,7 +315,7 @@ def _lua_value(v) -> str:
     raise TypeError(type(v))
 
 
-GAME_KEYS = ("name", "duration", "log", "stop_on_death", "units", "orders")
+GAME_KEYS = ("name", "duration", "log", "stop_on_death", "units", "orders", "pool")
 
 
 def scenarios_lua(scenarios: list[dict]) -> str:
@@ -300,7 +355,7 @@ def run_engine() -> None:
     scenarios = build_scenarios()
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / "scenarios.json").write_text(json.dumps(scenarios), "utf8")
-    wd = sim_engine.run("battery", MAP_NAME, timeout=420.0, port=8791,
+    wd = sim_engine.run("battery", MAP_NAME, timeout=720.0, port=8791,
                         extra_files={"LuaRules/Configs/sim_scenarios.lua": scenarios_lua(scenarios)})
     parsed = parse_log(wd / "infolog.txt", scenarios)
     (OUT / "engine.json").write_text(json.dumps(parsed), "utf8")
@@ -332,7 +387,7 @@ def run_sim(scenarios: list[dict], engine_starts: dict[str, int]) -> dict:
             for k, u in ids.items():
                 st = w.get(u)
                 if st.alive:
-                    rows[k].append([frame, st.x, st.z, st.heading, st.speed, st.hp])
+                    rows[k].append([frame, st.x, st.z, st.heading, st.speed, st.hp, st.para, st.disarm])
                 elif k not in dead:
                     dead[k] = frame
             if dead and s.get("stop_on_death"):
@@ -344,6 +399,10 @@ def run_sim(scenarios: list[dict], engine_starts: dict[str, int]) -> dict:
                         w.kill(ids[o["u"]])
                     elif o["c"] == "fight":
                         w.fight(ids[o["u"]], o["x"], o["z"])
+                    elif o["c"] == "attack":
+                        w.attack(ids[o["u"]], ids[o["t"]])
+                    elif o["c"] == "manual":
+                        w.manual_fire(ids[o["u"]], ids[o["t"]])
                     else:
                         w.move(ids[o["u"]], o["x"], o["z"])
             w.step(1)
@@ -400,6 +459,29 @@ def _path_length(rows: list[list[float]]) -> float:
 
 def _damage_taken(rows: list[list[float]]) -> float:
     return rows[0][5] - rows[-1][5] if rows else 0.0
+
+
+def _first_above(rows: list[list[float]], column: int, level: float) -> float | None:
+    return next((float(r[0]) for r in rows if len(r) > column and r[column] > level), None)
+
+
+def _frames_above(rows: list[list[float]], column: int, level: float) -> float:
+    return float(sum(b[0] - a[0] for a, b in zip(rows, rows[1:]) if len(a) > column and a[column] > level))
+
+
+def _status_checks(report: "Report", name: str, e: dict, m: dict) -> None:
+    """How long each status held, when it began, and how far the unit got."""
+    te, tm = e["rows"].get("t", []), m["rows"].get("t", [])
+    # Only while it is alive in both: how long it lasts is the duels' question.
+    last = min(te[-1][0], tm[-1][0]) if te and tm else 0
+    te, tm = [r for r in te if r[0] <= last], [r for r in tm if r[0] <= last]
+    report.add("status: walked (elmos)", name, _path_length(te), _path_length(tm), STATUS_SHARE, True)
+    for column, label in ((6, "stun"), (7, "disarm")):
+        began_e, began_m = _first_above(te, column, 1.0), _first_above(tm, column, 1.0)
+        if began_e is None and began_m is None:
+            continue
+        report.add(f"status: {label} begins (frame)", name, began_e, began_m, STATUS_FRAME_LIMIT, False)
+        report.add(f"status: {label} lasts (frames)", name, _frames_above(te, column, 1.0), _frames_above(tm, column, 1.0), STATUS_SHARE, True)
 
 
 def _ttk(cell: dict) -> float | None:
@@ -464,6 +546,11 @@ def compare() -> None:
             report.add("blocked move (walk frames)", name, _walk_frames(e["rows"]["a"], s["goal"]), _walk_frames(m["rows"]["a"], s["goal"]), ROUTE_SHARE, True)
         elif kind == "slope":
             report.add("clear move over slopes (walk frames)", name, _walk_frames(e["rows"]["a"], s["goal"]), _walk_frames(m["rows"]["a"], s["goal"]), SLOPE_SHARE, True)
+        elif kind == "status":
+            _status_checks(report, name, e, m)
+        elif kind == "status-fire":
+            report.add("status: damage it dealt", name, _damage_taken(e["rows"].get("dummy", [])), _damage_taken(m["rows"].get("dummy", [])), STATUS_SHARE, True)
+            _status_checks(report, name, e, m)
         elif kind == "orderdelay":
             continue
         elif kind == "reorder":

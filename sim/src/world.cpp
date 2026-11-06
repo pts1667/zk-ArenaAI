@@ -66,6 +66,10 @@ int World::add(int t, int s, float px, float pz, float head, float hp_frac, floa
     hp.push_back(std::max(0.01f, hp_frac) * d.hp);
     build.push_back(build_frac);
     para.push_back(0.0f);
+    disarm.push_back(0.0f);
+    stock.push_back(0);
+    stock_progress.push_back(0.0f);
+    stun_attackers.push_back(0);
     slow.push_back(0.0f);
     damage_taken.push_back(0.0f);
     pending.push_back(0.0f);
@@ -74,6 +78,12 @@ int World::add(int t, int s, float px, float pz, float head, float hp_frac, floa
     order_wait.push_back(0);
     order_lag.push_back(0);
     progress.push_back(WalkProgress{px, pz, 0, 0, -1, 0});
+    max_los = std::max(max_los, std::max(d.los_radius, d.air_los_radius));
+    mem_kind.push_back(-1);
+    mem_frame.push_back(0);
+    mem_target.push_back(-1);
+    mem_x.push_back(0.0f);
+    mem_z.push_back(0.0f);
     burn_rate.push_back(0.0f);
     burn_frames.push_back(0.0f);
     float power = 0.0f;
@@ -94,18 +104,29 @@ int World::add(int t, int s, float px, float pz, float head, float hp_frac, floa
     return u;
 }
 
-void World::ready_weapons() { std::fill(cooldown.begin(), cooldown.end(), 0.0f); }
+void World::ready_weapons() {
+    std::fill(cooldown.begin(), cooldown.end(), 0.0f);
+    for (int u = 0; u < count(); ++u)
+        if (type_of(u).stockpile_frames > 0.0f) stock[size_t(u)] = std::max(stock[size_t(u)], 1);
+}
 
 void World::order_unit(int u, int kind, float gx, float gz, int target) {
+    if (kind == ZK_ORDER_MANUAL_FIRE && manual_mount(u) < 0) return;
     order[size_t(u)] = kind;
     goal_x[size_t(u)] = gx;
     goal_z[size_t(u)] = gz;
     order_target[size_t(u)] = target;
+    mem_kind[size_t(u)] = kind;
+    mem_frame[size_t(u)] = frame;
+    mem_target[size_t(u)] = target;
+    mem_x[size_t(u)] = gx;
+    mem_z[size_t(u)] = gz;
     // Battery: a plain move order stops the unit until its next slow update.  A fight order doesn't.
     if (kind == ZK_ORDER_MOVE) {
         const int until = (SLOW_UPDATE_PHASE + u - frame) % SLOW_UPDATE_FRAMES;
         const int wrapped = until < 0 ? until + SLOW_UPDATE_FRAMES : until;
-        order_wait[size_t(u)] = wrapped == 0 ? SLOW_UPDATE_FRAMES : wrapped;
+        // Too close to the update to catch it: the unit waits for the one after (battery, kbots at 0.5 s).
+        order_wait[size_t(u)] = wrapped <= ORDER_BRAKE_LAG ? wrapped + SLOW_UPDATE_FRAMES : wrapped;
         order_lag[size_t(u)] = ORDER_BRAKE_LAG;
     }
 }
@@ -181,6 +202,15 @@ void World::update_status() {
         if (!alive[size_t(u)]) continue;
         const auto& d = type_of(u);
         para[size_t(u)] = std::max(0.0f, para[size_t(u)] - frames / PARA_DECLINE_FRAMES);
+        disarm[size_t(u)] = std::max(0.0f, disarm[size_t(u)] - frames / PARA_DECLINE_FRAMES);
+        // Stops for stun, disarm and an unfinished unit, and is slowed like everything else it does (unit_stockpile.lua).
+        if (d.stockpile_frames > 0.0f && active(u) && !disarmed(u)) {
+            stock_progress[size_t(u)] += frames * (1.0f - slow_now(u));
+            if (stock_progress[size_t(u)] >= d.stockpile_frames) {
+                stock_progress[size_t(u)] -= d.stockpile_frames;
+                ++stock[size_t(u)];
+            }
+        }
         slow[size_t(u)] = std::max(0.0f, slow[size_t(u)] - frames / SLOW_DECLINE_FRAMES);
         if (burn_frames[size_t(u)] > 0.0f) {
             const float amount = burn_rate[size_t(u)] * std::min(frames, burn_frames[size_t(u)]);

@@ -2,7 +2,7 @@
 
 A single network plays Zero-K through the existing bot client, trained by self-play in
 a simplified simulator, following StarCraft's Pluto (without its per-opponent opening
-bandit).  Status: plan only, nothing is built.
+bandit).  Status: stage 1 is built and Gate 1 was waived by the user on 2026-11-05 (below); Phase B's plumbing is built (below).  Nothing has been trained on the sim yet.
 
 * [01-simulator.md](01-simulator.md): the simplified environment
 * [02-policy.md](02-policy.md): the network, its observations and actions
@@ -47,15 +47,15 @@ rules economy.  The largest risks, in order:
 | Fog | The policy sees what a player sees: visible units, radar blips, its own state.  A blip's type is known only if the unit is in LOS, or was seen and has stayed in radar contact since (`rts/ExternalAI/AICallback.cpp:593-597`).  The critic may see everything in training. |
 | Units in the network | One token per unit: type stats from `catalog`, plus an exact name vocabulary with an unknown row and 30% dropout in training, plus instance state.  No per-name logic. |
 | Terrain in the network | One token per `terrain.py` region, connected along gates.  Exact unit positions and 24 ray values keep fine detail. |
-| Actions | The 16 kinds in 02 section 4.1, with KEEP as the default that emits nothing.  One output per controllable unit, at most 128 (the rest stay with rules at stage 2).  Commit lock of 3 s and "idle units can't KEEP" are masks.  Stage 2 enables kinds 0-9; factories and construction are stage 3. |
+| Actions | The 16 kinds in 02 section 4.1, with KEEP as the default that emits nothing.  One output per controllable unit, at most 256 (the rest stay with rules at stage 2).  Commit lock of 3 s and "idle units can't KEEP" are masks.  Stage 2 enables kinds 0-9; factories and construction are stage 3. |
 | Weapons | No projectile simulation.  Beam-type weapons hit at once.  Others schedule damage for the flight time, applied if the target is still within the blast then, so dodging still exists. |
-| Movement | Spheres, no terraform.  A ground `move` walks straight when the way is clear, as Zero-K's `cmd_raw_move.lua` does, and otherwise follows a flow field (01 section 1.1). |
-| Re-ordering | Its speed cost is **measured in the engine** (S-M4), not assumed, and then modelled.  Without it the policy would learn that re-ordering is free.  The cause isn't established: `WAIT_FOR_PATH` is compiled out (`GroundMoveType.cpp:85`). |
+| Movement | Spheres, no terraform.  A ground `move` walks straight when the way is clear, as Zero-K's `cmd_raw_move.lua` does, and otherwise follows gates and segment centres from a table made when the map is exported, with no fields and no pathfinding at run time (01 section 8.6). |
+| Re-ordering | Its speed cost is **measured in the engine** (S-M4), not assumed, and then modelled.  Without it the policy would learn that re-ordering is free.  Measured: a plain move order stops a unit until its next slow update (15 frames), and a fight order costs nothing (01 section 8.3). |
 | Reward | Zero-sum potential difference of own value only (03 section 1.3), blended into win/loss +1/-1 by `beta`.  Each kill already lowers the victim's value, so there's no separate kill term.  Gamma 1, GAE lambda 0.95. |
 | Opponents | Current weights first, as Pluto does; a league only if the triggers in 03 section 4.5 fire.  CircuitAI exists only in the real engine, and is the measure of progress. |
 | Rules baseline | Frozen flags `hitrun,mexpatrol,nearbuild,raidfirst,raidprobe,seeturrets,spearhead` (the "before" arm of rev5 and rev6).  Later rule changes don't enter comparisons.  At stage 2 both arms use these flags, and the policy arm adds `policy`. |
 | First scope | TitanDuel 2.2, ground factories and static defence.  Air follows, since CircuitAI builds it. |
-| Storage | Runs and checkpoints on `D:\zk-learned` (110 GB free).  **C: has 15 GB free and backs WSL's disk, even though `df` inside WSL shows 942 GB free.**  Raw frames stay in RAM for one iteration and are featurized per minibatch; nothing is spilled or archived, apart from a 1% sample kept for analysis. |
+| Storage | Runs and checkpoints on `D:\zk-learned` (110 GB free).  **C: backs WSL's disk, even though `df` inside WSL shows far more free than C: has** (77 GB on 2026-11-05).  Raw frames stay in RAM for one iteration and are featurized per minibatch; nothing is spilled or archived, apart from a 1% sample kept for analysis. |
 
 ## Stages and gates
 
@@ -67,6 +67,12 @@ A stage starts only when the previous gate passed.
 | 2. Army control | Self-play with scripted economy and reinforcements, then the network commands the army on the rules economy. | Real engine against CircuitAI Hard, 100 pairs, pre-registered: paired log X15 and log M15, +22% (03 section 6.3).  Win rate reported, not gated. |
 | 3. Full game | Economy and construction in sim and policy. | 60% against anchors in sim by 1B decisions, then the live policy without rules beats the rules bot against CircuitAI Hard. A move from 10% to 20% wins needs about 215 pairs. |
 | 4. Fine-tuning | Domain randomisation in sim, then continued training in the real engine. | Engine gate at its pre-registered effect; sim-to-engine gap within bound (03 section 6.6). |
+
+**Gate 1 outcome (2026-11-05): waived by the user.**  1(a) failed: advance 0.591 against out-of-fold `fightnet` 0.665 and value 0.564 at 20 s.  1(b) is at 105/113 of its checks.
+The user read this as probably unusual terrain and places tanks can't leave, said it's fine so far, and chose to skip the wider engine comparison and go on.
+So the sim's fight model is unproven, not validated, and Gate 2 in the real engine is the first test of whether what it teaches transfers.
+
+**Phase B outcome (2026-11-05): plumbing built, one budget missed.**  The toy met its win marks without learning focus fire unless forced to (03 section 10.2), so later gates should use several scripted opponents.  Numbers are in 01 section 8.7, 02 section 13 and 03 section 10.  Shadow mode ran live with no commands sent: forward mean 17 ms, p99 at most 37 ms, game at least 2.74x.  Numpy against torch: worst difference 7e-06 against the 1e-04 bound.  256 games of about 390 units: 0.34 ms per game decision against the 0.5 ms budget.  **The miss: training runs at about 360-400 decisions/s per pass on real frames, not the 1,700/s this plan assumed, so two passes give about 15M decisions a day, not 50M.**  The numbers and options are in 03 section 10.3.  It is the user's call before long runs start.
 
 If gate 1(a) fails while 1(b) passes, or 1(a) passes only on the no-blip, no-memory subset,
 stop and review.  The fight label is noisy and hides unseen enemies, so a failure there may
@@ -93,14 +99,14 @@ Milestones keep the numbers in their own plan: `S-` for 01, `P-` for 02, `T-` fo
 | Factories: 03's stage 2c trained them; 02 masks them until stage 3 | Stage 3.  In 2c a scripted production schedule supplies reinforcements. |
 | Live budget: 02 said 167 ms, 03 said 35 ms | 35 ms mean is the target, 60 ms p99 the guard, and 2.7x game speed the real test. |
 | Live model: 03 proposed d=128 or a GPU server; 02 measured d=192 at 30 ms | d=192 numpy.  P-M2 measures the whole forward, since 30 ms covers the encoder only. |
-| Token cap: 03 sized for 600; 02 caps at about 420 | 02's caps; 03's "up to 600 units" per decision is 128. |
-| Buffer: 03 stored 64-d tokens (5 GB); 02's tokens are 140-d with N x N buckets and masks | Store raw frames (about 72 bytes per record, about 1 GB per iteration) and featurize per minibatch.  At 1.3 ms and K=2 that's about 2-3 threads at 50M/day. |
+| Token cap: 03 sized for 600; 02 caps at about 750 | 02's caps; 03's "up to 600 units" per decision is 256. |
+| Buffer: 03 stored 64-d tokens (5 GB); 02's tokens are 140-d with N x N buckets and masks | Store raw frames (80 bytes per record, about 1 GB per iteration) and featurize per minibatch.  At 1.3 ms and K=2 that's about 2-3 threads at 50M/day. |
 | Featurizer cost: 1.3 ms (02) vs 0.4 ms (03) | 1.3 ms: 03's version had no rays or pair buckets. |
 | Module layout: 03's `policy_hook.py` vs 02's `policy/` | 02's layout.  Trajectory capture is `bots/zkbot/policy/trajectory.py`. |
 | Live weights: 03's prun arm used `.pt`; 02's bot reads `.npz` | Export to `.npz` first; `ZKBOT_POLICY` names that file. |
 | Live stage 2 gate: 02 said 8 games per arm | 8 games is a smoke test; the gate is 100 pairs. |
 | Hashed name embedding vs exact vocabulary | Exact: 615 names in 512 buckets must collide, and the hash can't detect unknown names anyway. |
-| Flow fields: 01 had an LRU of 64 and no budget for computing them | Move orders use the straight-line check first.  Fields to region centres are precomputed per map and class, shared read-only, and fine offsets steer locally (01 section 4.5). |
+| Flow fields: 01 had an LRU of 64 and no budget for computing them | Superseded by 01 section 8.6: no fields at all.  Move orders use the straight-line check first, then gates and segment centres from a per-class next-hop table. |
 
 ## Measured so far (2026-11-04)
 
@@ -110,7 +116,7 @@ Throwaway benchmarks, not in the repo; a guide, not a promise.
 |---|---|
 | C++ tick: spatial hash, targeting, blast damage, movement; 400 units, 16 busy threads | 370 µs.  Not a full sim. |
 | Actor and critic training, bf16, 243 tokens (02) | 2,560 samples/s at 1.0M; **1,720 at 2.7M (v1)**; 1,500 at 4.8M |
-| Plain transformer, no critic or region GRUs, bf16 and compile, 200 tokens (03) | 5,028 samples/s, so compile may help the real model; not yet measured |
+| Plain transformer, no critic or region GRUs, bf16 and compile, 200 tokens (03) | 5,028 samples/s, but compile gave the real model no gain, so it isn't used (03 section 10.3) |
 | Inference, v1, 243 tokens, GPU (02) | 7,000 decisions/s |
 | Numpy on CPU, v1 encoder, 243 tokens (02) | 30 ms per decision |
 | Real engine at 3x, 8 parallel games (03, rev6 timing) | About 1,000 games/day, mean game 658 game-seconds: 2.6-4.4M learnable decisions/day |

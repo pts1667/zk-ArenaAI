@@ -6,8 +6,11 @@
 #include <vector>
 
 #include "zksim/capi.h"
+#include "zksim/rawframe.hpp"
 
 namespace zk {
+
+constexpr float MAX_SLOW = 0.5f;
 
 struct Catalog {
     std::vector<zk_type_rec> types;
@@ -79,6 +82,7 @@ struct Shot {
     int weapon, source, source_side, target;
     float x, z, pending;
     bool guided, air;
+    float power;   // of its damage, after falling with distance
 };
 
 // Ground fire left by a shot.
@@ -86,6 +90,23 @@ struct FireArea {
     const zk_weapon_rec* weapon;
     float x, z, damage_per_frame;
     int frames_left;
+};
+
+// A blip's speed record, as blips.py keeps it: its top speed is the highest speed it has held for a whole window.
+struct BlipTrack {
+    float speeds[5] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    int frames[5] = {0, 0, 0, 0, 0};
+    int head = 0, filled = 0;
+    float top = 0.0f;
+};
+
+// What one side knows about every unit in the game.
+struct SideView {
+    std::vector<uint8_t> in_los, in_radar, known, remembered;
+    std::vector<int> seen_frame;
+    std::vector<float> ghost_hp, ghost_build;
+    std::vector<BlipTrack> tracks;
+    int last_contact = 0;
 };
 
 struct World {
@@ -99,11 +120,20 @@ struct World {
     // Units.
     std::vector<int> type, side, order, order_target, nearest;
     std::vector<uint8_t> alive;
-    std::vector<float> x, z, vx, vz, heading, speed, hp, build, para, slow, damage_taken, pending;
+    std::vector<float> x, z, vx, vz, heading, speed, hp, build, para, disarm, slow, damage_taken, pending;
+    std::vector<float> stock_progress;    // frames towards the next stockpiled shot
+    std::vector<int> stock;
+    std::vector<int> stun_attackers;      // disarm weapons that weighed this target this round
     std::vector<float> goal_x, goal_z, shield;
     std::vector<int> order_wait;          // frames until a new move order takes effect
     std::vector<int> order_lag;           // frames before the unit starts to brake for it
     std::vector<WalkProgress> progress;
+    // The order log: what the controller said last, as a player remembers it.
+    std::vector<int> mem_kind, mem_frame, mem_target;
+    std::vector<float> mem_x, mem_z, last_damage;
+    SideView views[2];
+    float max_los = 0.0f;                 // of the units in this game
+    std::vector<int> radar_units;
     std::vector<float> burn_rate, burn_frames;
     std::vector<FireArea> areas;
     // Weapons, ZK_MAX_MOUNTS per unit.
@@ -123,8 +153,15 @@ struct World {
     void ready_weapons();
     void step(int ticks);
     int count() const { return int(type.size()); }
+    void ensure_views();
+    void update_view(int side);
+    int emit_view(int side, UnitRecord* out, int cap, float* glob, int commander, const float* base);
+    void side_stats(int side, float* out) const;
+    void rebuild_index() { rebuild_grid(); }
     const zk_type_rec& type_of(int u) const { return cat->types[size_t(type[size_t(u)])]; }
     bool stunned(int u) const { return para[size_t(u)] > 1.0f; }
+    bool disarmed(int u) const { return disarm[size_t(u)] > 1.0f; }
+    float slow_now(int u) const { return slow[size_t(u)] < MAX_SLOW ? slow[size_t(u)] : MAX_SLOW; }
     bool active(int u) const { return build[size_t(u)] >= 1.0f && !stunned(u); }
 
     template <class F>
@@ -137,9 +174,11 @@ private:
     void pick_targets();
     void fire_weapons();
     void fire_one(int u, int slot, int frame_offset);
+    bool pay_for_shot(int u, const zk_weapon_rec& w);
+    int manual_mount(int u) const;
     void resolve_shots();
     void apply_shot(const Shot& s);
-    void explode(int weapon, float px, float pz, int source, int source_side, bool air);
+    void explode(int weapon, float px, float pz, int source, int source_side, bool air, float power = 1.0f);
     void damage_unit(int u, const zk_weapon_rec& w, float mult);
     bool absorbed_by_shield(const zk_weapon_rec& w, float px, float pz, const Shot& s);
     void move_units();
@@ -150,10 +189,12 @@ private:
     void finish_deaths();
     void update_status();
     void burn_areas();
-    float target_score(int u, int slot, int target) const;
+    float target_score(int u, int slot, int target);
     bool in_range(int u, const zk_weapon_rec& w, int target) const;
     bool faces(int u, const zk_weapon_rec& w, int target) const;
     void waypoint(int u, float gx, float gz, float& wx, float& wz) const;
+    bool clear_sight(int from, int to) const;
+    bool point_seen_by(int side, float x, float z) const;
 };
 
 template <class F>

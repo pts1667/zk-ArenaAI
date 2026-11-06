@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <memory>
 #include <thread>
 #include <vector>
 
@@ -28,6 +29,18 @@ void face_nearest_enemy(World& w, int first, int last, const int* side, const fl
         if (best < 1e30f) w.heading[size_t(e - first)] = std::atan2(cx - x[e], cz - z[e]);
     }
 }
+
+struct Game {
+    std::unique_ptr<World> world;
+    int commander[2] = {-1, -1};
+    float base[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+};
+
+struct Batch {
+    const Catalog* cat = nullptr;
+    int threads = 1;
+    std::vector<Game> games;
+};
 
 }  // namespace
 
@@ -126,6 +139,8 @@ void zk_world_get(const void* world, int unit, zk_unit_state* out) {
     out->hp = w->hp[u];
     out->damage_taken = w->damage_taken[u];
     out->para = w->para[u];
+    out->disarm = w->disarm[u];
+    out->stock = w->stock[u];
     out->shield = w->shield[u];
     out->alive = w->alive[u];
     out->order = w->order[u];
@@ -169,6 +184,74 @@ void zk_replay(const void* catalog, const void* const* maps, const int* snapshot
     };
     std::vector<std::thread> pool;
     for (int t = 0; t < std::max(1, threads); ++t) pool.emplace_back(worker);
+    for (auto& t : pool) t.join();
+}
+
+int zk_sizeof_unit_record(void) { return int(sizeof(UnitRecord)); }
+int zk_sizeof_site_record(void) { return int(sizeof(SiteRecord)); }
+int zk_global_count(void) { return G_COUNT; }
+
+int zk_world_view(void* world, int side, void* records, int cap, float* glob, int commander, const float* base) {
+    auto* w = static_cast<World*>(world);
+    w->ensure_views();
+    w->rebuild_index();
+    w->update_view(side);
+    return w->emit_view(side, static_cast<UnitRecord*>(records), cap, glob, commander, base);
+}
+
+void* zk_batch_new(const void* catalog, int games, int threads) {
+    auto* b = new Batch;
+    b->cat = static_cast<const Catalog*>(catalog);
+    b->games.resize(size_t(games));
+    b->threads = std::max(1, threads);
+    return b;
+}
+
+void zk_batch_free(void* batch) { delete static_cast<Batch*>(batch); }
+
+void zk_batch_reset(void* batch, int g, const void* map, uint64_t seed, int behaviour, int n, const int* type, const int* side,
+                    const float* x, const float* z, const float* heading, const float* hp_frac, const float* build_frac,
+                    const int* commander, const float* base) {
+    auto* b = static_cast<Batch*>(batch);
+    Game& game = b->games[size_t(g)];
+    game.world = std::make_unique<World>(b->cat, static_cast<const Map*>(map), seed, behaviour);
+    for (int i = 0; i < n; ++i) game.world->add(type[i], side[i], x[i], z[i], heading[i], hp_frac[i], build_frac[i]);
+    game.world->ready_weapons();
+    game.world->ensure_views();
+    game.commander[0] = commander[0];
+    game.commander[1] = commander[1];
+    std::copy(base, base + 4, game.base);
+}
+
+void* zk_batch_world(void* batch, int g) { return static_cast<Batch*>(batch)->games[size_t(g)].world.get(); }
+
+void zk_batch_step(void* batch, const int* games, int n_games, const zk_order_rec* orders, const int* order_offsets, int ticks,
+                   void* records, int cap, int* counts, float* globs, float* stats) {
+    auto* b = static_cast<Batch*>(batch);
+    auto* out = static_cast<UnitRecord*>(records);
+    auto worker = [&](int slice) {
+        for (int i = slice; i < n_games; i += b->threads) {
+            Game& game = b->games[size_t(games[i])];
+            World& w = *game.world;
+            for (int o = order_offsets[i]; o < order_offsets[i + 1]; ++o)
+                if (w.alive[size_t(orders[o].unit)]) w.order_unit(orders[o].unit, orders[o].kind, orders[o].x, orders[o].z, orders[o].target);
+            if (ticks > 0) w.step(ticks);
+            w.ensure_views();
+            w.rebuild_index();
+            for (int s = 0; s < 2; ++s) {
+                const size_t slot = size_t(i) * 2 + size_t(s);
+                w.update_view(s);
+                counts[slot] = w.emit_view(s, out + slot * size_t(cap), cap, globs + slot * G_COUNT, game.commander[s], game.base + 2 * s);
+                w.side_stats(s, stats + slot * ZK_STATS);
+            }
+        }
+    };
+    if (b->threads == 1 || n_games <= 1) {
+        for (int t = 0; t < b->threads; ++t) worker(t);
+        return;
+    }
+    std::vector<std::thread> pool;
+    for (int t = 0; t < b->threads; ++t) pool.emplace_back(worker, t);
     for (auto& t : pool) t.join();
 }
 

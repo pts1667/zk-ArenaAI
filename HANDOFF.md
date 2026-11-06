@@ -700,12 +700,12 @@ See **`docs/ML.md`** for the plan, environment and commands.
   `boom:<explosion>`, `env:<source>`. h124 (48 games) re-labelled: unknown
   killers 9% → 2.5%; death explosions 3.2% of all metal lost (fusion
   `atomic_blast` ~0.8k/game in our base; enemy pylon `estor_buildingex`
-  kills raiding Glaives); friendly fire lands 2% of killing blows (Rocko
+  kills raiding Glaives); friendly fire lands 2% of killing blows (Ronin
   and Reaver into our own Glaives); 10 fusions died without any damage
   event (unfinished frames decaying? new `built` field will tell).
 * Where metal is lost (h124 base, by killer role): first 10 min raiders
   25%, turrets 18%, riots 18%; 10–20 min assaults 19%, skirmishers 18%,
-  turrets 16%. Victims 10–20 min: Glaive 26%, Reaver 18%, Rocko 12%.
+  turrets 16%. Victims 10–20 min: Glaive 26%, Reaver 18%, Ronin 12%.
 * **ControllerAI** forwards ENEMY_DAMAGED (topic 17, ~15k events/game) with
   the enemy id: now used for exact enemy-loss labels. It drops the
   `weaponDefID` of UNIT_DESTROYED and the ids of ENEMY_DESTROYED (one-line
@@ -1134,6 +1134,55 @@ Setup, in WSL from the repo: `cmake -S sim -B ~/zksim/build && cmake --build ~/z
 `~/zksim/build/libzksim.so` (`ZKSIM_LIB` overrides).  `~/zkml/bin/python sim/tests/test_sim.py` runs the tests.
 `python tools/sim_data.py {catalog,maps,splits}` rebuilds the data; maps are gitignored.  `tools/sim_engine.py` uses its
 own write dir and port.  To stop a stuck run, stop only the process whose command line contains `results\simtools`.
+
+## 6g. Session 2026-11-05 — learned policy, Phase B: plumbing
+
+Gate 1 was waived by the user, so Phase B went ahead: the bot's policy package, the trainer, and the sim's batch and fog.  **No
+policy plays yet**: the bot only records (`rawframe`) or runs a forward pass without sending commands (`policyshadow`).  With no
+flags the bot is unchanged.  Numbers: `docs/learned-policy/00-overview.md`, `01-simulator.md` 8.7, `02-policy.md` 13, `03-training.md` 10.
+
+- **Passed:** live shadow latency (mean 17 ms, p99 at most 37 ms, 2.74x or better), numpy against torch parity (7e-06), 256-game
+  batch (0.34 ms per game decision), golden tests on live and sim frames, a live frame recreated in the sim, kill-while-saving.
+- **Missed: training rate.** About 360-400 decisions/s per pass on real frames against the plan's 1,700/s, so about 15M decisions a
+  day, not 50M.  Options are in `03-training.md` 10.3; 16-step segments give 597/s.  **Needs a decision before long runs.**
+- **Special weapons (01 section 8.8):** a scan of every weapon `customParam` against the exporter.  Capture does no damage and is out of
+  armies; disarm has its own level (firing and reload stop, walking doesn't); manual fire and stockpile work (`World.manual_fire`, Reef
+  checked in the engine); heat ray falloff, fake guns, slow-only beams, stun by current HP, overstun, Felon's shield cost and Ronin's reload
+  penalty fixed.  Armies are now 40 factory-built types.  ABI 3.  Battery 119/138: 9 routing misses as before, 10 new and explained in 8.8.
+  Reef's drones are not modelled, and the policy can't see disarm.
+- **Toy (`03-training.md` 10.2): marks met, tactic not learned.**  With all kinds, `toy-1` beat the nearest script 95% but didn't focus fire
+  (shared across 2.80 enemies against the focus script's 1.30) and still loses to focus 36-41%; it seems to dodge.  With only targets to pick,
+  `toy-focus` did learn it in part (1.90 enemies, 89% against nearest, 16-22% against focus).  Test later gates against several scripts.
+- **Later the same day: rate, caps, maps, teams (nothing trained yet).**
+  - Rate: 831 decisions/s, about 72M a day (256 games, concurrent, 32 steps, one pass, 40 a side, fog on).  That replaces the miss above.
+  - Caps: 256 controllable in a shared pool of 592 units.  Other alliances' units in sight come first, then on radar, then everything else.
+  - Teams: units carry `player`, `ally_team` and `knowledge`, so the same model reads any team layout.  Frame schema 2 and net `FEATURE_VERSION` 2: older recordings and checkpoints no longer load.  ABI 4.
+    Not done: the sim is still two sides of one player, nothing is trained on more, and ControllerAI sends no per-unit `team` (a hostile's player falls back to its alliance).
+  - Maps: Agalta, Faultline, FrostyCove, Red Comet Remake and TitanDuel, in `TRAINING_MAPS`.  Early end: from 2 minutes, a side with over 2.5x the other's metal value wins.
+  - Live cost with everything in view: 10 / 33 / 59 / 81 / 100 ms at 40 / 128 / 192 / 256 / 400 a side, so the 60 ms line is about 192.  The guard in `02-policy.md` 5.3 isn't built (`policy.budget_ms` and `policy.max_units` don't exist in the code yet).
+  - Orders: a unit with a target now gets the direction and distance to where the target is, and two pair buckets mark shooter and target.  `FEATURE_VERSION` 3.  Live gaps left: jump, cloak and manual fire orders read as no order, and a target out of sight reads as dead.
+  - Learning: `03-training.md` 10.2.  The toy doesn't find focus fire and seed luck is large (17% against 55% on the same settings), so compare settings over several seeds.  `sim-short`, 2M decisions, went from about 3% to about 15-20% wins against the fight script, with a weak critic and rising entropy.
+  - Whether the attack-target inputs help is still open: the comparison was stopped at 13 of about 122 iterations.
+  - Memory: no leak, but reserved memory fragments until the card spills into system memory, and training then runs about 10x slower.  The allocator settings and `empty_cache` are now defaults in `policy_train.py`.  Trainings sharing the card must pass `--gpu-runs N`.  `--concurrent` is the sim's default.
+  - `torch.compile` was tried with recompiles under control and removed: no gain, and one run hung.  `03-training.md` 10.3.
+  - The first real run, `sim-1v1`, started 2026-11-06: `/mnt/d/zk-learned/runs/sim-1v1`, 150M decisions, 256 games, one pass, 32 steps, concurrent, 40 a side, the five `TRAINING_MAPS`.  About 835 decisions/s, so about 2 days.  To stop it, create a file named `stop` in the run directory; delete that file and start the same command again, and it carries on from the last checkpoint (one every 20 iterations).
+
+To run:
+
+    python -m pytest tests/policy -q                                             # Windows
+    wsl ~/zkml/bin/python sim/tests/test_sim.py                                  # from the repo in WSL, after cmake --build ~/zksim/build
+    wsl ~/zkml/bin/python tools/policy_parity.py
+    wsl ~/zkml/bin/python tools/policy_train.py toy --run /mnt/d/zk-learned/runs/NAME --token-budget 16000
+    wsl ~/zkml/bin/python tools/sim_batch_bench.py --games 256 --units 200
+    python tools/prun.py NAME --games 3 --jobs 6 --map 'TitanDuel 2.2' --arm shadow=FLAGS,policyshadow --env ZKBOT_POLICY=D:/zk-learned/weights/random.npz
+
+Traps:
+
+- In WSL, `pkill -f policy_train` also matches the shell running it, and stops that shell.  Anchor the pattern and break the word:
+  `pkill -f "^/home/pts1667/zkml/bin/python tools/polic[y]_train"`.
+- `tools/sim_data.py maps` now also writes `<map>.bundle.npz`; the sim environment uses only `TRAINING_MAPS` in `tools/policy_sim_env.py`.
+- Next is Phase C (S-M7, T-M2, T-M3/P-M3, T-M4/P-M4, Gate 2).  Gate 2 is the first real test of whether the unproven fight model
+  teaches anything that transfers.
 
 ## 7. Test evidence from latest changes
 

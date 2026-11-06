@@ -136,9 +136,10 @@ bool World::wants_to_walk(int u, float& gx, float& gz) {
     }
     if (behaviour != ZK_BEHAVIOUR_ORDERS) return false;
     const int o = order[size_t(u)];
-    if (o == ZK_ORDER_ATTACK) {
+    if (o == ZK_ORDER_ATTACK || o == ZK_ORDER_MANUAL_FIRE) {
         const int t = order_target[size_t(u)];
-        if (t < 0 || !alive[size_t(t)] || std::hypot(x[size_t(t)] - x[size_t(u)], z[size_t(t)] - z[size_t(u)]) <= d.max_range)
+        const float reach = o == ZK_ORDER_ATTACK ? d.max_range : cat->weapons[size_t(d.mount_weapon[manual_mount(u)])].range;
+        if (t < 0 || !alive[size_t(t)] || std::hypot(x[size_t(t)] - x[size_t(u)], z[size_t(t)] - z[size_t(u)]) <= reach)
             return false;
         gx = x[size_t(t)];
         gz = z[size_t(t)];
@@ -198,12 +199,14 @@ void World::move_one(int u) {
         wanted = std::atan2(wx - x[size_t(u)], wz - z[size_t(u)]);
     } else if (active(u)) {
         // Standing units turn to what they shoot at, which fixed forward weapons need.
-        const int t = weapon_target[size_t(u) * ZK_MAX_MOUNTS];
+        const int t = order[size_t(u)] == ZK_ORDER_MANUAL_FIRE ? order_target[size_t(u)] : weapon_target[size_t(u) * ZK_MAX_MOUNTS];
         if (t >= 0 && alive[size_t(t)]) wanted = std::atan2(x[size_t(t)] - x[size_t(u)], z[size_t(t)] - z[size_t(u)]);
     }
     const int cls = d.move_class;
     float h = heading[size_t(u)], v = speed[size_t(u)], px = x[size_t(u)], pz = z[size_t(u)];
-    const float slow_mult = 1.0f - slow[size_t(u)];
+    // Some units are slower until their main weapon has reloaded (cloakskirm.lua, cloaksnipe.lua).
+    const float reload_mult = cooldown[size_t(u) * ZK_MAX_MOUNTS] > 0.0f ? d.reload_move_penalty : 1.0f;
+    const float slow_mult = (1.0f - slow_now(u)) * reload_mult;
     int& wait = order_wait[size_t(u)];
     int& lag = order_lag[size_t(u)];
     ZK_PROF(MOVE_FRAMES);
