@@ -2,7 +2,7 @@
 
 Numpy only.  Normalisation is fixed, not learned, so it can't drift with training.  Tokens come in a fixed order:
 
-    controllable units | every other unit, most important first | summaries | regions | sites | global
+    controllable units | every other unit, most important first | summaries | regions | sites | features | global
 
 so the first `controllable` tokens are the units that get an action, and an index into the tensors is an index into `uids`.
 All units share one pool, and each says whose it is through `unit_ally` and `unit_player`, numbered from the viewer: 0 is the viewer's
@@ -22,6 +22,7 @@ from .tables import TYPE_DIM, TypeTable
 
 CAP_CONTROLLABLE, CAP_UNITS, CAP_HIDDEN = 256, 592, 64
 CAP_SITES = 24
+CAP_FEATURES = 32           # wrecks and the like in sight.  Past that, a region's metal says what's left out.
 CAP_SUMMARIES = 12
 # How the rest of the pool is chosen: what can be aimed at comes first, what's in sight before what's on radar, whichever way the
 # armies stand.  Within each, value over distance from our army.  A blip's type may be unknown, so nothing counts for less than the floor.
@@ -44,7 +45,7 @@ ENEMY_POINTER_KINDS = (rf.ATTACK_UNIT, rf.ATTACK_GROUND, rf.MANUAL_FIRE)
 FINE_OPTIONS = 9
 
 # unit_x layout.
-_INSTANCE = 18
+_INSTANCE = 19
 _ORDER = rf.KIND_COUNT + 7
 _RAYS = 24
 _SUMMARY = 3
@@ -55,19 +56,21 @@ _O = _I + _INSTANCE
 _R = _O + _ORDER
 _S = _R + _RAYS
 
-REGION_DIM = 2 + 1 + 2 + 1 + 9 + 6 + 2 + 2 + 2 + 6
+REGION_DIM = 2 + 1 + 2 + 1 + 9 + 6 + 2 + 2 + 2 + 6 + 1
 SITE_DIM = 2 + 1 + 4 + 1 + 1
+FEATURE_DIM = 2 + 1 + 1 + 1
 GLOBAL_DIM = len(rf.GLOBAL_FIELDS) - 2     # the last two say who the viewer is, and aren't inputs
 
 # Pair buckets.  Unit-unit: log2 distance (12) x hostile, same alliance or same player (3), then a unit and what it's ordered to shoot, each way.
-# Unit-region: same region or hops 1-6+, or unknown (8).  Region-region: hops 0-6+ (7).  All else: one per pair of token groups.
+# Unit-region: same region or hops 1-6+, or unknown (8).  Region-region: hops 0-6+ (7).  Unit-feature: log2 distance (12).  All else: one per pair of token groups.
 _UU = 0
 _AIMS_AT = 36
 _AIMED_AT_BY = 37
 _UR = 38
 _RR = 46
-_OTHER = 53
-_GROUPS = 5   # unit, summary, region, site, global
+_UF = 53
+_OTHER = 65
+_GROUPS = 6   # unit, summary, region, site, feature, global
 NUM_BUCKETS = _OTHER + _GROUPS * _GROUPS + 1   # the last is the memory state's, with anything
 MEMORY_BUCKET = NUM_BUCKETS - 1
 
@@ -93,7 +96,8 @@ class Tensors:
     controllable: int             # C: the first C unit tokens get an action
     kind_mask: np.ndarray         # C x 16
     ptr_enemy: np.ndarray         # len(ENEMY_POINTER_KINDS) x C x E: legal targets per kind
-    ptr_region: np.ndarray        # C x R
+    ptr_region: np.ndarray        # C x R: where it can walk to
+    ptr_jump: np.ndarray          # C x R: where it can jump to, which can be across what it can't walk
     route_bias: np.ndarray        # C x R: walking seconds to each region
     gate_a: np.ndarray            # G: region indices of each gate
     gate_b: np.ndarray            # G
@@ -108,6 +112,8 @@ class Tensors:
     unit_player: np.ndarray = field(default_factory=lambda: np.zeros(0, np.int32))              # U
     hidden_ally: np.ndarray = field(default_factory=lambda: np.zeros(0, np.int32))              # critic only
     hidden_player: np.ndarray = field(default_factory=lambda: np.zeros(0, np.int32))            # critic only
+    feat_x: np.ndarray = field(default_factory=lambda: np.zeros((0, FEATURE_DIM), np.float32))  # F x FEATURE_DIM
+    feat_ids: np.ndarray = field(default_factory=lambda: np.zeros(0, np.int64))                 # F
 
 
 def _centroid(x: np.ndarray, z: np.ndarray, fallback: tuple[float, float]) -> np.ndarray:
@@ -178,6 +184,7 @@ def _instance(units: np.ndarray, rows: np.ndarray, bundle: Bundle, table: TypeTa
     # A remembered structure's ord_age says how long ago it was seen.
     is_memory = units["knowledge"] == rf.KNOW_MEMORY
     out[:, _I + 17] = np.where(is_memory, np.log1p(np.maximum(units["ord_age"], 0.0) / 30.0) / 6.0, 0.0)
+    out[:, _I + 18] = (flags & rf.JUMP_READY) != 0
 
 
 def _find(wanted: np.ndarray, uids: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -272,20 +279,30 @@ def _aim_pairs(units: np.ndarray, is_own: np.ndarray) -> tuple[np.ndarray, np.nd
     return aiming[found], at[found]
 
 
-def _pair_buckets(units: np.ndarray, is_own: np.ndarray, unit_region: np.ndarray, summaries: int, bundle: Bundle, sites: int) -> np.ndarray:
+def _distance_bucket(dist: np.ndarray) -> np.ndarray:
+    """Log2 distance: under 16 elmos is bucket 0, each doubling one more, 12 in all."""
+    return np.clip(np.frexp(np.maximum(dist, 1.0) / 8.0)[1] - 1, 0, 11)
+
+
+def _pair_buckets(units: np.ndarray, is_own: np.ndarray, unit_region: np.ndarray, summaries: int, bundle: Bundle, sites: int, features: np.ndarray) -> np.ndarray:
     x, z, players, allies = units["x"], units["z"], units["player"], units["ally_team"]
     u = len(units)                    # units, without summaries
     r = bundle.regions
-    n = u + summaries + r + sites + 1
+    f = len(features)
+    n = u + summaries + r + sites + f + 1
     out = np.empty((n, n), np.int8)
-    groups = np.concatenate((np.zeros(u, np.int8), np.full(summaries, 1, np.int8), np.full(r, 2, np.int8), np.full(sites, 3, np.int8), np.array([4], np.int8)))
+    groups = np.concatenate((np.zeros(u, np.int8), np.full(summaries, 1, np.int8), np.full(r, 2, np.int8), np.full(sites, 3, np.int8), np.full(f, 4, np.int8), np.array([5], np.int8)))
     out[:] = _OTHER + groups[:, None] * _GROUPS + groups[None, :]
+    if u and f:
+        block = _UF + _distance_bucket(np.hypot(features["x"][None, :] - x[:, None], features["z"][None, :] - z[:, None]))
+        first = u + summaries + r + sites
+        out[:u, first:first + f] = block
+        out[first:first + f, :u] = block.T
     if u:
         dx = x[None, :] - x[:, None]
         dz = z[None, :] - z[:, None]
         dist = np.sqrt(dx * dx + dz * dz)
-        # Log2 distance: under 16 elmos is bucket 0, each doubling one more, 12 in all.
-        buckets = np.clip(np.frexp(np.maximum(dist, 1.0) / 8.0)[1] - 1, 0, 11)
+        buckets = _distance_bucket(dist)
         same_ally = allies[:, None] == allies[None, :]
         # Two units whose player isn't known aren't known to share one.
         same_player = (players[:, None] == players[None, :]) & (players[:, None] >= 0)
@@ -394,17 +411,25 @@ def featurize(frame: rf.Frame, bundle: Bundle, table: TypeTable, commit_decision
         site_x[:, 7] = np.hypot(d[:, 0], d[:, 1]) / 1000.0
         site_x[:, 8] = np.hypot(sites["x"] - base[0], sites["z"] - base[1]) / max(bundle.map_w, bundle.map_h)
 
-    reg_x = _regions(all_units, all_rows, bundle, table, ally)
+    features = _pick_features(frame.features, army)
+    feat_x = np.zeros((len(features), FEATURE_DIM), np.float32)
+    feat_x[:, 0] = features["x"] / bundle.map_w * 2.0 - 1.0
+    feat_x[:, 1] = features["z"] / bundle.map_h * 2.0 - 1.0
+    feat_x[:, 2] = np.log1p(features["metal"]) / 8.0
+    feat_x[:, 3] = np.hypot(features["x"] - base[0], features["z"] - base[1]) / max(bundle.map_w, bundle.map_h)
+    feat_x[:, 4] = np.hypot(features["x"] - army[0], features["z"] - army[1]) / max(bundle.map_w, bundle.map_h)
+
+    reg_x = _regions(all_units, all_rows, bundle, table, ally, frame.features)
     glob_x = _global(frame, bundle, economy)
 
     # Token kinds.
     tok_kind = np.concatenate((_KIND_OF_KNOWLEDGE[knowledge], np.full(s, TK_SUMMARY, np.int8), np.full(bundle.regions, TK_REGION, np.int8),
-                               np.full(len(sites), TK_SITE, np.int8), np.array([TK_GLOBAL], np.int8)))
-    pair_bucket = _pair_buckets(units, is_own, unit_region, s, bundle, len(sites))
+                               np.full(len(sites), TK_SITE, np.int8), np.full(len(features), TK_FEATURE, np.int8), np.array([TK_GLOBAL], np.int8)))
+    pair_bucket = _pair_buckets(units, is_own, unit_region, s, bundle, len(sites), features)
 
     # Actions.
     enemy_tokens = np.flatnonzero(hostile & ((knowledge == rf.KNOW_LOS) | (knowledge == rf.KNOW_RADAR)))
-    kind_mask, ptr_enemy, ptr_region, route_bias = _masks(units, rows, unit_region, enemy_tokens, locked, c, bundle, table, enabled_kinds)
+    kind_mask, ptr_enemy, ptr_region, ptr_jump, route_bias = _masks(units, rows, unit_region, enemy_tokens, locked, c, bundle, table, enabled_kinds)
 
     if foe is None:
         foe = np.array((bundle.map_w * 0.5, bundle.map_h * 0.5), np.float32)
@@ -417,19 +442,33 @@ def featurize(frame: rf.Frame, bundle: Bundle, table: TypeTable, commit_decision
     gate_x[:, 6:12] = gate_x[:, 6:12] / 2000.0
     out = Tensors(
         unit_x=unit_x, unit_name=unit_name, reg_x=reg_x, site_x=site_x, glob_x=glob_x, tok_kind=tok_kind, pair_bucket=pair_bucket,
-        controllable=c, kind_mask=kind_mask, ptr_enemy=ptr_enemy, ptr_region=ptr_region, route_bias=route_bias,
+        controllable=c, kind_mask=kind_mask, ptr_enemy=ptr_enemy, ptr_region=ptr_region, ptr_jump=ptr_jump, route_bias=route_bias,
         gate_a=bundle.edge_a, gate_b=bundle.edge_b, gate_x=gate_x,
         uids=np.concatenate((units["uid"], np.full(s, -1, np.int64))), enemy_tokens=enemy_tokens, north=north,
         region_radius=(np.sqrt(bundle.area / np.pi) * 0.5).astype(np.float32), unit_ally=unit_ally, unit_player=unit_player,
+        feat_x=feat_x, feat_ids=features["feat_id"].astype(np.int64),
     )
     if privileged:
         out.hidden_x, out.hidden_name, out.hidden_ally, out.hidden_player = _hidden(all_units, all_rows, army, bundle, table, player, ally)
     return out
 
 
-def _regions(units: np.ndarray, rows: np.ndarray, bundle: Bundle, table: TypeTable, ally: int) -> np.ndarray:
+def _pick_features(features: np.ndarray, army: np.ndarray) -> np.ndarray:
+    """The most metal for the walk from our army, as the units are chosen.  feat_id breaks ties so that record order can't matter."""
+    if len(features) > CAP_FEATURES:
+        score = features["metal"] / (np.hypot(features["x"] - army[0], features["z"] - army[1]) + 200.0)
+        features = features[np.lexsort((features["feat_id"], -score))[:CAP_FEATURES]]
+    return features[np.argsort(features["feat_id"], kind="stable")]
+
+
+def _regions(units: np.ndarray, rows: np.ndarray, bundle: Bundle, table: TypeTable, ally: int, features: np.ndarray) -> np.ndarray:
     r = bundle.regions
     out = np.zeros((r, REGION_DIM), np.float32)
+    if len(features):
+        at = bundle.region_at(features["x"], features["z"]).astype(np.int64)
+        # All of what's in sight, kept as a token or not.  A point off every region counts for none.
+        on = at >= 0
+        out[:, 33] = np.log1p(np.bincount(at[on], weights=features["metal"][on], minlength=r)) / 10.0
     out[:, 0] = bundle.centre[:, 0] / bundle.map_w * 2.0 - 1.0
     out[:, 1] = bundle.centre[:, 1] / bundle.map_h * 2.0 - 1.0
     out[:, 2] = np.log1p(bundle.area) / 16.0
@@ -479,15 +518,16 @@ def _global(frame: rf.Frame, bundle: Bundle, economy: bool) -> np.ndarray:
 
 
 def _masks(units: np.ndarray, rows: np.ndarray, unit_region: np.ndarray, enemy_tokens: np.ndarray, locked: np.ndarray, c: int,
-           bundle: Bundle, table: TypeTable, enabled: tuple[int, ...]) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+           bundle: Bundle, table: TypeTable, enabled: tuple[int, ...]) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     r = bundle.regions
     e = len(enemy_tokens)
     kind = np.zeros((c, rf.KIND_COUNT), bool)
     ptr_enemy = np.zeros((len(ENEMY_POINTER_KINDS), c, e), bool)
     ptr_region = np.zeros((c, r), bool)
+    ptr_jump = np.zeros((c, r), bool)
     route = np.zeros((c, r), np.float32)
     if not c:
-        return kind, ptr_enemy, ptr_region, route
+        return kind, ptr_enemy, ptr_region, ptr_jump, route
     me = rows[:c]
     idle = (units["flags"][:c] & rf.IDLE) != 0
     free = ~locked[:c]
@@ -525,14 +565,24 @@ def _masks(units: np.ndarray, rows: np.ndarray, unit_region: np.ndarray, enemy_t
     kind[:, rf.STOP] = free
     fired = (units["ord_kind"][:c] == rf.MANUAL_FIRE) & (units["ord_age"][:c] < table.manual_reload[me])
     kind[:, rf.MANUAL_FIRE] = free & ptr_enemy[2].any(axis=1) & ~fired
-    kind[:, rf.JUMP] = free & table.jump[me] & can_go
+    # Where it's told to is a region's centre or near it: one it could walk to, or one a jump from here would reach (fine positions are this
+    # far off the centre), so that it can cross what it can't walk.  Not where it couldn't land, which the game refuses.
+    charged = table.jump[me] & (classes >= 0) & (here >= 0) & ((units["flags"][:c] & rf.JUMP_READY) != 0)
+    if charged.any():
+        cells = bundle.passable[np.clip((bundle.centre[:, 1] / PASS_CELL).astype(np.int64), 0, bundle.passable.shape[0] - 1),
+                                np.clip((bundle.centre[:, 0] / PASS_CELL).astype(np.int64), 0, bundle.passable.shape[1] - 1)]
+        off_centre = np.sqrt(bundle.area / np.pi) * 0.5
+        for i in np.flatnonzero(charged):
+            near = np.hypot(bundle.centre[:, 0] - units["x"][i], bundle.centre[:, 1] - units["z"][i]) <= table.jump_range[me[i]] + off_centre
+            ptr_jump[i] = (ptr_region[i] | near) & ((cells >> classes[i]) & 1).astype(bool)
+    kind[:, rf.JUMP] = free & ptr_jump.any(axis=1)
     cloaked = (units["flags"][:c] & rf.CLOAKED) != 0
     kind[:, rf.CLOAK_ON] = free & table.cloak[me] & ~cloaked
     kind[:, rf.CLOAK_OFF] = free & table.cloak[me] & cloaked
     off = np.ones(rf.KIND_COUNT, bool)
     off[list(enabled)] = False
     kind[:, off] = False
-    return kind, ptr_enemy, ptr_region, route
+    return kind, ptr_enemy, ptr_region, ptr_jump, route
 
 
 def _hidden(units: np.ndarray, rows: np.ndarray, army: np.ndarray, bundle: Bundle, table: TypeTable, player: int,

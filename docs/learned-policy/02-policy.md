@@ -118,7 +118,7 @@ Per decision, one frame:
 |---|---|---|
 | UNIT (array) | `uid` i8 (pointer identity only), `player` i2 and `ally_team` i2 (the game's numbers, -1 unknown; `player` is the engine's team), `knowledge` u1 (0 in LOS, 1 radar, 2 remembered, 3 hidden, critic only), `def_id` i4 (-1 unknown), `pos` f4x3, `vel` f4x2, `hp_frac` f4 (NaN blip), `build_frac` f4, `flags` u2 (BEING_BUILT 1, CLOAKED 2, PARALYZED 4, IN_LOS 8, IDLE 16, TYPE_KNOWN 32), `experience` f4, `blip_top_speed` f4, `ord_kind` i1 (-1 none), `ord_age` f4 (frames), `ord_x,ord_z` f4, `ord_target` i8 (uid or -1) | order fields count only on the viewer's own units |
 | SITE (array) | `site_id` i4, `x,z` f4, `income` f4, `status` u1 (free, ours, enemy, building), `region_id` i2 | from `map.spots` and `update_spot_status` (`intel.py:211`) |
-| FEATURE (array, stage 3 only) | `feat_id` i8, `x,z` f4, `metal` f4, `def_id` i4 | reclaimable wrecks with at least 1 metal: observation `features` (`ControllerAI/docs/api/state.md`) |
+| FEATURE (array) | `feat_id` i8, `x,z` f4, `metal` f4, `def_id` i4 | reclaimable wrecks in sight with at least 1 metal, with what's left of them: observation `features` (`ControllerAI/docs/api/state.md`), and in the sim the same by line of sight (01 section 8.10).  In frames since schema 3 |
 | GLOBAL (vector) | named by `GLOBAL_FIELDS`: frame, metal and energy current/income/storage, commander hp, commander uid, base x,z, map w,h, frames since last enemy contact, count of unfinished own structures, count of idle own builders, the viewer's own `player` and `ally_team` | the last two aren't net inputs: they say who the frame belongs to |
 | EVENTS | `idle_uids` (own units with UNIT_IDLE since the last decision) | |
 | STATIC BUNDLE (once per game) | region records (centre, area, height, domain, tags, access per class, spots); gate records per edge (width per class, walking length, choke, ramp and shore tags); spot list; 16-elmo passability for kbot; ground heights | built by `terrain.TerrainMap` in both paths |
@@ -139,6 +139,7 @@ the region graph differs between sim and live (unverified which maps are affecte
 | `tok_kind` | N | what is known, not whose: 0 seen, 1 blip, 2 remembered, 3 summary, 4 region, 5 site, 6 global, 7 feature (stage 3), 8 hidden (critic), 9 memory state |
 | `enemy_tokens` | E | the unit tokens that can be aimed at: any other alliance's, in LOS or on radar |
 | `pair_bucket` | N x N int8 | unit-unit: log2 distance (12) x hostile, same alliance or same player (3), and in place of those, a unit and what it's ordered to shoot, each way (2); unit-region: same region or hop 1-6+ (8); region-region: hop 0-6+ (7); all else one bucket per token-kind pair |
+| `feat_x` | F x 5 | a wreck or the like in sight: x, z, log1p metal / 8, distance to base, distance to army (both over map size).  F is at most 32.  Its pair buckets are 12 log2 distances to each unit, and one for each other group.  Region column 33 is log1p of all the metal in sight in that region / 10, so what the cap leaves out still shows |
 | `kind_mask` | U x 16 | legal action kinds, see 4.1 and 4.4 |
 | `ptr_*_mask` | U x E, U x U, U x R, U x S, U x T | legal pointer targets; T is the candidate type list |
 | `route_bias` | U x R | walking cost from the unit's region to each region; class-specific, a per-game region-to-region table on the gate graph (3.3) |
@@ -174,6 +175,7 @@ in training.  A checkpoint stores the vocabulary and the training catalog hash, 
 | Summary tokens | up to 12 | One per (whose, what's known of it, coarse role) with count, hp sum, dps sum, centroid.  The twelve largest are kept. |
 | Regions | all | 31 median, 120 max across 111 maps (`HANDOFF.md` 6e) |
 | Sites | 24 | Nearest to the base first |
+| Features | 32 | Most metal for the distance from the army, metal / (distance + 200).  Ties by id.  Each region still counts all of its metal |
 
 There is one pool, not one per side, so the same model reads a 1v1, a 5v5, a 3v3v3 or a free-for-all: who a unit belongs to is an id on the unit (2.3), and only the
 viewer's own player's units get actions.  Any fight against up to 336 targets keeps them all, however far off they are, at 256 controllable.
@@ -316,7 +318,7 @@ Every controllable unit has one kind per decision.  KEEP is the default and emit
 | 4 ATTACK_GROUND | enemy or blip token pointer + fine 9-way at 200 elmos | `custom` cmd 20 | `order_attack_ground` (`military.py:729`) | armed; target in range x1.5 + 300 |
 | 5 STOP | none | `stop` | new | not during a committed attack |
 | 6 MANUAL_FIRE | enemy-token pointer | `custom` cmd 105 [x,y,z] | `beh_manual_fire` (`behaviours.py:218-260`) | tag `manualfire`; in catalog manual-weapon range; memory of last shot older than the weapon's reload (catalog) |
-| 7 JUMP | region pointer | `custom` cmd 38521, params [x,y,z] (unverified format) | new | tag `jump` |
+| 7 JUMP | region pointer + fine 9-way | `custom` cmd 38521, params [x,y,z] (unverified format) | new | tag `jump`; charged; region walkable or within catalog jump range, and one its class can stand on |
 | 8 CLOAK_ON / 9 CLOAK_OFF | none | `custom` cmd 37382, state 1 / 0 (unverified; the Off/On state convention is in `Zero-K/LuaUI/Configs/customCmdTypes.lua:40`) | new | tag `cloak`, state from `isCloaked` |
 | 10 BUILD | site pointer + type pointer | `build` defId, pos, facing | `construction.py`, `production.py:257` | builder; type in `buildOptions`; site free; unfinished cap (4.3) |
 | 11 ASSIST | own unfinished unit pointer | `guard` targetId | `construction.py:300`, `production.py:372` | builder; target unfinished |
@@ -350,6 +352,13 @@ pointer scheme over sites from the static bundle.  Assist, repair and reclaim po
 Ability kinds are three: manual fire, jump, and cloak on or off.  A unit gets them through its tags
 (`manualfire`, `jump`, `cloak`).  The other tags (shield, regen, emp, slow and so on) are input features
 only in v1.
+
+Jumping is on in training and in the bot's runtime (2026-11-07).  Charge is frame flag `JUMP_READY`
+(schema 4), a column of the unit token (`FEATURE_VERSION` 5): the sim sets it for an own unit with a full
+charge that isn't already busy jumping, and the live bot reads rules param `jumpReload`.  The region
+pointer has its own mask, `Tensors.ptr_jump`, so that a jump can cross a wall or a gap MOVE can't, as long
+as the region is in range.  Range comes from `bots/zkbot/data/jumprange.json`, generated with the catalog
+and part of its hash.  Weights and frames from before this are invalid.
 
 To stop too many unfinished buildings at once, BUILD is illegal when the number of unfinished own
 structures reaches `policy.build_cap` (default 2 + builders / 3).  ASSIST is always legal for an idle

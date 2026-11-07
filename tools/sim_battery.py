@@ -371,7 +371,7 @@ def run_sim(scenarios: list[dict], engine_starts: dict[str, int]) -> dict:
     out: dict = {}
     heading_of = {0: 0.0, 1: math.pi / 2, 2: math.pi, 3: -math.pi / 2}
     for i, s in enumerate(scenarios):
-        w = zksim.World(catalog, world_map, seed=1000 + i, behaviour=zksim.ORDERS)
+        w = zksim.World(catalog, world_map, seed=1000 + i, behaviour=zksim.SCRIPTED)
         w.set_frame(engine_starts.get(s["name"], 0))
         ids = {}
         for spec in s["units"]:

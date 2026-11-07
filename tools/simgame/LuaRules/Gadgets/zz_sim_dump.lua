@@ -1,5 +1,6 @@
--- Writes UnitDefs, WeaponDefs and game rules as JSON after Zero-K's post-processing,
+-- Writes UnitDefs, WeaponDefs, FeatureDefs and game rules as JSON after Zero-K's post-processing,
 -- which the raw unit files don't show.  Runs only with the modoption sim_mode=dump.
+-- With sim_mode=facts it writes the map's start boxes, metal spots and reclaimable features instead, as start_boxes.lua and mex_spot_finder.lua published them.
 function gadget:GetInfo()
 	return {name = "Sim data dump", desc = "UnitDefs and WeaponDefs to JSON", layer = 1000000, enabled = true}
 end
@@ -60,8 +61,121 @@ local function dumpDefs(defs, f)
 	f:write("}\n")
 end
 
+-- By id until one is missing: startbox_max_n is #config, which is one short of a config counted from 0.
+local function dumpFacts()
+	local rule = Spring.GetGameRulesParam
+	local boxes = {}
+	local id = 0
+	while rule("startbox_n_" .. id) do
+		local polygons = {}
+		for i = 1, rule("startbox_n_" .. id) do
+			local polygon = {}
+			for j = 1, rule("startbox_polygon_" .. id .. "_" .. i) do
+				polygon[j] = {rule("startbox_polygon_x_" .. id .. "_" .. i .. "_" .. j), rule("startbox_polygon_z_" .. id .. "_" .. i .. "_" .. j)}
+			end
+			polygons[i] = polygon
+		end
+		local points = {}
+		for i = 1, rule("startpos_n_" .. id) or 0 do
+			points[i] = {rule("startpos_x_" .. id .. "_" .. i), rule("startpos_z_" .. id .. "_" .. i)}
+		end
+		boxes[id + 1] = {polygons = polygons, startpoints = points}
+		id = id + 1
+	end
+	local out = {}
+	local spots = {}
+	for i = 1, rule("mex_count") or 0 do
+		spots[i] = {rule("mex_x" .. i), rule("mex_z" .. i), rule("mex_metal" .. i)}
+	end
+	local features = {}
+	for _, id in ipairs(Spring.GetAllFeatures()) do
+		local def = FeatureDefs[Spring.GetFeatureDefID(id)]
+		if def.reclaimable and def.metal >= 1 then
+			local x, _, z = Spring.GetFeaturePosition(id)
+			features[#features + 1] = {x, z, def.metal, def.maxHealth, def.radius, def.id}
+		end
+	end
+	encode({map = Game.mapName, width = Game.mapSizeX, height = Game.mapSizeZ, boxes = boxes, spots = spots, features = features}, 0, out)
+	Spring.CreateDir("simdump")
+	local f = io.open("simdump/map_facts.json", "w")
+	f:write(table.concat(out), "\n")
+	f:close()
+	Spring.Echo("SIMDUMP done")
+	Spring.SendCommands("quitforce")
+end
+
+-- What unit_tactical_ai.lua does by unit type, after its defaults, with its sets of unit defs as names.  Those amphibians that behave
+-- differently under water go by their land table, as the sim has no depth to go by.
+local function tacticsRow(behaviour)
+	local row = {}
+	for k, v in pairs(behaviour) do
+		if type(v) == "table" then
+			local names = {}
+			for id, on in pairs(v) do
+				if on and type(id) == "number" and UnitDefs[id] then
+					names[#names + 1] = UnitDefs[id].name
+				end
+			end
+			row[k] = table.concat(names, " ")
+		elseif type(v) ~= "function" then
+			row[k] = v
+		end
+	end
+	return row
+end
+
+-- The lines of each unit's script that ask overkill prevention whether to fire: their arguments are only there.
+local function overkillLines(ud)
+	local source = ud.scriptName and VFS.LoadFile(ud.scriptName)
+	if not source then
+		return nil
+	end
+	local lines = {}
+	for line in source:gmatch("[^\n]+") do
+		if line:find("OverkillPrevention", 1, true) and not line:find("^%s*%-%-") then
+			lines[#lines + 1] = line:gsub("%-%-.*$", "")
+		end
+	end
+	return lines[1] and lines or nil
+end
+
+function dumpTactics(radarWobblePenalty, radarDotPenalty)
+	local behaviours = VFS.Include("LuaRules/Configs/tactical_ai_defs.lua")
+	local tactics, overkill, radar = {}, {}, {}
+	for id, b in pairs(behaviours) do
+		tactics[UnitDefs[id].name] = tacticsRow(b.land or b)
+		tactics[UnitDefs[id].name].defaultAIState = b.defaultAIState
+	end
+	for _, ud in pairs(UnitDefs) do
+		overkill[ud.name] = overkillLines(ud)
+	end
+	for wid, wd in pairs(WeaponDefs) do
+		if radarWobblePenalty[wid] or radarDotPenalty[wid] then
+			radar[wd.name] = {wobble = radarWobblePenalty[wid] or 0, dot = radarDotPenalty[wid] or 0}
+		end
+	end
+	local out = {}
+	encode({tactics = tactics, overkill = overkill, radar = radar}, 0, out)
+	local f = io.open("simdump/tactics.json", "w")
+	f:write(table.concat(out), "\n")
+	f:close()
+end
+
+-- A map's features don't exist yet when gadgets start.
+local factsDone = false
+function gadget:GameFrame()
+	if not factsDone and (Spring.GetModOptions() or {}).sim_mode == "facts" then
+		factsDone = true
+		dumpFacts()
+	end
+end
+
 function gadget:Initialize()
-	if (Spring.GetModOptions() or {}).sim_mode ~= "dump" then
+	local mode = (Spring.GetModOptions() or {}).sim_mode
+	if mode == "facts" then
+		return
+	end
+	if mode ~= "dump" then
 		gadgetHandler:RemoveGadget()
 		return
 	end
@@ -71,6 +185,9 @@ function gadget:Initialize()
 	f:close()
 	f = io.open("simdump/weapons.json", "w")
 	dumpDefs(WeaponDefs, f)
+	f:close()
+	f = io.open("simdump/features.json", "w")
+	dumpDefs(FeatureDefs, f)
 	f:close()
 	f = io.open("simdump/game.json", "w")
 	local out = {}
@@ -82,7 +199,8 @@ function gadget:Initialize()
 	f:write(table.concat(out), "\n")
 	f:close()
 	-- Zero-K's own target table: weapon by target unit, lower is preferred.
-	local GetPriority, _, _, _, _, _, velocityPenaltyDefs, _, _, _, highAlpha = VFS.Include("LuaRules/Configs/target_priority_defs.lua")
+	local GetPriority, _, _, _, _, _, velocityPenaltyDefs, radarWobblePenalty, radarDotPenalty, _, highAlpha = VFS.Include("LuaRules/Configs/target_priority_defs.lua")
+	dumpTactics(radarWobblePenalty, radarDotPenalty)
 	f = io.open("simdump/priority.txt", "w")
 	local unitIds = {}
 	for id in pairs(UnitDefs) do

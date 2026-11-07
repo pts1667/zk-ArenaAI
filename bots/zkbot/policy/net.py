@@ -20,11 +20,11 @@ GLOBAL_STATE, REGION_STATE = 384, 32
 NAME_DIM = 16
 ID_DIM = 8                  # each of ally team and player
 RBF_DIM = 16
-POINTERS = ("enemy", "own", "region", "site", "type")
+POINTERS = ("enemy", "own", "region", "site", "type", "feature")
 KEEP_START = 2.0
 ROUTE_SCALE_START = -3.0    # softplus gives 0.05 nats per walking second: near regions first, and a far one is still sampled
 HEAD_GAIN = 0.01          # an untrained kind head says only what KEEP_START says
-FEATURE_VERSION = 3
+FEATURE_VERSION = 5
 
 
 def weight_shapes(vocabulary: int) -> dict[str, tuple[int, ...]]:
@@ -43,6 +43,7 @@ def weight_shapes(vocabulary: int) -> dict[str, tuple[int, ...]]:
     linear("unit_in1", D, D)
     linear("reg_in", fz.REGION_DIM, D)
     linear("site_in", fz.SITE_DIM, D)
+    linear("feat_in", fz.FEATURE_DIM, D)
     linear("glob_in", fz.GLOBAL_DIM, D)
     linear("reg_mem", REGION_STATE, D)
     linear("mem_in", GLOBAL_STATE, D)
@@ -164,9 +165,10 @@ def encode(w: dict[str, np.ndarray], bias_table: np.ndarray, t: fz.Tensors, stat
         adjacency[t.gate_b, t.gate_a] = a
         hr = hr + _linear(w, "gate_m", adjacency @ hr)
     hs = _linear(w, "site_in", t.site_x)
+    hf = _linear(w, "feat_in", t.feat_x)
     hg = _linear(w, "glob_in", t.glob_x)[None, :]
     hm = _linear(w, "mem_in", state.glob)[None, :]
-    h = np.concatenate((hu, hr, hs, hg, hm), axis=0)
+    h = np.concatenate((hu, hr, hs, hf, hg, hm), axis=0)
     kinds = np.concatenate((t.tok_kind, np.array([fz.TK_MEMORY_STATE], np.int8)))
     h = h + w["kind_embed.weight"][kinds]
     n = len(h)
@@ -188,8 +190,7 @@ def encode(w: dict[str, np.ndarray], bias_table: np.ndarray, t: fz.Tensors, stat
         h = h + _linear(w, f"blocks.{layer}.ff2", _gelu(_linear(w, f"blocks.{layer}.ff1", _norm(w, f"blocks.{layer}.ln2", h))))
     h = _norm(w, "lnf", h)
     u, r = len(hu), len(hr)
-    s = len(hs)
-    new_glob = _gru(w, "gru_g", h[u + r + s], state.glob)
+    new_glob = _gru(w, "gru_g", h[u + r + len(hs) + len(hf)], state.glob)
     new_regions = _gru(w, "gru_r", h[u:u + r], state.regions)
     return Encoded(h, h[:u], h[u:u + r], State(new_glob, new_regions))
 
@@ -199,12 +200,14 @@ def kind_logits(w: dict[str, np.ndarray], enc: Encoded, t: fz.Tensors) -> np.nda
     return np.where(t.kind_mask, logits, -1e9)
 
 
-def region_logits(w: dict[str, np.ndarray], enc: Encoded, t: fz.Tensors) -> np.ndarray:
+def region_logits(w: dict[str, np.ndarray], enc: Encoded, t: fz.Tensors, kind: np.ndarray | None = None) -> np.ndarray:
+    """What's legal goes by the kind each unit chose: none given, the regions it can walk to."""
     q = _linear(w, "q_region", enc.units[:t.controllable])
     scores = q @ enc.regions.T / math.sqrt(D)
     # Near regions first, until the policy learns otherwise.
     scores = scores - _softplus(float(w["route_scale"])) * t.route_bias
-    return np.where(t.ptr_region, scores, -1e9)
+    legal = t.ptr_region if kind is None else np.where(kind[:, None] == rf.JUMP, t.ptr_jump, t.ptr_region)
+    return np.where(legal, scores, -1e9)
 
 
 def enemy_logits(w: dict[str, np.ndarray], enc: Encoded, t: fz.Tensors) -> np.ndarray:
@@ -257,7 +260,7 @@ class Policy:
         wants_region = np.isin(kind, (rf.MOVE, rf.FIGHT, rf.JUMP))
         if wants_region.any():
             idx = np.flatnonzero(wants_region)
-            p = _softmax(region_logits(w, enc, t)[idx] / temperature)
+            p = _softmax(region_logits(w, enc, t, kind)[idx] / temperature)
             region[idx] = _sample(p, rng)
             logp[idx] += np.log(np.maximum(p[np.arange(len(idx)), region[idx]], 1e-30))
             target_h[idx] = enc.regions[region[idx]]
@@ -272,7 +275,7 @@ class Policy:
                 enemy[idx] = _sample(p, rng)
                 logp[idx] += np.log(np.maximum(p[np.arange(len(idx)), enemy[idx]], 1e-30))
                 target_h[idx] = enc.units[t.enemy_tokens[enemy[idx]]]
-        wants_fine = np.isin(kind, (rf.MOVE, rf.FIGHT, rf.ATTACK_GROUND))
+        wants_fine = np.isin(kind, (rf.MOVE, rf.FIGHT, rf.JUMP, rf.ATTACK_GROUND))
         if wants_fine.any():
             idx = np.flatnonzero(wants_fine)
             p = _softmax(fine_logits(w, enc.units[idx], target_h[idx]) / temperature)

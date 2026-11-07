@@ -349,15 +349,15 @@ Notes:
   182 of the 188 games with logged fights), Red Comet Remake 1.7 (22, narrow), Agalta v1.0 (16, open), FrostyCove v1.13 (30, hills and
   chokes), Faultline v1.0 (31, 17% water).  Left out: harmful liquid, mostly water, heights generated in-game, and more than about 35 regions, since
   playing pads every seat to the map with the most regions, and a big map's frames also cost more themselves.  Carabanossi stays exported for the gate only.
-* **Early end.**  From 2 minutes of game time, a side with more than 2.5x the other's metal value (cost x build progress, as in 1.3) wins
+* **Early end.**  From 2 minutes of game time, a side with more than 2.5x the other's metal value (cost x build progress, as in 1.3), and at least 10,000 metal ahead, wins
   there and then.  The engine doesn't have this rule, so win rates in the sim aren't comparable with the engine's without it.
 * **Seats and starts.**  One set of weights controls both sides.  Each game draws a seat and a start for each
   side, so TitanDuel's asymmetry averages out.  Report by seat.  Sanity check (M2): self-play with the
   start-A seat wins 45-55% over 200 games.
-* **Scripted baseline.**  Stage 2 needs a fixed scripted army in the sim (attack nearest, focus weakest in
-  range, no kiting), written in 01's sim package.  The rules bot's army code does not port.
+* **Scripted baseline.**  Built, differently from the plan (2026-11-06, 01 section 8.9): the same opening on both sides, then on the script's side every finished fighter
+  attack-moves to the enemy's start, re-ordered every 3 s; it has since learned to finish, retreat and group (10.2).  It lives in `tools/policy_script.py`, not the sim.  The rules bot's army code does not port, so the script isn't the rules bot, and nothing has played the rules bot in the sim.
 * **Factories.**  Sampled per game as prun does (`--enemy-factories`).  Stage 2 uses the factories a scenario
-  names.
+  names.  As built, each seat draws evenly from the factories that suit its map (`Ground.suits`, 11.1).
 * **Maps.**  2b is TitanDuel only, so terrain tokens stay fixed.  From stage 3, 16 maps spanning the region
   count (small to 120).  01 must confirm it loads any `maps.json` terrain [U].
 * **Budgets** are estimates with wide ranges.  The full-game range rests on Gym-muRTS's 0.6-0.7B
@@ -794,6 +794,65 @@ Neither found focus fire.  Whether the attack-target inputs help isn't known: a 
 **First sim run, `sim-short` (2026-11-05).**  2M decisions on the five maps, 256 games, concurrent, one pass, 40 units a side, fog on, 978 decisions/s, no masked action chosen.  Wins against the fight script rose from about 3% to about 15-20% during training; tests of 64 games
 gave 5%, 8% and 14% at 660k, 1.3M and 2.0M.  Explained variance stayed between 0.06 and 0.56 with no steady rise, and entropy rose on the kind, enemy and region heads.  It isn't tested against anything else, or in the engine.
 
+**The opening game, `opening-smoke` (2026-11-06).**  The fixed armies are gone: both sides play the scripted opening of 01 section 8.9, and the policy controls only the raiders.  726k decisions, 256 games, concurrent, one pass, no masked action chosen.
+
+| Side 0 against the fight script, 256 games unless noted | Wins | Draws | Losses | Median game |
+|---|---|---|---|---|
+| Does nothing: its raiders stand where they come out | 25% | 14% | 61% | 462 s |
+| The script itself | 30% | 40% | 30% | 910 s |
+| The policy at 660k decisions, one test of 64 games, before Kodachis joined the opening | 64% | not logged | not logged | not logged |
+
+So the policy passed doing nothing quickly: for comparison, the fixed armies had 8% at 1.3M.  **How it wins hasn't been looked at.**  It kept its order 84% of the time, and from 2 minutes a side wins at 2.5x the metal value, so holding raiders back while the script trickles in may be most of it.  One test of 64 games is about +/- 12 points.  Explained variance reached 0.96, higher than `sim-short`, probably because much of the value is now in a slow, predictable economy, so it says less about fights.
+
+Draws matter more now: two scripts draw 40% of games at the 20-minute limit.  A long match could be set up differently, but nothing has changed there yet.
+
+`sim-1v1` was stopped at iteration 20 of about 4,600 when this replaced its game, and its checkpoints don't apply to it.
+
+The table above was on the old starts, with half of Faultline's metal missing, no overdrive and the old early end (01 section 8.9).  Baselines on real start boxes with overdrive, 256 games:
+
+| Side 0 against the fight script | Early end | Wins | Draws | Losses | Median game |
+|---|---|---|---|---|---|
+| Does nothing | 2.5x | 18% | 7% | 75% | 360 s |
+| The script itself | 2.5x | 39% | 30% | 31% | 613 s |
+| Does nothing | 2.5x and 10,000 ahead | 15% | 20% | 65% | 782 s |
+| The script itself | 2.5x and 10,000 ahead | 24% | 52% | 24% | 1,200 s (the limit) |
+| Does nothing, against the script below | 2.5x and 10,000 ahead | 2% | 15% | 83% | 680 s |
+| That script itself | 2.5x and 10,000 ahead | 43% | 20% | 37% | 534 s |
+
+**Stalemates (2026-11-06).**  Under the new early end, half of script-against-script games reach the 20-minute limit.  No game of 512 ended by elimination, so every win was the 10,000 lead, at a median of 766 s.  Two things cause it, and neither is units being stuck: of the 4,811 fighter sightings that stood still for a minute from 10 minutes on, every one was at the enemy's start.
+
+1. **Even trickles, in most draws.**  Both factories were alive in 83 of 117 draws and both commanders in 89.  Each side makes about 280 units at about 17 metal per second and they meet half way: the furthest side's front stays at 0.5-0.6 of the way across, and a side's value stays near 3,300 from 5 minutes to 20.  Matchups decide it: mirrors draw 83% and mixed factories 40%.  Of decided games, tank won 89%, spider 85%, shield 66%, amph 60%, veh 56%, hover 6%, cloak and jump 3%.  Whether that spread is the game's or the sim's isn't known, since the replay gate failed on fights (01 section 8.1).
+2. **The script stops at the enemy's start.**  An army that gets there stands at the point it was sent to.  A side loses by elimination only when every unit is dead, as in Zero-K (`game_over.lua`), and the extractors and solars up to 1,300 elmos away are left alone.  So the winner can only win by piling up a 10,000 lead, which takes at least 10 minutes at this income.
+
+An experiment sent fighters that reach the start on to the enemy's nearest building: draws fell from 52% to 38%, and 67 of 256 games then ended by elimination.
+
+**The script now (`tools/policy_script.py`).**
+
+* **Finishing.**  Once any of a side's fighters is within 500 elmos of the enemy's start, they all attack-move to the enemy's nearest building, and to whatever remains when no building does.  The script knows where buildings are without scouting: it's a training opponent.
+* **Retreat.**  A fighter whose def regenerates moves to the rally point below 40% health and stays until 90%.  By the data that's every raider, at very different cost: from 40% to 90% takes a Glaive about 11 s, a Kodachi 76 s, and most others 90-134 s.
+* **Groups.**  From 3:00 a new or recovered fighter attack-moves to a rally point past the factory, and those waiting go together once they're worth 400 metal at 3:00, 200 more each minute, 3,000 at most.  Metal rather than units, so groups take as long to gather whichever factory was drawn: at 17 metal a second, 25 s at first and about 3 minutes at the largest.  Nobody waits over 3 minutes, so that a side without income doesn't hold its last fighters for ever.
+
+With it, 167 of 256 script games end by elimination, 38 on the lead and 51 at the limit.  Mirrors draw 44% and mixed factories 13%.  Of decided games spider won 91%, tank 77%, shield 64%, amph 53%, veh 43%, jump 28%, cloak 13% and hover 8%, so regeneration helped Glaives (3% before) and the spread is still wide.  Whether it's the game's or the sim's isn't known.
+
+`script-smoke`, the first 725k decisions on this script (before section 01 8.10): 33% wins in one 64-game test at iteration 20, against 2% wins for doing nothing and 43% for the script itself.  It was 632 decisions a second late on, with no masked-out actions.
+
+`m8-smoke`, the same run after 01 8.10, 725k decisions: **16%** wins in the same single test, against 1% for doing nothing and 36% for the script itself.  Rate 524 a second late on, train 62 s and collect 47 s per iteration, 887 decisions a minibatch against 1,065, and no masked-out actions.  Explained variance reached 0.93.  Its share of finished games against the script rose from nothing to 0.2-0.75 over the last ten iterations, on few games each.
+
+Neither test says much alone: one test of 64 games has a standard error of about 5 points, and each run is about 0.5% of the 150 million decisions a real run would have.  What does hold is the cost: 17% fewer decisions a second, in both training and collecting.  The likely cause, not measured apart, is up to 32 more tokens a side where wrecks lie.  FrostyCove starts with 138 features.
+
+Faultline's start boxes differ from one load to the next, and every run before `m8-smoke` saw one draw of them (01 section 8.9).
+
+### 10.2a Against the script, then against itself
+
+`SelfPlay` in `tools/policy_train.py`.  Training starts wholly against the script.  Every 10 iterations a test of 64 games counts wins alone, with draws and losses logged beside it (`metrics.jsonl`) and each game's map, factories, length and ending in `tests.jsonl`.
+
+* **Starts** when the last two tests average 80% wins.  Two because one test has a standard error of about 5 points.
+* **Grows** by 1% of new games each iteration, so about 100 iterations from none to all.  Games under way stay as they are.  A self-play game gives twice the decisions of one against the script, so the share of decisions rises faster than the share of games.
+* **Pauses** while those two tests average under 70%.  It never goes back.
+* The test stays against the script throughout, so it stays comparable, but once self-play dominates it no longer measures everything the policy is learning.
+
+`--hours` stops a run after that long, as well as at `--decisions`.
+
 ### 10.3 Training rate: the miss
 
 Real frames from live games (about 160 tokens, 33 controllable), 24 segments of 32 steps, 6.3 GB of GPU memory:
@@ -841,6 +900,8 @@ Where it stands (2026-11-05, 256 sim games, concurrent, 32 steps, one pass, 40 u
 | One pool with per-unit ids | 831 | 71.8M |
 
 These frames have fog, so few enemies are in them.  With every enemy seen, the same setup gave 584-644/s at 40 a side and 58-61/s at 256 a side (02 section 2.4).
+
+On the opening game the rate is 728 decisions/s, about 63M a day: 44.6 s training and 37.0 s collecting per iteration, against 866, 37.2 s and 32.2 s on fixed armies.  The sim itself isn't the cost: 70,000 seat steps/s, script against script.
 
 **`torch.compile`, tried properly and removed (2026-11-06).**  On the sim, `--concurrent`, 12 iterations each, last six:
 
@@ -904,3 +965,184 @@ Memory is peak above the weights and Adam state.
 Mamba2's fast path and `fla`'s own MLA need `mamba-ssm`, `causal-conv1d` or `flash-attn`.  None has a prebuilt wheel, and there's no
 CUDA toolkit here to compile them.  If long memory becomes the limit, try Gated DeltaNet first: it's close to DeltaNet and can
 forget stale sightings.  Self-attention over a window is faster in training, but its live cost grows with the window.
+
+### 10.6 `selfplay-6h`: no measurable learning (2026-11-06)
+
+`--games 256 --passes 1 --iteration 32768`, GRU, against the script, on the 5 training maps.  Stopped by hand at iteration 221 after 4 h 52 min: 7,241,728 decisions, about 413 a second overall.  Self-play never began, as no test came near 80%.  The run used ABI 8, from before shields and the unit AI, so its numbers don't describe the present sim.  `/mnt/d/zk-learned/runs/selfplay-6h`.
+
+**Tests, 64 games every 10 iterations:**
+
+| Iterations | Wins | Draws | Losses |
+|---|---|---|---|
+| 10-50 | 23.1% | 21.6% | 55.3% |
+| 60-100 | 22.5% | 23.7% | 53.7% |
+| 110-150 | 34.4% | 16.3% | 49.4% |
+| 160-220 | 25.0% | 21.2% | 53.8% |
+
+The best single test was 28 of 64 at iteration 110, and the last 10 of 64.  The first and second halves, 704 games each, are 24.7% and 27.6% wins, which is within noise.  Training-game wins rose from 19% to 46% at about iteration 110 and fell back to 28%.
+
+**The factories decided the games**, as they do for the script (`01-simulator.md` 8.12):
+
+| Factories | Games | Wins | Draws | Losses |
+|---|---|---|---|---|
+| Own Spider or Tank, enemy neither | 273 | 89.4% | 8.8% | 1.8% |
+| Enemy Spider or Tank, own neither | 302 | 0.0% | 1.3% | 98.7% |
+| Both Spider or Tank | 84 | 21.4% | 35.7% | 42.9% |
+| Neither | 749 | 14.2% | 31.2% | 54.6% |
+| Same factory on both sides, of those above | 167 | 8.4% | 33.5% | 58.1% |
+
+In same-factory games the first and second halves are 8.4% and 8.3% wins, where the script against itself wins 37% (on the present sim).  So the policy is well below the script in a fair matchup, and didn't improve.
+
+**The policy barely moved:**
+
+* KL per iteration stayed at 0.001-0.002 and clip fraction at 1-3%, with 1 pass, a learning rate falling from 3e-4 and gradient clip 0.5.
+* The fine-position head stayed uniform: entropy 2.195 against ln 9 = 2.197.
+* The kind head's entropy rose from 0.91 to 1.20, and KEEP's share fell only from 87% to 83%.
+* Explained variance reached 0.995, and stayed there while the policy didn't improve, so it says nothing about skill.
+* `beta` went from 0 to 0.9, so reward moved from value change to the win itself as training went on.  It may account for the rise and fall in training wins, but I didn't test that.
+
+**What this suggests, none of it tested:**
+
+* 80% against the script can't be reached while the factory is drawn at random for both sides, unless the policy far outplays it.  A fair test holds the factory equal, or scores each matchup against the script's own record.
+* Check the raider matchups against the engine before training on them, since Spider's 92% may be the sim's.
+* More updates per decision: 1 pass at this KL is a very small step.
+* Behaviour cloning from the script before PPO, as the user proposed, would start the policy near the script instead of far below it.
+
+## 11. The frame model (2026-11-06): data collected, long run not started
+
+`tools/frame_data.py`, `tools/frame_jepa.py`, `tests/policy/test_frame_jepa.py`.  It compresses what a seat sees, from up to several hundred tokens, into one vector for the main model.  It follows LeJEPA (Balestriero and LeCun, [arXiv 2511.08544](https://arxiv.org/abs/2511.08544); the Epps-Pulley and slicing code follows [the authors' repository](https://github.com/rbalestr-lab/lejepa) and [stable_pretraining](https://galilai-group.github.io/stable-pretraining/_modules/stable_pretraining/methods/lejepa)).  Two million frames are collected on 298 maps.  Only 5,000-step checks have been trained, and **those don't beat an untrained encoder on most probes** (11.3).
+
+### 11.1 Data
+
+    python tools/map_gen.py real --facts D:/zk-learned/maps/real_facts.json --out D:/zk-learned/maps    # Windows Python: reads map archives
+    python tools/map_gen.py generate --count 200 --seed 1 --out D:/zk-learned/maps
+    python tools/map_gen.py stats --dir D:/zk-learned/maps
+    wsl ~/zkml/bin/python tools/frame_data.py collect --maps /mnt/d/zk-learned/maps --out /mnt/d/zk-learned/frames/pool2 --script-frames 1000000 --scenario-frames 1000000 --games 256 --threads 16 --workers 8
+
+Both sources take both seats and see under fog, with `economy=True`.
+
+**The collection in `/mnt/d/zk-learned/frames/pool2`,** feature version 5, replacing `pool1`, since deleted, which the trainer would no longer accept because unit tokens gained jump charge: 1M frames from each source, 25 GB, 15 minutes on 8 processes at about 2,250 and 2,630 frames a second (one process manages about 420).  A frame takes about 13 kB.  At the 50th, 90th and 99th percentile a frame has 27, 70 and 129 unit tokens, up to 236, and 44, 94 and 134 regions, up to 148.
+
+| Share of frames with any | Script | Scenario |
+|---|---|---|
+| Own aircraft | 23% | 36% |
+| Own ships | 3% | 7% |
+| A map with water | 49% | 47% |
+| Wreck metal in sight | 85% | 84% |
+
+**The maps, `D:/zk-learned/maps`, 1.3 GB, 7.3 GB once loaded, 37 s to load.**  Forked processes share them.
+
+* **98 real maps,** made from the height maps of every archive that has them, with start boxes and spots from a game (`sim_engine.py facts --out`).  Nine are left out: six make their terrain in the game, and three have no start boxes or spots.
+* **200 made-up maps** (`tools/map_gen.py`, `Rules`): rolling, plateaus, ridges, craters or canyons, then no water, lakes, a river, a central sea, a coast, islands or open sea, and rot180, mirror, diagonal or no symmetry.  Starts are flattened, ramps join what walkers couldn't reach, and maps that still fail are drawn again.  Open-sea and island maps need only hovers and amphibians to connect.
+* **Drawn half real and half made,** with maps of 3% water or more 1.5 times as likely.  52% of frames are on those.
+* **21 maps are held out** (`held_out_maps`): TitanDuel, and a tenth by name's hash, of which 5 are real.  No latent or probe fits on them.
+
+| 10th, 50th, 90th percentile | Real | Made |
+|---|---|---|
+| Relief | 192, 392, 704 | 216, 464, 992 |
+| Water share | 0, 0.05, 0.46 | 0, 0, 0.47 |
+| Spots per area | 0.16, 0.28, 0.49 | 0.20, 0.36, 0.48 |
+| Regions | 18, 36, 67 | 27, 58, 101 |
+| Sea regions | 0, 0, 13 | 0, 0, 5 |
+| Kbots can go on | 0.54, 0.92, 0.99 | 0.72, 0.94, 1.00 |
+
+Made maps are a little rougher, with more regions but fewer sea regions and walls.  That's left as it is: it widens what the encoder sees, and half the frames are on real maps anyway.
+
+**Script games** (`FrameGames`) are whole games on any of those maps.  `WideOpening` opens with any factory that suits the map, and factories that use the water are 3 times as likely where 15% of the map or more is water, so ships, hovers, amphibians and aircraft all come up.  Ships are half as common as they were, since a shipyard now needs a real sea at both bases.  `BaseScript` is no plan, only so frames look played: factories change what they make every 30-120 s, and idle builders build, assist or reclaim within 1000 elmos, with more expensive things as the clock runs.  `FrameFight` keeps each unit's orders on ground it can reach, so ships stay at sea.  96 games over 2400 decisions: 126 ended, median 639 s, 85% with a winner.
+
+**Scenarios** are built by `draw_side` in `ScenarioRules`, and play for 24 s, taken from 2 s in, every 6 s, and again 2 s later.
+  * **Value:** each side gets 150-40,000 metal, log-uniform, up to 240 units.
+  * **Army:** 1-3 clusters, at home, at the enemy's start, between them, or anywhere.  70% of sides keep to one factory's roster, the rest draw from all.
+  * **Base:** a factory 80% of the time, a second likelier from 3,000 metal and a third from 12,000, 0-8 extractors on spots, other structures up to 1500 metal each, none on each other or on a spot.  Turrets may stand at home, by a spot, or on the way to the enemy.
+  * **Wear:** 40% of units hurt, 10% of structures part built, 85% of sides with a commander.
+  * **Wrecks:** 60% of sides have lost things, up to half their value in up to 40 wrecks, valued from the catalog, a quarter of them shot down to heaps.
+  * **Memory:** each side has seen 0-100% of the enemy's structures, and those read as remembered until seen again.
+  * **What stands where comes from the unit data** (`Ground`, `Footing`): water depth limits and `floatOnWater`.  So a shipyard goes on deep water, however far that is from the base, a solar never does, and a floating turret can be either.  A factory that doesn't suit the map isn't drawn.
+  * **Which factories suit a map** (`Ground.suits`, `tools/policy_opening.py`), from what the units can reach, not from how much water there is: Akilon is a third water and land still reaches all its metal, and on Sailaway land reaches 2%.  The factory has to have room to stand on the map.  Air then always suits.  Ground units need 4% of the map to move on, a path to the enemy, and at least half the metal the best class could reach from that start.  Ships need a sea of 20% of the map within 1500 elmos of both bases.  Over the pool's 596 starts: a median of 10 factories offered, at least 3, and always one on the ground or water.  Sailaway, Expanded Tropics and Shimmershore get amphibians, gunships, hovers, planes and ships.  Hotstepper, Deserted Third and Painted Redux get no tanks or vehicles.  Hover and Amph still count on dry maps, since they work there.  The training maps keep all 8 land factories, drawn evenly.
+  * **Jumping:** `FrameFight` turns a charged jumper's order into a jump when it's 150 elmos or more away, so frames show it.  `FightScript`, which the policy trains against, doesn't jump.
+
+Frames also carry probe values, including the truth the seat can't see, and `outcomes.npz` holds how each game ended.
+
+**Scenarios aren't quite what a game gives:**
+
+* The clock is invented from the side's value, at 15 metal a second, because nothing in the sim sets it.
+* No unit is part way out of a factory at the start, and there's little radar history.
+* The fight script gathers as if at the start of a game.
+
+**Two fixes this needed:**
+
+* The sim's records leave every metal spot "free".  `with_site_status` works out each seat's view from the extractors it knows of, as the live bot's Brain does.  Training the policy still has economy features off, so this applies only here.
+* Extractors added before `set_economy` earned nothing.  `set_economy` now works their income out again.  Ordinary games are unaffected since they start with commanders only.
+
+### 11.2 The model
+
+`FrameEncoder`, 1.65 million parameters at the defaults.  Each token group goes through its own input layer, with sines of its map position, then 24 learned queries read all tokens twice, talking among themselves after each read.  Those queries, flattened, go to a 256-number `z`.
+
+* **Cost is tokens x queries**, not tokens squared.  Self-attention over tokens is there as `token_layers`, off by default.
+* **No pair bias.**  Positions come from the token features, not the main net's distance buckets, so the data needn't store them.
+* **Same output whatever the token order or padding**, tested.
+* **Reads a `policy_model.Batch` as it stands**, with the same answer as its own batches, tested.
+
+The projector (1024, 1024, 128) is used only in training, and only the encoder is saved.
+
+**The loss** is `(1 - lambda) invariance + lambda SIGReg`, with lambda 0.02, 1024 random directions, and 17 points to t = 3.  There's no stop-gradient, teacher network or decoder.
+
+**Views**, in `GLOBAL_VIEWS` and `LOCAL_VIEWS`, each its own forward pass:
+
+| View | Keeps units / regions, sites / features | Else |
+|---|---|---|
+| Global: the whole frame | all | |
+| Global: the same seat 2 s later | all | |
+| 2 local | 70% / 80% / 70% | 10% of names unknown, positions jittered 0.5% of the map |
+| 2 local | 40% / 50% / 40% | 10% of names unknown, positions jittered 1% of the map |
+
+**Considered and left out: a fully informed view with hidden units.**  Invariance can be met simply by ignoring the hidden tokens, so it wouldn't teach the latent to infer them, and the live model never gets them.  The critic has its own route to them.
+
+### 11.3 How we'd know it works
+
+`collapse_report` gives the latents' spread and effective rank.  `probe_report` fits a linear probe on maps not held out and scores it on those that are, overall and for real, made and wet maps.  It covers own and enemy value and fighters, what's known of the enemy, where each side is, commander health, metal, the clock, air, ships, sea, wreck metal and, on finished script games, the outcome from that seat's side.  A column that hardly varies in a group is left out: a dry map has no ships to score.
+
+**Three numbers to read each probe against:** what an untrained encoder gets (the run's step 0), what the run gets, and the ceiling.  `python tools/frame_jepa.py ceiling --data DIR --out FILE` trains the same encoder directly on the probes.  What it can't reach isn't in the tokens or doesn't carry over to unseen maps; what it can, and a run doesn't, the run's objective left out.
+
+| Held-out R^2 | Untrained | 5,000 steps, lambda 0.02 | 5,000 steps, lambda 0.1 | Ceiling, 6,000 steps |
+|---|---|---|---|---|
+| Own value | 0.77 | 0.72 | 0.62 | 0.99 |
+| Own fighters | 0.77 | 0.72 | 0.67 | 0.99 |
+| What's known of the enemy | 0.59 | 0.47 | 0.53 | 0.99 |
+| Own x, z | 0.77, 0.74 | 0.77, 0.74 | 0.17, 0.41 | 1.00, 1.00 |
+| Commander health | 0.18 | 0.28 | 0.11 | 1.00 |
+| Metal | 0.14 | 0.13 | 0.08 | 1.00 |
+| Clock | 0.56 | 0.36 | 0.40 | 1.00 |
+| Own air | 0.12 | 0.09 | 0.05 | 1.00 |
+| Own ships | 0.15 | 0.10 | 0.07 | 1.00 |
+| Sea share | 0.74 | 0.49 | 0.19 | 0.97 |
+| Wreck metal | 0.79 | 0.76 | 0.88 | 1.00 |
+| Enemy value (partly hidden) | 0.27 | 0.18 | 0.21 | 0.74 |
+| Enemy air (partly hidden) | 0.01 | 0.01 | 0.00 | 0.66 |
+| Outcome (not in the tokens) | 0.09 | 0.20 | 0.12 | 0.33 |
+
+**What that says:**
+
+* **The pipeline works.**  5.8 steps a second at batch 256, including probes, peak 3.2 GB allocated.  The batch goes from 64 to 256 at almost the same steps a second, so 256 is now the default.
+* **The encoder isn't the limit.**  Directly trained, it reads all that's visible on maps it never saw, so it can count and carries over.  This ruled out the first suspect, that attention can't count.
+* **The objective hasn't got there.**  Most probes fall below the untrained encoder early, then a few climb back; only commander health and outcome finish clearly above.
+* **5,000 steps is short:** 1.28M samples, under one pass of the data.  The learning rate reached zero there, while the loss was still falling (0.96, 0.67, 0.42, 0.34 at 500, 2,000, 3,500 and 5,000).  SIGReg's statistic stayed about 15 where a real normal gives about 1.  **So this doesn't show whether a long run would learn.**
+* **Lambda 0.1 is worse**, so it stays at 0.02.  Rank rises to 26 against 17, but what fills it isn't what the probes ask for.
+* **Trained latents have most of their variance in a few directions:** 82% in 6 directions at lambda 0.02.
+* **Map identity is not the explanation so far.**  Every view shares its map, so a latent could fingerprint maps and pass both losses.  Maps hold 37% of the trained latent's variance, but 38% of an untrained one's, against 3% of own value's.  It's high, but training hasn't raised it.
+
+**The run** (the checks above were on `pool1`; on `pool2` it's only been seen to load and take 30 steps):
+
+    wsl ~/zkml/bin/python tools/frame_jepa.py train --data /mnt/d/zk-learned/frames/pool2 --run /mnt/d/zk-learned/runs/frame-1 --steps 100000
+
+About 4.8 hours and 100 MB.  A `stop` file in the run's directory ends it at the next report, and starting it again goes on from the last state, every 10,000 steps.  Its step 0 records the untrained scores.
+
+**When to stop it:** by 20,000 steps, about 1 hour, own air, metal, the clock and sea share should be clearly above their untrained scores.  If they aren't, more of the same is unlikely to help and the objective needs changing.
+
+**What to try then**, none of it tried yet: views that drop whole groups of tokens rather than a share of each, so that regions alone can't pass; a later view further ahead than 2 s, so that the slowly changing state counts for more than the constant; or a small probe loss added to the objective, which gives up on being purely self-supervised.
+
+### 11.4 Not done, for the user to decide
+
+* **How `z` reaches the main model.**  A single vector can't drive per-unit orders and target pointers, because those need a token per unit.  So `z` can replace the GRU's frame input and give the critic and global context, with unit tokens kept for the heads, but it can't replace them.  `tools/policy_model.py` isn't changed.
+* **The live bot has no forward for it.**  `bots/zkbot/policy/net.py` runs in numpy and the encoder is torch only, so a numpy port with a parity test comes first.
+* **Whether to start the long run**, with the stopping rule in 11.3.  `selfplay-6h` (10.6) points at the policy's updates and the factory matchups, rather than the frame input, as the first problems, so this may not fix what that run showed.

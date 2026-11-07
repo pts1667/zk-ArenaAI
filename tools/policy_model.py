@@ -2,7 +2,7 @@
 
 Batches are padded per token group, so every decision in a batch has the layout
 
-    units (Umax) | regions (Rmax) | sites (Smax) | global | memory state
+    units (Umax) | regions (Rmax) | sites (Smax) | features (Fmax) | global | memory state
 
 `collate` builds them from featurizer output, and is numpy so a data worker can run it.
 """
@@ -26,13 +26,13 @@ from zkbot.policy.bundle import GATE_DIM  # noqa: E402
 D, LAYERS, HEADS = npnet.D, npnet.LAYERS, npnet.HEADS
 ILLEGAL = -1e9
 KINDS_WITH_REGION = (rf.MOVE, rf.FIGHT, rf.JUMP)
-KINDS_WITH_FINE = (rf.MOVE, rf.FIGHT, rf.ATTACK_GROUND)
+KINDS_WITH_FINE = (rf.MOVE, rf.FIGHT, rf.JUMP, rf.ATTACK_GROUND)
 
 
 # What the encoder reads, per recurrent step.  Everything else is read once per minibatch, from `join`.
-ENCODER_FIELDS = frozenset(("unit_x", "unit_name", "unit_ally", "unit_player", "reg_x", "site_x", "glob_x", "tok_kind", "bucket", "key_mask", "gate_i", "gate_a", "gate_b", "gate_x"))
-JOINED_FIELDS = ("unit_x", "unit_name", "unit_ally", "unit_player", "hidden_ally", "hidden_player", "unit_mask", "reg_x", "reg_mask", "site_x", "site_mask", "glob_x", "tok_kind", "ctrl_mask", "kind_mask", "ptr_enemy",
-                 "enemy_tokens", "enemy_mask", "ptr_region", "route_bias", "hidden_x", "hidden_name", "hidden_mask")
+ENCODER_FIELDS = frozenset(("unit_x", "unit_name", "unit_ally", "unit_player", "reg_x", "site_x", "feat_x", "glob_x", "tok_kind", "bucket", "key_mask", "gate_i", "gate_a", "gate_b", "gate_x"))
+JOINED_FIELDS = ("unit_x", "unit_name", "unit_ally", "unit_player", "hidden_ally", "hidden_player", "unit_mask", "reg_x", "reg_mask", "site_x", "site_mask", "feat_x", "feat_mask", "glob_x", "tok_kind", "ctrl_mask", "kind_mask", "ptr_enemy",
+                 "enemy_tokens", "enemy_mask", "ptr_region", "ptr_jump", "route_bias", "hidden_x", "hidden_name", "hidden_mask")
 
 
 @dataclass
@@ -45,6 +45,8 @@ class Batch:
     reg_mask: object
     site_x: object
     site_mask: object
+    feat_x: object
+    feat_mask: object
     glob_x: object
     tok_kind: object
     bucket: object
@@ -59,6 +61,7 @@ class Batch:
     enemy_tokens: object    # B x E
     enemy_mask: object      # B x E
     ptr_region: object      # B x C x R
+    ptr_jump: object        # B x C x R
     route_bias: object      # B x C x R
     hidden_x: object        # B x H x UNIT_DIM, critic only
     hidden_name: object     # B x H
@@ -82,10 +85,11 @@ def collate(items: list[fz.Tensors], regions: int = 0) -> Batch:
     u = max(max(len(t.unit_x) for t in items), 1)
     r = max(max(len(t.reg_x) for t in items), 1, regions)
     s = max(max(len(t.site_x) for t in items), 1)
+    f = max(max(len(t.feat_x) for t in items), 1)
     c = max(max(t.controllable for t in items), 1)
     e = max(max(len(t.enemy_tokens) for t in items), 1)
     h = max(max(len(t.hidden_x) for t in items), 1)
-    n = u + r + s + 2
+    n = u + r + s + f + 2
     unit_x = np.zeros((b, u, fz.UNIT_DIM), np.float32)
     unit_name = np.zeros((b, u), np.int64)
     unit_mask = np.zeros((b, u), bool)
@@ -95,10 +99,13 @@ def collate(items: list[fz.Tensors], regions: int = 0) -> Batch:
     reg_mask = np.zeros((b, r), bool)
     site_x = np.zeros((b, s, fz.SITE_DIM), np.float32)
     site_mask = np.zeros((b, s), bool)
+    feat_x = np.zeros((b, f, fz.FEATURE_DIM), np.float32)
+    feat_mask = np.zeros((b, f), bool)
     glob_x = np.zeros((b, fz.GLOBAL_DIM), np.float32)
     tok_kind = np.zeros((b, n), np.int64)
     tok_kind[:, u:u + r] = fz.TK_REGION
     tok_kind[:, u + r:u + r + s] = fz.TK_SITE
+    tok_kind[:, u + r + s:u + r + s + f] = fz.TK_FEATURE
     tok_kind[:, -2] = fz.TK_GLOBAL
     tok_kind[:, -1] = fz.TK_MEMORY_STATE
     bucket = np.full((b, n, n), fz.MEMORY_BUCKET, np.int64)
@@ -110,6 +117,7 @@ def collate(items: list[fz.Tensors], regions: int = 0) -> Batch:
     enemy_tokens = np.zeros((b, e), np.int64)
     enemy_mask = np.zeros((b, e), bool)
     ptr_region = np.zeros((b, c, r), bool)
+    ptr_jump = np.zeros((b, c, r), bool)
     route_bias = np.zeros((b, c, r), np.float32)
     hidden_x = np.zeros((b, h, fz.UNIT_DIM), np.float32)
     hidden_name = np.zeros((b, h), np.int64)
@@ -123,9 +131,11 @@ def collate(items: list[fz.Tensors], regions: int = 0) -> Batch:
         unit_ally[i, :nu], unit_player[i, :nu] = t.unit_ally, t.unit_player
         reg_x[i, :nr], reg_mask[i, :nr] = t.reg_x, True
         site_x[i, :ns], site_mask[i, :ns] = t.site_x, True
+        nf = len(t.feat_x)
+        feat_x[i, :nf], feat_mask[i, :nf] = t.feat_x, True
         glob_x[i] = t.glob_x
         tok_kind[i, :nu] = t.tok_kind[:nu]
-        idx = np.concatenate((np.arange(nu), u + np.arange(nr), u + r + np.arange(ns), [u + r + s]))
+        idx = np.concatenate((np.arange(nu), u + np.arange(nr), u + r + np.arange(ns), u + r + s + np.arange(nf), [u + r + s + f]))
         bucket[i][np.ix_(idx, idx)] = t.pair_bucket
         key_mask[i, idx] = True
         ctrl_mask[i, :nc] = True
@@ -135,6 +145,7 @@ def collate(items: list[fz.Tensors], regions: int = 0) -> Batch:
             enemy_tokens[i, :ne] = t.enemy_tokens
             enemy_mask[i, :ne] = True
         ptr_region[i, :nc, :nr] = t.ptr_region
+        ptr_jump[i, :nc, :nr] = t.ptr_jump
         route_bias[i, :nc, :nr] = t.route_bias
         nh = len(t.hidden_x)
         hidden_x[i, :nh], hidden_name[i, :nh], hidden_mask[i, :nh] = t.hidden_x, t.hidden_name, True
@@ -143,9 +154,9 @@ def collate(items: list[fz.Tensors], regions: int = 0) -> Batch:
         gate_a.append(t.gate_a.astype(np.int64))
         gate_b.append(t.gate_b.astype(np.int64))
         gate_x.append(t.gate_x)
-    return Batch(unit_x, unit_name, unit_mask, reg_x, reg_mask, site_x, site_mask, glob_x, tok_kind, bucket, key_mask,
+    return Batch(unit_x, unit_name, unit_mask, reg_x, reg_mask, site_x, site_mask, feat_x, feat_mask, glob_x, tok_kind, bucket, key_mask,
                  np.concatenate(gate_i), np.concatenate(gate_a), np.concatenate(gate_b), np.concatenate(gate_x),
-                 ctrl_mask, kind_mask, ptr_enemy, enemy_tokens, enemy_mask, ptr_region, route_bias, hidden_x, hidden_name, hidden_mask,
+                 ctrl_mask, kind_mask, ptr_enemy, enemy_tokens, enemy_mask, ptr_region, ptr_jump, route_bias, hidden_x, hidden_name, hidden_mask,
                  unit_ally, unit_player, hidden_ally, hidden_player)
 
 
@@ -218,6 +229,7 @@ class Actor(nn.Module):
         self.unit_in1 = nn.Linear(D, D)
         self.reg_in = nn.Linear(fz.REGION_DIM, D)
         self.site_in = nn.Linear(fz.SITE_DIM, D)
+        self.feat_in = nn.Linear(fz.FEATURE_DIM, D)
         self.glob_in = nn.Linear(fz.GLOBAL_DIM, D)
         self.reg_mem = nn.Linear(npnet.REGION_STATE, D)
         self.mem_in = nn.Linear(npnet.GLOBAL_STATE, D)
@@ -233,6 +245,7 @@ class Actor(nn.Module):
         self.q_region = nn.Linear(D, D)
         self.q_site = nn.Linear(D, D)
         self.q_type = nn.Linear(D, D)
+        self.q_feature = nn.Linear(D, D)
         self.fine0 = nn.Linear(2 * D, D)
         self.fine1 = nn.Linear(D, fz.FINE_OPTIONS)
         self.route_scale = nn.Parameter(torch.tensor(npnet.ROUTE_SCALE_START))
@@ -259,9 +272,10 @@ class Actor(nn.Module):
             adjacency = adjacency.index_put((b.gate_i, b.gate_a, b.gate_b), a).index_put((b.gate_i, b.gate_b, b.gate_a), a)
             hr = hr + self.gate_m(adjacency.to(hr.dtype) @ hr)
         hs = self.site_in(b.site_x)
+        hf = self.feat_in(b.feat_x)
         hg = self.glob_in(b.glob_x)[:, None]
         hm = self.mem_in(glob)[:, None]
-        h = torch.cat((hu, hr, hs, hg, hm), 1) + self.kind_embed(b.tok_kind)
+        h = torch.cat((hu, hr, hs, hf, hg, hm), 1) + self.kind_embed(b.tok_kind)
         # A small table looked up per pair: backward keeps indices, not every pair's RBF features.  index_select because its
         # backward is an index_add, where plain indexing's sorts every pair on the GPU.
         table = self.rbf @ self.pair_w.to(self.rbf.dtype)
@@ -272,18 +286,18 @@ class Actor(nn.Module):
         for i, block in enumerate(self.blocks):
             h = block(h, bias[:, i * HEADS:(i + 1) * HEADS], b.key_mask)
         h = self.lnf(h)
-        u, r, s = hu.shape[1], hr.shape[1], hs.shape[1]
-        new_glob = self.gru_g(h[:, u + r + s], glob)
+        u, r, s, f = hu.shape[1], hr.shape[1], hs.shape[1], hf.shape[1]
+        new_glob = self.gru_g(h[:, u + r + s + f], glob)
         new_regions = self.gru_r(h[:, u:u + r], regions)
         return h, h[:, :u], h[:, u:u + r], new_glob, new_regions
 
     def heads(self, b: Batch, units: torch.Tensor, reg_h: torch.Tensor):
-        """Float32 logits with the illegal choices taken out: kind, region, and enemy per pointer kind."""
+        """Float32 logits with the illegal choices taken out: kind, and enemy per pointer kind.  Which regions are legal depends on the kind: region_legal."""
         c = b.kind_mask.shape[1]
         me = units[:, :c]
         kind = self.head_kind(me).float().masked_fill(~b.kind_mask, ILLEGAL)
         region = (self.q_region(me) @ reg_h.transpose(1, 2)).float() / math.sqrt(D)
-        region = (region - F.softplus(self.route_scale).float() * b.route_bias).masked_fill(~b.ptr_region, ILLEGAL)
+        region = region - F.softplus(self.route_scale).float() * b.route_bias
         enemy_h = torch.gather(units, 1, b.enemy_tokens[:, :, None].expand(-1, -1, D))
         enemy = (self.q_enemy(me) @ enemy_h.transpose(1, 2)).float() / math.sqrt(D)
         enemy = enemy[:, None].expand(-1, b.ptr_enemy.shape[1], -1, -1).masked_fill(~b.ptr_enemy, ILLEGAL)
@@ -291,6 +305,11 @@ class Actor(nn.Module):
 
     def fine(self, me: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         return self.fine1(F.gelu(self.fine0(torch.cat((me, target), -1)), approximate="tanh")).float()
+
+
+def region_legal(b: Batch, scores: torch.Tensor, kind: torch.Tensor) -> torch.Tensor:
+    """The region scores, with what each unit's kind can't go to taken out."""
+    return scores.masked_fill(~torch.where((kind == rf.JUMP)[:, :, None], b.ptr_jump, b.ptr_region), ILLEGAL)
 
 
 def _masked_entropy(logits: torch.Tensor) -> torch.Tensor:
@@ -324,6 +343,7 @@ class Critic(nn.Module):
         self.unit_in = nn.Linear(fz.UNIT_DIM + 16, d)
         self.reg_in = nn.Linear(fz.REGION_DIM, d)
         self.site_in = nn.Linear(fz.SITE_DIM, d)
+        self.feat_in = nn.Linear(fz.FEATURE_DIM, d)
         self.glob_in = nn.Linear(fz.GLOBAL_DIM + npnet.GLOBAL_STATE, d)
         self.blocks = nn.ModuleList(Block(d, 4) for _ in range(self.LAYERS))
         self.lnf = nn.LayerNorm(d)
@@ -336,10 +356,11 @@ class Critic(nn.Module):
         hh = self.unit_in(torch.cat((b.hidden_x, self.name_embed(b.hidden_name), self.ally_embed(b.hidden_ally), self.player_embed(b.hidden_player)), -1)) + self.kind_embed.weight[fz.TK_HIDDEN]
         hr = self.reg_in(b.reg_x) + self.kind_embed.weight[fz.TK_REGION]
         hs = self.site_in(b.site_x) + self.kind_embed.weight[fz.TK_SITE]
+        hf = self.feat_in(b.feat_x) + self.kind_embed.weight[fz.TK_FEATURE]
         hg = self.glob_in(torch.cat((b.glob_x, actor_state.detach()), -1))[:, None]
         hu = hu + self.kind_embed(b.tok_kind[:, :hu.shape[1]])
-        h = torch.cat((hg, hu, hh, hr, hs), 1)
-        mask = torch.cat((torch.ones_like(b.unit_mask[:, :1]), b.unit_mask, b.hidden_mask, b.reg_mask, b.site_mask), 1)
+        h = torch.cat((hg, hu, hh, hr, hs, hf), 1)
+        mask = torch.cat((torch.ones_like(b.unit_mask[:, :1]), b.unit_mask, b.hidden_mask, b.reg_mask, b.site_mask, b.feat_mask), 1)
         for block in self.blocks:
             h = block(h, None, mask)
         return self.value(self.lnf(h[:, 0]))[:, 0].float()
@@ -359,6 +380,7 @@ def sample_actions(actor: Actor, b: Batch, units: torch.Tensor, reg_h: torch.Ten
     kind = _sample(kind_l)
     logp = _pick(kind_l, kind)
     uses_region = torch.isin(kind, torch.tensor(KINDS_WITH_REGION, device=kind.device))
+    region_l = region_legal(b, region_l, kind)
     region = _sample(region_l)
     logp = logp + uses_region * _pick(region_l, region)
     # The enemy head per kind: only a kind with an enemy pointer uses one.
@@ -386,6 +408,7 @@ def evaluate_actions(actor: Actor, b: Batch, units: torch.Tensor, reg_h: torch.T
     legal_choices = b.kind_mask.sum(-1) > 1
     logp = _pick(kind_l, a.kind)
     ent = {"kind": (_masked_entropy(kind_l), b.ctrl_mask & legal_choices)}
+    region_l = region_legal(b, region_l, a.kind)
     uses_region = a.region >= 0
     region = a.region.clamp_min(0)
     logp = logp + uses_region * _pick(region_l, region)

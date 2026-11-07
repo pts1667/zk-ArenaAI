@@ -5,6 +5,7 @@
 
 Reads the .smf inside each map's .sd7/.sdz (via 7-Zip), honouring the height
 overrides in mapinfo.lua and .smd, so no game is needed.  Metal spots come from
+what a game on the map reported (sim/data/map_facts.json, by tools/sim_engine.py facts), or else
 the game's list, the map's layout file or the metal map; these only approximate
 what LuaRules/Gadgets/mex_spot_finder.lua does in a game.  Maps that generate
 their terrain in-game hold flat placeholder heights: they are flagged
@@ -37,6 +38,7 @@ sys.path.insert(0, str(ROOT / "bots"))
 from zkbot import terrain as tr  # noqa: E402
 
 GAME_DIR = pathlib.Path(os.environ.get("ZK_GAME_DIR", ROOT.parent / "Zero-K"))
+MAP_FACTS = ROOT / "sim" / "data" / "map_facts.json"
 MAPS_DIR = pathlib.Path(os.environ.get("ZK_MAPS_DIR", pathlib.Path.home() / "Downloads" / "zero-k-portable" / "maps"))
 SMF_HEADER = "<16s2i5i2f7i"     # magic, version, id, mapx, mapy, square, texel, tile, min, max, 6 ptrs, extra count
 
@@ -150,6 +152,13 @@ def spots_from_metalmap(metal: np.ndarray) -> list[tuple[float, float, float]]:
 DAMAGE_PER_SLOW_UPDATE = 15 / 30
 
 
+def _reported_spots(name: str) -> list[tuple[float, float, float]]:
+    if not MAP_FACTS.exists():
+        return []
+    slug = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+    return [(x, z, metal) for x, z, metal in json.loads(MAP_FACTS.read_text("utf8")).get(slug, {}).get("spots", [])]
+
+
 def load_map(path: pathlib.Path, name: str = "") -> MapFile:
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="zkmap", dir=os.environ.get("CLAUDE_JOB_DIR") and
                                         pathlib.Path(os.environ["CLAUDE_JOB_DIR"]) / "tmp"))
@@ -208,6 +217,11 @@ def load_map(path: pathlib.Path, name: str = "") -> MapFile:
         # The game treats a metal map with so few spots as metal everywhere.
         if out.spot_source == "metalmap" and len(out.spots) < 6:
             out.spots = []
+        # Better than all of those, for a map that has played.  Faultline's layout builds half its spots in code, and maps' metal values vary.
+        reported = _reported_spots(name)
+        if reported:
+            out.spots = reported
+            out.spot_source = "engine"
         return out
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

@@ -52,11 +52,13 @@ int zk_sizeof_type(void) { return int(sizeof(zk_type_rec)); }
 int zk_sizeof_state(void) { return int(sizeof(zk_unit_state)); }
 
 void* zk_catalog_new(const zk_type_rec* types, int n_types, const zk_weapon_rec* weapons, int n_weapons,
-                     const float* priority) {
+                     const float* priority, const zk_tactics_rec* tactics, const uint8_t* relations) {
     auto* c = new Catalog;
     c->types.assign(types, types + n_types);
     c->weapons.assign(weapons, weapons + n_weapons);
     c->priority.assign(priority, priority + size_t(n_weapons) * size_t(n_types));
+    c->tactics.assign(tactics, tactics + n_types);
+    c->relations.assign(relations, relations + size_t(n_types) * size_t(n_types));
     return c;
 }
 
@@ -117,6 +119,8 @@ void zk_world_order(void* world, int unit, int kind, float x, float z, int targe
     static_cast<World*>(world)->order_unit(unit, kind, x, z, target);
 }
 
+void zk_world_set_hp(void* world, int unit, float hp) { static_cast<World*>(world)->hp[size_t(unit)] = hp; }
+
 void zk_world_step(void* world, int ticks) { static_cast<World*>(world)->step(ticks); }
 
 int zk_world_frame(const void* world) { return static_cast<const World*>(world)->frame; }
@@ -126,6 +130,32 @@ void zk_world_set_frame(void* world, int frame) { static_cast<World*>(world)->fr
 void zk_world_ready_weapons(void* world) { static_cast<World*>(world)->ready_weapons(); }
 
 void zk_world_kill(void* world, int unit) { static_cast<World*>(world)->hp[size_t(unit)] = 0.0f; }
+
+void zk_world_set_shield(void* world, int unit, float charge) { static_cast<World*>(world)->shield[size_t(unit)] = charge; }
+
+void zk_world_economy(void* world, int n_spots, const float* spots, float metal, float energy, float innate_metal, float innate_energy, float storage) {
+    static_cast<World*>(world)->set_economy(n_spots, spots, metal, energy, innate_metal, innate_energy, storage);
+}
+
+int zk_world_add_feature(void* world, float x, float z, float metal, float hp, float radius, int feature_def) {
+    return static_cast<World*>(world)->add_wreck(x, z, metal, hp, radius, feature_def, -1);
+}
+
+int zk_world_features(void* world, int side, void* records, int cap) {
+    auto* w = static_cast<World*>(world);
+    w->rebuild_index();
+    return w->emit_features(side, static_cast<FeatureRecord*>(records), cap);
+}
+
+void zk_world_resources(const void* world, int side, float* out) {
+    const Purse& p = static_cast<const World*>(world)->purses[size_t(side)];
+    out[0] = p.metal;
+    out[1] = p.energy;
+    out[2] = p.metal_income;
+    out[3] = p.energy_income;
+    out[4] = p.overdrive_metal;
+    out[5] = p.overdrive_energy;
+}
 
 void zk_world_get(const void* world, int unit, zk_unit_state* out) {
     const auto* w = static_cast<const World*>(world);
@@ -140,7 +170,15 @@ void zk_world_get(const void* world, int unit, zk_unit_state* out) {
     out->damage_taken = w->damage_taken[u];
     out->para = w->para[u];
     out->disarm = w->disarm[u];
+    out->build = w->build[u];
     out->stock = w->stock[u];
+    out->cloaked = w->cloaked[u];
+    out->heat = w->ai[u].heat;
+    out->jump_charge = w->jump[u].charge;
+    out->jumping = w->jump[u].flying ? 2 : (w->jump[u].busy ? 1 : 0);
+    out->chasing = w->ai[u].chasing;
+    out->dodging = w->ai[u].dodging;
+    out->shots_fired = w->ai[u].shots_fired;
     out->shield = w->shield[u];
     out->alive = w->alive[u];
     out->order = w->order[u];
@@ -189,6 +227,7 @@ void zk_replay(const void* catalog, const void* const* maps, const int* snapshot
 
 int zk_sizeof_unit_record(void) { return int(sizeof(UnitRecord)); }
 int zk_sizeof_site_record(void) { return int(sizeof(SiteRecord)); }
+int zk_sizeof_feature_record(void) { return int(sizeof(FeatureRecord)); }
 int zk_global_count(void) { return G_COUNT; }
 
 int zk_world_view(void* world, int side, void* records, int cap, float* glob, int commander, const float* base) {
@@ -226,9 +265,10 @@ void zk_batch_reset(void* batch, int g, const void* map, uint64_t seed, int beha
 void* zk_batch_world(void* batch, int g) { return static_cast<Batch*>(batch)->games[size_t(g)].world.get(); }
 
 void zk_batch_step(void* batch, const int* games, int n_games, const zk_order_rec* orders, const int* order_offsets, int ticks,
-                   void* records, int cap, int* counts, float* globs, float* stats) {
+                   void* records, int cap, int* counts, float* globs, float* stats, void* features, int feature_cap, int* feature_counts) {
     auto* b = static_cast<Batch*>(batch);
     auto* out = static_cast<UnitRecord*>(records);
+    auto* out_features = static_cast<FeatureRecord*>(features);
     auto worker = [&](int slice) {
         for (int i = slice; i < n_games; i += b->threads) {
             Game& game = b->games[size_t(games[i])];
@@ -243,6 +283,7 @@ void zk_batch_step(void* batch, const int* games, int n_games, const zk_order_re
                 w.update_view(s);
                 counts[slot] = w.emit_view(s, out + slot * size_t(cap), cap, globs + slot * G_COUNT, game.commander[s], game.base + 2 * s);
                 w.side_stats(s, stats + slot * ZK_STATS);
+                feature_counts[slot] = w.emit_features(s, out_features + slot * size_t(feature_cap), feature_cap);
             }
         }
     };

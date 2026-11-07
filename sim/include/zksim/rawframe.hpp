@@ -5,7 +5,7 @@
 
 namespace zk {
 
-constexpr int RAWFRAME_SCHEMA = 2;
+constexpr int RAWFRAME_SCHEMA = 4;
 
 constexpr int KNOW_LOS = 0;
 constexpr int KNOW_RADAR = 1;
@@ -20,6 +20,7 @@ constexpr int UF_IDLE = 16;
 constexpr int UF_TYPE_KNOWN = 32;
 constexpr int UF_DAMAGED = 64;
 constexpr int UF_RESERVED = 128;
+constexpr int UF_JUMP_READY = 256;
 
 struct UnitRecord {
     int64_t uid;
@@ -56,6 +57,15 @@ struct SiteRecord {
     uint8_t pad;
 };
 static_assert(sizeof(SiteRecord) == 20, "SiteRecord: rawframe.py disagrees");
+
+struct FeatureRecord {
+    int64_t feat_id;
+    float x;
+    float z;
+    float metal;
+    int32_t def_id;
+};
+static_assert(sizeof(FeatureRecord) == 24, "FeatureRecord: rawframe.py disagrees");
 
 enum GlobalField {
     G_FRAME = 0,

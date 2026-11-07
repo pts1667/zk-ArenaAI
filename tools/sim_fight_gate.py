@@ -309,7 +309,7 @@ def main() -> None:
     if f.unknown:
         print("  names not in the catalog:", f.unknown)
     sim = {}
-    for name, behaviour in (("advance", zksim.ADVANCE), ("hold", zksim.HOLD)):
+    for name, behaviour in (("advance", zksim.ADVANCE), ("hold", zksim.HOLD), ("orders", zksim.ORDERS)):
         print(name)
         sim[name] = sim_scores(f, cat, behaviour, a.seeds, a.seed, a.threads)
     OUT.mkdir(parents=True, exist_ok=True)

@@ -22,6 +22,7 @@ constexpr float STUCK_SHARE = 0.2f;            // of the window's walk at top sp
 constexpr int ESCAPE_TICKS = 18;               // 3 s, doubling with each attempt
 constexpr int ESCAPE_MAX_DOUBLINGS = 3;
 constexpr float AT_CENTRE = 64.0f;             // near enough: a turning circle can keep a unit from getting closer
+constexpr float BACK_ON_LINE = 64.0f;          // MobileCAI.cpp: going back to a fight's line is over this close to it
 
 float wrap(float a) {
     while (a > PI) a -= 2.0f * PI;
@@ -134,18 +135,65 @@ bool World::wants_to_walk(int u, float& gx, float& gz) {
         gz = z[size_t(e)];
         return true;
     }
-    if (behaviour != ZK_BEHAVIOUR_ORDERS) return false;
+    if (behaviour != ZK_BEHAVIOUR_ORDERS && behaviour != ZK_BEHAVIOUR_SCRIPTED) return false;
+    UnitAI& a = ai[size_t(u)];
+    a.speed_limit = 0.0f;
+    if (jump[size_t(u)].stranded) return false;
+    if (a.dodging) {
+        gx = a.dodge_x;
+        gz = a.dodge_z;
+        if (std::hypot(gx - x[size_t(u)], gz - z[size_t(u)]) > GOAL_RADIUS) return true;
+        a.dodging = false;
+    }
+    if (a.chasing >= 0 && alive[size_t(a.chasing)]) return walk_to_target(u, a.chasing, gx, gz);
     const int o = order[size_t(u)];
-    if (o == ZK_ORDER_ATTACK || o == ZK_ORDER_MANUAL_FIRE) {
+    if (o == ZK_ORDER_ATTACK) {
         const int t = order_target[size_t(u)];
-        const float reach = o == ZK_ORDER_ATTACK ? d.max_range : cat->weapons[size_t(d.mount_weapon[manual_mount(u)])].range;
+        return t >= 0 && alive[size_t(t)] && walk_to_target(u, t, gx, gz);
+    }
+    if (o == ZK_ORDER_MANUAL_FIRE) {
+        const int t = order_target[size_t(u)];
+        const float reach = cat->weapons[size_t(d.mount_weapon[manual_mount(u)])].range;
         if (t < 0 || !alive[size_t(t)] || std::hypot(x[size_t(t)] - x[size_t(u)], z[size_t(t)] - z[size_t(u)]) <= reach)
             return false;
         gx = x[size_t(t)];
         gz = z[size_t(t)];
         return true;
     }
-    if (o == ZK_ORDER_MOVE || (o == ZK_ORDER_FIGHT && !has_target)) {
+    if (o == ZK_ORDER_JUMP) {
+        // AttemptJump's Approach: into range.  There it stands until it's charged.
+        gx = goal_x[size_t(u)];
+        gz = goal_z[size_t(u)];
+        return std::hypot(gx - x[size_t(u)], gz - z[size_t(u)]) >= d.jump_range;
+    }
+    if (o == ZK_ORDER_BUILD) {
+        gx = goal_x[size_t(u)];
+        gz = goal_z[size_t(u)];
+        return !within(u, gx, gz, reach_of(u, cat->types[size_t(order_target[size_t(u)])].footprint_radius));
+    }
+    if (o == ZK_ORDER_RECLAIM) {
+        const int id = order_target[size_t(u)];
+        if (!wreck_exists(id)) return false;
+        gx = wrecks[size_t(id)].x;
+        gz = wrecks[size_t(id)].z;
+        return !within(u, gx, gz, reach_of(u, wrecks[size_t(id)].radius));
+    }
+    if (o == ZK_ORDER_ASSIST) {
+        const int t = order_target[size_t(u)];
+        if (t < 0 || !alive[size_t(t)]) return false;
+        gx = x[size_t(t)];
+        gz = z[size_t(t)];
+        return !within(u, gx, gz, reach_of(u, type_of(t).footprint_radius));
+    }
+    if (o == ZK_ORDER_FIGHT && a.returning) {
+        if (std::hypot(a.return_x - x[size_t(u)], a.return_z - z[size_t(u)]) > BACK_ON_LINE) {
+            gx = a.return_x;
+            gz = a.return_z;
+            return true;
+        }
+        a.returning = false;
+    }
+    if (o == ZK_ORDER_MOVE || o == ZK_ORDER_FIGHT) {
         gx = goal_x[size_t(u)];
         gz = goal_z[size_t(u)];
         if (std::hypot(gx - x[size_t(u)], gz - z[size_t(u)]) > GOAL_RADIUS) return true;
@@ -181,6 +229,10 @@ void World::track_progress(int u, bool walking) {
 }
 
 void World::move_one(int u) {
+    if (jump[size_t(u)].busy) {
+        track_progress(u, false);
+        return;
+    }
     const auto& d = type_of(u);
     float gx = 0.0f, gz = 0.0f;
     bool walking;
@@ -207,6 +259,7 @@ void World::move_one(int u) {
     // Some units are slower until their main weapon has reloaded (cloakskirm.lua, cloaksnipe.lua).
     const float reload_mult = cooldown[size_t(u) * ZK_MAX_MOUNTS] > 0.0f ? d.reload_move_penalty : 1.0f;
     const float slow_mult = (1.0f - slow_now(u)) * reload_mult;
+    const float speed_limit = ai[size_t(u)].speed_limit;
     int& wait = order_wait[size_t(u)];
     int& lag = order_lag[size_t(u)];
     ZK_PROF(MOVE_FRAMES);
@@ -215,7 +268,10 @@ void World::move_one(int u) {
         if (wait > 0) --wait;
         if (lag > 0) --lag;
         const float terrain = cls >= 0 ? map->speed_along(cls, px, pz, std::sin(h), std::cos(h)) : 1.0f;
-        const float top = go ? d.speed * std::max(terrain, MIN_TERRAIN_SPEED) * slow_mult : 0.0f;
+        float top = go ? d.speed * std::max(terrain, MIN_TERRAIN_SPEED) * slow_mult : 0.0f;
+        if (speed_limit > 0.0f) top = std::min(top, speed_limit);
+        // What flies comes to a stop at its goal, rather than getting there at full speed and coming back.
+        if (cls < 0 && walking) top = std::min(top, std::sqrt(2.0f * d.brake * std::hypot(gx - px, gz - pz)));
         const float diff = (go || !walking) ? wrap(wanted - h) : 0.0f;
         const float limit = std::fabs(diff) > SLOW_TURN_ANGLE ? std::min(top, d.slow_turn_speed) : top;
         h = wrap(h + std::clamp(diff, -d.turn_rate, d.turn_rate));
@@ -248,12 +304,12 @@ void World::separate() {
     for (int u = 0; u < n; ++u) {
         if (!alive[size_t(u)]) continue;
         const auto& d = type_of(u);
-        if (!(d.flags & ZK_U_MOBILE) || (d.flags & ZK_U_AIR)) continue;
+        if (!(d.flags & ZK_U_MOBILE) || (d.flags & ZK_U_AIR) || jump[size_t(u)].flying) continue;
         float push_x = 0.0f, push_z = 0.0f;
         for_near(x[size_t(u)], z[size_t(u)], d.footprint_radius + SEPARATION_MARGIN, [&](int o) {
             if (o == u || !alive[size_t(o)]) return;
             const auto& od = type_of(o);
-            if (od.flags & ZK_U_AIR) return;
+            if ((od.flags & ZK_U_AIR) || jump[size_t(o)].flying) return;
             const float dx = x[size_t(u)] - x[size_t(o)], dz = z[size_t(u)] - z[size_t(o)];
             const float reach = d.footprint_radius + od.footprint_radius;
             const float d2 = dx * dx + dz * dz;

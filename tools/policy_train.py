@@ -78,6 +78,10 @@ class Config:
     pair_grad_share: float = 0.125  # of a minibatch's steps carrying the pair bias's gradient, scaled up to match
     concurrent: bool = False        # collect the next iteration during this one's training
     decide_every: int = 1           # in 15-frame slots: 1 is 2 Hz, 2 is 1 Hz.  Scripted opponents keep their own rate.
+    hours: float = 0.0              # stop after this long as well as at `decisions`, if not 0
+    self_play_at: float = 0.8       # wins against the script over the last two tests that start the move to self-play
+    self_play_holds_below: float = 0.7      # and over the same two, what pauses it
+    self_play_per_iteration: float = 0.01   # share of new games added each iteration: 100 iterations from none to all
 
 
 # Attention's pairs make a big frame cost more memory per token than a small one.  Fitted on training at 40, 128 and 256 units a
@@ -108,6 +112,32 @@ def beta(progress: float) -> float:
     if progress < 0.1:
         return 0.0
     return min(0.9, 0.9 * (progress - 0.1) / 0.5)
+
+
+@dataclass
+class SelfPlay:
+    """How much of training is against itself: none until it beats the script, then more each iteration, pausing if it slips."""
+    start_at: float
+    hold_below: float
+    per_iteration: float
+    share: float = 0.0
+    started_at: int = -1            # iteration
+    tests: list[float] = field(default_factory=list)
+
+    def _recent(self) -> float | None:
+        """Two tests, since one of 64 games has a standard error of about 5 points."""
+        return sum(self.tests[-2:]) / 2.0 if len(self.tests) >= 2 else None
+
+    def note_test(self, wins: float, iteration: int) -> None:
+        self.tests.append(wins)
+        recent = self._recent()
+        if self.started_at < 0 and recent is not None and recent >= self.start_at:
+            self.started_at = iteration
+
+    def advance(self) -> float:
+        if self.started_at >= 0 and self._recent() >= self.hold_below:
+            self.share = min(1.0, self.share + self.per_iteration)
+        return self.share
 
 
 @dataclass
@@ -208,7 +238,7 @@ def _act_slices(items: list[fz.Tensors], regions: int) -> list[slice]:
     """Seats in order, cut where the next would take a forward pass's padded pairs over the limit."""
     out, start, most = [], 0, 0
     for i, t in enumerate(items):
-        tokens = len(t.unit_x) + regions + len(t.site_x) + 2
+        tokens = len(t.unit_x) + regions + len(t.site_x) + len(t.feat_x) + 2
         if i > start and (i - start + 1) * max(most, tokens) ** 2 > ACT_PAIRS:
             out.append(slice(start, i))
             start, most = i, 0
@@ -275,6 +305,7 @@ class Learner:
         self.decisions = 0
         self.iteration = 0
         self.entropy_coef = {h: ENTROPY_BASE for h in HEADS}
+        self.self_play = SelfPlay(cfg.self_play_at, cfg.self_play_holds_below, cfg.self_play_per_iteration)
         self.autocast = torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda")
         self.player = Player(self.actor, self.critic, workers, device)
         if device == "cuda":
@@ -305,7 +336,7 @@ class Learner:
         minibatch isn't all from one stage of the game, and the minibatches then go in random order.  The budget counts padded
         tokens, weighed by `memory_tokens`: a small frame batched with a big map's costs as much as the big map's.  Token groups
         pad separately, so each is tracked on its own."""
-        units = np.array([max(min(len(s.frame.units), UNIT_TOKENS) + min(len(s.frame.sites), fz.CAP_SITES) for s in seg.steps) for seg in segments])
+        units = np.array([max(min(len(s.frame.units), UNIT_TOKENS) + min(len(s.frame.sites), fz.CAP_SITES) + min(len(s.frame.features), fz.CAP_FEATURES) for s in seg.steps) for seg in segments])
         regions = np.array([seg.bundle.regions for seg in segments])
         lengths = np.array([len(seg.steps) for seg in segments])
         order = np.argsort((units + regions) * rng.uniform(0.85, 1.15, len(segments)))
@@ -434,7 +465,7 @@ class Learner:
         name = f"it-{self.iteration:06d}.pt"
         temp = directory / (name + ".tmp")
         torch.save({"actor": self.actor.state_dict(), "critic": self.critic.state_dict(), "optimizer": self.optimizer.state_dict(),
-                    "iteration": self.iteration, "decisions": self.decisions, "entropy_coef": self.entropy_coef}, temp)
+                    "iteration": self.iteration, "decisions": self.decisions, "entropy_coef": self.entropy_coef, "self_play": asdict(self.self_play)}, temp)
         os.replace(temp, directory / name)
         marker = self.run / "latest.json.tmp"
         marker.write_text(json.dumps({"checkpoint": f"ckpt/{name}", "iteration": self.iteration, "decisions": self.decisions}))
@@ -450,6 +481,8 @@ class Learner:
         self.optimizer.load_state_dict(state["optimizer"])
         self.iteration, self.decisions = state["iteration"], state["decisions"]
         self.entropy_coef = state["entropy_coef"]
+        if "self_play" in state:
+            self.self_play = SelfPlay(**state["self_play"])
         return True
 
 
@@ -562,7 +595,7 @@ class Collector:
                     masked_out += int((~t.kind_mask[np.arange(c), kind]).sum())
                 kind_counts += np.bincount(kind, minlength=rf.KIND_COUNT)
                 raw = frames[k][0]
-                step = Step(rf.Frame(raw.units.copy(), raw.sites.copy(), raw.glob.copy()), kind, out["enemy"][k, :c].copy(),
+                step = Step(rf.Frame(raw.units.copy(), raw.sites.copy(), raw.glob.copy(), raw.features.copy()), kind, out["enemy"][k, :c].copy(),
                             out["region"][k, :c].copy(), out["fine"][k, :c].copy(), out["logp"][k, :c].copy(), float(value[k]))
                 tr = current[seat]
                 tr.steps.append(step)
@@ -640,6 +673,7 @@ def evaluate(learner: Learner, make_env, opponent: str, games: int, seed: int) -
     seats = Seats(env.seat_count, env.max_regions, learner.device)
     names = np.arange(learner.vocabulary, dtype=np.int32)
     results: dict[int, float] = {}
+    records: dict[int, dict] = {}
     while len(results) < games:
         acting = env.policy_seats_to_act()
         if not acting:
@@ -659,10 +693,12 @@ def evaluate(learner: Learner, make_env, opponent: str, games: int, seed: int) -
             seats.regions[index] = new_regions
             env.step(1.0)
         for seat, _, won in env.finished_seats():
+            if seat not in results and seat in getattr(env, "ended", {}):
+                records[seat] = env.ended[seat]
             results.setdefault(seat, won)
             seats.clear(seat)
     r = np.array(list(results.values()), np.float32)
-    return {"win_rate": float((r == 1).mean()), "draw_rate": float((r == 0.5).mean()), "games": len(r)}
+    return {"win_rate": float((r == 1).mean()), "draw_rate": float((r == 0.5).mean()), "loss_rate": float((r == 0).mean()), "games": len(r), "records": list(records.values())}
 
 
 def make_toy(games: int, seed: int, modes: list[str] | None = None, decide_every: int = 1):
@@ -674,7 +710,7 @@ def make_toy(games: int, seed: int, modes: list[str] | None = None, decide_every
 def make_sim(games: int, seed: int, modes: list[str] | None = None, decide_every: int = 1):
     import policy_sim_env
 
-    return policy_sim_env.SimEnv(games, seed, modes or ["fight", "fight", "mirror"], decide_every=decide_every)
+    return policy_sim_env.SimEnv(games, seed, modes or ["fight"], decide_every=decide_every)
 
 
 class Ahead:
@@ -728,6 +764,8 @@ def train(cfg: Config, run: pathlib.Path, make_env, device: str = "cuda") -> Non
     ahead: Ahead | None = None
     collect_s = train_s = 0.0
     log = (run / "metrics.jsonl").open("a")
+    began = time.perf_counter()
+    env.self_play_share = learner.self_play.share
     while learner.decisions < cfg.decisions:
         t0 = time.perf_counter()
         if ahead is None:
@@ -757,15 +795,23 @@ def train(cfg: Config, run: pathlib.Path, make_env, device: str = "cuda") -> Non
             raise RuntimeError(f"{metrics['masked_out']} chosen actions were outside their mask")
         if learner.iteration % cfg.eval_every == 0:
             for opponent in env.eval_opponents:
+                tested = time.perf_counter()
                 result = evaluate(learner, make_env, opponent, cfg.eval_games, cfg.seed * 1000 + learner.iteration)
                 metrics[f"eval_{opponent}"] = result["win_rate"]
+                metrics[f"eval_{opponent}_draws"], metrics[f"eval_{opponent}_losses"] = result["draw_rate"], result["loss_rate"]
+                metrics[f"eval_{opponent}_seconds"] = time.perf_counter() - tested
+                with (run / "tests.jsonl").open("a") as tests:
+                    tests.write(json.dumps({"iteration": learner.iteration, "decisions": learner.decisions, "opponent": opponent, "games": result["records"]}) + "\n")
+                if opponent == "fight":
+                    learner.self_play.note_test(result["win_rate"], learner.iteration)
+        env.self_play_share = metrics["self_play_share"] = learner.self_play.advance()
         if learner.iteration % cfg.checkpoint_every == 0:
             learner.save()
         log.write(json.dumps(metrics) + "\n")
         log.flush()
         show = {k: round(v, 3) for k, v in metrics.items() if isinstance(v, float) and (k.startswith(("wins_", "eval_", "entropy_", "share_kind")) or k in ("explained_variance", "kl", "clip_fraction", "collect_rate", "train_rate", "overall_rate", "minibatch_decisions"))}
         print(f"it {learner.iteration} decisions {learner.decisions} {show}", flush=True)
-        if (run / "stop").exists():
+        if (run / "stop").exists() or (cfg.hours and time.perf_counter() - began >= cfg.hours * 3600.0):
             break
     if ahead:
         ahead.join()
@@ -841,6 +887,8 @@ def main() -> None:
     ap.add_argument("--concurrent", action=argparse.BooleanOptionalAction, default=None, help="collect the next iteration during this one's training: on for the sim, off for the toy")
     ap.add_argument("--decide-every", type=int, default=Config.decide_every, help="in 15-frame slots: 1 is 2 Hz, 2 is 1 Hz")
     ap.add_argument("--workers", type=int, default=Config.data_workers)
+    ap.add_argument("--hours", type=float, default=Config.hours, help="stop after this long as well as at --decisions")
+    ap.add_argument("--eval-every", type=int, default=Config.eval_every, help="iterations between tests against the script")
     ap.add_argument("--kinds", help="action kinds to allow, such as 0,3: a test of one head with nothing else to fall back on")
     ap.add_argument("--gpu-runs", type=int, default=Config.gpu_runs, help="how many trainings share the card, this one included")
     ap.add_argument("--empty-cache", action=argparse.BooleanOptionalAction, default=Config.empty_cache, help="hand back what the allocator holds after each iteration")
@@ -850,7 +898,7 @@ def main() -> None:
     args = ap.parse_args()
     cfg = Config(env=args.env, seed=args.seed, decisions=args.decisions, games=args.games, iteration=args.iteration, passes=args.passes,
                  segment=args.segment, token_budget=args.token_budget, data_workers=args.workers, pair_grad_share=args.pair_grad_share,
-                 concurrent=args.env == "sim" if args.concurrent is None else args.concurrent, decide_every=args.decide_every, gpu_runs=args.gpu_runs, empty_cache=args.empty_cache)
+                 concurrent=args.env == "sim" if args.concurrent is None else args.concurrent, decide_every=args.decide_every, hours=args.hours, eval_every=args.eval_every, gpu_runs=args.gpu_runs, empty_cache=args.empty_cache)
     if args.kinds:
         cfg.enabled_kinds = tuple(int(k) for k in args.kinds.split(","))
     run = pathlib.Path(args.run)

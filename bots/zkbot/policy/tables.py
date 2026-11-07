@@ -28,6 +28,10 @@ class TypeTable:
         self.names = tuple(names)
         n = len(names)
         moves = json.loads((_DATA / "moveclass.json").read_text("utf8"))
+        self.jump_range = np.zeros(n + 1, np.float32)
+        for name, reach in json.loads((_DATA / "jumprange.json").read_text("utf8")).items():
+            if name in names:
+                self.jump_range[names.index(name)] = reach
         self.stats = np.zeros((n + 1, TYPE_DIM), np.float32)
         self.cost = np.zeros(n + 1, np.float32)
         self.speed = np.zeros(n + 1, np.float32)         # elmos/s
@@ -98,7 +102,7 @@ class TypeTable:
 
 def _catalog_hash() -> str:
     h = hashlib.sha256()
-    for name in ("units.json", "weapons.json", "abilities.json", "moveclass.json"):
+    for name in ("units.json", "weapons.json", "abilities.json", "moveclass.json", "jumprange.json"):
         h.update((_DATA / name).read_bytes().replace(b"\r\n", b"\n"))
     return h.hexdigest()[:16]
 

@@ -30,12 +30,9 @@ def decode(decision: Decision, t: fz.Tensors, bundle: Bundle, unit_x: np.ndarray
         if kind == rf.KEEP:
             continue
         uid = int(t.uids[i])
-        if kind in (rf.MOVE, rf.FIGHT):
+        if kind in (rf.MOVE, rf.FIGHT, rf.JUMP):
             x, z = fz.fine_point(t, bundle, int(decision.region[i]), int(decision.fine[i]))
             orders.append(Order(uid, kind, x, z))
-        elif kind == rf.JUMP:
-            r = int(decision.region[i])
-            orders.append(Order(uid, kind, float(bundle.centre[r, 0]), float(bundle.centre[r, 1])))
         elif kind in (rf.ATTACK_UNIT, rf.MANUAL_FIRE):
             token = int(t.enemy_tokens[decision.enemy[i]])
             orders.append(Order(uid, kind, float(unit_x[token]), float(unit_z[token]), int(t.uids[token])))

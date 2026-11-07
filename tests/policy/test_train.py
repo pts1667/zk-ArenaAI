@@ -276,6 +276,58 @@ def test_a_slower_policy_is_told_of_every_hit_since_it_last_looked():
     assert env.games[0].frame_for(0).units[0]["flags"] & rf.DAMAGED
 
 
+def _self_play():
+    return pt.SelfPlay(start_at=0.8, hold_below=0.7, per_iteration=0.01)
+
+
+def test_self_play_waits_for_two_tests_that_beat_the_script():
+    plan = _self_play()
+    assert plan.advance() == 0.0
+    plan.note_test(0.95, 10)
+    assert plan.advance() == 0.0, "one good test is mostly luck"
+    plan.note_test(0.5, 20)
+    assert plan.advance() == 0.0
+    plan.note_test(0.9, 30)
+    assert plan.advance() == 0.0, "0.9 and 0.5"
+    plan.note_test(0.8, 40)
+    assert plan.started_at == 40 and plan.advance() == 0.01
+
+
+def test_self_play_grows_a_little_at_a_time_up_to_all_of_it():
+    plan = _self_play()
+    plan.note_test(0.8, 10)
+    plan.note_test(0.8, 20)
+    shares = [plan.advance() for _ in range(150)]
+    assert shares[0] == 0.01 and shares[49] == pytest.approx(0.5) and shares[-1] == 1.0
+    assert all(b >= a and b - a <= 0.0101 for a, b in zip(shares, shares[1:]))
+
+
+def test_self_play_pauses_if_the_script_starts_winning_and_never_goes_back():
+    plan = _self_play()
+    plan.note_test(0.8, 10)
+    plan.note_test(0.8, 20)
+    for _ in range(30):
+        plan.advance()
+    held = plan.share
+    plan.note_test(0.6, 30)
+    plan.note_test(0.6, 40)
+    assert plan.advance() == held and plan.started_at == 20
+    plan.note_test(0.9, 50)
+    assert plan.advance() > held, "0.6 and 0.9"
+
+
+def test_a_run_remembers_how_far_self_play_got(tmp_path):
+    cfg = pt.Config(env="toy", decisions=0, games=2, iteration=4)
+    workers = pt.DataWorkers(0, [], cfg.enabled_kinds)
+    first = pt.Learner(cfg, tmp_path, workers, "cpu")
+    first.self_play.note_test(0.8, 10)
+    first.self_play.note_test(0.9, 20)
+    first.self_play.share = 0.25
+    first.save()
+    second = pt.Learner(cfg, tmp_path, workers, "cpu")
+    assert second.resume() and second.self_play.share == 0.25 and second.self_play.started_at == 20 and second.self_play.tests == [0.8, 0.9]
+
+
 def test_runs_sharing_the_card_stay_inside_their_share():
     card = 12 * 2**30
     assert pt.gpu_fraction(0.85, 1, card) == 0.85

@@ -51,7 +51,10 @@ def random_frame(rng: np.random.Generator, size: float) -> rf.Frame:
     glob[rf.G["player"]], glob[rf.G["ally_team"]] = 0, 0
     sites = np.zeros(int(rng.integers(0, 10)), rf.SITE_DTYPE)
     sites["x"], sites["z"], sites["income"] = rng.uniform(0, size, len(sites)), rng.uniform(0, size, len(sites)), 2.0
-    return rf.Frame(u, sites, glob)
+    features = np.zeros(int(rng.integers(0, 2 * fz.CAP_FEATURES)), rf.FEATURE_DTYPE)
+    features["feat_id"], features["def_id"] = np.arange(len(features)), -1
+    features["x"], features["z"], features["metal"] = rng.uniform(0, size, len(features)), rng.uniform(0, size, len(features)), rng.uniform(1, 400, len(features))
+    return rf.Frame(u, sites, glob, features)
 
 
 def main() -> None:
@@ -94,7 +97,9 @@ def main() -> None:
         ]
         if t.controllable:
             np_kind, np_region = net.kind_logits(weights, enc, t), net.region_logits(weights, enc, t)
-            pairs += [(np_kind, kind[0, :t.controllable]), (np_region, region[0, :t.controllable, :len(t.reg_x)])]
+            np_jump = net.region_logits(weights, enc, t, np.full(t.controllable, rf.JUMP))
+            walk, jump = region.masked_fill(~b.ptr_region, pm.ILLEGAL), region.masked_fill(~b.ptr_jump, pm.ILLEGAL)
+            pairs += [(np_kind, kind[0, :t.controllable]), (np_region, walk[0, :t.controllable, :len(t.reg_x)]), (np_jump, jump[0, :t.controllable, :len(t.reg_x)])]
             if len(t.enemy_tokens):
                 np_enemy = net.enemy_logits(weights, enc, t)
                 pairs.append((np_enemy, enemy[0, :, :t.controllable, :len(t.enemy_tokens)]))

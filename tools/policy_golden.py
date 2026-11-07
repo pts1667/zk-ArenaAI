@@ -21,7 +21,7 @@ from zkbot import units  # noqa: E402
 DATA = ROOT / "tests" / "policy" / "data"
 # Game, and frame number nearest: chosen to show a fight, blips, ghosts, sites changing hands and an idle army.
 PICKS = (("game-001", 10968), ("game-002", 18198), ("game-002", 36198), ("game-003", 12090), ("game-003", 23610))
-ARRAYS = ("unit_x", "unit_name", "unit_ally", "unit_player", "reg_x", "site_x", "glob_x", "tok_kind", "pair_bucket", "kind_mask", "ptr_enemy", "ptr_region", "route_bias", "uids", "enemy_tokens", "north", "region_radius")
+ARRAYS = ("unit_x", "unit_name", "unit_ally", "unit_player", "reg_x", "site_x", "feat_x", "glob_x", "tok_kind", "pair_bucket", "kind_mask", "ptr_enemy", "ptr_region", "ptr_jump", "route_bias", "uids", "enemy_tokens", "north", "region_radius")
 
 
 def pick_frames(recording: pathlib.Path) -> None:
@@ -69,7 +69,7 @@ def sim_frames(decisions: tuple[int, ...] = (1, 50, 100, 200)) -> None:
         env.decisions += 1
         if d in decisions:
             f = env.frame(int(d % 2))
-            out.append(rf.Frame(f.units.copy(), f.sites.copy(), f.glob.copy()))
+            out.append(rf.Frame(f.units.copy(), f.sites.copy(), f.glob.copy(), f.features.copy()))
     rf.save_frames(DATA / "sim_frames.npz", out)
     print("sim frames, records by knowledge:", [np.bincount(f.units["knowledge"], minlength=4).tolist() for f in out])
 

@@ -1,7 +1,7 @@
 # 01. Simplified Zero-K simulator: implementation plan
 
 Status: stage 1 built, Gate 1 waived by the user; S-M5 and S-M6 built (section 8.7).  Results in section 8 override older
-text here.  S-M7 hasn't started.  Engine and game facts are cited `path:line` against
+text here.  S-M7 hasn't started; S-M8 is built (8.9, 8.10).  Engine and game facts are cited `path:line` against
 `C:\Users\Thoma\Documents\sources\RecoilEngine` (RE), `...\Zero-K` (ZK) and this repo (zk-ArenaAI).
 Numbers marked **measured** come from a throwaway Python pass over the repo's data while planning
 (method stated where used). Everything else is from reading source, or is marked unverified.
@@ -60,7 +60,7 @@ likely way RL would find the error. Tags: **E** exact in the sim (formula copied
 |---|---|---|---|---|
 | Reload, burst, projectile count | E | `reloadTime` starts at the first round; burst and projectiles per shot. | `WeaponDef.cpp:79, 82-83` | Low |
 | Auto-target order | A | Engine sorts by `TargetWeight` (script) with bad-target categories last, then takes the first valid (`Weapon.cpp:228-232, 720-776`). Sim: sort by category preference, then distance; ZK's `unit_target_priority` gadget (480 lines) overrides this and is not read in full. | `Weapon.cpp:720-776` | **High**: focus fire is the thing a policy will learn |
-| Overkill avoidance | A | `unit_overkill_prevention` (calls `SetUnitTarget`) retargets when pending shots already kill. Sim: count pending scheduled damage at impact. Without this the sim gives too much overkill. | `unit_overkill_prevention.lua` | Medium |
+| Overkill avoidance | A | `unit_overkill_prevention` holds a shot when incoming damage already kills. Sim: the same rule per weapon from each script's `BlockShot` line, without using the reload (8.12). | `unit_overkill_prevention.lua`, unit scripts | Medium |
 | Target leading | A | Engine predicts with `dist / projectileSpeed` and no target velocity (`Weapon.cpp:311-316`, with the engine's own TODO). Sim does the same. | `Weapon.cpp:311` | Low |
 | Turret turn | A | Instant turret rotation, except non-turret weapons get a cone (`tolerance`, `WeaponDef.cpp:112`). `unit_turn` and `unit_turn_without_interia` are approximated as the same. | `WeaponDef.cpp:112` | Low |
 | Range | E | `range` from weapon defs; chase when out of range for attack orders (see 4.7). | `weapons.json` | Low |
@@ -71,7 +71,7 @@ likely way RL would find the error. Tags: **E** exact in the sim (formula copied
 | Blast falloff | E | Copy `rts/Game/GameHelper.cpp:146-150`: factor `(R + 0.001 - d) / (R + 0.001 - d*edge)`. The sim uses centre distance minus the unit radius, not the collision-volume surface (`GameHelper.cpp:132`), which the sphere model cannot reproduce exactly. | `GameHelper.cpp:107-150` | Low |
 | Blast delay | A | Engine queues damage by `dist / explosionSpeed` (`GameHelper.cpp:~160-170`). Sim uses the flight-time rule above. | `GameHelper.cpp:~160-170` | Low |
 | Damage types, armour classes | E for ground | Classes are `ELSE`, `PLANES`, `SHIELD`, `CHICKEN` (`armordefs.lua`). Ground units take the `default` value. Only `planes` and `shield` differ. Post-processing sets `default` to the max over classes (`armordefs.lua` weapon loop). | `Zero-K/gamedata/armordefs.lua` | Low |
-| Shields (`Shield` weapon type, 3 factory units) | A | Absorb damage up to a stored amount with regen. Projectile interception not modelled. | `Zero-K/units/*.lua` | Medium for shield units |
+| Shields (`Shield` weapon type: Aspis, Convict, Thug, Felon, Funnelweb, Nebula, Aegis, Odin's temporary one) | A | A sphere that stops hostile shots along their path, for what the weapon does to shields.  Charging costs energy and they share charge.  **Checked in a game, 8.11**. | `Zero-K/units/*.lua`, `CheckShieldCollisions`, `unit_shield_charge.lua`, `unit_shield_link.lua` | Medium for shield units |
 | EMP | A | Engine: `paralyzeDamage` accumulates; stun while it exceeds max health; decays at `maxHealth x (15/30) x empDeclineRate` per slow update (`Unit.cpp:992-1009`). ZK uses `paralyzeOnMaxHealth = true` (`modrules.lua:92-93`). Sim copies this, with `empDeclineRate` read from the engine dump. | `Unit.cpp:992-1009` | Medium |
 | Slow (`timeslow`) | A | Multiplies speed and reload for a duration; ZK applies it via rules params read by unit scripts (`unit_timeslow.lua`). Duration and factor from the unit file. | `unit_timeslow.lua` | Low |
 | Disarm | A | Disables weapons and their reload, not walking, with its own level and timer. Built, see 8.8. | `disarm_defs.lua`, `unit_boolean_disable.lua` | Low |
@@ -87,7 +87,7 @@ likely way RL would find the error. Tags: **E** exact in the sim (formula copied
 | Air LOS | A | Circle at 1.5 x LOS (`UnitDef.cpp:481`). | `UnitDef.cpp:481` | Low |
 | Radar | A | Circle at `radarRadius`, same raycast as LOS (`LosHandler.cpp:92`). Blips carry no type (`fightnet.py` FLAG_BLIP). | `LosHandler.cpp:92` | **High** if blips leak type |
 | Radar position wobble | A | `unit_radar_wobble` (`SetUnitPosErrorParams`). Stage 2. | `unit_radar_wobble.lua` | Low |
-| Cloak | A | Cloaked units are hidden unless within `minCloakDistance` (`UnitDef.cpp:501`) or in LOS when `decloakRequiresLineOfSight` (`modrules.lua:101`). Energy cost (`cloakCost`, `UnitDef.cpp:497`) is in the economy stage. | `UnitDef.cpp:497-501` | Medium |
+| Cloak | A | Own or lent by an area cloak.  Hidden from sight (`LosHandler.cpp`) and from radar (`unit_stealth.lua`), so it can't be aimed at, only caught in a blast.  Costs energy twice a second, more moving; shown by an enemy within `decloakDistance`, damage, firing or building, then blocked 45 or 90 frames (own cloak) or 90 or 240 (lent).  **Checked in a game, 8.10**. | `unit_decloak_damaged.lua`, `unit_stealth.lua`, `unit_cloak_shield.lua` | Medium |
 | Global LOS | config | `globallos` modoption (`game_globallos.lua`) makes LOS global for allies. Off for matchmaking, to be confirmed. | `game_globallos.lua` | If on, fog is wrong |
 | Sphere sensor | A | `unit_spherical_los` (`SetUnitSensorRadius`). | `unit_spherical_los.lua` | Low |
 
@@ -104,12 +104,12 @@ likely way RL would find the error. Tags: **E** exact in the sim (formula copied
 | Construction decay | E (off) | Disabled in ZK (`modrules.lua`, construction block). | `modrules.lua` construction | None |
 | Nanoframe rate limit | O | `unit_nanoframe_rate_limit.lua` (54 lines, not read). Stage 3. | | Unknown |
 | Factory queue | A | `CFactory::StartBuild` / `UpdateBuild` / `FinishBuild` (`Factory.cpp:173, 209, 255`): queue, resource wait, exit placement approximated. | `Factory.cpp:173-255` | Low |
-| Metal in wrecks | A | Wreck feature from `corpse` (`UnitDef.cpp:292`), metal value from the feature def, not verified. Sim: wreck value = fraction of cost. | `Unit.cpp:153, 452` | Medium: reclaim farming |
-| Reclaim | O | Stage 3. `modrules.lua` reclaim block (lines 62-74) sets `featureEnergyCostFactor` and `reclaimMethod`. | `modrules.lua:62-74` | Medium |
+| Metal in wrecks | A | 40% of a unit's metal as a wreck, 20% as a heap, by the feature defs of `featuredefs_post.lua`.  Which by recent damage over health, as the scripts' `Killed` say.  A wreck blown up leaves a heap, a heap nothing.  **Checked in a game, 8.10**; wrecks aren't thrown by blasts. | `featuredefs_post.lua`, `unit_nanoframe_death.lua` | Medium: reclaim farming |
+| Reclaim | A | Any builder but a factory, at its reclaim speed in metal a second, adding up, paid as income and lost past storage.  **Checked in a game, 8.10**.  Nothing orders it in training yet. | `modrules.lua:62-74`, `Feature.cpp` | Medium |
 | Assist and repair | A | Same build-step formula; repair via `repairSpeed` (`UnitDef.cpp:366`). | `UnitDef.cpp:366` | Low |
 | Resurrect, capture | O | Not on the stage 1-3 roster. Capture (`capture_defs.lua`) is stage 4. For now a capture weapon does nothing and its unit is out of armies (8.8). | | Low |
 | Commander, morph | O (stage 3) | `unit_morph` (1266 lines) and `unit_commander_upgrade` (755 lines) are not read in full. | | Medium at game start |
-| Stockpile | A, without its cost | `unit_stockpile.lua`. Built with manual fire, see 8.8; the metal cost waits for the economy. | | Low |
+| Stockpile | A | Both resources as it goes, all of a step or none; always on, as the auto-stockpile widget leaves it.  **Checked in a game, 8.10**. | `unit_stockpile.lua` | Low |
 
 ### 1.5 Terrain hazards
 
@@ -146,13 +146,13 @@ read every file in full. Files marked "not read" need reading before the stage t
 | `weapon_reaim_time` | Delay after aim changes (`SetUnitWeaponState`) | Model as reaim delay | 1 |
 | `weapon_single_hit` | One hit per unit per projectile | Model | 1 |
 | `weapon_area_damage` | Area damage behaviour (`SetProjectileCollision`) | Covered by blast rule | 1 |
-| `weapon_shield_merge` | Shield projectile merge | Approximate with shields | 2 |
+| `weapon_shield_merge` | Shield projectile merge; what a shot takes from a shield | Modelled, merge itself off by default (8.11) | 2 |
 | `weapon_impulse`, `weapon_noexplode_speed_damage` | Push and speed-based damage | Impulse applied to separation; the speed rule is not read | 2 |
 | `weapon_projectile_retarget`, `weapon_projectile_radar_homing`, `weapon_projectile_chain`, `weapon_projectile_gravity`, `weapon_projectile_hold` | Projectile behaviour | Missiles approximated as flight time; the rest not read | 2 |
 | `unit_spherical_los`, `unit_radar_wobble` | Sensors | As 1.3 | 2 |
 | `unit_stockpile` | Stockpile | Model | 3 |
 | `unit_jumpjets`, `unit_jumpjet_pilot`, `unit_jumpjet_pilot_2`, `unit_impulsejumpjets`, `unit_fall_damage` | Jump and fall damage | Approximate, see 1.2 | 2 |
-| `unit_shield_charge`, `unit_shield_link` | Shield units | Approximate | 2 |
+| `unit_shield_charge`, `unit_shield_link` | Shield units | Modelled, without priorities (8.11) | 2 |
 | `unit_morph`, `unit_commander_upgrade` | Morph and level-ups | Not read in full | 3 |
 | `unit_explosion_spawner`, `unit_self_destruct`, `unit_instant_self_destruct`, `unit_noselfd` | Death and self-destruct effects | Model | 1 |
 | `unit_attributes`, `unit_attributes_generic` | Per-unit attribute overrides (`SetUnitRulesParam`) | Not read; check the unit files for overrides | 1 |
@@ -173,7 +173,7 @@ read every file in full. Files marked "not read" need reading before the stage t
 | `unit_teleporter`, `api_teleport_helper` | One unit type. Stage 4. |
 | `unit_grey_goo`, `unit_global_zombie_resurrect`, `api_zombie_helper`, `chicken_control` | Chicken and zombie modes. |
 | `game_sudden_death`, `game_point_control`, `game_share_mode`, `game_support_powers`, `game_support_mana_handler`, `game_resign`, `unit_planetwars`, `mission_*` | Game modes, campaigns, the bot's own resign rule. |
-| `unit_antinuke_handler`, `unit_missilesilo`, `unit_missilewarn`, `unit_bait_prevention` | No nukes on the factory roster. |
+| `unit_antinuke_handler`, `unit_missilesilo`, `unit_missilewarn` | No nukes on the factory roster. |
 | `unit_air_plants`, `unit_aircraft_crash`, `unit_bomber_*`, `unit_fighter_pullup`, `unit_gunship_*`, `unit_control_gunship_*`, `unit_zenithskylinecheck`, `unit_vertical_swarm`, `unit_carrier_drones` | Air, stage 5 (after the ground stages). |
 | `ai_*`, `CAI`, `cmd_*` except the two in 2.1, `dbg_*`, `lups_*`, `gfx_*`, `feature_fx`, `wake_fx`, `unit_glow`, `unit_tint`, `unit_icongenerator`, `unit_model_rescale`, `unit_grass_cutter`, `unit_retexture_custom_param`, `cus_gl4`, `api_*` (not listed above), `start_*` (scenario setup only), `mex_placement`, `mex_spot_finder` (the map dump supplies spots), `endgame_graphs`, `awards`, `mod_stats`, `typemap_options` | Debug, visual, UI, plumbing or setup. About 150 of the 242 fall here by name and header. |
 
@@ -862,8 +862,8 @@ region ids, so numbering doesn't reach it.
 Bug found by the recreate check: `Batch.reset` passed record-array columns to C, which read past each value because the columns
 have gaps.  `zksim._floats` and `_ints` now refuse such arrays and `reset` copies them.
 
-S-M7 is not started, so the sim obeys only KEEP, MOVE, FIGHT, ATTACK_UNIT and MANUAL_FIRE (8.8).  `tools/policy_sim_env.py`'s start, two
-mirrored armies from far-apart spots, is a binding test and not the army game of 03 section 3.
+S-M7 is not started, so of the fighting kinds the sim obeys only KEEP, MOVE, FIGHT, ATTACK_UNIT and MANUAL_FIRE (8.8).  Construction came later (8.9).  `tools/policy_sim_env.py`'s start of two
+mirrored armies from far-apart spots is now only for checks and benchmarks.
 
 ### 8.8 Special weapons (2026-11-05)
 
@@ -889,7 +889,7 @@ disarm.  Fixed, each from the game's source:
 | Ronin, Phantom (`reload_move_penalty`) | Ignored | Slower while the main weapon reloads | `cloakskirm.lua` |
 
 Checked and needing nothing: `extra_paratime` equals `emp_paratime` on all 5 playable weapons that carry it, and
-`shieldstartingpower` equals `shieldPower` on all 3.
+`shieldstartingpower` equals `shieldPower` on Convict and Thug.  (This said "all 3" when written; it doesn't hold for all shields: 8.11.)
 
 **Armies** (`policy_sim_env.army_types`) drew from every def: chickens, test units, and AA that can't hit the ground.  Now 40 types:
 factory-built, can hit the ground, nothing flagged `ZK_W_UNMODELLED` (capture, spawned units, pushing or pulling, throwing).
@@ -989,3 +989,433 @@ From 03-training.md:
   snapshots gave non-finite scores that I did not trace.
 - LOS cost estimate (section 4.7): arithmetic, not measured.
 - This list and the plan above predate the build; section 8 records what the build measured.
+
+### 8.9 Economy and the scripted opening (2026-11-06)
+
+Part of S-M8, as far as an opening needs: `sim/src/economy.cpp`, ABI 7.  A world runs none of it unless `zk_world_economy` turns it on, so the gate's replays are unaffected.
+
+| What | How | Source |
+|---|---|---|
+| Start | 350 metal and energy, storage 500 (the commander's own) | `start_setup.lua`, unit dump |
+| Income | Innate 2 and 2.  Commander 4 and 6 while it lives.  Extractor: its spot's income, as the game reports it.  Solar: 2 energy.  Nothing while stunned; an extractor nothing while disarmed | `start_setup.lua`, `dynamic_comm_defs.lua` "econ", `unit_mex_overdrive.lua` |
+| Overdrive | Below | `unit_mex_overdrive.lua` |
+| Build step | Progress per second is build speed / build time, paid as it goes from both resources, stalling on whichever runs out.  First come, first served, in handle order.  Health rises with progress | 1.4 |
+| First factory | A side's first ploppable factory is free and finishes at once.  The game ties this to the commander; the sim to the side | `start_unit_setup.lua:61-69` |
+| Orders | BUILD (type at x, z), ASSIST (a unit; a factory means what it's building), PRODUCE (a type the factory repeats), numbered as the raw frame's kinds 10, 11 and 14 | |
+| New units | Come out of the factory's front, or the nearest side their class can walk from.  Unfinished, they neither walk, shoot nor see | |
+
+The commander's income wasn't in the unit dump, and with only the innate 2 and 2 the sim fell well behind real games.  **Logged games settled it**: over 188 games, income less 2 per finished extractor and solar is 6 and 8 in the first four minutes, in most samples.
+
+Against those logs (rules bot, which also builds constructors):
+
+| Time | Sim opening, metal / energy income | Logged median |
+|---|---|---|
+| 30 s | 8.8 / 10.1 | about 8-10 / 8-10 |
+| 60 s | 11.3 / 12.2 | 12.0 / 10.0 |
+| 120 s | 15.1 / 14.8 | 14.8 / 14.9 |
+| 180 s | 16.9 / 16.5 | 18.2 / 17.9 (past here the rules bot keeps expanding; the opening stops) |
+
+Build times, stalls and assisting follow the source and have unit tests, but **no engine battery covers them yet**.
+
+**Regeneration** (`unit_regeneration.lua`) is in every world, not only one with an economy: a unit gains `idle_regen` health a second once `idleTime` frames have passed since it was last damaged, unless stunned or disarmed.  The sim adds it evenly where the game adds half of it every 15 frames.  This is the only source of healing there is, since `autoHeal` is 0 on every def once Zero-K's post-processing has moved it.  A real game agrees: hurt to half, Glaive waits 5 s then gains 20 a second, Kodachi 10 s then 5, Scorcher and Solar 60 s then 5.  The gate moved a little and still fails: advance at 20 s 0.593 against 0.591, at 10 s 0.638 against 0.631, and predicted loss per snapshot fell from 358 to 323 ours against 240 measured.
+
+Not in: repair, Duck's faster healing under water (`amph_regen`), and `neededlink` (a heavy turret that won't fire off a powered grid).  Reclaim, wrecks, upkeep, cloak, stockpile cost and a shot solar came later (8.10).
+
+**Overdrive** runs once a second, per side, as `unit_mex_overdrive.lua` does for an ally team of one player:
+
+1. Energy to spend: income less what builders spent in the last second, if that's positive, times how full storage is.
+2. Grids: finished, unstunned, undisarmed units with a pylon range share one if closer than the sum of their ranges (extractor 50, solar 100, wind 63, pylon 500).  They're worked out afresh each time.
+3. An extractor's share goes by its income squared, over all grids.  A grid can't take more than its own generators make; the commander and innate income are in no grid, so they feed overdrive only up to what grids can carry.  What a full grid leaves goes to the others, and what no grid can take stays in storage.
+4. An extractor earns its income times `1 + 0.25 sqrt(energy)` until the next update.
+
+An extractor with one solar beside it takes that solar's 2 and earns 35% more.  In the opening that's about 0.8-0.9 metal per second from 120 s on, well under the 3-4 that 4-6 pairs could carry at full storage, since the commander and factory spend most of what's spare.
+
+The income the sim reports is the game's: metal with its overdrive, energy after what overdrive drew.  `AddTeamResource` books the net as income (`Team.cpp`), so **the game's energy income falls when overdrive runs**.
+
+`python tools/sim_engine.py overdrive` builds layouts in a real game and logs what the gadget makes of them.  **The sim matches it**:
+
+| Layout (commander's 8 energy as well) | Game: drain, extra metal, team energy income | Sim |
+|---|---|---|
+| Extractor and solar 100 apart, storage full | 2.00, 0.709, 8.00 | 2.00, 0.709, 8.00 |
+| 160 apart, no link | 0, 0, 10.00 | 0, 0, 10.00 |
+| One extractor, 5 solars, full | 10.00, 1.585, 8.00 | 10.00, 1.585, 8.00 |
+| The same, half full | 9.00, 1.503, 9.00 | 9.11, 1.513, 8.89 |
+| Two grids, carrying 2 and 10, half full | 10.00, 2.126, 10.00 | 10.13, 2.138, 9.87 |
+| Two extractors on a pylon, 10 solars, full | 20.00, 3.170, 8.00 | 20.00, 3.170, 8.00 |
+| The same, half full | 14.00, 2.652, 14.00 | 14.26, 2.677, 13.74 |
+
+The half-full gaps are the check, not the sim: the game's energy is held at exactly 250, and the sim's has one tick of income on it.  For this table the sim's spots earn the 2.0047 a real extractor earned here.  The game's list says 2.0, and that 0.2% is otherwise left alone.  The policy isn't told about grids, and its token for a unit has no grid number.  That matters once it builds (S-M7).
+
+**Map facts.**  `python tools/sim_engine.py facts MAP...` starts a game on each map and writes what Zero-K published to `sim/data/map_facts.json`: start boxes (`start_boxes.lua`) and metal spots (`mex_spot_finder.lua`).  A game is asked rather than the files read because the choice between Zero-K's config, the map's and a fallback is the game's, and a map's file is Lua that may build its list in code.
+
+* **That found a bug in the export.**  `tools/terrain_map.py` read 22 of Faultline's 44 spots: its layout file makes half of them in code.  Red Comet's spots give 2.3 metal, not the 2.0 the export assumed, and FrostyCove's 1.97-2.12.  `load_map` now prefers the facts file, and the five training maps are exported again.  All earlier sim training had this wrong.
+* **A map may draw its boxes when it loads.**  Faultline's come out differently from one launch to the next, 3 layouts in 6 launches, so `facts` loads each map several times and keeps every layout seen, and a game draws one.  All earlier training saw a single draw.
+* It also lists what's reclaimable on the map from the start, with at least 1 metal.  Those are placed in every game: Agalta 12 features of 120 metal, Faultline 18 of 720, FrostyCove 138 of 2,760, and none on Red Comet or TitanDuel.
+* Start boxes are polygons, and the two on each training map are far from where the old rule (the two farthest spots) put commanders: on Agalta, mid-west and mid-east, not two corners.  FrostyCove's start points are corners of their own polygons.
+* A game takes two of a map's boxes at random, as Zero-K's `allshuffle` does.  A start is the box's start point half the time, which is where logged bot games start (TitanDuel 4813, 4809).  Otherwise it's anywhere in the box on level ground, as a player could choose, snapped to 32 elmos so that plans can be kept.  The script's target is the enemy's actual start; the opening plans towards the enemy box's start point, which is all a player knows then.
+
+**The opening** (`tools/policy_opening.py`), the same on both sides whoever controls the fighting: the factory first, about 160 elmos towards the enemy, which starts repeating its raider at once.  Then an extractor and a solar at each of the 6 nearest spots within 1,300 elmos and nearer us than them, 4 to 6 by map from the start points, and after that the commander assists the factory.  Commander and factory are drawn per side.  Finished by a median of 152 s (p90 194 s), later than the older starts' 124 s because there's more to build.
+
+* A step over 2 minutes is given up.
+* Eight factories: amph, cloak, hover, jump, shield, spider, tank, veh.  Tank was missing at first because `tools/sim_data.py` flagged a weapon as unmodelled if it had `area_damage_is_impulse` at all, and on 12 fire weapons the value is 0.  It now reads the value.  This also makes Dante, `missileslow` and `jumparty` eligible for the older armies' pool, if they pass its other filters.
+* "Raider" is the bot's role data, so jump opens with Pyros at 220 metal and spider with Venoms at 190, against Glaives at 65.
+
+### 8.10 Wrecks, reclaim, upkeep, cloak, stockpile, a shot solar (the rest of S-M8; 2026-11-06)
+
+`sim/src/wrecks.cpp`, `sim/src/cloak.cpp`, more of `sim/src/economy.cpp`; ABI 8.
+
+| Mechanic | The rule | Simplified |
+|---|---|---|
+| Wreck or heap | Finished unit: wreck (40% of its metal) if recent damage is at most half its health, else heap (20%).  Recent damage gains each hit and fades by a tenth **a frame** | A few scripts' `Killed` return other levels, ignored.  Flying units leave theirs where they die |
+| Frame | Over 5% built: a heap in proportion, with health in proportion.  Under: nothing.  Over 80%: it explodes as well | |
+| Blast on a wreck | Default damage to its health.  At zero a wreck becomes a heap, keeping the share already reclaimed; a heap is gone | **Blasts don't throw it.**  A Singularity threw a Glaive's heap 2,519 elmos |
+| Reclaim | At the builder's reclaim speed, in metal a second, adding up across builders; no energy; paid as income, the rest lost past storage.  Either side may take any wreck | Costed in metal alone: a feature with energy in it takes as long as its metal says |
+| Upkeep | Once a second, in energy: radars, jammers, an area cloak.  Unpaid, a radar stops until paid.  Not while stunned, disarmed or unfinished | First come, first served, not by priority |
+| Cloak | See the table in section 1.3.  Commanders can't, without a module | Area cloak has its radius at once and covers friends at once |
+| Stockpile | Metal and energy together as it goes, all of a step or none | Always on, without end: the stock isn't capped |
+| Solar | A hit from a real weapon shuts it from that moment: no energy, no capacity on its grid.  19 frames on, armoured to a third.  120 frames after the last hit it opens: armour off at once, energy 38 frames after that | |
+
+Only the solar closes: `energysolar` alone has `auto_close_time`.  Until now the sim gave it its armour always, which was wrong.
+
+**Features are in the frame**, schema 3: id, place, what metal's left, def.  What a side sees is what's in the line of sight of its finished units, by the same raycast as units (02 section 2.3).
+
+`python tools/sim_engine.py mechanics` plays these out in a real game and logs them.  It corrected two readings of the source, and sent us back to a third:
+
+* **Radar doesn't see cloaked units.**  `LosHandler.cpp` alone would have them on radar, but `unit_stealth.lua` makes a unit radar stealthy while it's cloaked.
+* **Recent damage fades every frame**, in `CUnit::Update`, not every slow update.  Three 100-damage hits on a 230-health Glaive leave a heap 10 frames apart and a wreck 30 frames apart.
+* **A blasted wreck keeps what was reclaimed of it** (`CFeature::CreateWreck`).  This one is from the source: in the game's check the wreck survived its blast, so the heap's share wasn't seen.
+
+| Check | Game | Sim |
+|---|---|---|
+| Glaive destroyed outright / big hit | wreck 26 / heap 13 | same |
+| Half-built Glaive, 3% built | heap 6.5 metal, 115 health / nothing | same |
+| Wreck in a blast, then its heap | heap / gone | same |
+| Wreck loses, income gains, one builder / two | 5.0 / 10.0 a second | same |
+| Energy a second: radar / unfinished radar | 0.80 / 0 | same |
+| Jammer with its cloak on | 16.5 | same |
+| Cloaked Scythe still / moving | 0.20 / 1.0 | same |
+| Stockpile, each resource | 4.01 a second | 4.00 |
+| Unpaid radar | radius 0, and back when paid | same |
+| Solar's first hit to energy off / armour | 1 / 19 frames | within a tick / 19, by tick |
+| Solar's last hit to armour off / energy back | 121 / 159 frames | 120 / 158, by tick |
+| Damage to it, open / shut | 10.5 / 3.5 | same |
+| Starts cloaked | frame 1 | at once |
+| Enemy near, then gone, to cloaked again | 43 frames | 30-60, by slow update |
+| Hit, to cloaked again | 90 frames, and shown only at the next slow update | 90, shown at once |
+| Lent cloak: covered | 26 frames | up to 15 |
+| Lent cloak: fired, to cloaked again | 240-255 frames | 240-255 |
+| Sniper firing | stays cloaked | same |
+
+Nothing issues RECLAIM in training yet: the opening's commander assists its factory for good, and the policy has only the fighters, with kind 13 masked until stage 3.  So wrecks are there to see and don't yet change a game's outcome.
+
+**What it did to the numbers** (256 games, side 0's wins/draws/losses; the earlier figures are from before this section):
+
+| | Before | After |
+|---|---|---|
+| Doing nothing against the script (so the script wins 83, then 82) | 2/15/83, median 680 s | 1/16/82, median 718 s |
+| Script against script | 43/20/37, median 534 s; 167 eliminated, 38 on the lead, 51 at the limit | 36/27/36, median 564 s; 152, 34, 70 |
+| Mirror factories draw / mixed | 44% / 13% | 47% / 16% |
+| Seat steps a second | about 44,000 | 40,058 |
+| Replay gate 1(a), advance at 20 s against fightnet | 0.593 against 0.665, CI of the difference [-0.091, -0.052], FAIL | 0.604 against 0.665, [-0.080, -0.042], FAIL |
+| Advance at 10 s against fightnet | 0.638 | 0.642 against 0.644, CI [-0.019, +0.015] |
+
+`results/simgate/m8.json`.  Income is the same at 60 s and a little lower later: metal and energy 15.9 / 15.8 at 180 s against 16.9 / 16.5, which takes it further under the logged 18.2 / 17.9.  The draw rate's rise is about two standard errors and hasn't been explained: Faultline's other layouts, solars being softer until shut, cloak and the new blast rules all changed at once.  The gate wasn't a target of any of this.
+
+### 8.11 Shields (2026-11-06)
+
+`sim/src/shields.cpp`, ABI 9.  Before this a shield was checked where a shot landed, so it covered what was inside it and let a shot pass through on its way to something beyond.  Beams cost almost nothing.
+
+**What a shield stops.**  A shot stops at the first hostile sphere its path enters that can pay for it, and explodes there, so its splash reaches what's near the surface.  A shooter inside fires out freely, and a shield of the shooter's own side isn't in the way.  The spheres are 3D, on the ground at the unit's position.
+
+**A shell's path.**  A parabola from the same two solutions as `Cannon.cpp`, with the higher one for the three units with `highTrajectory` 1 (Lobster, Tremor, Badger).  It can fly over a small bubble.  What's fired from or at the air, and missiles that climb first, count only where they land.
+
+**What it costs.**  `damages[shield]` is what the weapon does to shields, and it doesn't fall with range: `weapon_shield_merge.lua` charges `shield_damage`, and the check is strict, so a shield with no more than that doesn't stop it.
+
+For a beam `armordefs.lua` gives `shield_damage` per beam frame, 35 for the Stinger against 850 per shot, and `stats_shield_damage` for the whole shot.  The catalog holds the whole shot, and the sim, which has one hit where a beam has many, stops the share of it the shield can pay for.  The rest carries on to the next shield or the target.  103 beam weapons differ between the two figures, and no other type does.
+
+**Charging.**  Only when active: a stunned or unfinished shield doesn't charge, which it used to.  Slow scales both charge and energy.  It takes `shield_drain` energy a second (Aspis 12, Funnelweb 48, Aegis and Nebula 9, others free), and it's all of a step or none of it.
+
+**Sharing.**  As `unit_shield_link.lua`: spheres that touch, ranked by radius so that a shield doesn't start with a lower rank, a random pick every 2 frames from its links and one more choice that does nothing, 1% of the difference, with room left for what the lower one charges by itself.  Links are refreshed every 30 frames.
+
+**Against a game** (`python tools/sim_engine.py mechanics`, `shield_*` lines; 900 is a Convict and 3600 an Aspis, both charged to that at the start; sim figures averaged over 16 seeds):
+
+| Case | Game: target lost, shield left | Sim |
+|---|---|---|
+| Stinger, 10 s, Convict in the way | 1347, 14 | 1551, 11 |
+| Same, Convict off the line | 2481, 900 | 2550, 900 |
+| Minotaur shells, 10 s, Convict in the way | 640, 34-39 | 960, 35 |
+| Stardust at something inside, near the near edge, 1 s | 109-128, 769-858 | 225, 706 |
+| Same, deep inside | 0, 770 | 0, 769 |
+| Sling, 20 s, Aspis half way | 0, 3540; every shell stops at x 46-53 of its 350-radius edge at x 50 | 0, 3600 |
+| Sling, target inside an Aspis | 0, 3600; shells stop at x 463-477 | 0, 3600 |
+| Sling, Convict half way, target beyond | 140, 900 (a second run: 140, 764) | 420, 900 |
+
+| Charging and sharing | Game | Sim |
+|---|---|---|
+| Aspis from 0, 5 s | 250; energy +8/s full, -4/s charging | 250, 12/s |
+| Aspis with no energy, 5 s | 100 stays 100 | same (unit test) |
+| Two Aspis touching, 3000 and 0, at 2, 5, 10, 20 s | 2487/713, 2067/1433, 2059/1941, 2503/2497 | 2418/782, 2100/1400, 2067/1933, 2504/2496 |
+| Aspis and Convict, 3000 and 0, at 2, 5, 10 s | 2748/374, 2445/860, 2668/900 | 2702/420, 2448/857, 2672/900 |
+| Two Aspis out of reach, 5 s | 3250/250 | same |
+
+The differences, as far as they've been followed up:
+
+* **Sling against a Convict.**  The game's first shell hits the target and later ones mostly miss it, as `accuracy` also scatters up and down.  A shell that falls short can come down low enough to meet the bubble: one was at height 212 at x 316, where the full path is over 300.  The sim's scatter is sideways only (1.2).  Its shells land on target and overfly the bubble.
+* **Minotaur.**  One more shell lands in the sim's window, as it fires at once and the game turns first.  The split on the shield is the same: three stopped.
+* **Stinger.**  13% less gets through in the game, since it charges frame by frame and a shot is 827 there against 850.
+* **Stardust.**  The sim's 2D hit point is a few elmos from a target just inside the surface.  The game hits higher up, and varies a lot between runs.
+
+An early probe had 140 of damage inside a full Aspis.  It was a shell left in the air by the case before, which started inside the new sphere and so wasn't stopped.  The cases now wait for those.
+
+**Left out:**
+
+* A stun doesn't take charge to 0 (`unit_shield_charge.lua` does).
+* Everything starts full.  In the game Aspis, Nebula, Aegis and Funnelweb start empty, and Felon at 1600 of 1800.
+* Funnelweb's `shield_recharge_delay`.
+* The temporary shield's falling charge rate and death at 0, `shield_rate_charge` and `shield_die_on_zero_charge`: 620 after 5 s in the game, 1000 here.  It's dropped by Odin, a bomber, so not in the armies.
+* Charge priorities when energy is short: each shield pays in turn.
+* Shells' scatter up and down, as above.
+
+The raiders and commanders in the present games have no shields, so this matters only for games with other shield units.
+
+**Replay gate 1(a):** unchanged, FAIL.  Advance at 20 s 0.604 against fightnet 0.665, CI of the difference [-0.080, -0.042], and at 10 s 0.642 against 0.644, CI [-0.019, +0.015], the same as 8.10 to three places.  The sim's prediction changed in 3.8% of snapshots for advance and 1.1% for hold.  `results/simgate/shields.json`.
+
+### 8.12 Unit AI (2026-11-06)
+
+`sim/src/unit_ai.cpp`, ABI 10.  Units now act on their own between orders, as in the game.  `ZK_BEHAVIOUR_ORDERS` is a game's behaviour; `ZK_BEHAVIOUR_SCRIPTED` does only what it's told and sees everything, for tests and the battery that measure one mechanic.
+
+**What's in:**
+
+* **Attack-move.**  At move state 1 (the default) a unit looks within its range + 100 elmos of the closest point on its line, chases the closest enemy, and returns to the line when that's over.  `MobileCAI`'s leash is 500 elmos plus range, from the point it left.  Roam widens the search and hold position stops it moving.
+* **Idle.**  Attacks within range + 200 elmos, gives up after 150 frames, and walks home if it was idle before.
+* **Fire states.**  Hold fire doesn't shoot, return fire shoots what shot it, fire at will is the default.
+* **Tactical AI**, ported from `unit_tactical_ai.lua`, with its tables from the game: raiders run from riots when idle, skirmishers kite what would reach them, and step out of range of turrets and other skirmishers while they reload.
+* **Overkill prevention** from each script's `BlockShot` line, per shot for weapons whose script fires the salvo, and without using the reload.
+* **Bait prevention** at each unit's default level.  The gadget's default is off for AIs, and a human's widget or the AI interface turns it on, so the sim has it on.
+* **Radar.**  An unidentified blip is aimed with an error.  Some weapons take `radar_wobble` and dot penalties from their defs.  By the user's rule, a weapon that only hits by touching (`ZK_W_IMPACT_ONLY`, such as Lance) can't hit a radar dot unless it's a structure already seen.  That's stricter than the game, where a Lance hit a mobile dot with 1 of 4 shots and an unseen structure with 2 of 4.
+* **Stardust.**  Its script's heat is modelled, slowing reload with continued fire, and its 9 degrees of scatter.  `SCATTER_DAMAGE` in `tools/sim_data.py` takes 20% off its damage because the sim's scatter is sideways only.
+
+**Against the game** (`python tools/sim_engine.py mechanics`, the `unitAI` probes in `zz_sim_mechanics.lua`; times in seconds):
+
+| Probe | Game | Sim |
+|---|---|---|
+| Fight, target at range + 60 | chases, returns, at the goal by 20-24 s | same |
+| Fight, target at range + 160; hold position, same | ignored | ignored |
+| Hold position, target in range | kills, stays on the line | same |
+| Leash against a fleeing scout | gives up about 4 s in, at x about 738 | same |
+| Idle, target at range + 100 | closes to 158-168, kills | same |
+| Idle at range + 300; idle on hold position | doesn't move | doesn't move |
+| Idle, home again after a target | by 6 s | by 6 s |
+| Hold fire and return fire, not shot at | 0 damage | 0 damage |
+| Return fire, shot at | gun 1702 hp, enemy lost 690 | gun 1692, enemy lost 920 |
+| Raider flees a riot | at about 400 elmos | about 410 |
+| Skirmisher kiting a mobile unit, 24 s | holds about 438, 4 shots | about 411, 6 shots |
+| Ronin stepping back from a Lotus | 185-262, about a 4 s period | 192-253, same period |
+| Ronin against a Moderator | goes in to about 516 | steps at 192-261: **differs** |
+| Ronin against a Ronin | 280-327 | 261: **differs** |
+| Ogres at a Glaive | 1 shot | 1 shot (the test requires it) |
+| Ogres at a Knight, shots | 11 | 13, measured before the last overkill fix |
+| Bait prevention on, Lance at a solar | 0 damage | 0 damage |
+| Bait prevention on, Lance at a Glaive | 2600 | 3000 |
+| Lance at radar mobile / unseen structure / seen structure, 72 s | 2952 / 6000 / 12000 | 0 / 0 / 12000, by the rule above |
+| Sling at a radar dot | not measured: terrain blocked the radar in the probe (`los_state` 0) | 701 damage |
+
+**Stardust at 30 s, game against sim before the 0.8:**
+
+| | 150 | 250 | 350 | 400 |
+|---|---|---|---|---|
+| Knight | 6512 / 6693 | 5994 / 6434 | 5395 / 5974 | 4247 / 5659 |
+| Glaive | 6166 / 6526 | 4730 / 6043 | 3739 / 5399 | 2691 / 4988 |
+
+The heat agrees, 0.967-0.994 against 0.972.  The mean of game over sim is 0.815, and 0.8 is a mean, so a Stardust is now a little weak up close and strong at range.
+
+**Left out:**
+
+* The swarm logic.  A game's raiders and skirmishers jink up to 136 elmos sideways and some close in; the sim's walk straight, so they arrive sooner (z 1729 against 1501 at 15 s in one probe).
+* Ward fire, `fightOnlyOverride`, jammers, and the amphibians' sea table: they use the land one.
+* Disarm in overkill prevention (`shieldarty`, `shipscout`), its repair trend, and scripts with computed damage (Merlin, bombers) or several `BlockShot` branches, where the first line is taken.
+* Builders on attack-move fight like any mobile unit, with no reclaim on the way.  Air uses the same logic.
+* Elevation scatter, except the Stardust's 0.8.
+* **The policy can't set fire or move states yet**: both stay at the default.
+
+**What it did to the numbers:**
+
+| | Before (8.11) | After |
+|---|---|---|
+| Doing nothing against the script, side 0's wins/draws/losses | 1/16/82, median 718 s | 11/22/67, median 611 s |
+| Script against script | 36/27/36, median 564 s; 152 eliminated, 34 on the lead, 70 at the limit | 46/8/46, median 491 s; 235, 0, 21 |
+| Mirror factories draw | 47% | 26% (133 games, of a separate 1024) |
+| Seat steps a second | 40,058 | 43,059 (a clean machine; the 40,058 may not have been) |
+| Replay gate 1(a): advance at 20 s against fightnet | 0.604 against 0.665, [-0.080, -0.042], FAIL | 0.603 against 0.665, [-0.081, -0.043], FAIL |
+| New `orders` arm at 20 s | | 0.613 against 0.665, [-0.067, -0.037] |
+| New `orders` arm at 10 s | | 0.653 against 0.644, [-0.005, +0.023] |
+
+`results/simgate/unit_ai.json`.  The gate's primary arm stays `advance`, so the gate still fails.  `orders` has the best agreement of the three on the gate's measure at both horizons, and it's the behaviour training plays, but not on every measure: at 20 s its sign agreement is 0.484 against advance's 0.560, and its rank correlations are 0.547 and 0.560 against 0.599 and 0.596.  Its mean losses are 143 and 156, against 240 and 136 logged and advance's 307 and 319.
+
+"Doing nothing" is no longer nothing: idle raiders defend and attack what comes close, and that alone wins 11% against the script.
+
+**The factory drawn now decides most games.**  1024 games of script against script: the side with the better factory by overall score won 91% of decided games between different factories.  Overall score, wins plus half draws:
+
+| Spider | Tank | Amph | Shield | Jump | Cloak | Hover | Veh |
+|---|---|---|---|---|---|---|---|
+| 0.92 | 0.74 | 0.67 | 0.48 | 0.47 | 0.29 | 0.24 | 0.21 |
+
+Only raiders get built in these games, so this is each factory's cheapest raider-role unit, not the factory: Venom for Spider, Kodachi for Tank.  **I haven't checked this against the engine.**  A factory that can't win has nothing for a policy to learn from, and it caps the win rate of a test: see `03-training.md` 10.6.
+
+### 8.13 Bombs (2026-11-06)
+
+ABI 11.  Limpet, Imp, Skuttle and Snitch now go off by themselves.  `kamikaze_distance` comes from each def's `kamikazeDist`, which is the Lua `kamikazeDistance` plus 25, so any ground unit with `canKamikaze` gets this (`subscout` too) and no unit is named in the code.  `update_kamikaze` in `sim/src/unit_ai.cpp` follows `CUnit::SlowUpdateKamikaze`, every 15 frames.
+
+**When one goes off:**
+
+* **Told to attack:** when the target is within reach.  An order at what it can't see lapses after four updates.
+* **On fire at will:** when any enemy on the ground it can see is within reach, whichever way that enemy is going.
+* **Told to self-destruct** (`ZK_ORDER_SELF_DESTRUCT`, `World.self_destruct`): at once.  It does nothing for other units.
+* **Never:** while stunned, on attacking the ground, or at hold fire without an attack order.  Hold fire is what they all default to.
+
+They have no weapon, so they never pick a target or chase on their own, whatever their fire state.  Going off adds twice the unit's maximum health to its recent damage, as `ForcedKillUnit` does, so it leaves a heap.
+
+**What the game corrected.**  I first wrote it to go off only for an enemy coming closer, reading the engine's `AllowUnitKamikaze` call.  In the game a Limpet went off for a Knight standing still and for one walking away: the engine only passes that test to gadgets, Zero-K has none for it, and with none the answer is yes.
+
+**Against the game** (`python tools/sim_engine.py mechanics`, `bombs()` in `zz_sim_mechanics.lua`):
+
+| Case | Game | Sim |
+|---|---|---|
+| Limpet told to attack at 200: dies at frame, distance | 26, 116 | 35, 96 |
+| Imp, same | 25, 109 | 35, 84 |
+| Skuttle, same | 104, 45 | 110, 42 |
+| Snitch, same | 40, 67 | 35, 99 |
+| Told to attack at 400, unseen: walks (Limpet, Imp, Skuttle, Snitch), none goes off | 73, 75, 35, 66 | 109, 116, 44, 102 |
+| Limpet at hold fire, Knight walks past | stays | stays |
+| Limpet on fire at will, Knight approaching: goes off at distance | 139 | 126 |
+| Same, Knight standing at 100, or walking away from 100 | goes off | goes off |
+| Limpet on a fight order passing 60 from a Knight: hold fire / fire at will | walks on / goes off | same |
+| Attacking the ground | stands there, stays | no order path sets it off, not played |
+| Stunned, told to attack or self-destruct | stays | stays (test) |
+| What's left | heap: 32, 25, 110, 34 metal | same |
+
+**Blasts:**
+
+| Blast, target at distance | Game | Sim |
+|---|---|---|
+| Limpet at 60: Knight's health lost, friend's | 105, 0 | 107, 0 |
+| Limpet at 60: Knight's slow | 0.44 | not read: the state has no slow field, a test measures its walking |
+| Imp at 60: Knight's stun, friend's | 0.91, 0 | 0.95, 0 |
+| Snitch at 60: Knight's health lost, friend's | 994, 1024 | 1026, 1026 |
+| Snitch at 80 | 896 | 931 |
+| Skuttle at 80 | 2638 | 3386 |
+| Skuttle told to attack, at about 43 | 5921 | 7055 |
+
+**The sim's blasts run a bit strong.**  At 80 elmos, Snitch's and Skuttle's numbers both fit the game measuring 7 elmos farther from the blast than the sim does.  It's probably height, which the sim doesn't have.  That's 4% for Snitch, with its wide blast, but 19-28% for Skuttle, whose damage falls steeply over 90 elmos.  This applies to every blast and is left as it is.
+
+**Two fixes along the way:**
+
+* A death blast now carries its side, so a Limpet's no-friendly-fire blast spares friends.  Before, it hurt them.
+* A death blast now comes before the remains, as in `ForcedKillUnit`.  Before, it could damage its own heap.
+
+**Left out:**
+
+* Burrowing, jumping and Blastwing were here, and are now in 8.14.
+* A self-destruct waits for the next slow update in the game, up to 15 frames, except Imp's, which has `instantselfd`.  Here it's at once.  An order given while stunned is dropped.  By the engine's code it would finish once the stun ends, for those without `instantselfd`; the probe's 4 s didn't reach that.
+* Bombs set off by fliers: the engine measures in 3D, and they're mostly too high up.
+* Bombs in replays' `advance` and `hold` arms, which give no orders.
+
+**The policy can't use bombs yet**, and they aren't in training's armies:
+
+* `ptr_enemy` allows an attack only for what can hit, which a bomb can't.
+* It can't set fire states, or self-destruct.
+* So a policy's bomb can walk, and go off only when killed.
+* The fight script's FIGHT orders leave them walking too, at hold fire.  That includes the frame model's scenarios.
+
+**What it did to the numbers:** nothing in the present games, which have no bombs.  Script against script is still 46/8/46, and doing nothing against the script 11/22/67, game for game.  42,520 seat steps a second against 43,059, which is noise.  The replay gate wasn't rerun.
+
+### 8.14 Jumping, digging in and Blastwing (2026-11-06)
+
+ABI 12, `sim/src/jump.cpp`, `sim/tests/test_jump.py`.  Checked in a game: `python tools/sim_engine.py mechanics`, `jumps()`, `burrows()` and `blastwing()` in `zz_sim_mechanics.lua`.
+
+**Jumping**, for every mobile unit with `canjump` (`World.jump`, `ZK_ORDER_JUMP`): it walks into range, goes when charged, flies an arc whose length sets the time, and reloads after landing.  Height exists only in the air: it counts for weapon reach, blasts and a bomb's reach.
+
+**Digging in**, for everything with `idle_cloak` (Imp, Snitch, Flea, Blastwing; the Wolverine mine by the same rule).
+
+**Blastwing:** told to attack, it goes off at a reach that grows with speed, up to 160, and on fire at will only within its kamikaze distance.  Its bomb keeps its speed.
+
+| Case | Game | Sim |
+|---|---|---|
+| 300-elmo jump, landed at frame: Pyro, Jack, Constable, Jugglenaut, Skuttle | 76, 126, 84, 93, 65 | 80, 125, 85, 90, 65 |
+| Ready again: Pyro, Jugglenaut | 376, 542 | 385, 540 |
+| 700 away: leaves at frame, from | 106, 310 | 115, 335 |
+| Jugglenaut's landing: at 60, at 120, friend at 100, itself | 710, 356, 514, 0 | 751, 398, 515, 0 |
+| Skuttle landing by a Knight: dead at, damage | 72, 7294 | 75, 7187 |
+| Snitch blast, Jack on the ground / at the top of its arc | 1238-1258 / 0 | 1193 / 159 |
+| Jack's spike in the air | no damage | no damage |
+| Imp, Snitch, Flea: cloaked again after a 300-elmo walk, frame | 115, 125, 90 | 95, 95, 80 |
+| Blastwing back on the ground after 300 | 85 | 80 |
+| Blastwing attacking at 200: gone at frame, from, damage | 39-41, 112-119, 265-288 | 30, 119, 236 |
+| Same at 400 | 59-60, 167-175, 262-342 | 55, 128, 223 |
+| Same at 800, out of sight | order lapses | order lapses |
+| Passing a Knight at 60; at 120 or more | goes off; doesn't | same |
+| Blastwing going off where it sits: frames from death to damage, target, friend | 1, 211-214, 221-224 | 5, 225, 225 |
+
+**What the game corrected:**
+
+* A jumper can be out of reach of what's under it, so `in_range` counts height.
+* A Blastwing on fire at will passed a Knight at 120 without going off: only an ordered target extends its weapon's range.  Told to attack, it's looked at every tick.
+* A Pyro told to move, fight or attack in the air stood where it landed for the 10 s watched.  The sim keeps it standing until its next order, and ends a move order at landing, where a game's lapsed some time within 12 s.
+* A fix for every flier: they now slow down to stop at a goal, rather than overshooting.
+* A burrowing unit's decloak distance is its def's, not the area-cloak one.
+* Jugglenaut's and Detriment's landing blasts were being fired as ordinary guns.  They now go off only on landing.
+
+**Left out:**
+
+* Units landing at one place spreading out; bouncing off a structure.
+* Landing in water too deep to walk in, which the game allows: the sim refuses that order.
+* Turning during flight: it faces its goal at take-off.  Jump modules on commanders.  Detriment's weapons being blocked in its wind-up.
+* A flight's order stays until the stun ends in the game; here landing ends it.
+* Shots at a jumper in the air use only its map position, so they hit more easily than in a game.
+
+**Not checked:** the case of a Knight walking up to a sitting Blastwing played only on rough ground (game: gone at 156-159 from 66, sim: 160 from 79); it didn't move in the flat-ground runs.  Script games, speed and the replay gate weren't rerun after this.
+
+Pyro's flamer did about half its game damage here: fixed in 8.16.  The policy couldn't jump here: it can now (`02-policy.md` 4.3).
+
+### 8.15 Floating structures (2026-11-06)
+
+ABI 13, for the frame model's maps with water (`03-training.md` 11).  Catalog entries gain `min_water_depth` and `max_water_depth` from the defs, and flag `ZK_U_FLOATS` from `floatOnWater`.  A floating structure now reports its height from the water's surface, as ships and aircraft do, where before it read the sea bed.  A structure that doesn't float, such as an Amphibious factory, still stands on the bed.
+
+Nothing else changed.  Script against script is 46/8/46, median 491 s, and doing nothing against the script 11/22/67, both as before.  Replay gate still fails: `results/simgate/jump.json`, 20 s AUC value_tracked 0.564, advance 0.604, hold 0.596, orders 0.611, fightnet 0.665.  Speed measured 39,600 seat steps a second against 42,500 before ABI 12's and 13's changes, about 7% slower or noise; not looked into.
+
+### 8.16 Shots that go through (2026-11-07)
+
+ABI 14.  A weapon with `noExplode` no longer stops at what it hits (`World::pierce` in `sim/src/combat.cpp`, `sim/tests/test_pierce.py`).  Flag `ZK_W_PIERCES` comes from the defs, for all except thermite bombs, whose burn is modelled apart.
+
+In the engine such a shot is tested once a frame and can hit whatever it's inside on each, so hits on a target come to about 1 + chord / speed.  The sim does the same in one go: it finds every enemy on the line from the shooter through the aim point to the end of the range, and for each one applies the shot's blast with its power multiplied by 1 + 2 * sqrt(r^2 - offset^2 - height^2) / speed.  With `ZK_W_ONE_HIT_EACH`, from `single_hit` and `single_hit_multi`, that multiplier stays 1.  Shields stop it as before, and it never hurts its shooter.
+
+**Against a game** (`zz_sim_mechanics.lua` modes `pierce` and `pierce_slow`), damage in the sim over the game's, standing targets, mean over 2-5 distances:
+
+| Shooter | Glaive | Knight | Hermit | Minotaur | Lotus |
+|---|---|---|---|---|---|
+| Pyro (was about 0.4) | 1.11 | 1.11 | 1.08 | 1.03 | 0.91 |
+| Dante | 0.99 | 1.03 | 0.98 | 1.01 | 1.00 |
+| Gauss turret | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 |
+| Dagger | 0.83 | 0.83 | 0.83 | 0.83 | 0.83 |
+| Ultimatum, one shot | 0.93 | 1.13 | 0.99 | 0.84 | 1.00 |
+
+Single Pyro distances range from 0.71 to 1.69.
+
+**Differences left:**
+
+* **A walking target:** a Pyro against a Glaive crossing its line does 236 where the game does 430.  Not looked into.
+* **Dagger:** 5 shots against the game's 6 in 15 s, which is the whole of its 0.83.  Not looked into.
+* **Friends on the line:** in the game the shooter holds fire, and in the sim it fires and passes through them unhurt.
+* **First shot:** the Ultimatum's first hit lands within 45 frames in the game, and later than that in the sim, so its row compares 90 frames against 45, one shot each.
+* `assaultcruiser`, `bomberassault` and `striderdetriment` also have the flag and weren't compared.
+
+**What it did to the factories,** in 1024 script games, overall score against 8.12's:
+
+| | Spider | Jump | Tank | Amph | Shield | Hover | Veh | Cloak |
+|---|---|---|---|---|---|---|---|---|
+| 8.12 | 0.92 | 0.47 | 0.74 | 0.67 | 0.48 | 0.24 | 0.21 | 0.29 |
+| Now | 0.91 | 0.74 | 0.70 | 0.57 | 0.45 | 0.30 | 0.22 | 0.16 |
+
+The better factory won 93% of decided games between different ones, up from 91%.  So the fix, right as it is for a Pyro alone, makes the spread in `03-training.md` 10.6 a little wider, with Cloak now lowest.  **Still not checked against the engine.**  8.12's row is from ABI 10, and bombs, jumping and floating structures came in since, so not all of this change need be this fix.  The user expects a spread like this: the script only builds raiders, and some factories have more versatile ones.  So it's no sign of a sim fault, and it's a limit of the script as a test (`03-training.md` 10.6).
+
+**Regression:** script against script 45/8/47 on 256 games, median 496 s, against 46/8/46 and 491.  Speed 39,350 seat steps a second against 39,600.  Replay gate still fails, unchanged: `results/simgate/pierce.json`, 20 s AUC value_tracked 0.564, advance 0.604, hold 0.596, orders 0.612, fightnet 0.665.

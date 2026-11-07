@@ -1,6 +1,8 @@
 """Schema, shapes, masks, net and the live producer, on frames made by hand."""
 from __future__ import annotations
 
+import copy
+import json
 import pathlib
 import time
 from types import SimpleNamespace
@@ -8,7 +10,8 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from zkbot.policy import actions, featurize as fz, net, rawframe as rf
+from zkbot import units as unit_data
+from zkbot.policy import actions, bundle as bd, featurize as fz, net, rawframe as rf
 from zkbot.policy.bundle import Bundle
 
 from conftest import BLIP, ENEMY, HIDDEN, MEMORY, make_frame, make_units
@@ -50,6 +53,79 @@ def test_bundle_survives_a_file_and_finds_its_way(small_map, tmp_path):
     kbot = 0
     assert np.isfinite(small_map.walk[kbot, west, east]) and small_map.walk[kbot, west, east] > 0
     assert small_map.walk[kbot, west, west] == 0
+
+
+def _features(*rows):
+    out = np.zeros(len(rows), rf.FEATURE_DTYPE)
+    for i, (x, z, metal) in enumerate(rows):
+        out[i] = (i + 100, x, z, metal, 7)
+    return out
+
+
+def _with_features(units, features, small_map, table):
+    frame = make_frame(units)
+    return fz.featurize(rf.Frame(frame.units, frame.sites, frame.glob, features), small_map, table)
+
+
+def test_frames_keep_their_features_in_a_file(tmp_path):
+    frame = make_frame(make_units({"uid": 1}))
+    path = tmp_path / "f.npz"
+    rf.save_frames(path, [rf.Frame(frame.units, frame.sites, frame.glob, _features((10.0, 20.0, 30.0))), frame])
+    a, b = rf.load_frames(path)
+    assert a.features["metal"].tolist() == [30.0] and not len(b.features)
+
+
+def test_a_frame_from_before_features_reads_as_having_none():
+    assert all(not len(f.features) for f in rf.load_frames(ROOT / "tests" / "policy" / "data" / "golden_frames.npz"))
+
+
+def test_features_get_tokens_before_the_global_one(small_map, table):
+    units = make_units({"uid": 1, "x": 500.0, "z": 500.0}, {"uid": 2, "side": ENEMY, "x": 900.0, "z": 500.0})
+    bare = _with_features(units, _features(), small_map, table)
+    t = _with_features(units, _features((520.0, 500.0, 50.0), (2000.0, 500.0, 400.0)), small_map, table)
+    assert t.feat_x.shape == (2, fz.FEATURE_DIM) and t.feat_ids.tolist() == [100, 101]
+    assert len(t.tok_kind) == len(bare.tok_kind) + 2
+    assert t.tok_kind[-3:].tolist() == [fz.TK_FEATURE, fz.TK_FEATURE, fz.TK_GLOBAL]
+    assert t.feat_x[0, 2] == pytest.approx(np.log1p(50.0) / 8.0) and t.feat_x[1, 0] > t.feat_x[0, 0]
+    assert np.isfinite(t.feat_x).all() and t.feat_x[0, 4] < t.feat_x[1, 4]
+    # Everything the units already had stays as it was.
+    assert np.array_equal(t.unit_x, bare.unit_x) and np.array_equal(t.ptr_enemy, bare.ptr_enemy)
+
+
+def test_a_unit_knows_how_far_a_feature_is_and_the_rest_read_as_groups(small_map, table):
+    units = make_units({"uid": 1, "x": 500.0, "z": 500.0}, {"uid": 2, "side": ENEMY, "x": 900.0, "z": 500.0})
+    t = _with_features(units, _features((510.0, 500.0, 5.0), (2500.0, 500.0, 5.0)), small_map, table)
+    b = t.pair_bucket
+    first, last = len(b) - 3, len(b) - 2
+    assert b[0, first] == fz._UF and b[first, 0] == fz._UF
+    assert fz._UF < b[0, last] < fz._UF + 12 and b[last, 0] == b[0, last]
+    assert b[first, last] == fz._OTHER + 4 * fz._GROUPS + 4
+    assert b[first, -1] == fz._OTHER + 4 * fz._GROUPS + 5
+    assert (b >= 0).all() and (b < fz.NUM_BUCKETS).all()
+
+
+def test_the_cap_keeps_most_metal_for_the_walk_and_regions_count_the_rest(small_map, table):
+    units = make_units({"uid": 1, "x": 500.0, "z": 500.0})
+    many = [(600.0, 500.0, 1.0)] * (fz.CAP_FEATURES + 5) + [(650.0, 500.0, 500.0)]
+    features = _features(*many)
+    t = _with_features(units, features, small_map, table)
+    assert len(t.feat_x) == fz.CAP_FEATURES and 100 + fz.CAP_FEATURES + 5 in t.feat_ids
+    region = int(small_map.region_at(600.0, 500.0))
+    assert t.reg_x[region, 33] == pytest.approx(np.log1p(sum(m for *_, m in many)) / 10.0, rel=1e-3)
+    assert t.reg_x[:, 33].sum() == t.reg_x[region, 33]
+    # Which record came first can't matter.
+    again = _with_features(units, features[::-1], small_map, table)
+    assert np.array_equal(t.feat_ids, again.feat_ids) and np.array_equal(t.feat_x, again.feat_x)
+
+
+def test_a_feature_in_sight_reaches_what_the_net_thinks(small_map, table, policy):
+    units = make_units({"uid": 1, "x": 500.0, "z": 500.0})
+    plain = _with_features(units, _features(), small_map, table)
+    richer = _with_features(units, _features((520.0, 500.0, 300.0)), small_map, table)
+    state = net.State.initial(small_map.regions)
+    a, b = net.encode(policy.w, policy.bias_table, plain, state), net.encode(policy.w, policy.bias_table, richer, state)
+    assert a.tokens.shape[0] + 1 == b.tokens.shape[0]
+    assert np.abs(a.tokens[0] - b.tokens[0]).max() > 1e-4
 
 
 def test_tensor_shapes_and_token_order(small_map, table):
@@ -185,12 +261,80 @@ def test_attack_ground_needs_a_target_within_reach(small_map, table):
 
 
 def test_abilities_come_from_tags(small_map, table):
-    assert rf.JUMP in kinds_of(make_units({"uid": 1, "name": "jumpraid"}), small_map, table)[1]
-    assert rf.JUMP not in kinds_of(make_units({"uid": 1, "name": "cloakraid"}), small_map, table)[1]
+    charged = rf.IN_LOS | rf.TYPE_KNOWN | rf.JUMP_READY
+    assert rf.JUMP in kinds_of(make_units({"uid": 1, "name": "jumpraid", "flags": charged}), small_map, table)[1]
+    assert rf.JUMP not in kinds_of(make_units({"uid": 1, "name": "cloakraid", "flags": charged}), small_map, table)[1]
     assert rf.CLOAK_ON in kinds_of(make_units({"uid": 1, "name": "cloaksnipe"}), small_map, table)[1]
     cloaked = make_units({"uid": 1, "name": "cloaksnipe", "flags": rf.IN_LOS | rf.TYPE_KNOWN | rf.CLOAKED})
     _, kinds = kinds_of(cloaked, small_map, table)
     assert rf.CLOAK_OFF in kinds and rf.CLOAK_ON not in kinds
+
+
+def test_a_jump_must_be_charged_and_the_policy_can_see_that(small_map, table):
+    charged = make_units({"uid": 1, "name": "jumpraid", "flags": rf.IN_LOS | rf.TYPE_KNOWN | rf.JUMP_READY})
+    waiting = make_units({"uid": 1, "name": "jumpraid"})
+    t, kinds = kinds_of(charged, small_map, table)
+    assert rf.JUMP in kinds and t.unit_x[0, fz._I + 18] == 1.0
+    t, kinds = kinds_of(waiting, small_map, table)
+    assert rf.JUMP not in kinds and t.unit_x[0, fz._I + 18] == 0.0 and not t.ptr_jump.any()
+
+
+def test_a_jump_can_cross_what_the_unit_cannot_walk_but_only_within_reach(small_map, table):
+    """Nothing's walkable from where it stands, so a walk mask would leave it its own region."""
+    walled = copy.copy(small_map)
+    walled.walk = np.full_like(small_map.walk, np.inf)
+    centres = small_map.centre[:, :2]
+    off_centre = np.sqrt(small_map.area / np.pi) * 0.5
+    reach = float(table.jump_range[table.names.index("jumpraid")])
+    # Just inside what a jump reaches of the region next to the first.
+    next_door = 1 + int(np.argmin(np.hypot(*(centres[1:] - centres[0]).T)))
+    line = centres[next_door] - centres[0]
+    at = centres[next_door] - line / np.hypot(*line) * (reach + off_centre[next_door] - 10.0)
+    u = make_units({"uid": 1, "name": "jumpraid", "x": float(at[0]), "z": float(at[1]), "flags": rf.IN_LOS | rf.TYPE_KNOWN | rf.JUMP_READY})
+    t = run(u, walled, table)
+    assert t.ptr_region[0].sum() == 1
+    assert t.ptr_jump[0, next_door] and not t.ptr_region[0, next_door]
+    away = np.hypot(*(centres - at).T)
+    assert (away[t.ptr_jump[0]] <= reach + off_centre[t.ptr_jump[0]] + 1e-3).all() and not t.ptr_jump[0].all()
+
+
+def test_a_jump_is_not_offered_where_it_could_not_land(small_map, table):
+    blocked = copy.copy(small_map)
+    blocked.passable = small_map.passable.copy()
+    kbot = bd.MOVE_CLASSES.index("kbot")
+    c = small_map.centre[1]
+    blocked.passable[int(c[1] / bd.PASS_CELL), int(c[0] / bd.PASS_CELL)] &= 255 ^ (1 << kbot)
+    at = small_map.centre[0]
+    u = make_units({"uid": 1, "name": "jumpraid", "x": float(at[0]), "z": float(at[1]), "flags": rf.IN_LOS | rf.TYPE_KNOWN | rf.JUMP_READY})
+    assert not run(u, blocked, table).ptr_jump[0, 1]
+
+
+def test_who_jumps_agrees_with_the_sim(table):
+    cat = json.loads((ROOT / "sim/data/catalog.json").read_text("utf8"))
+    ranges = {u["name"]: u["jump_range"] for u in cat["units"]}
+    for row, name in enumerate(table.names):
+        if table.jump[row] and table.mobile[row] and name in ranges:
+            assert ranges[name] > 0.0 and table.jump_range[row] == ranges[name], name
+    assert table.jump_range[table.names.index("jumpsumo")] == 360.0
+
+
+def test_a_live_jumper_is_charged_by_its_rules_param():
+    class Client:
+        def __init__(self, value):
+            self.value = value
+
+        def query(self, q, timeout=10.0):
+            assert q["type"] == "unit_rules_param" and q["key"] == "jumpReload"
+            return {"floatValue": self.value}
+
+    class Brain:
+        def __init__(self, client):
+            self.client = client
+
+    pyro, glaive = {"defId": unit_data.id_of("jumpraid")}, {"defId": unit_data.id_of("cloakraid")}
+    assert rf._jump_charged(Brain(Client(1.0)), 5, pyro) and not rf._jump_charged(Brain(Client(0.4)), 5, pyro)
+    assert not rf._jump_charged(Brain(Client(1.0)), 5, glaive)
+    assert rf._jump_charged(object(), 5, pyro)      # no game behind it
 
 
 def test_manual_fire_needs_range_and_reload(small_map, table):
@@ -269,9 +413,9 @@ def test_a_decision_is_legal_and_decodes(small_map, table, policy):
         k = int(d.kind[i])
         assert (d.region[i] >= 0) == (k in (rf.MOVE, rf.FIGHT, rf.JUMP))
         assert (d.enemy[i] >= 0) == (k in fz.ENEMY_POINTER_KINDS)
-        assert (d.fine[i] >= 0) == (k in (rf.MOVE, rf.FIGHT, rf.ATTACK_GROUND))
+        assert (d.fine[i] >= 0) == (k in (rf.MOVE, rf.FIGHT, rf.JUMP, rf.ATTACK_GROUND))
         if d.region[i] >= 0:
-            assert t.ptr_region[i, d.region[i]]
+            assert (t.ptr_jump if k == rf.JUMP else t.ptr_region)[i, d.region[i]]
         if d.enemy[i] >= 0:
             assert t.ptr_enemy[fz.ENEMY_POINTER_KINDS.index(k), i, d.enemy[i]]
     assert np.isfinite(d.logp).all()
@@ -306,7 +450,7 @@ def test_permuting_tokens_permutes_the_output(small_map, table, policy):
     p.unit_x, p.unit_name = t.unit_x[perm[:u]], t.unit_name[perm[:u]]
     p.unit_ally, p.unit_player = t.unit_ally[perm[:u]], t.unit_player[perm[:u]]
     p.pair_bucket = t.pair_bucket[np.ix_(perm, perm)]
-    p.kind_mask, p.route_bias, p.ptr_region = t.kind_mask[perm[:12]], t.route_bias[perm[:12]], t.ptr_region[perm[:12]]
+    p.kind_mask, p.route_bias, p.ptr_region, p.ptr_jump = t.kind_mask[perm[:12]], t.route_bias[perm[:12]], t.ptr_region[perm[:12]], t.ptr_jump[perm[:12]]
     p.ptr_enemy = t.ptr_enemy[:, perm[:12]]
     s = net.State.initial(small_map.regions)
     a, b = policy.decide(t, s), policy.decide(p, s)
@@ -362,6 +506,16 @@ class FakeBrain:
     def effective_storage(resource):
         raw = resource["storage"]
         return raw - 10000.0 if raw > 10000.0 else raw
+
+
+def test_from_brain_reads_what_is_left_of_a_feature_in_sight():
+    obs = {"frame": 900, "units": {}, "enemies": {}, "radarBlips": {},
+           "features": {"9": {"defId": 12, "pos": [100.0, 5.0, 200.0], "reclaimLeft": 0.5, "definition": {"containedResources": {"Metal": 60.0, "Energy": 0.0}}},
+                        "10": {"defId": 13, "pos": [300.0, 5.0, 400.0], "definition": {"containedResources": {"Metal": 20.0}}}}}
+    f = rf.from_brain(FakeBrain(), obs, rf.LiveMemory(), region_of=lambda x, z: 4)
+    by_id = {int(r["feat_id"]): r for r in f.features}
+    assert (by_id[9]["x"], by_id[9]["z"], by_id[9]["metal"], by_id[9]["def_id"]) == (100.0, 200.0, 30.0, 12)
+    assert by_id[10]["metal"] == 20.0
 
 
 def test_from_brain_reads_everything_the_schema_asks_for():

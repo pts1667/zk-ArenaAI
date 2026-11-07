@@ -35,8 +35,10 @@ void World::ensure_views() {
     last_damage.resize(n, 0.0f);
 }
 
-bool World::clear_sight(int from, int to) const {
-    const float fx = x[size_t(from)], fz = z[size_t(from)], tx = x[size_t(to)], tz = z[size_t(to)];
+bool World::clear_sight(int from, int to) const { return sees_point(from, x[size_t(to)], z[size_t(to)]); }
+
+bool World::sees_point(int from, float tx, float tz) const {
+    const float fx = x[size_t(from)], fz = z[size_t(from)];
     const float eye = surface(*map, fx, fz) + type_of(from).los_height;
     const float seen = surface(*map, tx, tz) + TARGET_HEIGHT;
     const float dist = std::hypot(tx - fx, tz - fz);
@@ -61,10 +63,12 @@ bool World::point_seen_by(int s, float px, float pz) const {
 void World::update_view(int s) {
     ZK_PROF(FOG);
     SideView& v = views[size_t(s)];
+    if (v.updated_frame == frame) return;     // done for targeting, or by a frame just asked for
+    v.updated_frame = frame;
     const int n = count();
     radar_units.clear();
     for (int o = 0; o < n; ++o)
-        if (side[size_t(o)] == s && alive[size_t(o)] && build[size_t(o)] >= 1.0f && type_of(o).radar_radius > 0.0f) radar_units.push_back(o);
+        if (side[size_t(o)] == s && alive[size_t(o)] && build[size_t(o)] >= 1.0f && type_of(o).radar_radius > 0.0f && !unpaid[size_t(o)]) radar_units.push_back(o);
     bool contact = false;
     for (int e = 0; e < n; ++e) {
         const size_t i = size_t(e);
@@ -78,7 +82,8 @@ void World::update_view(int s) {
         const auto& d = type_of(e);
         const bool flying = (d.flags & ZK_U_AIR) != 0;
         bool los = false;
-        for_near(x[i], z[i], max_los, [&](int o) {
+        // LosHandler.cpp: a cloaked enemy isn't in sight, and unit_stealth.lua keeps it off radar too.
+        if (!cloaked[i]) for_near(x[i], z[i], max_los, [&](int o) {
             if (los || side[size_t(o)] != s || !alive[size_t(o)] || build[size_t(o)] < 1.0f) return;
             const auto& od = type_of(o);
             const float r = flying ? od.air_los_radius : od.los_radius;
@@ -87,7 +92,7 @@ void World::update_view(int s) {
             if (flying || (od.flags & ZK_U_AIR) || clear_sight(o, e)) los = true;
         });
         bool radar = false;
-        if (!los)
+        if (!cloaked[i] && !los)
             for (int o : radar_units) {
                 const float r = type_of(o).radar_radius, dx = x[size_t(o)] - x[i], dz = z[size_t(o)] - z[i];
                 if (dx * dx + dz * dz <= r * r) {
@@ -130,7 +135,7 @@ int World::emit_view(int s, UnitRecord* out, int cap, float* glob, int commander
     SideView& v = views[size_t(s)];
     const int n = count();
     int w = 0;
-    int unfinished = 0;
+    int unfinished = 0, idle_builders = 0;
     auto common = [&](int u, int knowledge, int flags) -> UnitRecord& {
         const size_t i = size_t(u);
         const auto& d = type_of(u);
@@ -140,8 +145,8 @@ int World::emit_view(int s, UnitRecord* out, int cap, float* glob, int commander
         r.def_id = d.def_id;
         r.x = x[i];
         r.z = z[i];
-        const bool water_top = d.move_class == 4 || d.move_class == 5;   // hovers and ships ride on the water
-        r.y = (water_top ? surface(*map, x[i], z[i]) : map->height_at(x[i], z[i])) + ((d.flags & ZK_U_AIR) ? AIR_ALTITUDE : 0.0f);
+        const bool water_top = d.move_class == 4 || d.move_class == 5 || (d.flags & ZK_U_FLOATS);   // hovers, ships and what floats ride on the water
+        r.y = (water_top ? surface(*map, x[i], z[i]) : map->height_at(x[i], z[i])) + ((d.flags & ZK_U_AIR) ? AIR_ALTITUDE : 0.0f) + jump_altitude(u);
         r.vx = vx[i];
         r.vz = vz[i];
         r.hp_frac = hp[i] / d.hp;
@@ -159,6 +164,7 @@ int World::emit_view(int s, UnitRecord* out, int cap, float* glob, int commander
         r.ord_kind = -1;
         if (build[i] < 1.0f) flags |= UF_BEING_BUILT;
         if (stunned(u)) flags |= UF_PARALYZED;
+        if (cloaked[i] && side[i] == s) flags |= UF_CLOAKED;
         r.flags = uint16_t(flags);
         return r;
     };
@@ -169,11 +175,14 @@ int World::emit_view(int s, UnitRecord* out, int cap, float* glob, int commander
         const auto& d = type_of(u);
         int flags = UF_IN_LOS | UF_TYPE_KNOWN;
         const bool aims = order[i] == ZK_ORDER_ATTACK || order[i] == ZK_ORDER_MANUAL_FIRE;
-        const bool order_done = order[i] == ZK_ORDER_NONE || (aims && !alive[size_t(order_target[i])]);
+        // The engine's queue holds what a unit gives itself as well.
+        const bool order_done = (order[i] == ZK_ORDER_NONE && ai[i].chasing < 0 && !ai[i].dodging) || (aims && !alive[size_t(order_target[i])]);
         if (order_done && (d.flags & ZK_U_MOBILE) && build[i] >= 1.0f) flags |= UF_IDLE;
         if (damage_taken[i] > last_damage[i]) flags |= UF_DAMAGED;
+        if (d.jump_range > 0.0f && jump[i].charge >= 1.0f && !jump[i].busy) flags |= UF_JUMP_READY;
         last_damage[i] = damage_taken[i];
         if (!(d.flags & ZK_U_MOBILE) && build[i] < 1.0f) ++unfinished;
+        if (order_done && (d.flags & ZK_U_MOBILE) && d.build_speed > 0.0f && build[i] >= 1.0f) ++idle_builders;
         UnitRecord& r = common(u, KNOW_LOS, flags);
         if (mem_kind[i] >= 0) {
             r.ord_kind = int8_t(mem_kind[i]);
@@ -223,6 +232,41 @@ int World::emit_view(int s, UnitRecord* out, int cap, float* glob, int commander
         glob[G_BASE_Z] = base[1];
         glob[G_FRAMES_SINCE_CONTACT] = float(frame - v.last_contact);
         glob[G_UNFINISHED_STRUCTURES] = float(unfinished);
+        if (economy_on) {
+            const Purse& p = purses[size_t(s)];
+            glob[G_METAL] = p.metal;
+            glob[G_METAL_INCOME] = p.metal_income;
+            glob[G_METAL_STORAGE] = p.storage;
+            glob[G_ENERGY] = p.energy;
+            glob[G_ENERGY_INCOME] = p.energy_income;
+            glob[G_ENERGY_STORAGE] = p.storage;
+            glob[G_IDLE_BUILDERS] = float(idle_builders);
+        }
+    }
+    return w;
+}
+
+// In ground sight of the side, as a feature is (AICallback.cpp).  One ray per wreck and unit, as for units.
+int World::emit_features(int s, FeatureRecord* out, int cap) const {
+    int w = 0;
+    for (int id : live_wrecks) {
+        if (w >= cap) break;
+        const Wreck& wreck = wrecks[size_t(id)];
+        bool seen = false;
+        for_near(wreck.x, wreck.z, max_los, [&](int o) {
+            if (seen || side[size_t(o)] != s || !alive[size_t(o)] || build[size_t(o)] < 1.0f) return;
+            const auto& od = type_of(o);
+            const float dx = x[size_t(o)] - wreck.x, dz = z[size_t(o)] - wreck.z;
+            if (dx * dx + dz * dz > od.los_radius * od.los_radius) return;
+            if ((od.flags & ZK_U_AIR) || sees_point(o, wreck.x, wreck.z)) seen = true;
+        });
+        if (!seen) continue;
+        FeatureRecord& r = out[w++];
+        r.feat_id = id;
+        r.x = wreck.x;
+        r.z = wreck.z;
+        r.metal = wreck.metal * wreck.left;
+        r.def_id = wreck.feature_def;
     }
     return w;
 }

@@ -30,7 +30,6 @@ DUMP = ROOT / "results/simtools/simdump"
 DATA = ROOT / "sim/data"
 FRAMES = 30.0
 HEADING_CIRCLE = 65536.0
-SLOW_UPDATE_FRAMES = 16.0
 MAX_MOUNTS = 8
 MOVE_CLASS_NAMES = ("kbot", "tank", "spider", "amph", "hover", "ship")
 MIN_SEGMENT_CELLS = 64               # smaller pieces join a neighbour
@@ -46,15 +45,34 @@ SM_TANK, SM_KBOT, SM_HOVER, SM_SHIP = 0, 1, 2, 3
 KIND_INSTANT, KIND_PROJECTILE, KIND_GUIDED, KIND_SHIELD = 0, 1, 2, 3
 INSTANT_TYPES = {"BeamLaser", "LightningCannon", "Melee"}
 MISSILE_TYPES = {"MissileLauncher", "StarburstLauncher", "TorpedoLauncher"}
-W_DISARM_ONLY, W_MANUAL, W_STOCKPILE, W_UNMODELLED = 256, 512, 1024, 2048
+W_DISARM_ONLY, W_MANUAL, W_STOCKPILE, W_UNMODELLED, W_UNLINKED, W_HIGH_ARC, W_BEAM = 256, 512, 1024, 2048, 4096, 8192, 16384
 W_IMPACT_ONLY, W_TURRET, W_PARALYZER, W_NO_SELF_DAMAGE, W_NO_AUTO_TARGET, W_NO_FRIENDLY_FIRE, W_SLOW_ONLY, W_AREA_SLOWS = 1, 2, 4, 8, 16, 32, 64, 128
-U_MOBILE, U_AIR, U_ARMED, U_FIREPROOF = 1, 2, 4, 8
+W_OKP_STATIC_ONLY, W_OKP_FLIGHT, W_OKP_TARGET_SPEED, W_SCRIPT_BURST = 32768, 65536, 131072, 262144
+W_PIERCES, W_ONE_HIT_EACH = 524288, 1048576
+# Metal and energy per second from the module all new commanders have (dynamic_comm_defs.lua, "econ"); it's not in the unit def.
+# Logged games agree: income less 2 per extractor and solar is 6 and 8, this and the team's innate 2 and 2.
+COMMANDER_ECON = (4.0, 6.0)
+U_MOBILE, U_AIR, U_ARMED, U_FIREPROOF, U_FACTORY, U_PLOPPABLE, U_COMMANDER = 1, 2, 4, 8, 16, 32, 64
+U_FLOATS = 8192
+U_CAN_CLOAK, U_STARTS_CLOAKED, U_FIRES_CLOAKED, U_AREA_CLOAK_ON, U_LEAVES_GHOST, U_KAMIKAZE_BLIND = 128, 256, 512, 1024, 2048, 4096
+# bait_prevention_defs.lua: a target whose build time is up to the n-th of these is at bait level n.
+BAIT_COST_BANDS = (10.0, 89.9, 239.9, 419.9)
+# capi.h: how a unit type regards a type of enemy, and how it acts.  From unit_tactical_ai.lua's tables.
+R_SKIRM, R_FLEE, R_IDLE_FLEE, R_HUG, R_FIGHT_ONLY, R_BONUS_RANGE, R_AVOID_HEIGHT = 1, 2, 4, 8, 16, 32, 64
+T_HANDLED, T_IDLE_ONLY, T_SKIRM_RADAR, T_SKIRM_EVERYTHING, T_KEEP_ORDER, T_FLEE_EVERYTHING, T_FLEE_RADAR, T_FLEE_COMBAT, T_IDLE_FLEE_COMBAT = 1, 2, 4, 8, 16, 32, 64, 128, 256
 DEFAULT_BURN_FRAMES = 450.0          # fire_defs.lua
 SLOW_DECLINE_PER_FRAME = 0.04 / FRAMES   # timeslow_defs.lua DEGRADE_FACTOR
 # Weapons that would rather hit something not yet disarmed: the penalty, and the status above which
 # it counts (target_priority_defs.lua disarmPenaltyDefs, disarmWeaponTimeDefs after its conversion).
 DISARM_TARGETING = {"shieldarty_emp_rocket": (200.0, 0.4), "shipscout_missile": (10.0, 0.33)}
 DEFAULT_BURN_RANDOM = 0.3
+# A shot off up or down in the game misses, where the sim's scatter is sideways only.  It matters for a Stardust, with its 9 degrees of it: at the rate
+# its heat allows the game gave 0.97 of the sim's damage at 150 elmos on a Knight and 0.54 at 400 on a Glaive, and 0.81 over those eight cases
+# (01-simulator.md 8.12).  This is a mean over ranges and sizes, not the falloff.
+SCATTER_DAMAGE = {"turretriot_turretriot_weapon": 0.8}
+LANDING_SUFFIX = "_landing"
+BURROW_SPEED, BURROW_SPEED_AIR = 0.05, 3.5
+DETONATE_REACH = 160.0      # gunshipbomb.lua AimFromWeapon: its weapon's range at top speed
 DEFAULT_BURN_DAMAGE = 0.5
 SHIELD_ARMOR = "4"
 
@@ -90,18 +108,29 @@ def _weapon_kind(w: dict) -> int:
     return KIND_PROJECTILE
 
 
-def _weapon_record(w: dict, velocity: tuple[float, float, float], alpha: float) -> dict:
+def _arc(w: dict, game_gravity: float) -> float:
+    """Gravity over speed squared for what falls as it flies: Cannon.cpp, with the map's gravity unless it has its own."""
+    speed = w["projectilespeed"]
+    if w["type"] != "Cannon" or speed <= 0.0:
+        return 0.0
+    return (w.get("myGravity") or game_gravity) / (speed * speed)
+
+
+def _weapon_record(w: dict, velocity: tuple[float, float, float], alpha: float, game_gravity: float) -> dict:
     custom = w.get("customParams") or {}
     damages = w["damages"]
     # Burst weapons fire from their script: the def's reload is the time between shots.
     reload_s, salvo, salvo_delay_s = w["reload"], w["salvoSize"], w["salvoDelay"]
-    if "script_reload" in custom:
+    script_burst = "script_reload" in custom
+    if script_burst:
         salvo = _custom(w, "script_burst", 1.0)
         salvo_delay_s = reload_s
         reload_s = _custom(w, "script_reload")
     # Starburst missiles leave straight up, so the launcher needn't face the target.
     starburst = w["type"] == "StarburstLauncher"
     flags = W_TURRET if w.get("turret") or starburst else 0
+    if script_burst:
+        flags |= W_SCRIPT_BURST
     if w.get("impactOnly"):
         flags |= W_IMPACT_ONLY
     if w.get("paralyzer"):
@@ -113,7 +142,7 @@ def _weapon_record(w: dict, velocity: tuple[float, float, float], alpha: float) 
     disarm_penalty, disarm_time = DISARM_TARGETING.get(w["name"], (0.0, 0.0))
     if w.get("noSelfDamage"):
         flags |= W_NO_SELF_DAMAGE
-    if w.get("noAutoTarget") or w.get("manualFire"):
+    if w.get("noAutoTarget") or w.get("manualFire") or w["name"].endswith(LANDING_SUFFIX):
         flags |= W_NO_AUTO_TARGET
     if w.get("manualFire"):
         flags |= W_MANUAL
@@ -125,6 +154,15 @@ def _weapon_record(w: dict, velocity: tuple[float, float, float], alpha: float) 
         flags |= W_NO_AUTO_TARGET
     if "nofriendlyfire" in custom:
         flags |= W_NO_FRIENDLY_FIRE
+    if "unlinked" in custom:
+        flags |= W_UNLINKED
+    if w["type"] == "BeamLaser":
+        flags |= W_BEAM
+    # Thermite is noExplode too, but it falls and then sits there burning (weapon_noexplode_speed_damage.lua).
+    if w.get("noExplode") and "thermite_frames" not in custom:
+        flags |= W_PIERCES
+        if {"single_hit", "single_hit_multi"} & custom.keys():
+            flags |= W_ONE_HIT_EACH
     if "timeslow_onlyslow" in custom:
         flags |= W_SLOW_ONLY
     if custom.get("area_damage_is_slow") == "1":
@@ -133,10 +171,10 @@ def _weapon_record(w: dict, velocity: tuple[float, float, float], alpha: float) 
     has_area = "area_damage_dps" in custom and custom.get("area_damage_is_impulse") != "1"
     on_fire = "setunitsonfire" in custom
     fire_starter = float(w.get("fireStarter") or 0.0)
-    damage = [float(damages[str(i)]) for i in range(5)]
+    damage = [float(damages[str(i)]) * SCATTER_DAMAGE.get(w["name"], 1.0) for i in range(5)]
     # What these are for isn't in the sim, so no army may rely on them: capture (a capture weapon does
     # no health damage, unit_capture.lua), spawned units, pushing and pulling, throwing.
-    if {"is_capture", "spawns_name", "impulse", "thower_weapon", "area_damage_is_impulse"} & custom.keys():
+    if {"is_capture", "spawns_name", "impulse", "thower_weapon"} & custom.keys() or custom.get("area_damage_is_impulse", "0") != "0":
         flags |= W_UNMODELLED
     if "is_capture" in custom:
         damage = [0.0] * 5
@@ -147,8 +185,9 @@ def _weapon_record(w: dict, velocity: tuple[float, float, float], alpha: float) 
         slow_factor = _custom(w, "timeslow_damage") / raw_damage
     # The Felon's gun fires from its shield's charge (shieldfelon.lua).  On shields this is an energy cost.
     shield_cost = _custom(w, "shield_drain") if not w.get("isShield") else 0.0
+    # armordefs.lua: shield_damage is per frame of a beam, and what a whole shot takes is the stats figure.
     if "shield_damage" in custom:
-        damage[int(SHIELD_ARMOR)] = _custom(w, "shield_damage")
+        damage[int(SHIELD_ARMOR)] = _custom(w, "stats_shield_damage", _custom(w, "shield_damage"))
     para_seconds = _custom(w, "emp_paratime", _custom(w, "disarmtimer", float(damages.get("paralyzeDamageTime") or 0.0)))
     return {
         "name": w["name"], "damage": damage,
@@ -170,6 +209,8 @@ def _weapon_record(w: dict, velocity: tuple[float, float, float], alpha: float) 
         "dyn_exp": float(w.get("dynDamageExp") or 0.0), "dyn_range": float(w.get("dynDamageRange") or 0.0),
         "shield_power": w["shieldPower"], "shield_regen": _custom(w, "shield_rate") / FRAMES,
         "shield_radius": w["shieldRadius"],
+        "shield_energy": _custom(w, "shield_drain") / FRAMES if w.get("isShield") else 0.0,
+        "arc": _arc(w, game_gravity),
         "vel_threshold": velocity[0], "vel_base": velocity[1], "vel_scale": velocity[2], "alpha_damage": alpha,
         "area_dps": _custom(w, "area_damage_dps") if has_area else 0.0,
         "area_radius": _custom(w, "area_damage_radius") if has_area else 0.0,
@@ -215,8 +256,64 @@ def _mask(names: dict | None, categories: dict[str, float]) -> int:
     return mask
 
 
+def _remains(u: dict, features: dict[str, dict], features_by_id: dict[int, dict]) -> dict:
+    """What a unit leaves when it dies: its corpse, and what the corpse leaves in turn (featuredefs_post.lua)."""
+    wreck = features.get(u.get("wreckName") or "") or {}
+    heap = features_by_id.get(int(wreck.get("deathFeatureID") or -1)) or {}
+    out = {}
+    for prefix, f in (("wreck", wreck), ("heap", heap)):
+        out[f"{prefix}_metal"] = f.get("metal", 0.0) if f.get("reclaimable") else 0.0
+        out[f"{prefix}_hp"] = f.get("maxHealth", 0.0)
+        out[f"{prefix}_feature"] = int(f.get("id", -1))
+    return out
+
+
+def _cloak(u: dict, custom: dict) -> tuple[dict, int]:
+    """A commander's def says it can cloak whether or not it has the module, and a new one hasn't."""
+    can = bool(u.get("canCloak")) and not custom.get("dynamic_comm") and not custom.get("cannotcloak")
+    radius = float(custom.get("area_cloak_radius") or 0.0)
+    flags = ((U_CAN_CLOAK if can else 0) | (U_STARTS_CLOAKED if can and custom.get("initcloaked") else 0)
+             | (U_FIRES_CLOAKED if not u.get("decloakOnFire", True) else 0)
+             | (U_AREA_CLOAK_ON if radius > 0.0 and str(custom.get("area_cloak_init", "1")) != "0" else 0))
+    return {
+        "cloak_cost": u.get("cloakCost", 0.0) if can else 0.0, "cloak_cost_moving": u.get("cloakCostMoving", 0.0) if can else 0.0,
+        "decloak_distance": u.get("decloakDistance", 0.0), "bestowed_decloak": float(custom.get("cloaker_bestowed_radius") or 0.0),
+        "area_cloak_radius": radius, "area_cloak_upkeep": float(custom.get("area_cloak_upkeep") or 0.0),
+    }, flags
+
+
+def _jump(custom: dict, mobile: bool) -> dict:
+    """jump_defs.lua.  A factory's def says it can as well, to give its orders to what it builds."""
+    can = mobile and custom.get("canjump") == "1"
+    return {"jump_range": float(custom["jump_range"]) if can else 0.0, "jump_speed": float(custom["jump_speed"]) if can else 0.0,
+            "jump_height": float(custom["jump_height"]) if can else 0.0, "jump_reload": float(custom["jump_reload"]) * FRAMES if can else 0.0,
+            "jump_delay": float(custom.get("jump_delay") or 0.0) if can else 0.0}
+
+
+def _burrow(custom: dict, air: bool) -> float:
+    """The speed under which what has idle_cloak digs in: GG.StartStopMovingControl's, or what gunshipbomb.lua polls for."""
+    if not custom.get("idle_cloak"):
+        return 0.0
+    return BURROW_SPEED_AIR if air else BURROW_SPEED
+
+
+def _bait(u: dict, custom: dict) -> dict:
+    """bait_prevention_defs.lua, for what would rather not shoot at cheap things and what's cheap.  0 is no level."""
+    target = int(custom.get("bait_level_target") or 0)
+    if not target:
+        target = next((i + 1 for i, top in enumerate(BAIT_COST_BANDS) if u["buildTime"] <= top), 0)
+    return {"bait_level": int(custom.get("bait_level_default") or 0), "bait_target": target,
+            "bait_target_armor": int(custom.get("bait_level_target_armor") or 0), "bait_cost": u["buildTime"]}
+
+
+def _heat(custom: dict) -> dict:
+    """turretriot.lua: firing heats the unit, which reloads this much slower when fully hot."""
+    return {"heat_per_shot": float(custom.get("heat_per_shot") or 0.0), "heat_decay": float(custom.get("heat_decay") or 0.0) / FRAMES,
+            "heat_max_slow": float(custom.get("heat_max_slow") or 0.0), "heat_initial": float(custom.get("heat_initial") or 0.0)}
+
+
 def _unit_record(u: dict, weapon_index: dict[str, int], weapons_by_id: dict[int, dict], records: list[dict],
-                 categories: dict[str, float]) -> tuple[dict, bool]:
+                 categories: dict[str, float], features: dict[str, dict], features_by_id: dict[int, dict]) -> tuple[dict, bool]:
     mounts = sorted((u.get("weapons") or {}).items(), key=lambda kv: int(kv[0]))
     only_name = COMMANDER_WEAPONS.get(u["name"])
     picked, seen = [], set()
@@ -254,17 +351,56 @@ def _unit_record(u: dict, weapon_index: dict[str, int], weapons_by_id: dict[int,
     custom = u.get("customParams") or {}
     if custom.get("fireproof") == "1":
         flags |= U_FIREPROOF
+    if u.get("isFactory"):
+        flags |= U_FACTORY
+    if custom.get("ploppable"):
+        flags |= U_PLOPPABLE
+    if custom.get("ai_start_unit"):
+        flags |= U_COMMANDER
+    bomb = custom.get("stats_detonate_weapon")
+    cloak, cloak_flags = _cloak(u, custom)
+    flags |= cloak_flags
+    if u.get("floatOnWater"):
+        flags |= U_FLOATS
+    if u.get("leavesGhost"):
+        flags |= U_LEAVES_GHOST
+    kamikaze = float(u.get("kamikazeDist") or 0.0) if u.get("canKamikaze") else 0.0
+    if kamikaze > 0.0 and not u.get("kamikazeUseLOS"):
+        flags |= U_KAMIKAZE_BLIND
     return {
+        **_remains(u, features, features_by_id), **cloak, **_bait(u, custom), **_heat(custom),
+        "kamikaze_distance": kamikaze, **_jump(custom, mobile), "burrow_speed": _burrow(custom, air),
+        # The Lua's *_landing weapon goes off when it lands, from its script.  Nothing aims it.
+        "landing_weapon": next((weapon_index[n] for n, _ in picked if n.endswith(LANDING_SUFFIX)), -1),
+        # Only Blastwing has one.
+        "drop_weapon": weapon_index[bomb] if bomb else -1, "detonate_reach": DETONATE_REACH if bomb else 0.0,
+        "drop_height": float(u.get("wantedHeight") or 0.0) if bomb else 0.0,
+        "drop_gravity": float(next(w for w in weapons_by_id.values() if w["name"] == bomb)["customParams"]["mygravity"]) if bomb else 0.0,
+        # The engine's defaults for a def that doesn't say: fire at will, maneuver.
+        "move_state": int(u["moveState"]) if u.get("moveState", -1) >= 0 else 1,
+        "fire_state": int(u["fireState"]) if u.get("fireState", -1) >= 0 else 2,
+        "no_chase": _mask(u.get("noChaseCategories"), categories),
+        "perceived_range": float(custom.get("percieved_range") or max_range),
+        "reclaim_speed": u.get("reclaimSpeed", 0.0), "energy_upkeep": float(custom.get("upkeep_energy") or 0.0),
+        "stockpile_cost": float(custom.get("stockpilecost") or 0.0), "close_frames": float(custom.get("auto_close_time") or 0.0) * FRAMES,
         "name": u["name"], "cost": u["cost"], "hp": u["health"], "speed": speed,
         "accel": u["maxAcc"], "brake": u["maxDec"], "turn_rate": turn, "slow_turn_speed": slow_turn,
         "footprint_radius": footprint, "hit_radius": hit_radius,
-        "armored_mult": u.get("armoredMultiple", 1.0), "auto_heal": (u.get("autoHeal") or 0.0) / SLOW_UPDATE_FRAMES,
+        "armored_mult": u.get("armoredMultiple", 1.0), "idle_regen": float(custom.get("idle_regen") or 0.0) / FRAMES, "idle_time": u.get("idleTime") or 0.0,
         "max_range": max_range, "armor_class": int(u["armorType"]), "move_class": _move_class(u),
         "def_id": int(u["id"]), "los_radius": u.get("losRadius", 0.0), "air_los_radius": u.get("airLosRadius", 0.0),
         "radar_radius": u.get("radarRadius", 0.0), "los_height": u.get("losHeight", 0.0),
-        # Costs nothing until the sim has an economy (unit_stockpile.lua: seconds, then frames).
+        # unit_stockpile.lua: seconds, then frames.
         "stockpile_frames": float(custom.get("stockpiletime") or 0.0) * FRAMES,
         "reload_move_penalty": float(custom.get("reload_move_penalty") or 1.0),
+        "metal_cost": u["metalCost"], "energy_cost": u["energyCost"], "build_time": u["buildTime"],
+        "build_speed": u["buildSpeed"], "build_range": u["buildDistance"],
+        "metal_make": u["metalMake"] + float(custom.get("income_metal") or 0.0) + (COMMANDER_ECON[0] if custom.get("ai_start_unit") else 0.0),
+        "energy_make": u["energyMake"] + float(custom.get("income_energy") or 0.0) + (COMMANDER_ECON[1] if custom.get("ai_start_unit") else 0.0),
+        "extract_mult": float(custom.get("metal_extractor_mult") or 0.0),
+        "pylon_range": float(custom.get("pylonrange") or 0.0),
+        # Where a structure can go.  Nothing in the sim reads these: tools/frame_data.py places structures by them.
+        "min_water_depth": float(u.get("minWaterDepth", 0.0)), "max_water_depth": float(u.get("maxWaterDepth", 0.0)),
         "category": _mask(u.get("modCategories"), categories), "flags": flags,
         "explode_weapon": weapon_index.get(explosion.lower(), -1),
         "mount_weapon": [weapon_index[n] for n, _ in picked],
@@ -329,34 +465,172 @@ def _roster_check(units: list[dict]) -> None:
     print(f"move class vs the bot's unit families: {len(differ)} differ {differ}")
 
 
+def _number(text: str) -> float | None:
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _call_args(line: str, name: str) -> list[str] | None:
+    """The arguments after unitID and targetID of a call in a line of script, if none is itself a call."""
+    at = line.find(name + "(")
+    if at < 0:
+        return None
+    inside = line[at + len(name) + 1:].split(")")[0]
+    return None if "(" in inside else [a.strip() for a in inside.split(",")[2:]]
+
+
+def _overkill(lines: list[str], okp_damage: float) -> tuple[int | None, dict] | None:
+    """What a script's first ordinary overkill check asks: unit_overkill_prevention.lua, called from its BlockShot.  Returns the one mount
+    it's for, if it says, and the weapon's fields.  One whose damage is worked out as it fires isn't read: Merlin's, and the bombers'."""
+    for line in lines:
+        mount = re.search(r"num\s*==\s*(\d)", line)
+        which = int(mount.group(1)) - 1 if mount else None
+        args = _call_args(line, "GG.Script.OverkillPreventionCheck")
+        out = {}
+        if args is not None:
+            # (damage, range, fullTime, hitTimeMod, useTargetSpeed, minRange, fastMult, radarMult, staticOnly), constants.lua
+            args += ["false"] * (9 - len(args))
+            hit_mod, min_range = _number(args[3]) or 0.0, _number(args[5]) or 0.0
+            out = {"okp_full_frames": _number(args[2]) or 0.0, "okp_hit_mod": hit_mod, "okp_min_range": min_range,
+                   "okp_fast_mult": _number(args[6]) or 0.0, "okp_radar_mult": _number(args[7]) or 0.0}
+            flags = W_OKP_TARGET_SPEED if args[4] == "true" else 0
+            flags |= W_OKP_STATIC_ONLY if args[8] == "true" else 0
+        else:
+            args = _call_args(line, "GG.OverkillPrevention_CheckBlock")
+            if args is None or len(args) < 2:
+                continue
+            args += ["false"] * (5 - len(args))
+            time = _number(args[1])
+            times = re.fullmatch(r"([\d.]+)\s*\*\s*distMult", args[1])
+            flags = W_OKP_STATIC_ONLY if args[4] == "true" else 0
+            out = {"okp_fast_mult": _number(args[2]) or 0.0, "okp_radar_mult": _number(args[3]) or 0.0}
+            if time is not None:
+                out["okp_frames"] = time
+            elif times:
+                out["okp_full_frames"] = float(times.group(1))
+            else:          # framesETA and the like: how long the shot takes
+                flags |= W_OKP_FLIGHT
+        damage = _number(args[0])
+        if damage is None and args[0] == "OKP_DAMAGE":
+            damage = okp_damage
+        if damage:
+            return which, {**out, "okp_damage": damage, "okp_flags": flags}
+    return None
+
+
+def _apply_overkill(units: list[dict], weapons: list[dict], raw_units: dict, lines: dict) -> int:
+    done = 0
+    for u in units:
+        script = _lists(lines.get(u["name"]) or {})
+        found = _overkill(script, float((raw_units[u["name"]].get("customParams") or {}).get("okp_damage") or 0.0)) if script else None
+        if not found:
+            continue
+        mount, fields = found
+        done += 1
+        for i, w in enumerate(u["mount_weapon"]):
+            if (mount is None or mount == i) and weapons[w]["kind"] != KIND_SHIELD:
+                weapons[w].update({k: v for k, v in fields.items() if k != "okp_flags"})
+                weapons[w]["flags"] |= fields["okp_flags"]
+    return done
+
+
+def _lists(v):
+    """The dump writes a Lua array as an object keyed "1", "2"..."""
+    return [v[k] for k in sorted(v, key=int)] if isinstance(v, dict) else v
+
+
+def _tactics_record(b: dict, unit: dict) -> dict:
+    """One row of unit_tactical_ai.lua's table, after its defaults.  Swarming and ward fire aren't in the sim."""
+    # A negative stands for what the table leaves out.
+    def num(key: str, default: float = 0.0) -> float:
+        return float(b.get(key, default))
+    flags = T_HANDLED
+    if b.get("onlyIdleHandling") or not b.get("defaultAIState", 1):
+        flags |= T_IDLE_ONLY
+    for key, flag in (("skirmRadar", T_SKIRM_RADAR), ("skirmEverything", T_SKIRM_EVERYTHING), ("skirmKeepOrder", T_KEEP_ORDER),
+                      ("fleeEverything", T_FLEE_EVERYTHING), ("fleeRadar", T_FLEE_RADAR), ("fleeCombat", T_FLEE_COMBAT),
+                      ("idleFleeCombat", T_IDLE_FLEE_COMBAT)):
+        if b.get(key):
+            flags |= flag
+    return {
+        "search_range": num("searchRange", max(unit["max_range"] + 100.0, 800.0)), "idle_push_dist_sq": num("idlePushAggressDistSq"),
+        "idle_chase_leeway": num("idleChaseEnemyLeeway"), "idle_commit_dist": num("idleCommitDist"),
+        "idle_commit_mult": num("idleCommitDistMult"), "idle_enemy_mult": num("idleEnemyDistMult"),
+        "flee_order_dis": num("fleeOrderDis", 120.0), "flee_leeway": num("fleeLeeway", 100.0), "flee_distance": num("fleeDistance", 120.0),
+        "min_flee_range": num("minFleeRange"), "flee_vel_prediction": num("fleeVelPrediction", -1.0),
+        "weapon_range": num("skirmRange", unit["max_range"]), "stopping_distance": num("stoppingDistance"),
+        "velocity_prediction": num("velocityPrediction", 30.0), "skirm_order_dis": num("skirmOrderDis", 120.0),
+        "skirm_order_dis_min": num("skirmOrderDisMin", -1.0), "hug_range": num("hugRange", 50.0), "skirm_leeway": num("skirmLeeway"),
+        "skirm_range_override": num("skirmRangeOverride", -1.0), "reload_skirm_leeway": num("reloadSkirmLeeway"),
+        "skirm_blocked_frames": num("skirmBlockedApproachFrames", -1.0), "vel_pred_chase": num("velPredChaseFactor", -1.0),
+        "skirm_keep_leeway": num("skirmKeepOrderLeeway", -1e9), "skirm_only_near": num("skirmOnlyNearEnemyRange", -1.0),
+        "my_speed": num("mySpeed", unit["speed"]), "flags": flags, "weapon_num": max(0, int(num("weaponNum", 1.0)) - 1),
+        "blocked_on_fight": 1 if b.get("skirmBlockedApproachOnFight") else 0,
+    }
+
+
+def _tactics(units: list[dict], table: dict) -> tuple[list[dict], np.ndarray]:
+    index = {u["name"]: i for i, u in enumerate(units)}
+    records: list[dict] = []
+    relations = np.zeros((len(units), len(units)), np.uint8)
+    for i, u in enumerate(units):
+        b = table.get(u["name"])
+        if not b or b.get("externallyHandled"):
+            records.append({})
+            continue
+        records.append(_tactics_record(b, u))
+        for key, bit in (("skirms", R_SKIRM), ("flees", R_FLEE), ("idleFlee", R_IDLE_FLEE), ("hugs", R_HUG), ("fightOnlyUnits", R_FIGHT_ONLY),
+                         ("bonusRangeUnits", R_BONUS_RANGE), ("avoidHeightDiff", R_AVOID_HEIGHT)):
+            for name in (b.get(key) or "").split():
+                if name in index:
+                    relations[i, index[name]] |= bit
+    return records, relations
+
+
 def catalog() -> None:
     raw_units = json.loads((DUMP / "units.json").read_text("utf8", "replace"))
     raw_weapons = json.loads((DUMP / "weapons.json").read_text("utf8", "replace"))
+    raw_features = json.loads((DUMP / "features.json").read_text("utf8", "replace"))
+    features_by_id = {int(f["id"]): f for f in raw_features.values()}
     game = json.loads((DUMP / "game.json").read_text("utf8", "replace"))
     categories = game["springCategories"]
     unit_order, priority = _read_priority()
     weapon_order = sorted(raw_weapons)
     weapon_index = {n: i for i, n in enumerate(weapon_order)}
+    game_gravity = game["gravity"] / (FRAMES * FRAMES)
     weapons = []
     for n in weapon_order:
         velocity, alpha, _ = priority.get(n, ((0.0, 0.0, 0.0), 0.0, None))
-        weapons.append(_weapon_record(raw_weapons[n], velocity, alpha))
+        weapons.append(_weapon_record(raw_weapons[n], velocity, alpha, game_gravity))
     by_id = {int(w["id"]): w for w in raw_weapons.values()}
     units, truncated = [], []
     for n in unit_order:
-        rec, cut = _unit_record(raw_units[n], weapon_index, by_id, weapons, categories)
+        rec, cut = _unit_record(raw_units[n], weapon_index, by_id, weapons, categories, raw_features, features_by_id)
         units.append(rec)
         if cut:
             truncated.append(n)
+        # The unit's def says which of a cannon's two paths it takes.
+        if raw_units[n].get("highTrajectoryType") == 1:
+            for mount in rec["mount_weapon"]:
+                weapons[mount]["flags"] |= W_HIGH_ARC
+    extras = json.loads((DUMP / "tactics.json").read_text("utf8", "replace"))
+    print("scripts read for overkill prevention:", _apply_overkill(units, weapons, raw_units, extras["overkill"]))
+    for w in weapons:
+        radar = extras["radar"].get(w["name"]) or {}
+        w["radar_wobble_penalty"], w["radar_dot_penalty"] = float(radar.get("wobble", 0.0)), float(radar.get("dot", 0.0))
+    tactics, relations = _tactics(units, extras["tactics"])
     table = np.full((len(weapons), len(units)), 100.0, np.float32)
     for n, (_, _, row) in priority.items():
         if n in weapon_index:
             table[weapon_index[n]] = row
     DATA.mkdir(parents=True, exist_ok=True)
-    (DATA / "catalog.json").write_text(json.dumps({"units": units, "weapons": weapons}), "utf8")
-    np.savez_compressed(DATA / "priority.npz", priority=table)
+    (DATA / "catalog.json").write_text(json.dumps({"units": units, "weapons": weapons, "tactics": tactics}), "utf8")
+    np.savez_compressed(DATA / "priority.npz", priority=table, relations=relations)
     moves = {u["name"]: MOVE_CLASS_NAMES[u["move_class"]] for u in units if u["move_class"] >= 0}
     (ROOT / "bots/zkbot/data/moveclass.json").write_text(json.dumps(moves, indent=0, sort_keys=True), "utf8")
+    (ROOT / "bots/zkbot/data/jumprange.json").write_text(json.dumps({u["name"]: u["jump_range"] for u in units if u["jump_range"] > 0.0}, indent=0, sort_keys=True), "utf8")
     print(f"{len(units)} units, {len(weapons)} weapons, priority {table.shape}; more than {MAX_MOUNTS} mounts: {truncated}")
     bad = _cross_check(units, weapons)
     print(f"cross-check against bots/zkbot/data: {bad} mismatches")
@@ -448,39 +722,44 @@ def _segments(fine: np.ndarray | None, shape: tuple[int, int]) -> np.ndarray:
     return out
 
 
-def maps(names: list[str], height_band: float = HEIGHT_BAND, slope_band: float = SLOPE_BAND, max_parts: int | None = None,
-         seen_share: float | None = None) -> None:
+def export_map(mf, name: str, out: pathlib.Path, height_band: float = HEIGHT_BAND, slope_band: float = SLOPE_BAND, max_parts: int | None = None, seen_share: float | None = None):
+    """A map's heights and spots to what the sim and the policy load: its name's slug, .npz and .bundle.npz.  Returns the terrain."""
     sys.path.insert(0, str(ROOT / "sim" / "py"))
+    import terrain_map as tm
     import zknav
+    from zkbot import terrain as tr
+    from zkbot.policy import bundle as policy_bundle
     max_parts = zknav.MAX_PARTS if max_parts is None else max_parts
     seen_share = zknav.SEEN_SHARE if seen_share is None else seen_share
-    import terrain_map as tm
-    from zkbot import terrain as tr
-    out = DATA / "maps"
     out.mkdir(parents=True, exist_ok=True)
+    slope = np.nan_to_num(np.asarray(tr.slope_from_corners(mf.corners), np.float32))
+    h16 = tr._block_mean(mf.center, 2)
+    rows, cols = min(h16.shape[0], slope.shape[0]), min(h16.shape[1], slope.shape[1])
+    h16, slope = h16[:rows, :cols], slope[:rows, :cols]
+    water = mf.water_damage * tm.DAMAGE_PER_SLOW_UPDATE
+    speed = np.stack([tr.speed_field(tr.MOVE_CLASSES[c], h16, slope, water, mf.hover_safe) for c in MOVE_CLASS_NAMES])
+    slope_mod = np.array([0.0 if tr.MOVE_CLASSES[c].kind == "ship" else tr.MOVE_CLASSES[c].slope_mod_value for c in MOVE_CLASS_NAMES], np.float32)
+    terrain = tm.build(mf)
+    h16 = h16.astype(np.float32)
+    segments = np.stack([merge_segments(_segments(terrain.fine_label.get(c), (rows, cols)), h16, slope, height_band, slope_band)
+                         for c in MOVE_CLASS_NAMES])
+    built = [zknav.navigation(s, v, max_parts, seen_share) for s, v in zip(segments, speed)]
+    segments = np.stack([labels for labels, _ in built])
+    routes = {f"class{c}_{k}": v for c, (_, r) in enumerate(built) for k, v in r.items()}
+    np.savez_compressed(out / f"{_slug(name)}.npz", height=h16.astype(np.float32), speed=speed.astype(np.float32),
+                        slope=slope, slope_mod=slope_mod, segments=segments, cell=16.0, name=name, **routes)
+    policy_bundle.from_terrain(terrain).save(out / f"{_slug(name)}.bundle.npz")
+    print(f"  {len(terrain.regions)} regions; segments per class " + " ".join(f"{c} {len(r['centres'])}" for c, (_, r) in zip(MOVE_CLASS_NAMES, built)))
+    print(f"{name}: {cols}x{rows}, classes {MOVE_CLASS_NAMES}, passable " +
+          " ".join(f"{(s > 0).mean():.2f}" for s in speed), flush=True)
+    return terrain
+
+
+def maps(names: list[str], height_band: float = HEIGHT_BAND, slope_band: float = SLOPE_BAND, max_parts: int | None = None,
+         seen_share: float | None = None) -> None:
+    import terrain_map as tm
     for name, path in tm.find_maps(names):
-        mf = tm.load_map(path, name)
-        slope = np.nan_to_num(np.asarray(tr.slope_from_corners(mf.corners), np.float32))
-        h16 = tr._block_mean(mf.center, 2)
-        rows, cols = min(h16.shape[0], slope.shape[0]), min(h16.shape[1], slope.shape[1])
-        h16, slope = h16[:rows, :cols], slope[:rows, :cols]
-        water = mf.water_damage * tm.DAMAGE_PER_SLOW_UPDATE
-        speed = np.stack([tr.speed_field(tr.MOVE_CLASSES[c], h16, slope, water, mf.hover_safe) for c in MOVE_CLASS_NAMES])
-        slope_mod = np.array([0.0 if tr.MOVE_CLASSES[c].kind == "ship" else tr.MOVE_CLASSES[c].slope_mod_value for c in MOVE_CLASS_NAMES], np.float32)
-        terrain = tm.build(mf)
-        h16 = h16.astype(np.float32)
-        segments = np.stack([merge_segments(_segments(terrain.fine_label.get(c), (rows, cols)), h16, slope, height_band, slope_band)
-                             for c in MOVE_CLASS_NAMES])
-        built = [zknav.navigation(s, v, max_parts, seen_share) for s, v in zip(segments, speed)]
-        segments = np.stack([labels for labels, _ in built])
-        routes = {f"class{c}_{k}": v for c, (_, r) in enumerate(built) for k, v in r.items()}
-        np.savez_compressed(out / f"{_slug(name)}.npz", height=h16.astype(np.float32), speed=speed.astype(np.float32),
-                            slope=slope, slope_mod=slope_mod, segments=segments, cell=16.0, name=name, **routes)
-        from zkbot.policy import bundle as policy_bundle
-        policy_bundle.from_terrain(terrain).save(out / f"{_slug(name)}.bundle.npz")
-        print(f"  {len(terrain.regions)} regions; segments per class " + " ".join(f"{c} {len(r['centres'])}" for c, (_, r) in zip(MOVE_CLASS_NAMES, built)))
-        print(f"{name}: {cols}x{rows}, classes {MOVE_CLASS_NAMES}, passable " +
-              " ".join(f"{(s > 0).mean():.2f}" for s in speed))
+        export_map(tm.load_map(path, name), name, DATA / "maps", height_band, slope_band, max_parts, seen_share)
 
 
 def splits(folds: int = 5, seed: int = 0) -> None:

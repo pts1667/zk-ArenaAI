@@ -19,15 +19,18 @@ sys.path.insert(0, str(ROOT / "py"))
 sys.path.insert(0, str(ROOT.parent / "bots"))
 import zknav  # noqa: E402
 from zkbot.policy import rawframe  # noqa: E402
-ABI_VERSION = 4
+ABI_VERSION = 14
 MAX_MOUNTS = 8
 TICK_FRAMES = 5
 FRAMES_PER_SECOND = 30
 MOVE_CLASSES = ("kbot", "tank", "spider", "amph", "hover", "ship")
-ADVANCE, HOLD, ORDERS = 0, 1, 2
-ORDER_NONE, ORDER_MOVE, ORDER_FIGHT, ORDER_ATTACK, ORDER_MANUAL_FIRE = 0, 1, 2, 3, 6
-MOBILE, AIR, ARMED, FIREPROOF = 1, 2, 4, 8
+ADVANCE, HOLD, ORDERS, SCRIPTED = 0, 1, 2, 3
+ORDER_NONE, ORDER_MOVE, ORDER_FIGHT, ORDER_ATTACK, ORDER_MANUAL_FIRE, ORDER_JUMP, ORDER_CLOAK_ON, ORDER_CLOAK_OFF = 0, 1, 2, 3, 6, 7, 8, 9
+ORDER_BUILD, ORDER_ASSIST, ORDER_RECLAIM, ORDER_PRODUCE, ORDER_MOVE_STATE, ORDER_FIRE_STATE, ORDER_UNIT_AI, ORDER_SELF_DESTRUCT = 10, 11, 13, 14, 15, 16, 17, 18
+MOBILE, AIR, ARMED, FIREPROOF, FACTORY, PLOPPABLE, COMMANDER, CAN_CLOAK, STARTS_CLOAKED, FIRES_CLOAKED, AREA_CLOAK_ON, LEAVES_GHOST, KAMIKAZE_BLIND, FLOATS = 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192
+FEATURES_PER_SIDE = 256             # records a frame can hold: more than is in sight in any game looked at
 W_TURRET, W_NO_AUTO_TARGET, W_MANUAL, W_UNMODELLED = 2, 16, 512, 2048
+W_PIERCES, W_ONE_HIT_EACH = 524288, 1048576
 
 
 class WeaponRec(ct.Structure):
@@ -36,26 +39,43 @@ class WeaponRec(ct.Structure):
         "blast_radius", "edge", "height_mod", "spray", "accuracy", "moving_accuracy",
         "para_seconds", "extra_para", "slow_factor", "disarm_mult", "disarm_penalty", "disarm_time", "overstun_seconds",
         "overslow", "shield_cost", "dyn_exp", "dyn_range", "climb_frames", "shield_power", "shield_regen", "shield_radius",
+        "shield_energy", "arc",
         "vel_threshold", "vel_base", "vel_scale", "alpha_damage",
         "area_dps", "area_radius", "area_plateau", "area_range_fall", "area_plateau_fall", "area_time_fall", "area_frames",
-        "burn_frames", "burn_random", "burn_chance", "burn_damage")] + [(n, ct.c_int32) for n in (
+        "burn_frames", "burn_random", "burn_chance", "burn_damage",
+        "okp_damage", "okp_frames", "okp_full_frames", "okp_hit_mod", "okp_min_range", "okp_fast_mult", "okp_radar_mult",
+        "radar_wobble_penalty", "radar_dot_penalty")] + [(n, ct.c_int32) for n in (
             "kind", "flags", "shield_intercept", "intercepted_by")]
 
 
 class TypeRec(ct.Structure):
     _fields_ = [(n, ct.c_float) for n in (
         "cost", "hp", "speed", "accel", "brake", "turn_rate", "slow_turn_speed",
-        "footprint_radius", "hit_radius", "armored_mult", "auto_heal", "max_range",
-        "los_radius", "air_los_radius", "radar_radius", "los_height", "stockpile_frames", "reload_move_penalty")] + [(n, ct.c_int32) for n in (
-            "def_id", "armor_class", "move_class", "category", "flags", "explode_weapon", "n_mounts")] + [
+        "footprint_radius", "hit_radius", "armored_mult", "max_range", "idle_regen", "idle_time",
+        "los_radius", "air_los_radius", "radar_radius", "los_height", "stockpile_frames", "reload_move_penalty",
+        "metal_cost", "energy_cost", "build_time", "build_speed", "build_range", "metal_make", "energy_make", "extract_mult", "pylon_range",
+        "reclaim_speed", "wreck_metal", "wreck_hp", "heap_metal", "heap_hp", "energy_upkeep", "stockpile_cost", "close_frames",
+        "cloak_cost", "cloak_cost_moving", "decloak_distance", "bestowed_decloak", "area_cloak_radius", "area_cloak_upkeep",
+        "perceived_range", "heat_per_shot", "heat_decay", "heat_max_slow", "heat_initial", "bait_cost", "kamikaze_distance", "detonate_reach", "drop_height", "drop_gravity", "jump_range", "jump_speed", "jump_height", "jump_reload", "jump_delay", "burrow_speed")] + [(n, ct.c_int32) for n in (
+            "move_state", "fire_state", "no_chase", "bait_level", "bait_target", "bait_target_armor",
+            "def_id", "wreck_feature", "heap_feature", "armor_class", "move_class", "category", "flags", "explode_weapon", "n_mounts", "landing_weapon", "drop_weapon")] + [
         ("mount_weapon", ct.c_int32 * MAX_MOUNTS), ("mount_only", ct.c_int32 * MAX_MOUNTS),
         ("mount_bad", ct.c_int32 * MAX_MOUNTS)]
 
 
+class TacticsRec(ct.Structure):
+    _fields_ = [(n, ct.c_float) for n in (
+        "search_range", "idle_push_dist_sq", "idle_chase_leeway", "idle_commit_dist", "idle_commit_mult", "idle_enemy_mult",
+        "flee_order_dis", "flee_leeway", "flee_distance", "min_flee_range", "flee_vel_prediction",
+        "weapon_range", "stopping_distance", "velocity_prediction", "skirm_order_dis", "skirm_order_dis_min", "hug_range", "skirm_leeway",
+        "skirm_range_override", "reload_skirm_leeway", "skirm_blocked_frames", "vel_pred_chase", "skirm_keep_leeway", "skirm_only_near", "my_speed")] + [
+        (n, ct.c_int32) for n in ("flags", "weapon_num", "blocked_on_fight")]
+
+
 class UnitState(ct.Structure):
     _fields_ = [(n, ct.c_float) for n in (
-        "x", "z", "vx", "vz", "heading", "speed", "hp", "damage_taken", "para", "shield", "disarm")] + [
-        (n, ct.c_int32) for n in ("alive", "order", "target", "stock")]
+        "x", "z", "vx", "vz", "heading", "speed", "hp", "damage_taken", "para", "shield", "disarm", "build", "heat", "jump_charge")] + [
+        (n, ct.c_int32) for n in ("alive", "order", "target", "stock", "cloaked", "chasing", "dodging", "shots_fired", "jumping")]
 
 
 def _load_library() -> ct.CDLL:
@@ -65,7 +85,7 @@ def _load_library() -> ct.CDLL:
     fl, it = ct.c_float, ct.c_int
     fp, ip = ct.POINTER(ct.c_float), ct.POINTER(ct.c_int)
     lib.zk_catalog_new.restype = vp
-    lib.zk_catalog_new.argtypes = [ct.POINTER(TypeRec), it, ct.POINTER(WeaponRec), it, fp]
+    lib.zk_catalog_new.argtypes = [ct.POINTER(TypeRec), it, ct.POINTER(WeaponRec), it, fp, ct.POINTER(TacticsRec), ct.POINTER(ct.c_uint8)]
     lib.zk_catalog_free.argtypes = [vp]
     lib.zk_map_new.restype = vp
     lib.zk_map_new.argtypes = [it, it, fl, fp, fp, it, fp, fp, fp, fp, ct.POINTER(ct.c_short)]
@@ -84,6 +104,14 @@ def _load_library() -> ct.CDLL:
     lib.zk_world_get.argtypes = [cvp, it, ct.POINTER(UnitState)]
     lib.zk_world_ready_weapons.argtypes = [vp]
     lib.zk_world_kill.argtypes = [vp, it]
+    lib.zk_world_set_hp.argtypes = [vp, it, fl]
+    lib.zk_world_set_shield.argtypes = [vp, it, fl]
+    lib.zk_world_economy.argtypes = [vp, it, fp, fl, fl, fl, fl, fl]
+    lib.zk_world_resources.argtypes = [cvp, it, fp]
+    lib.zk_world_add_feature.restype = it
+    lib.zk_world_add_feature.argtypes = [vp, fl, fl, fl, fl, fl, it]
+    lib.zk_world_features.restype = it
+    lib.zk_world_features.argtypes = [vp, it, vp, it]
     lib.zk_world_view.restype = it
     lib.zk_world_view.argtypes = [vp, it, vp, it, fp, it, fp]
     lib.zk_batch_new.restype = vp
@@ -92,12 +120,13 @@ def _load_library() -> ct.CDLL:
     lib.zk_batch_reset.argtypes = [vp, it, cvp, ct.c_uint64, it, it, ip, ip, fp, fp, fp, fp, fp, ip, fp]
     lib.zk_batch_world.restype = vp
     lib.zk_batch_world.argtypes = [vp, it]
-    lib.zk_batch_step.argtypes = [vp, ip, it, vp, ip, it, vp, it, ip, fp, fp]
+    lib.zk_batch_step.argtypes = [vp, ip, it, vp, ip, it, vp, it, ip, fp, fp, vp, it, ip]
     lib.zk_replay.argtypes = [cvp, ct.POINTER(vp), ip, it, ip, ip, ip, fp, fp, fp, fp, ct.POINTER(ct.c_uint8), it,
                               ct.c_uint64, ip, it, it, it, fp]
     if lib.zk_abi_version() != ABI_VERSION:
         raise RuntimeError("libzksim has another ABI version: rebuild it")
-    if lib.zk_sizeof_unit_record() != rawframe.UNIT_DTYPE.itemsize or lib.zk_global_count() != len(rawframe.GLOBAL_FIELDS):
+    if (lib.zk_sizeof_unit_record() != rawframe.UNIT_DTYPE.itemsize or lib.zk_sizeof_feature_record() != rawframe.FEATURE_DTYPE.itemsize
+            or lib.zk_global_count() != len(rawframe.GLOBAL_FIELDS)):
         raise RuntimeError("libzksim was built from another raw frame schema: rebuild it")
     for got, want in ((lib.zk_sizeof_weapon(), WeaponRec), (lib.zk_sizeof_type(), TypeRec), (lib.zk_sizeof_state(), UnitState)):
         if got != ct.sizeof(want):
@@ -133,13 +162,16 @@ class Catalog:
         data = json.loads((directory / "catalog.json").read_text("utf8"))
         self.units = data["units"]
         self.weapons = data["weapons"]
-        self._install(np.load(directory / "priority.npz")["priority"].astype(np.float32))
+        arrays = np.load(directory / "priority.npz")
+        self.tactics, self.relations = data["tactics"], arrays["relations"]
+        self._install(arrays["priority"].astype(np.float32))
 
     @classmethod
     def from_records(cls, units: list[dict], weapons: list[dict]) -> "Catalog":
         """A small catalog for tests: every weapon rates every unit equally."""
         self = cls.__new__(cls)
         self.units, self.weapons = units, weapons
+        self.tactics, self.relations = [{} for _ in units], np.zeros((len(units), len(units)), np.uint8)
         self._install(np.zeros((len(weapons), len(units)), np.float32))
         return self
 
@@ -148,6 +180,7 @@ class Catalog:
         self.weapon_index = {w["name"]: i for i, w in enumerate(self.weapons)}
         types = (TypeRec * len(self.units))()
         for rec, u in zip(types, self.units):
+            rec.move_state, rec.fire_state = 1, 2      # the engine's defaults, for records that don't say
             _fill(rec, u)
             rec.n_mounts = len(u["mount_weapon"])
             for i in range(rec.n_mounts):
@@ -157,10 +190,26 @@ class Catalog:
         weapons = (WeaponRec * len(self.weapons))()
         for rec, w in zip(weapons, self.weapons):
             _fill(rec, w)
-        self.handle = _lib.zk_catalog_new(types, len(self.units), weapons, len(self.weapons), _floats(priority))
+        tactics = (TacticsRec * len(self.units))()
+        for rec, t in zip(tactics, self.tactics):
+            _fill(rec, t)
+        relations = np.require(self.relations, np.uint8, "C")
+        self.handle = _lib.zk_catalog_new(types, len(self.units), weapons, len(self.weapons), _floats(priority), tactics,
+                                          relations.ctypes.data_as(ct.POINTER(ct.c_uint8)))
 
     def weapon_of(self, unit: str, mount: int = 0) -> dict:
         return self.weapons[self.units[self.index[unit]]["mount_weapon"][mount]]
+
+
+# LuaRules/Configs/start_setup.lua.  Storage is a commander's own: the game starts with none besides.
+START_METAL, START_ENERGY = 350.0, 350.0
+INNATE_METAL, INNATE_ENERGY = 2.0, 2.0
+COMMANDER_STORAGE = 500.0
+
+
+def _set_economy(world, spots: np.ndarray, metal: float, energy: float, innate_metal: float, innate_energy: float, storage: float) -> None:
+    triples = np.require(spots, np.float32, "C").reshape(-1, 3)
+    _lib.zk_world_economy(world, len(triples), _floats(triples), metal, energy, innate_metal, innate_energy, storage)
 
 
 ROUTE_ARRAYS = ("centres", "edge_to", "gates", "next_edge")
@@ -236,8 +285,34 @@ class World:
     def fight(self, unit: int, x: float, z: float) -> None:
         _lib.zk_world_order(self.handle, unit, ORDER_FIGHT, x, z, -1)
 
+    def set_move_state(self, unit: int, state: int) -> None:
+        """Hold position 0, maneuver 1, roam 2."""
+        _lib.zk_world_order(self.handle, unit, ORDER_MOVE_STATE, 0.0, 0.0, state)
+
+    def set_fire_state(self, unit: int, state: int) -> None:
+        """Hold fire 0, return fire 1, fire at will 2."""
+        _lib.zk_world_order(self.handle, unit, ORDER_FIRE_STATE, 0.0, 0.0, state)
+
+    def jump(self, unit: int, x: float, z: float) -> None:
+        """Walks into range and goes when charged.  Nothing happens for what can't jump, or if it couldn't walk where it would land."""
+        _lib.zk_world_order(self.handle, unit, ORDER_JUMP, x, z, -1)
+
+    def self_destruct(self, unit: int) -> None:
+        """A bomb goes off now, unless it's stunned.  Nothing else does."""
+        _lib.zk_world_order(self.handle, unit, ORDER_SELF_DESTRUCT, 0.0, 0.0, 0)
+
+    def set_unit_ai(self, unit: int, on: bool) -> None:
+        """The tactical AI, which a player can turn off a unit at a time."""
+        _lib.zk_world_order(self.handle, unit, ORDER_UNIT_AI, 0.0, 0.0, 1 if on else 0)
+
+    def set_hp(self, unit: int, hp: float) -> None:
+        _lib.zk_world_set_hp(self.handle, unit, hp)
+
     def kill(self, unit: int) -> None:
         _lib.zk_world_kill(self.handle, unit)
+
+    def set_shield(self, unit: int, charge: float) -> None:
+        _lib.zk_world_set_shield(self.handle, unit, charge)
 
     def attack(self, unit: int, target: int) -> None:
         _lib.zk_world_order(self.handle, unit, ORDER_ATTACK, 0.0, 0.0, target)
@@ -247,6 +322,39 @@ class World:
 
     def ready_weapons(self) -> None:
         _lib.zk_world_ready_weapons(self.handle)
+
+    def economy(self, spots: np.ndarray = np.zeros((0, 3)), metal: float = START_METAL, energy: float = START_ENERGY, innate_metal: float = INNATE_METAL,
+                innate_energy: float = INNATE_ENERGY, storage: float = COMMANDER_STORAGE) -> None:
+        """Turns on resources and construction.  spots: S x 3, x, z, income.  Before adding extractors: they read their spot when added."""
+        _set_economy(self.handle, spots, metal, energy, innate_metal, innate_energy, storage)
+
+    def build(self, unit: int, type_name: str, x: float, z: float) -> None:
+        _lib.zk_world_order(self.handle, unit, ORDER_BUILD, x, z, self.catalog.index[type_name])
+
+    def assist(self, unit: int, target: int) -> None:
+        _lib.zk_world_order(self.handle, unit, ORDER_ASSIST, 0.0, 0.0, target)
+
+    def produce(self, factory: int, type_name: str | None) -> None:
+        _lib.zk_world_order(self.handle, factory, ORDER_PRODUCE, 0.0, 0.0, -1 if type_name is None else self.catalog.index[type_name])
+
+    def reclaim(self, unit: int, feature: int) -> None:
+        _lib.zk_world_order(self.handle, unit, ORDER_RECLAIM, 0.0, 0.0, feature)
+
+    def cloak(self, unit: int, on: bool) -> None:
+        _lib.zk_world_order(self.handle, unit, ORDER_CLOAK_ON if on else ORDER_CLOAK_OFF, 0.0, 0.0, -1)
+
+    def add_feature(self, x: float, z: float, metal: float, hp: float = 100.0, radius: float = 16.0, feature_def: int = -1) -> int:
+        return _lib.zk_world_add_feature(self.handle, x, z, metal, hp, radius, feature_def)
+
+    def features(self, side: int) -> np.ndarray:
+        """What this side has in sight now."""
+        records = np.zeros(FEATURES_PER_SIDE, rawframe.FEATURE_DTYPE)
+        return records[:_lib.zk_world_features(self.handle, side, records.ctypes.data, FEATURES_PER_SIDE)]
+
+    def resources(self, side: int) -> dict[str, float]:
+        out = np.zeros(6, np.float32)
+        _lib.zk_world_resources(self.handle, side, _floats(out))
+        return dict(zip(("metal", "energy", "metal_income", "energy_income", "overdrive_metal", "overdrive_energy"), map(float, out)))
 
     def step(self, ticks: int = 1) -> None:
         _lib.zk_world_step(self.handle, ticks)
@@ -264,7 +372,7 @@ class World:
         glob = np.zeros(len(rawframe.GLOBAL_FIELDS), np.float32)
         where = np.array(base, np.float32)
         n = _lib.zk_world_view(self.handle, side, records.ctypes.data, cap, _floats(glob), commander, _floats(where))
-        return rawframe.Frame(records[:n], np.zeros(0, rawframe.SITE_DTYPE), glob)
+        return rawframe.Frame(records[:n], np.zeros(0, rawframe.SITE_DTYPE), glob, self.features(side))
 
     def get(self, unit: int) -> UnitState:
         state = UnitState()
@@ -286,6 +394,8 @@ class Batch:
         self.counts = np.zeros((games, 2), np.int32)
         self.globs = np.zeros((games, 2, len(rawframe.GLOBAL_FIELDS)), np.float32)
         self.stats = np.zeros((games, 2, STATS), np.float32)
+        self.features = np.zeros((games, 2, FEATURES_PER_SIDE), rawframe.FEATURE_DTYPE)
+        self.feature_counts = np.zeros((games, 2), np.int32)
         self.sites: list[np.ndarray] = [np.zeros(0, rawframe.SITE_DTYPE)] * games
         self.positions = np.arange(games, dtype=np.int32)
 
@@ -308,6 +418,17 @@ class Batch:
         if sites is not None:
             self.sites[game] = sites
 
+    def economy(self, game: int, spots: np.ndarray, metal: float = START_METAL, energy: float = START_ENERGY, innate_metal: float = INNATE_METAL,
+                innate_energy: float = INNATE_ENERGY, storage: float = COMMANDER_STORAGE) -> None:
+        """Turns on resources and construction in a game just reset."""
+        _set_economy(_lib.zk_batch_world(self.handle, game), spots, metal, energy, innate_metal, innate_energy, storage)
+
+    def add_features(self, game: int, features: np.ndarray) -> None:
+        """What lies on a map from the start, in a game just reset.  N x 5: x, z, metal, hp, radius; and N: the def."""
+        world = _lib.zk_batch_world(self.handle, game)
+        for x, z, metal, hp, radius, feature_def in features:
+            _lib.zk_world_add_feature(world, x, z, metal, hp, radius, int(feature_def))
+
     def step(self, orders: np.ndarray | None = None, order_offsets: np.ndarray | None = None, games: np.ndarray | None = None, ticks: int = 3) -> None:
         """orders: ORDER_DTYPE, grouped by listed game; order_offsets: where each listed game's begin, plus the end."""
         listed = self.positions if games is None else np.asarray(games, np.int32)
@@ -315,18 +436,21 @@ class Batch:
             orders = np.zeros(0, ORDER_DTYPE)
             order_offsets = np.zeros(len(listed) + 1, np.int32)
         _lib.zk_batch_step(self.handle, _ints(listed), len(listed), orders.ctypes.data, _ints(np.asarray(order_offsets, np.int32)), ticks,
-                           self.records.ctypes.data, self.cap, _ints(self.counts), _floats(self.globs), _floats(self.stats))
+                           self.records.ctypes.data, self.cap, _ints(self.counts), _floats(self.globs), _floats(self.stats),
+                           self.features.ctypes.data, FEATURES_PER_SIDE, _ints(self.feature_counts))
 
     def refresh(self, game: int) -> None:
         """This game's frames, in place, without stepping: after a reset, while the rest of the batch stays as it was."""
         empty = np.zeros(1, ORDER_DTYPE)
         _lib.zk_batch_step(self.handle, _ints(self.positions[game:game + 1]), 1, empty.ctypes.data, _ints(np.zeros(2, np.int32)), 0,
-                           self.records[game:].ctypes.data, self.cap, _ints(self.counts[game:]), _floats(self.globs[game:]), _floats(self.stats[game:]))
+                           self.records[game:].ctypes.data, self.cap, _ints(self.counts[game:]), _floats(self.globs[game:]), _floats(self.stats[game:]),
+                           self.features[game:].ctypes.data, FEATURES_PER_SIDE, _ints(self.feature_counts[game:]))
 
     def frame(self, position: int, side: int, game: int | None = None) -> rawframe.Frame:
         """The frame of the position-th listed game, a view into this batch's buffers, so valid until the next step."""
         n = int(self.counts[position, side])
-        return rawframe.Frame(self.records[position, side, :n], self.sites[position if game is None else game], self.globs[position, side])
+        return rawframe.Frame(self.records[position, side, :n], self.sites[position if game is None else game], self.globs[position, side],
+                              self.features[position, side, :int(self.feature_counts[position, side])])
 
     def frame_hash(self) -> int:
         """Of everything the last step wrote, to compare runs."""
@@ -336,6 +460,7 @@ class Batch:
             for side in (0, 1):
                 n = int(self.counts[position, side])
                 h.update(self.records[position, side, :n].tobytes())
+                h.update(self.features[position, side, :int(self.feature_counts[position, side])].tobytes())
         h.update(self.stats.tobytes())
         return int.from_bytes(h.digest()[:8], "little")
 

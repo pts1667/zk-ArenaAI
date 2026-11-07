@@ -1158,14 +1158,43 @@ flags the bot is unchanged.  Numbers: `docs/learned-policy/00-overview.md`, `01-
   - Caps: 256 controllable in a shared pool of 592 units.  Other alliances' units in sight come first, then on radar, then everything else.
   - Teams: units carry `player`, `ally_team` and `knowledge`, so the same model reads any team layout.  Frame schema 2 and net `FEATURE_VERSION` 2: older recordings and checkpoints no longer load.  ABI 4.
     Not done: the sim is still two sides of one player, nothing is trained on more, and ControllerAI sends no per-unit `team` (a hostile's player falls back to its alliance).
-  - Maps: Agalta, Faultline, FrostyCove, Red Comet Remake and TitanDuel, in `TRAINING_MAPS`.  Early end: from 2 minutes, a side with over 2.5x the other's metal value wins.
+  - Maps: Agalta, Faultline, FrostyCove, Red Comet Remake and TitanDuel, in `TRAINING_MAPS`.  Early end: from 2 minutes, a side with over 2.5x the other's metal value and at least 10,000 metal ahead wins (`03-training.md` 10.2, which also covers why half of script games now draw).
   - Live cost with everything in view: 10 / 33 / 59 / 81 / 100 ms at 40 / 128 / 192 / 256 / 400 a side, so the 60 ms line is about 192.  The guard in `02-policy.md` 5.3 isn't built (`policy.budget_ms` and `policy.max_units` don't exist in the code yet).
   - Orders: a unit with a target now gets the direction and distance to where the target is, and two pair buckets mark shooter and target.  `FEATURE_VERSION` 3.  Live gaps left: jump, cloak and manual fire orders read as no order, and a target out of sight reads as dead.
   - Learning: `03-training.md` 10.2.  The toy doesn't find focus fire and seed luck is large (17% against 55% on the same settings), so compare settings over several seeds.  `sim-short`, 2M decisions, went from about 3% to about 15-20% wins against the fight script, with a weak critic and rising entropy.
   - Whether the attack-target inputs help is still open: the comparison was stopped at 13 of about 122 iterations.
   - Memory: no leak, but reserved memory fragments until the card spills into system memory, and training then runs about 10x slower.  The allocator settings and `empty_cache` are now defaults in `policy_train.py`.  Trainings sharing the card must pass `--gpu-runs N`.  `--concurrent` is the sim's default.
   - `torch.compile` was tried with recompiles under control and removed: no gain, and one run hung.  `03-training.md` 10.3.
-  - The first real run, `sim-1v1`, started 2026-11-06: `/mnt/d/zk-learned/runs/sim-1v1`, 150M decisions, 256 games, one pass, 32 steps, concurrent, 40 a side, the five `TRAINING_MAPS`.  About 835 decisions/s, so about 2 days.  To stop it, create a file named `stop` in the run directory; delete that file and start the same command again, and it carries on from the last checkpoint (one every 20 iterations).
+  - `sim-1v1`, the first long run, on fixed armies, was stopped at iteration 20 at the user's request and isn't worth resuming.  To stop any run, create a file named `stop` in its directory; delete that file and start the same command again, and it carries on from the last checkpoint (one every 20 iterations).
+- **Later on 2026-11-06: a new game for the fight script, not committed yet.**
+  - The sim has a small economy (`sim/src/economy.cpp`, ABI 7, `01-simulator.md` 8.9) and an opening both sides play by rule (`tools/policy_opening.py`): free factory, repeating its raider; extractor and solar at each of the 6 nearest spots within 1,300 elmos; commander then assists the factory.  The fight script (`tools/policy_script.py`, `03-training.md` 10.2) attack-moves finished fighters to the enemy's start and then its buildings, sends the hurt back to recover, and from 3:00 gathers them into groups that grow with time.  The policy controls only raiders on its side.
+  - Commanders earn 4 metal and 6 energy, which isn't in the unit dump.  Logged income confirmed it.  No engine battery covers construction yet.  Not modelled: reclaim, wrecks, repair.  Regeneration is in and agrees with a real game.
+  - Overdrive and pylon grids are in, and match the real gadget on seven layouts (`python tools/sim_engine.py overdrive`).  The game's energy income is net of what overdrive draws, and so is the sim's.
+  - Starts are the maps' real start boxes.  `python tools/sim_engine.py facts MAP...` asks a game for boxes and metal spots, into `sim/data/map_facts.json`.  It found that the export had 22 of Faultline's 44 spots and the wrong income on Red Comet and FrostyCove; `terrain_map.load_map` now prefers this file.  `sim/data/maps` is ignored by git, so after a pull run `tools/sim_data.py maps` for the five training maps (in WSL, with `ZK_MAPS_DIR=/mnt/c/Users/Thoma/Downloads/zero-k-portable/maps`).
+  - `opening-smoke`, 726k decisions: 64% in one 64-game test.  Doing nothing scores 25%.  How the policy wins hasn't been looked at, and it may be mostly holding back: `03-training.md` 10.2.  728 decisions/s, about 63M a day.
+
+  - **The script grew** (`tools/policy_script.py`): fighters finish the enemy's buildings once they've reached its start, a raider that regenerates retreats below 40% until 90%, and from 3:00 they go in groups worth 400 metal, 200 more a minute.  Early end needs 2.5 times the value and a lead of 10,000.  `03-training.md` 10.2.
+  - **The rest of S-M8 is in**, ABI 8, frame schema 3 (`01-simulator.md` 8.10): wrecks and heaps, reclaim, upkeep, cloak, stockpile cost, a shot solar closing.  `python tools/sim_engine.py mechanics` plays them out in a game, and the sim matches its numbers.  That run found radar doesn't see cloaked units (`unit_stealth.lua`) and recent damage fades every frame.  The sim also had solars always armoured.  Blasts don't throw wrecks in the sim; in the game a Singularity threw a heap 2,519 elmos.
+  - **The model sees features in line of sight**, here and live: up to 32 tokens, pair buckets by distance to each unit, and a region column with all the metal in sight (`02-policy.md` 2.3, 2.4).  `FEATURE_VERSION` is 4, so **older weights don't load**.
+  - **Nothing issues RECLAIM in training yet.**  The opening's commander assists its factory for good, and kind 13 is masked until stage 3, so wrecks don't change a game's outcome so far.
+  - **Faultline draws its start boxes at each load**: 3 layouts in 6 launches.  `sim/data/map_facts.json` now has `layouts` and `features`, and `tests/policy/data` was regenerated.  Maps' own features are placed in every game.
+  - `m8-smoke`: 16% wins in one 64-game test, doing nothing 1%, the script itself 36%, 524 decisions a second against 632.  Script against script now draws 27%, up from 20%, unexplained.  Replay gate still fails: `results/simgate/m8.json`.
+
+  - **Training moves to self-play on its own**, once two tests in a row average 80% wins against the script, 1% of new games an iteration, pausing below 70% (`03-training.md` 10.2a).  Older figures above that say "%" in a test are wins alone.
+  - **Shields**, ABI 9 (`01-simulator.md` 8.11, `sim/src/shields.cpp`, `sim/tests/test_shields.py`): they stop hostile shots along the path and in 3D, a ballistic shell can fly over a small one, and the shot explodes at the surface.  Charging costs energy, and touching shields share charge.  Beams now cost the whole shot (850 for the Stinger, it was 35 a shot) and part of a beam gets through when the charge runs out.  Stunned or unfinished shields no longer charge.  Still not done: stun taking charge to 0, shields that start empty, Funnelweb's recharge delay.  The `shield_*` lines of `python tools/sim_engine.py mechanics` are compared with the sim in the tables in 8.11.  Replay gate unchanged and still failing: 0.604 against 0.665, `results/simgate/shields.json`.
+  - **Unit AI**, ABI 10 (`01-simulator.md` 8.12, `sim/src/unit_ai.cpp`, `sim/tests/test_unit_ai.py`): attack-move, idle, hold position, fire states, Zero-K's tactical AI, overkill and bait prevention, radar aim, Stardust heat and scatter.  `ZK_BEHAVIOUR_SCRIPTED` is the old obedient behaviour, for mechanics tests.  Replay gate still fails on `advance`; the new `orders` arm is the best of the three (`results/simgate/unit_ai.json`).  Script against script is now 46/8/46.
+  - **`selfplay-6h` stopped at iteration 221, no measurable learning** (`03-training.md` 10.6): 26% wins against the script over all tests, 8% in same-factory games, no trend, self-play never began.  It ran on ABI 8.
+  - **The factory drawn decides most games**: the better one by overall score wins 91% of decided script games, Spider scores 0.92 and Veh 0.21.  Not checked against the engine, and it caps what a test against the script can show.
+  - **Bombs go off by themselves**, ABI 11 (`01-simulator.md` 8.13, `update_kamikaze` in `sim/src/unit_ai.cpp`): Limpet, Imp, Skuttle, Snitch and anything else on the ground with `canKamikaze`, near an attack target, or near any seen enemy on fire at will, plus `World.self_destruct`.  Checked in a game.  The policy can't use them yet: attack is masked for units that can't hit, and it can't set fire states.
+  - **Jumping, digging in and Blastwing's bomb**, ABI 12 (`01-simulator.md` 8.14, `sim/src/jump.cpp`), checked in a game.  The policy can't jump yet.  Script games, speed and the gate weren't rerun.  Pyro's flamer does about half its game damage in the sim (`noExplode`), not fixed.
+  - `~/zksim/build` is rebuilt to ABI 12.
+  - **Frame model: data collected, long run not started** (`03-training.md` 11, `tools/frame_data.py`, `tools/frame_jepa.py`, `tests/policy/test_frame_jepa.py`): a LeJEPA-style encoder from a seat's tokens to one 256-number vector.  Not wired into `policy_model.py`, and no numpy forward for the live bot.
+  - **Map pool** in `D:/zk-learned/maps` (not in git): 98 real and 200 made-up maps with water, lava, islands and open sea (`tools/map_gen.py`, `tests/policy/test_map_pool.py`).  `policy_sim_env.load_pool(directory)` loads it; `SimEnv` still defaults to the five training maps.
+  - **Frames** in `/mnt/d/zk-learned/frames/pool1` (25 GB, not in git): 1M from whole script games with every factory, ships and air included (`frame_world.FrameGames`, `BaseScript`), and 1M from random scenarios with bases, turrets, wrecks and remembered buildings.  `collect --workers 8` makes about 2,500 frames a second of each.
+  - **5,000-step checks don't beat an untrained encoder on most probes**, though the same encoder trained directly on the probes scores 0.99+ on held-out maps (`python tools/frame_jepa.py ceiling`).  The objective or the length is the question, not the architecture.  Run command, stopping rule and what to try next: `03-training.md` 11.3.
+  - **Floating structures**, ABI 13 (`01-simulator.md` 8.15).  `~/zksim/build` is rebuilt to it.  Regression after ABI 12 and 13: script against script 46/8/46, doing nothing 11/22/67, unchanged; replay gate still fails (`results/simgate/jump.json`); speed 39,600 seat steps a second against 42,500, not looked into.
+  - `set_economy` now recomputes income for what already stands.  Ordinary games are unaffected.
+  - **pytest in WSL**: `/tmp` can be cleared when WSL restarts, so it now lives in `~/zksim/pt`: `~/zkml/bin/python -m pip install -q --target ~/zksim/pt pytest`, then `PYTHONPATH=$HOME/zksim/pt:bots`.
 
 To run:
 
@@ -1173,6 +1202,7 @@ To run:
     wsl ~/zkml/bin/python sim/tests/test_sim.py                                  # from the repo in WSL, after cmake --build ~/zksim/build
     wsl ~/zkml/bin/python tools/policy_parity.py
     wsl ~/zkml/bin/python tools/policy_train.py toy --run /mnt/d/zk-learned/runs/NAME --token-budget 16000
+    wsl ~/zkml/bin/python tools/policy_train.py sim --run /mnt/d/zk-learned/runs/NAME --games 256 --passes 1 --iteration 32768 --decisions 150000000
     wsl ~/zkml/bin/python tools/sim_batch_bench.py --games 256 --units 200
     python tools/prun.py NAME --games 3 --jobs 6 --map 'TitanDuel 2.2' --arm shadow=FLAGS,policyshadow --env ZKBOT_POLICY=D:/zk-learned/weights/random.npz
 
@@ -1180,7 +1210,7 @@ Traps:
 
 - In WSL, `pkill -f policy_train` also matches the shell running it, and stops that shell.  Anchor the pattern and break the word:
   `pkill -f "^/home/pts1667/zkml/bin/python tools/polic[y]_train"`.
-- `tools/sim_data.py maps` now also writes `<map>.bundle.npz`; the sim environment uses only `TRAINING_MAPS` in `tools/policy_sim_env.py`.
+- `tools/sim_data.py maps` now also writes `<map>.bundle.npz`; the sim environment uses only `TRAINING_MAPS` in `tools/policy_sim_env.py`, and each needs an entry in `sim/data/map_facts.json`.
 - Next is Phase C (S-M7, T-M2, T-M3/P-M3, T-M4/P-M4, Gate 2).  Gate 2 is the first real test of whether the unproven fight model
   teaches anything that transfers.
 
@@ -1389,6 +1419,11 @@ Older list (2026-11-01, mostly done):
 7. Test other maps from `maps.md` once TitanDuel is stable.
 
 ## 10. Git state
+  - **Shots that go through**, ABI 14 (`01-simulator.md` 8.16, `World::pierce`, `sim/tests/test_pierce.py`): Pyro's damage is now 0.91-1.11 of the game's, from about 0.4; Dante, Gauss turret and Ultimatum were checked too.  A Pyro on a walking target still does 0.55 and a Dagger 0.83, not looked into.  Jump's script score rose from 0.47 to 0.74 and Cloak's fell from 0.29 to 0.16; the better factory now wins 93% of decided games.  Not checked against the engine, and the user expects a spread like this, since the script only builds raiders and some factories have more versatile ones.
+  - **The policy can jump** (`02-policy.md` 4.3): frame flag `JUMP_READY`, schema 4, feature version 5, its own region mask `ptr_jump`, `bots/zkbot/data/jumprange.json`.  An untrained policy chose 455 jumps in 48 sim games, with units seen in the air, and parity holds.  None of those crossed ground it couldn't walk; only tests cover that.  The live command's format is still unverified, and the live bot hasn't been run with it.  **Old weights no longer load.**
+  - **Factories suit the map** (`03-training.md` 11.1, `Ground.suits`): from the metal a class can reach and whether it reaches the enemy; ships need a sea at both bases.  The rules bot's `choose_factory` only picks Cloak or Hover, so it wasn't reused.  Own ships fell by about half in frames, to 3% and 7%.
+  - **Frames recollected** as `/mnt/d/zk-learned/frames/pool2` (25 GB).  `pool1` and the smoke data are deleted, so earlier mentions of them above are history.  The long run hasn't started; its command is in `03-training.md` 11.3.
+  - `~/zksim/build` is rebuilt to ABI 14.
 
 The 2026-11-02 commit contains all bot changes (incl. new `air.py`,
 `burrow.py`, `threat.py`, `data/weapons.json`), `tools/` (`run.sh`,
