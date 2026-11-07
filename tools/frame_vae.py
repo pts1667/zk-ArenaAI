@@ -371,6 +371,26 @@ class FrameVae(nn.Module):
         return (self.region_targets(b) - self.region_mean) / self.region_std, (b.glob_x.float() - self.global_mean) / self.global_std
 
 
+class LatentEncoder(nn.Module):
+    """What an actor keeps of a trained model: the encoder, frozen, and no decoder.  It sees a frame's true names, if a batch has them apart from those the actor is allowed."""
+
+    def __init__(self, model: FrameVae):
+        super().__init__()
+        self.encoder, self.to_mean = model.encoder, model.to_mean
+        self.norm = model.latent_norm if not model.cfg.variational else nn.Identity()
+        self.tokens, self.latent = model.encoder_cfg.queries, model.cfg.latent
+        self.requires_grad_(False)
+        self.eval()
+
+    def train(self, mode: bool = True) -> "LatentEncoder":
+        return super().train(False)
+
+    @torch.no_grad()
+    def forward(self, b) -> torch.Tensor:
+        names = getattr(b, "true_name", None)
+        return self.norm(self.to_mean(self.encoder.read(b if names is None else replace(b, unit_name=names))))
+
+
 def kl_per_token_number(mean: torch.Tensor, log_var: torch.Tensor) -> torch.Tensor:
     """KL from N(0, 1) to N(mean, var), in nats, for each number."""
     return 0.5 * (mean.square() + log_var.exp() - 1.0 - log_var)

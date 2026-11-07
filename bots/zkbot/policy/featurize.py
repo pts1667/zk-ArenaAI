@@ -121,6 +121,7 @@ class Tensors:
     hidden_player: np.ndarray = field(default_factory=lambda: np.zeros(0, np.int32))            # critic only
     feat_x: np.ndarray = field(default_factory=lambda: np.zeros((0, FEATURE_DIM), np.float32))  # F x FEATURE_DIM
     feat_ids: np.ndarray = field(default_factory=lambda: np.zeros(0, np.int64))                 # F
+    true_name: np.ndarray | None = None     # U: set if unit_name has had this game's names dropped
 
 
 def _centroid(x: np.ndarray, z: np.ndarray, fallback: tuple[float, float]) -> np.ndarray:

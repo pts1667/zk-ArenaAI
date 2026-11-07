@@ -71,6 +71,7 @@ class Batch:
     unit_player: object     # B x U
     hidden_ally: object     # B x H
     hidden_player: object   # B x H
+    true_name: object = None    # B x U: before this game's names were dropped, for an encoder trained on them
 
     def to(self, device: str, only: frozenset[str] | None = None) -> "Batch":
         out = {}
@@ -80,8 +81,8 @@ class Batch:
         return Batch(**out)
 
 
-def collate(items: list[fz.Tensors], regions: int = 0) -> Batch:
-    """regions: pad to at least this many, so the recurrent state's shape holds across a batch."""
+def collate(items: list[fz.Tensors], regions: int = 0, pairs: bool = True) -> Batch:
+    """regions: pad to at least this many, so the recurrent state's shape holds across a batch.  pairs: whether anything will read pair buckets, which are most of its memory."""
     b = len(items)
     u = max(max(len(t.unit_x) for t in items), 1)
     r = max(max(len(t.reg_x) for t in items), 1, regions)
@@ -109,7 +110,8 @@ def collate(items: list[fz.Tensors], regions: int = 0) -> Batch:
     tok_kind[:, u + r + s:u + r + s + f] = fz.TK_FEATURE
     tok_kind[:, -2] = fz.TK_GLOBAL
     tok_kind[:, -1] = fz.TK_MEMORY_STATE
-    bucket = np.full((b, n, n), fz.MEMORY_BUCKET, np.int64)
+    bucket = np.full((b, n, n), fz.MEMORY_BUCKET, np.int64) if pairs else None
+    true_name = np.zeros((b, u), np.int64)
     key_mask = np.zeros((b, n), bool)
     key_mask[:, -2:] = True
     ctrl_mask = np.zeros((b, c), bool)
@@ -131,6 +133,7 @@ def collate(items: list[fz.Tensors], regions: int = 0) -> Batch:
     for i, t in enumerate(items):
         nu, nr, ns, nc, ne = len(t.unit_x), len(t.reg_x), len(t.site_x), t.controllable, len(t.enemy_tokens)
         unit_x[i, :nu], unit_name[i, :nu], unit_mask[i, :nu] = t.unit_x, t.unit_name, True
+        true_name[i, :nu] = t.unit_name if t.true_name is None else t.true_name
         unit_ally[i, :nu], unit_player[i, :nu] = t.unit_ally, t.unit_player
         reg_x[i, :nr], reg_mask[i, :nr] = t.reg_x, True
         site_x[i, :ns], site_mask[i, :ns] = t.site_x, True
@@ -139,7 +142,8 @@ def collate(items: list[fz.Tensors], regions: int = 0) -> Batch:
         glob_x[i] = t.glob_x
         tok_kind[i, :nu] = t.tok_kind[:nu]
         idx = np.concatenate((np.arange(nu), u + np.arange(nr), u + r + np.arange(ns), u + r + s + np.arange(nf), [u + r + s + f]))
-        bucket[i][np.ix_(idx, idx)] = t.pair_bucket
+        if pairs:
+            bucket[i][np.ix_(idx, idx)] = t.pair_bucket
         key_mask[i, idx] = True
         ctrl_mask[i, :nc] = True
         kind_mask[i, :nc] = t.kind_mask
@@ -162,7 +166,7 @@ def collate(items: list[fz.Tensors], regions: int = 0) -> Batch:
     return Batch(unit_x, unit_name, unit_mask, reg_x, reg_mask, site_x, site_mask, feat_x, feat_mask, glob_x, tok_kind, bucket, key_mask,
                  np.concatenate(gate_i), np.concatenate(gate_a), np.concatenate(gate_b), np.concatenate(gate_x),
                  ctrl_mask, kind_mask, ptr_enemy, enemy_tokens, enemy_mask, ptr_region, ptr_jump, ptr_wait, ptr_produce, route_bias, hidden_x, hidden_name, hidden_mask,
-                 unit_ally, unit_player, hidden_ally, hidden_player)
+                 unit_ally, unit_player, hidden_ally, hidden_player, true_name)
 
 
 def join(batches: list[Batch]) -> Batch:
@@ -224,6 +228,9 @@ class Block(nn.Module):
 
 
 class Actor(nn.Module):
+    encoder_fields = ENCODER_FIELDS
+    uses_pairs = True
+
     def __init__(self, vocabulary: int):
         super().__init__()
         self.name_embed = nn.Embedding(vocabulary, npnet.NAME_DIM)
@@ -397,14 +404,15 @@ def sample_actions(actor: Actor, b: Batch, units: torch.Tensor, reg_h: torch.Ten
     logp = logp + uses_region * _pick(region_l, region)
     # The enemy head per kind: only a kind with an enemy pointer uses one.
     enemy = torch.full_like(kind, -1)
-    target = torch.gather(reg_h, 1, region[:, :, None].expand(-1, -1, D))
+    width = reg_h.shape[-1]
+    target = torch.gather(reg_h, 1, region[:, :, None].expand(-1, -1, width))
     for slot, k in enumerate(fz.ENEMY_POINTER_KINDS):
         here = (kind == k) & b.ctrl_mask
         if here.any():
             choice = _sample(enemy_l[:, slot])
             logp = logp + here * _pick(enemy_l[:, slot], choice)
             enemy = torch.where(here, choice, enemy)
-            target = torch.where(here[:, :, None], torch.gather(enemy_h, 1, choice[:, :, None].expand(-1, -1, D)), target)
+            target = torch.where(here[:, :, None], torch.gather(enemy_h, 1, choice[:, :, None].expand(-1, -1, width)), target)
     me = units[:, :kind.shape[1]]
     fine_l = actor.fine(me, target)
     fine = _sample(fine_l)
@@ -429,7 +437,8 @@ def evaluate_actions(actor: Actor, b: Batch, units: torch.Tensor, reg_h: torch.T
     region = a.region.clamp_min(0)
     logp = logp + uses_region * _pick(region_l, region)
     ent["region"] = (_masked_entropy(region_l), uses_region)
-    target = torch.gather(reg_h, 1, region[:, :, None].expand(-1, -1, D))
+    width = reg_h.shape[-1]
+    target = torch.gather(reg_h, 1, region[:, :, None].expand(-1, -1, width))
     uses_enemy = a.enemy >= 0
     enemy = a.enemy.clamp_min(0)
     enemy_entropy = torch.zeros_like(logp)
@@ -438,7 +447,7 @@ def evaluate_actions(actor: Actor, b: Batch, units: torch.Tensor, reg_h: torch.T
         if here.any():
             logp = logp + here * _pick(enemy_l[:, slot], enemy)
             enemy_entropy = torch.where(here, _masked_entropy(enemy_l[:, slot]), enemy_entropy)
-    target = torch.where(uses_enemy[:, :, None], torch.gather(enemy_h, 1, enemy[:, :, None].expand(-1, -1, D)), target)
+    target = torch.where(uses_enemy[:, :, None], torch.gather(enemy_h, 1, enemy[:, :, None].expand(-1, -1, width)), target)
     ent["enemy"] = (enemy_entropy, uses_enemy)
     uses_fine = a.fine >= 0
     fine_l = actor.fine(units[:, :a.kind.shape[1]], target)

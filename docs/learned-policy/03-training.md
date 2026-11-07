@@ -1367,4 +1367,41 @@ Muon 0.03 on the same 5,000 steps came out a little under 0.008 (region R^2 0.82
 
 Nearest place, median, by named units in a frame: 0.003 up to 30, 0.017 for 31 to 70, 0.036 above 70; likeliest place, 0.003, 0.033, 0.061.  **More steps went mostly to regions and to position; a unit's other state hardly moved after 5,000 steps,** and a fresh reader did a little worse on the final encoder.  Why isn't measured; the signs are of a latent that's full.  Its numbers matter more: noise at 0.2 of each number's spread takes R^2 from 0.949 to 0.886 (without questions 0.989 to 0.982), losing one unit moves a latent by 0.129 of the distance between frames (0.076), and keeping 512 directions of 768 leaves 0.772 (0.974).  A larger latent might help; that isn't measured.  Encoder 916k parameters, 320k more in training only; 1.6 to 1.9 ms a frame on one CPU thread with torch.  `final/usable.json`.
 
-**For the actor, not built yet:** its transformer reads only latent tokens, each own unit's features read those latents to make its decision, and pointers score against embeddings of the raw features of what they point at.  The user chose sine codes of position in those embeddings, since the dot product of two sine codes depends on the difference of the positions, which a linear embedding of raw coordinates can't give.
+### 11.6 The actor on latents (2026-11-07)
+
+`tools/policy_latent.py`, `tests/policy/test_latent_actor.py`, `policy_train.py --latent-encoder`.  It reads a frozen encoder's latent tokens in place of every token: built to the user's design, and **not yet shown to learn**.
+
+* **A small transformer reads only the latents** and a token of the memory state: 2 blocks, d=128, 4 heads, with no pair bias and no gate layer.  The encoder isn't trained further, and reads true names whatever names this game has dropped for the actor.
+* **Each own unit reads what that made,** one cross-attention, with a query of its own raw features and sine codes of its place.  Its decision comes from that.
+* **Pointers score against embeddings of the raw features** of what they point at.  The user chose sine codes of position in those embeddings, since the dot product of two sine codes depends on the difference of the positions, which a linear embedding of raw coordinates can't give.  So a key ends in a code of its place, and a query in the unit's own code, each band scaled by a gain the unit chooses, which makes that part of the score a sum over bands of gain x cos(band x difference).
+* **Memory is kept:** the global GRU, and one per region, whose query reads the transformer's output.  A region's key is from its raw features and memory, not what it read.
+* The critic is unchanged and reads every privileged token.  Rollouts, masks, decoding and PPO are unchanged; `pm.collate(pairs=False)` skips pair buckets.
+
+Parameters: 1.65M trained and 0.92M frozen, against the first actor's 2.99M.  Of the 1.65M, 0.59M is the global GRU, kept at 384 for the trainer and critic.
+
+**Speed,** 256 games, one pass, 57,344 decisions on the sim, CPU and GPU otherwise idle, iterations from the third on:
+
+| | First actor | On latents |
+|---|---|---|
+| Decisions a second, overall | 950 | 933 |
+| Training, per pass | 1,009 | 1,013 |
+| Collecting | 1,108 | 1,137 |
+| Peak GPU memory | 8.8 GB | **5.1 GB** |
+| GPU busy, mean | 21% | 17% |
+
+So it saves memory and no time.  0 chosen actions were outside their mask.
+
+**Why the GPU is so idle,** measured on the latent actor, collecting and training in turn over 40,960 decisions, with the GPU waited for around each part.  **One thread issuing small calls sets the rate, not the GPU or featurizing.**
+
+| Collecting, 21.2 s, GPU 14% | | Training, 29.8 s, GPU 22% | |
+|---|---|---|---|
+| Waiting for featurizing | 52% | `actor.encode`, 928 calls | 45% |
+| `actor.encode`, 165 calls | 14% | `backward`, 29 calls | 37% |
+| Sim steps | 6% | Waiting for featurizing | 8% |
+| Choosing actions, critic | 11% | Critic | 3% |
+
+The main process used about one core, the workers 2 to 2.5 of their 6, and the machine 3 to 3.5 of 16.  Timed alone, `encode` costs 9 to 30 ms a call from 16 frames to 2,048, in no clear order, so 0.58 ms a decision at 16 and 0.011 at 2,048; a GPU setting the rate would make that grow with the batch.  Training calls it 928 times at about 44 frames, as the memory has to go step by step.  The frozen encoder is about half to two-thirds of each call, and isn't recurrent, so it needn't go step by step.
+
+Pair buckets aren't the cause: 9.5% of featurizing at 1.01 ms a frame, so about 2% of the iteration.  Featurizing waits 67 ms a call, against 41 ms if six workers took 1 ms a frame with nothing else to pay, so sending frames between processes is likely the rest.  Collecting during training ran 933 a second, against 803 for these two phases in turn, though they alone would go at 1,929 and 1,377; sharing one thread's lock is the likely reason, not measured.
+
+**Not built:** the numpy forward, export and parity for the bot, so this actor can't run in `bots/zkbot/policy/net.py` yet.  Muon isn't used for PPO.  Not checked: whether it learns; the token budget, which still allows for pair memory it doesn't use.

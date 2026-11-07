@@ -36,6 +36,7 @@ import torch  # noqa: E402
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT / "bots"))
+import policy_latent  # noqa: E402
 import policy_model as pm  # noqa: E402
 from zkbot.policy import actions as act, bundle as bd, featurize as fz, rawframe as rf, tables  # noqa: E402
 
@@ -82,6 +83,7 @@ class Config:
     self_play_at: float = 0.8       # wins against the script over the last two tests that start the move to self-play
     self_play_holds_below: float = 0.7      # and over the same two, what pauses it
     self_play_per_iteration: float = 0.01   # share of new games added each iteration: 100 iterations from none to all
+    latent_encoder: str = ""        # a trained frame encoder: the actor reads its latents (policy_latent.py) instead of every token
 
 
 # Attention's pairs make a big frame cost more memory per token than a small one.  Fitted on training at 40, 128 and 256 units a
@@ -186,9 +188,13 @@ def name_map(rng: np.random.Generator, vocabulary: int) -> np.ndarray:
 _WORKER: dict = {}
 
 
-def _worker_setup(bundles: dict, kinds: tuple[int, ...]) -> None:
+def _worker_setup(bundles: dict, kinds: tuple[int, ...], pairs: bool = True) -> None:
     signal.signal(signal.SIGINT, signal.SIG_IGN)
-    _WORKER.update(bundles=bundles, kinds=kinds, table=tables.table())
+    _WORKER.update(bundles=bundles, kinds=kinds, table=tables.table(), pairs=pairs)
+
+
+def _drop_names(t: fz.Tensors, names: np.ndarray) -> None:
+    t.true_name, t.unit_name = t.unit_name, names[t.unit_name]
 
 
 def _worker_chunk(chunk: list[tuple[rf.Frame, int]]) -> list[fz.Tensors]:
@@ -200,21 +206,21 @@ def _worker_batch(work: tuple[list[tuple[rf.Frame, int, np.ndarray]], int]) -> p
     items, regions = work
     tensors = _worker_chunk([(f, key) for f, key, _ in items])
     for t, (_, _, names) in zip(tensors, items):
-        t.unit_name = names[t.unit_name]
-    return pm.collate(tensors, regions=regions)
+        _drop_names(t, names)
+    return pm.collate(tensors, regions=regions, pairs=_WORKER["pairs"])
 
 
 class DataWorkers:
     """Featurizing in processes: it is the one part of a decision the GIL would otherwise hold to a single thread.  They are
     forked with every bundle in memory, so a frame only sends a key; fork before the GPU is touched."""
 
-    def __init__(self, count: int, bundles: list[bd.Bundle], kinds: tuple[int, ...]):
+    def __init__(self, count: int, bundles: list[bd.Bundle], kinds: tuple[int, ...], pairs: bool = True):
         self.count = count
         self.keys = {id(b) for b in bundles}
         by_key = {id(b): b for b in bundles}
-        self.pool = multiprocessing.get_context("fork").Pool(count, _worker_setup, (by_key, kinds)) if count else None
+        self.pool = multiprocessing.get_context("fork").Pool(count, _worker_setup, (by_key, kinds, pairs)) if count else None
         if self.pool is None:
-            _worker_setup(by_key, kinds)
+            _worker_setup(by_key, kinds, pairs)
 
     def map(self, items: list[tuple[rf.Frame, bd.Bundle]]) -> list[fz.Tensors]:
         pairs = [(f, id(b)) for f, b in items]
@@ -270,12 +276,12 @@ class Player:
     def _features(self, items: list[tuple[rf.Frame, bd.Bundle, np.ndarray]]) -> list[fz.Tensors]:
         out = self.workers.map([(f, b) for f, b, _ in items])
         for t, (_, _, names) in zip(out, items):
-            t.unit_name = names[t.unit_name]
+            _drop_names(t, names)
         return out
 
     @torch.no_grad()
     def _forward(self, items: list[fz.Tensors], glob: torch.Tensor, regions: torch.Tensor):
-        b = pm.collate(items, regions=regions.shape[1]).to(self.device)
+        b = pm.collate(items, regions=regions.shape[1], pairs=self.actor.uses_pairs).to(self.device)
         with self.autocast:
             _, units, reg_h, new_glob, new_regions = self.actor.encode(b, glob, regions)
             a = pm.sample_actions(self.actor, b, units, reg_h)
@@ -299,10 +305,10 @@ class Learner:
         torch.manual_seed(cfg.seed)
         self.table = tables.table()
         self.vocabulary = len(self.table.names) + 1
-        self.actor = pm.Actor(self.vocabulary).to(device)
+        self.actor = (policy_latent.make(self.vocabulary, cfg.latent_encoder) if cfg.latent_encoder else pm.Actor(self.vocabulary)).to(device)
         self.critic = pm.Critic(self.vocabulary).to(device)
-        params = list(self.actor.parameters()) + list(self.critic.parameters())
-        self.optimizer = torch.optim.Adam(params, lr=cfg.lr_start, eps=cfg.adam_eps)
+        self.trained = [p for p in list(self.actor.parameters()) + list(self.critic.parameters()) if p.requires_grad]
+        self.optimizer = torch.optim.Adam(self.trained, lr=cfg.lr_start, eps=cfg.adam_eps)
         self.decisions = 0
         self.iteration = 0
         self.entropy_coef = {h: ENTROPY_BASE for h in HEADS}
@@ -380,7 +386,7 @@ class Learner:
             for t, ready in enumerate(self.workers.batches(work, rmax)):
                 frames.append(ready)
                 states.append(glob)
-                _, u, r, new_glob, new_regions = self.actor.encode(ready.to(device, only=pm.ENCODER_FIELDS), glob, regions, pair_grad=float(pair_grad[t]))
+                _, u, r, new_glob, new_regions = self.actor.encode(ready.to(device, only=self.actor.encoder_fields), glob, regions, pair_grad=float(pair_grad[t]))
                 units.append(u)
                 reg_h.append(r)
                 glob, regions = new_glob[:alive[t + 1]].to(torch.float32), new_regions[:alive[t + 1]].to(torch.float32)
@@ -438,7 +444,7 @@ class Learner:
             for batch in self._minibatches(segments, rng):
                 self.optimizer.zero_grad(set_to_none=True)
                 self._loss(batch, clip, note, rng).backward()
-                grad = torch.nn.utils.clip_grad_norm_(list(self.actor.parameters()) + list(self.critic.parameters()), cfg.grad_clip)
+                grad = torch.nn.utils.clip_grad_norm_(self.trained, cfg.grad_clip)
                 self.optimizer.step()
                 note("grad_norm", float(grad))
                 if between is not None:
@@ -755,8 +761,9 @@ def train(cfg: Config, run: pathlib.Path, make_env, device: str = "cuda") -> Non
     (run / "config.json").write_text(json.dumps(asdict(cfg), indent=1))
     env = make_env(cfg.games, cfg.seed)
     # Separate pools: training queues a minibatch's steps at once, and collection mustn't wait behind them.  Both before the GPU.
-    workers = DataWorkers(cfg.data_workers, env.bundles(), cfg.enabled_kinds)
-    act_workers = DataWorkers(cfg.data_workers, env.bundles(), cfg.enabled_kinds) if cfg.concurrent else None
+    pairs = not cfg.latent_encoder
+    workers = DataWorkers(cfg.data_workers, env.bundles(), cfg.enabled_kinds, pairs)
+    act_workers = DataWorkers(cfg.data_workers, env.bundles(), cfg.enabled_kinds, pairs) if cfg.concurrent else None
     learner = Learner(cfg, run, workers, device)
     if learner.resume():
         print(f"resumed at iteration {learner.iteration}, {learner.decisions} decisions", flush=True)
@@ -892,6 +899,7 @@ def main() -> None:
     ap.add_argument("--workers", type=int, default=Config.data_workers)
     ap.add_argument("--hours", type=float, default=Config.hours, help="stop after this long as well as at --decisions")
     ap.add_argument("--eval-every", type=int, default=Config.eval_every, help="iterations between tests against the script")
+    ap.add_argument("--latent-encoder", default=Config.latent_encoder, help="a trained frame encoder: the actor reads its latents instead of every token")
     ap.add_argument("--kinds", help="action kinds to allow, such as 0,3: a test of one head with nothing else to fall back on")
     ap.add_argument("--gpu-runs", type=int, default=Config.gpu_runs, help="how many trainings share the card, this one included")
     ap.add_argument("--empty-cache", action=argparse.BooleanOptionalAction, default=Config.empty_cache, help="hand back what the allocator holds after each iteration")
@@ -901,7 +909,7 @@ def main() -> None:
     args = ap.parse_args()
     cfg = Config(env=args.env, seed=args.seed, decisions=args.decisions, games=args.games, iteration=args.iteration, passes=args.passes,
                  segment=args.segment, token_budget=args.token_budget, data_workers=args.workers, pair_grad_share=args.pair_grad_share,
-                 concurrent=args.env == "sim" if args.concurrent is None else args.concurrent, decide_every=args.decide_every, hours=args.hours, eval_every=args.eval_every, gpu_runs=args.gpu_runs, empty_cache=args.empty_cache)
+                 concurrent=args.env == "sim" if args.concurrent is None else args.concurrent, decide_every=args.decide_every, hours=args.hours, eval_every=args.eval_every, gpu_runs=args.gpu_runs, empty_cache=args.empty_cache, latent_encoder=args.latent_encoder)
     if args.kinds:
         cfg.enabled_kinds = tuple(int(k) for k in args.kinds.split(","))
     run = pathlib.Path(args.run)
