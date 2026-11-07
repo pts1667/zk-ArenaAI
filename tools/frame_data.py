@@ -55,7 +55,7 @@ class ScenarioRules:
     most_units: int = 240           # a side
     extractors: tuple[int, int] = (0, 8)
     structure_share: tuple[float, float] = (0.0, 0.5)   # uniform, of a side's value
-    most_structure_cost: float = 1500.0
+    most_structure_cost: float = 6500.0     # up to a Singularity and the big guns, and no superweapons
     has_factory: float = 0.8
     second_factory_from: float = 3000.0     # of a side's value: where another's likely, as a side that big has been at it a while
     third_factory_from: float = 12000.0

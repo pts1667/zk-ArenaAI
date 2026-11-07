@@ -14,6 +14,7 @@ constexpr float SPOT_REACH = 64.0f;          // an extractor stands on a spot, n
 constexpr float EXIT_GAP = 8.0f;             // between a factory's footprint and a new unit's
 constexpr float PI = 3.14159265358979f;
 constexpr int EXIT_TRIES = 8;
+constexpr float PAD_OFFSET = 1.0f / 3.0f;   // of a silo's footprint: where its four pads are, 16 elmos out in a game
 constexpr int OVERDRIVE_TICKS = 30 / ZK_TICK_FRAMES;      // TEAM_SLOWUPDATE_RATE
 constexpr float OVERDRIVE_PER_ROOT = 0.25f;  // energyToExtraM: an extractor earns this times the root of its energy, of its income
 constexpr int UPKEEP_TICKS = 30 / ZK_TICK_FRAMES;         // unit_energy_drain.lua's PERIOD
@@ -151,6 +152,7 @@ void World::overdrive_side(int s) {
         if (side[size_t(u)] != s) continue;
         overdrive[size_t(u)] = 0.0f;
         if (active(u) && !disarmed(u)) nodes.push_back(u);
+        else low_power[size_t(u)] = type_of(u).needed_link > 0.0f;     // on no grid
     }
     const size_t n = nodes.size();
     std::vector<int> parent(n);
@@ -181,6 +183,11 @@ void World::overdrive_side(int s) {
             squares[g] += m * m;
             all_squares += m * m;
         }
+    }
+    // unit_mex_overdrive.lua: a weapon that needs a grid has to be on one that makes enough.  It goes by what the grid makes, spent or not.
+    for (size_t a = 0; a < n; ++a) {
+        const float needs = type_of(nodes[a]).needed_link;
+        if (needs > 0.0f) low_power[size_t(nodes[a])] = needs > capacity[size_t(find(int(a)))];
     }
     for (bool again = true; again;) {
         again = false;
@@ -275,6 +282,16 @@ void World::run_factory(int u) {
     if (f >= 0 && (!alive[size_t(f)] || build[size_t(f)] >= 1.0f)) f = work_on[i] = -1;
     if (f < 0) {
         const auto& d = cat->types[size_t(produces[i])];
+        // A silo builds on a pad, and with none free it can't start (unit_missilesilo.lua).
+        if (type_of(u).missile_pads > 0) {
+            const int pad = free_pad(u);
+            if (pad < 0) return;
+            const float across = type_of(u).footprint_radius * PAD_OFFSET;
+            f = work_on[i] = place_frame(produces[i], side[i], x[i] + (pad % 2 ? across : -across), z[i] + (pad / 2 ? across : -across), heading[i]);
+            silo_missiles.push_back({f, u, pad});
+            advance_frame(u, f);
+            return;
+        }
         const float gap = type_of(u).footprint_radius + d.footprint_radius + EXIT_GAP;
         // Out of the front, or the nearest side a new unit could walk away from.
         float px = x[i], pz = z[i];
@@ -300,7 +317,7 @@ void World::run_economy() {
     // By handle, not by kind: a list can grow while it's walked, since placing a frame adds to the world.
     for (size_t k = 0, n = builders.size(); k < n; ++k) {
         const int u = builders[k];
-        if (!active(u) || !alive[size_t(u)]) continue;
+        if (!active(u) || !alive[size_t(u)] || power_off(u)) continue;
         if (type_of(u).flags & ZK_U_FACTORY) run_factory(u);
         else run_builder(u);
     }

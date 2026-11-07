@@ -83,6 +83,7 @@ def main() -> None:
     glob, regions = pm.initial_state(1, bundle.regions, "cpu")
     for frame_number in range(100):
         t = fz.featurize(random_frame(rng, bundle.map_w), bundle, table)
+        t.ptr_produce = np.ones_like(t.ptr_produce)     # few frames have a silo, and these are the same maths for any unit
         if frame_number % 10 == 0:                         # 10 recurrent steps from a fresh state, ten times
             state = net.State.initial(bundle.regions)
             glob, regions = pm.initial_state(1, bundle.regions, "cpu")
@@ -90,7 +91,7 @@ def main() -> None:
         b = pm.collate([t]).to("cpu")
         with torch.no_grad():
             _, units, reg_h, new_glob, new_regions = actor.encode(b, glob, regions)
-            kind, region, enemy, enemy_h = actor.heads(b, units, reg_h)
+            kind, region, enemy, enemy_h, produce = actor.heads(b, units, reg_h)
         pairs = [
             (enc.units, units[0, :len(t.unit_x)]), (enc.regions, reg_h[0, :len(t.reg_x)]),
             (enc.state.glob, new_glob[0]), (enc.state.regions, new_regions[0]),
@@ -99,7 +100,8 @@ def main() -> None:
             np_kind, np_region = net.kind_logits(weights, enc, t), net.region_logits(weights, enc, t)
             np_jump = net.region_logits(weights, enc, t, np.full(t.controllable, rf.JUMP))
             walk, jump = region.masked_fill(~b.ptr_region, pm.ILLEGAL), region.masked_fill(~b.ptr_jump, pm.ILLEGAL)
-            pairs += [(np_kind, kind[0, :t.controllable]), (np_region, walk[0, :t.controllable, :len(t.reg_x)]), (np_jump, jump[0, :t.controllable, :len(t.reg_x)])]
+            pairs += [(np_kind, kind[0, :t.controllable]), (np_region, walk[0, :t.controllable, :len(t.reg_x)]), (np_jump, jump[0, :t.controllable, :len(t.reg_x)]),
+                      (net.produce_logits(weights, enc, t), produce[0, :t.controllable])]
             if len(t.enemy_tokens):
                 np_enemy = net.enemy_logits(weights, enc, t)
                 pairs.append((np_enemy, enemy[0, :, :t.controllable, :len(t.enemy_tokens)]))

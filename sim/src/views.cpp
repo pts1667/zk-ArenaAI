@@ -176,10 +176,12 @@ int World::emit_view(int s, UnitRecord* out, int cap, float* glob, int commander
         int flags = UF_IN_LOS | UF_TYPE_KNOWN;
         const bool aims = order[i] == ZK_ORDER_ATTACK || order[i] == ZK_ORDER_MANUAL_FIRE;
         // The engine's queue holds what a unit gives itself as well.
-        const bool order_done = (order[i] == ZK_ORDER_NONE && ai[i].chasing < 0 && !ai[i].dodging) || (aims && !alive[size_t(order_target[i])]);
+        const bool order_done = (order[i] == ZK_ORDER_NONE && ai[i].chasing < 0 && !ai[i].dodging) || (aims && order_target[i] >= 0 && !alive[size_t(order_target[i])]);
         if (order_done && (d.flags & ZK_U_MOBILE) && build[i] >= 1.0f) flags |= UF_IDLE;
         if (damage_taken[i] > last_damage[i]) flags |= UF_DAMAGED;
-        if (d.jump_range > 0.0f && jump[i].charge >= 1.0f && !jump[i].busy) flags |= UF_JUMP_READY;
+        // Whatever it does with it: throwing's the same to whoever's deciding.
+        if ((d.jump_range > 0.0f && jump[i].charge >= 1.0f && !jump[i].busy) || throw_ready(u)) flags |= UF_JUMP_READY;
+        if (pulling[i]) flags |= UF_PULLING;
         last_damage[i] = damage_taken[i];
         if (!(d.flags & ZK_U_MOBILE) && build[i] < 1.0f) ++unfinished;
         if (order_done && (d.flags & ZK_U_MOBILE) && d.build_speed > 0.0f && build[i] >= 1.0f) ++idle_builders;

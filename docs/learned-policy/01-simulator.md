@@ -170,10 +170,10 @@ read every file in full. Files marked "not read" need reading before the stage t
 | `game_perks`, `game_rogue_progression` | Not read beyond the header ("Perks", "Unlock system"). Verify before stage 2 that matchmaking games have no stat changes. |
 | `unit_terraform`, `weapon_terraform_explosions` | Terraform disabled by user direction. |
 | `unit_capture`, `capture_defs` | Stage 4. |
-| `unit_teleporter`, `api_teleport_helper` | One unit type. Stage 4. |
+| `unit_teleporter`, `api_teleport_helper` | Modelled since ABI 15: section 8.17. |
 | `unit_grey_goo`, `unit_global_zombie_resurrect`, `api_zombie_helper`, `chicken_control` | Chicken and zombie modes. |
 | `game_sudden_death`, `game_point_control`, `game_share_mode`, `game_support_powers`, `game_support_mana_handler`, `game_resign`, `unit_planetwars`, `mission_*` | Game modes, campaigns, the bot's own resign rule. |
-| `unit_antinuke_handler`, `unit_missilesilo`, `unit_missilewarn` | No nukes on the factory roster. |
+| `unit_antinuke_handler`, `unit_missilewarn` | No nukes on the factory roster. `unit_missilesilo` is modelled since ABI 15: section 8.17. |
 | `unit_air_plants`, `unit_aircraft_crash`, `unit_bomber_*`, `unit_fighter_pullup`, `unit_gunship_*`, `unit_control_gunship_*`, `unit_zenithskylinecheck`, `unit_vertical_swarm`, `unit_carrier_drones` | Air, stage 5 (after the ground stages). |
 | `ai_*`, `CAI`, `cmd_*` except the two in 2.1, `dbg_*`, `lups_*`, `gfx_*`, `feature_fx`, `wake_fx`, `unit_glow`, `unit_tint`, `unit_icongenerator`, `unit_model_rescale`, `unit_grass_cutter`, `unit_retexture_custom_param`, `cus_gl4`, `api_*` (not listed above), `start_*` (scenario setup only), `mex_placement`, `mex_spot_finder` (the map dump supplies spots), `endgame_graphs`, `awards`, `mod_stats`, `typemap_options` | Debug, visual, UI, plumbing or setup. About 150 of the 242 fall here by name and header. |
 
@@ -1419,3 +1419,41 @@ Single Pyro distances range from 0.71 to 1.69.
 The better factory won 93% of decided games between different ones, up from 91%.  So the fix, right as it is for a Pyro alone, makes the spread in `03-training.md` 10.6 a little wider, with Cloak now lowest.  **Still not checked against the engine.**  8.12's row is from ABI 10, and bombs, jumping and floating structures came in since, so not all of this change need be this fix.  The user expects a spread like this: the script only builds raiders, and some factories have more versatile ones.  So it's no sign of a sim fault, and it's a limit of the script as a test (`03-training.md` 10.6).
 
 **Regression:** script against script 45/8/47 on 256 games, median 496 s, against 46/8/46 and 491.  Speed 39,350 seat steps a second against 39,600.  Replay gate still fails, unchanged: `results/simgate/pierce.json`, 20 s AUC value_tracked 0.564, advance 0.604, hold 0.596, orders 0.612, fightnet 0.665.
+
+### 8.17 Grids, pushing, throwing, silos and teleporting (ABI 15, 2026-11-07)
+
+`sim/src/abilities.cpp`, `sim/tests/test_abilities.py`.  The game side is `tools/sim_engine.py abilities`, on ground levelled for the purpose with `Spring.LevelHeightMap`.  Levelling mattered: on the first run's hills, slopes moved units far more than the guns did, and that run's "bursts" were all slopes.
+
+**Grids.**  What has `neededlink` doesn't fire or build unless its grid makes enough.  The sim works it out from generators in pylon reach and calls the result `low_power`, which isn't in the unit token.  In the game the `lowpower` rule param agrees for no generator, a solar, one fusion (all short of a Cerberus's 50) and two fusions, a Singularity (enough).
+
+**Not checked:** a Cerberus in the harness never fired, with or without power, even told to attack a seen Knight 1,000 away with 1,850 range (`grid_ordered_*`: 0 shots).  So the rule param is confirmed and a powered Cerberus's actual fire isn't, in this harness.  The sim's Cerberus fires when powered.
+
+**Pushing** (`push_from`, `step_skid`; Newton and Sumo).  Elmos from the Newton, in the game and in the sim on flat ground, at the same frames.  `CMD.ONOFF` is refused by `cmd_onoff.lua`, and the game's order is `CMD_PUSH_PULL`.
+
+| Case | Game | Sim |
+|---|---|---|
+| Glaive facing away, frames 0-150 | 300, 321, 349, 375, 402, 425 | 300, 315, 339, 363, 385, 409 |
+| Knight facing away | 300, 306, 313, 320, 327, 334 | 300, 305, 313, 319, 326, 333 |
+| Ravager facing away | 300, 302, 306, 308, 312, 315 | 300, 302, 306, 308, 311, 314 |
+| Sumo facing away | 300, 301, 302, 304, 305, 306 | 300, 301, 303, 305, 306, 307 |
+| Knight facing the gun or side on, 150 frames | 300 or 301 | 301 |
+| Knight walking at it from 400, 150 frames | 409 | 392 |
+| Glaive facing the gun, frames 0-75 by 15 | 300, 341, 470, 548, 555 | 300, 309, 351, 373, 399, 410 |
+| Glaive side on | 300, 323, 454, 610, 662 | as facing the gun |
+| Pull, Knight facing away, 150 frames | 399 | 400 expected from a test; 367 facing the gun, not measured in the game |
+| Pull, Glaive from 400 | 381, 189, 43 at frame 45, then back and forth, 956 lost | 387, 380, 363, 307, 200, 87, 28 at frame 105, hurt in time |
+
+So a unit facing the way it's pushed goes by as much as each hit (a Glaive at about an elmo a frame), and anything else skids against 0.35 of friction a frame: more than a hit gives a Knight, which then stays put and is held from walking.  The difference between pushing and pulling is the gun standing higher than its target (`GUN_STANDS_HIGHER`): a hit on a light unit lifts it off the ground only when pulling, and in the air nothing slows it.  A Sumo at a Glaive facing away drifts it at 1.6 elmos a frame in the game and 0.83 in the sim, which hasn't been looked into.
+
+**Known differences.**  A Glaive under fire isn't thrown as far, 410-450 against 555-660, nor pulled in as fast, because a beam misses what's moving fast between ticks.  Slopes are left out, and on a hill they count for more than the push.  So are units hitting each other or a wall.
+
+**Throwing** (`throw_around`, `update_throwers`).  500 elmos, on flat ground: up by 317, down at frame 147, going across from about frame 18 at 3.97 a frame, and landing 511 away.  The sim takes 148 frames, 317 and 510, with a plain parabola, so it's higher early on (79 in the game by frame 15, 115 in the sim) and within 20 from frame 45 on.  Across, it's within 5 elmos all the way.  Who goes: what's near of either side, not air, not buildings, not the Lobster.  With nobody to throw, the order waits.  Out of range, it walks at 1.8.  Reload 540 frames (541 measured).  **Known difference:** a thrower stunned just after firing stops the throw going across, as in the game, but there the flight's also shorter (120 frames, 155 up), and the sim keeps it whole.
+
+**Silos and missiles** (`free_pad`, `launch_missile`, `destroy_missiles_of`).  In the game: one missile at a time, about 1,800 frames each, on 4 pads at (+-16, +-16), and no more after that.  The sim makes one by each 1,800 frames too.  Losing the silo takes them with it.  A missile with a seen enemy in reach fires by itself, by frame 190 at 1,000 elmos for a tactical (3,502 lost), so nothing has to order it.  In the game a fired missile stays a valid unit off the map for about 17 s; in the sim it's gone at once.
+
+**Teleporting** (`update_teleporters`).  In the game: a beacon takes 270 frames from any distance and the Djinn doesn't move for it, then deployed after 36 (30 here).  A Knight comes over in 52 frames, a Glaive in 15 after it and a Sumo in 143 after that, so mass over 5, longest waiting first, coming out 55-73 from the Djinn with no order left.  In the sim: a beacon at 270, deployed at 35, and over at 65, 85 and 230, coming out 52-80 away.  Walking undeploys it.  Nothing shoots a beacon by itself, and it goes with its Djinn.
+
+**Orders.**  `ZK_ORDER_PLACE_BEACON`, `ZK_ORDER_WAIT_AT_BEACON` and `ZK_ORDER_ON_OFF` are the sim's, as is `ZK_ORDER_MANUAL_FIRE` at the ground.  Frames have them from scripts (`FrameFight`, `BaseScript`), and the policy has kinds for them all since 2026-11-07 (`02-policy.md` 4.3; `policy_sim_env.sim_orders`), with frame flag `PULLING` (`UF_PULLING`) saying which a switch is doing, to its own side only.
+
+**Still unmodelled:** capture, spawned units and area impulse, on `bomberassault`, `dronecarry`, `hoverminer`, `jumpblackhole`, `veharty`, `vehcapture`, `zenith`.  They can be in frames, and stand there without their weapon doing what it does.
+

@@ -46,6 +46,7 @@ class EncoderConfig:
     queries: int = 24       # how many learned queries read the tokens.  Attention costs tokens x queries, so hundreds of tokens stay cheap.
     rounds: int = 2         # reads of the tokens, each followed by the queries talking among themselves
     token_layers: int = 0   # self-attention over the tokens first.  Costs tokens squared, so it's off by default.
+    region_pool: int = 0    # numbers each region token gets from summing its units, as attention averages and so can't count.  0: none.
     z: int = 256            # the latent: what the main model reads
     position_bands: int = 6
     projector: int = 1024   # width of the projector's hidden layers
@@ -166,6 +167,14 @@ class CrossBlock(nn.Module):
         return queries + self.ff2(F.gelu(self.ff1(self.ln2(queries)), approximate="tanh"))
 
 
+@torch.no_grad()
+def nearest_region(b) -> torch.Tensor:
+    """B x U: the region with the nearest centre to each unit.  Close enough for a sum over a region, since the region's outline isn't in the frame."""
+    units = b.unit_x[:, :, None, POSITION_COLUMN["unit"]:POSITION_COLUMN["unit"] + 2].float()
+    centres = b.reg_x[:, None, :, POSITION_COLUMN["reg"]:POSITION_COLUMN["reg"] + 2].float()
+    return (units - centres).square().sum(-1).masked_fill(~b.reg_mask[:, None], float("inf")).argmin(-1)
+
+
 class FrameEncoder(nn.Module):
     """Tokens in, one vector out.  What it gives doesn't depend on the tokens' order, or on padding."""
 
@@ -180,7 +189,9 @@ class FrameEncoder(nn.Module):
         self.kind_embed = nn.Embedding(fz.TOKEN_KINDS, d)
         self.unit_in0 = nn.Linear(fz.UNIT_DIM + extra + npnet.NAME_DIM + 2 * npnet.ID_DIM, d)
         self.unit_in1 = nn.Linear(d, d)
-        self.reg_in = nn.Linear(fz.REGION_DIM + extra, d)
+        self.reg_in = nn.Linear(fz.REGION_DIM + extra + cfg.region_pool, d)
+        if cfg.region_pool:
+            self.pool_in = nn.Sequential(nn.Linear(d, 2 * d), nn.GELU(approximate="tanh"), nn.Linear(2 * d, cfg.region_pool))
         self.site_in = nn.Linear(fz.SITE_DIM + extra, d)
         self.feat_in = nn.Linear(fz.FEATURE_DIM + extra, d)
         self.glob_in = nn.Linear(fz.GLOBAL_DIM, d)
@@ -189,7 +200,7 @@ class FrameEncoder(nn.Module):
         self.cross = nn.ModuleList(CrossBlock(d, cfg.heads) for _ in range(cfg.rounds))
         self.latent_blocks = nn.ModuleList(Block(d, cfg.heads) for _ in range(cfg.rounds))
         self.lnf = nn.LayerNorm(d)
-        self.to_z = nn.Linear(cfg.queries * d, cfg.z)
+        self.to_z = nn.Linear(cfg.queries * d, cfg.z) if cfg.z else nn.Identity()      # z 0: no vector, for a model that reads the queries themselves
         self.register_buffer("bands", math.pi * 2.0 ** torch.arange(cfg.position_bands, dtype=torch.float32), persistent=False)
 
     def _with_position(self, x: torch.Tensor, column: int) -> torch.Tensor:
@@ -197,11 +208,20 @@ class FrameEncoder(nn.Module):
         at = x[..., column:column + 2].unsqueeze(-1) * self.bands
         return torch.cat((x.clamp(-FEATURE_LIMIT, FEATURE_LIMIT), at.sin().flatten(-2), at.cos().flatten(-2)), -1)
 
+    def pooled(self, unit_tokens: torch.Tensor, b) -> torch.Tensor:
+        """B x R x region_pool: what each region's units add up to, each number squashed by asinh, so a region of 100 units is on the scale of the rest of its token."""
+        each = (self.pool_in(unit_tokens) * b.unit_mask[..., None]).float()
+        at = nearest_region(b)[..., None].expand(-1, -1, self.cfg.region_pool)
+        return torch.zeros(len(each), b.reg_x.shape[1], self.cfg.region_pool, device=each.device).scatter_add(1, at, each).asinh()
+
     def tokens(self, b) -> tuple[torch.Tensor, torch.Tensor]:
         """All tokens and which are real: units, regions, sites, features, global."""
         units = torch.cat((self._with_position(b.unit_x, POSITION_COLUMN["unit"]), self.name_embed(b.unit_name), self.ally_embed(b.unit_ally), self.player_embed(b.unit_player)), -1)
         hu = self.unit_in1(F.gelu(self.unit_in0(units), approximate="tanh")) + self.kind_embed(b.tok_kind[:, :b.unit_x.shape[1]])
-        hr = self.reg_in(self._with_position(b.reg_x, POSITION_COLUMN["reg"])) + self.kind_embed.weight[GROUP_KINDS["reg"]]
+        regions = self._with_position(b.reg_x, POSITION_COLUMN["reg"])
+        if self.cfg.region_pool:
+            regions = torch.cat((regions, self.pooled(hu, b)), -1)
+        hr = self.reg_in(regions) + self.kind_embed.weight[GROUP_KINDS["reg"]]
         hs = self.site_in(self._with_position(b.site_x, POSITION_COLUMN["site"])) + self.kind_embed.weight[GROUP_KINDS["site"]]
         hf = self.feat_in(self._with_position(b.feat_x, POSITION_COLUMN["feat"])) + self.kind_embed.weight[GROUP_KINDS["feat"]]
         hg = (self.glob_in(b.glob_x) + self.kind_embed.weight[fz.TK_GLOBAL])[:, None]
@@ -211,6 +231,10 @@ class FrameEncoder(nn.Module):
 
     def forward(self, b) -> torch.Tensor:
         """B x z.  b: a FrameBatch or a policy_model.Batch."""
+        return self.to_z(self.read(b).flatten(1))
+
+    def read(self, b) -> torch.Tensor:
+        """B x queries x d: what the queries hold after reading the tokens."""
         h, mask = self.tokens(b)
         for block in self.token_blocks:
             h = block(h, None, mask)
@@ -218,7 +242,7 @@ class FrameEncoder(nn.Module):
         everyone = torch.ones_like(q[:, :, 0], dtype=torch.bool)
         for cross, latent in zip(self.cross, self.latent_blocks):
             q = latent(cross(q, h, mask), None, everyone)
-        return self.to_z(self.lnf(q).flatten(1))
+        return self.lnf(q)
 
 
 class FrameJepa(nn.Module):
@@ -351,8 +375,9 @@ def ridge_r2(train_z: np.ndarray, train_y: np.ndarray, test_z: np.ndarray, test_
 
 
 @torch.no_grad()
-def encode_shards(encoder: FrameEncoder, paths: list[pathlib.Path], device: str, frames: int, batch: int = 128, each: int = 200) -> dict[str, np.ndarray]:
-    """Latents of a sample, with what's known about each frame.  At most `each` frames, evenly spaced, from a shard, since one shard is only a few games."""
+def encode_shards(encoder, paths: list[pathlib.Path], device: str, frames: int, batch: int = 128, each: int = 200) -> dict[str, np.ndarray]:
+    """Latents of a sample, with what's known about each frame.  At most `each` frames, evenly spaced, from a shard, since one shard is only a few games.
+    encoder: anything that turns a batch into B x size."""
     latents, probes, maps, games, seats, sources = [], [], [], [], [], []
     left = frames
     for path in paths:
@@ -413,6 +438,7 @@ class TrainConfig:
     checkpoint_every: int = 10000
     hours: float = 0.0
     seed: int = 1
+    muon_lr: float = 0.0    # above 0, Muon takes the hidden layers' weights at this rate, on the same schedule, and AdamW the rest (frame_vae.py only)
 
 
 def save_encoder(path: pathlib.Path, model: FrameJepa, step: int) -> None:

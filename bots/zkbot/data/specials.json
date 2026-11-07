@@ -1,0 +1,28 @@
+{
+"silos": {
+"staticmissilesilo": [
+"empmissile",
+"missileslow",
+"napalmmissile",
+"seismic",
+"tacnuke"
+]
+},
+"switches": [
+"dbg_m0r0",
+"dbg_m0r1",
+"dbg_m1r0",
+"dbg_m1r1",
+"jumpsumo",
+"turretimpulse"
+],
+"teleporters": {
+"amphtele": "tele_beacon"
+},
+"throwers": {
+"amphlaunch": {
+"radius": 160.0,
+"reach": 620.0
+}
+}
+}

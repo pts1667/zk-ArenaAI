@@ -20,9 +20,9 @@ constexpr float CANCEL_FACTOR = 2.0f;       // DISARM_CANCEL_FACTOR: disarmed fo
 
 float World::jump_altitude(int u) const {
     const JumpState& j = jump[size_t(u)];
-    if (!j.flying) return 0.0f;
+    if (!j.flying) return skid[size_t(u)].y;
     const float bend = 2.0f * j.at - 1.0f;
-    return (1.0f - bend * bend) * type_of(u).jump_height;
+    return (1.0f - bend * bend) * j.height;
 }
 
 // AllowCommand's ValidJumpLocation, which is stricter here: it also lets a unit land in water too deep for it, where the sim has nothing for it to do next.
@@ -65,6 +65,10 @@ void World::try_jump(int u) {
     j.to_x = gx;
     j.to_z = gz;
     j.charge = 0.0f;
+    j.height = d.jump_height;
+    j.sideways = 0.0f;
+    j.thrown_by = -1;
+    skid[i] = Skid{};
     if (line > 0.0f) heading[i] = std::atan2(gx - x[i], gz - z[i]);
     vx[i] = vz[i] = speed[i] = 0.0f;
 }
@@ -77,7 +81,9 @@ void World::land(int u) {
     x[i] = j.to_x;
     z[i] = j.to_z;
     vx[i] = vz[i] = speed[i] = 0.0f;
-    if (d.landing_weapon >= 0) {
+    const bool thrown_here = j.thrown_by >= 0;
+    j.thrown_by = -1;
+    if (d.landing_weapon >= 0 && !thrown_here) {
         show_for_action(u);
         explode(d.landing_weapon, x[i], z[i], u, side[i], false);
     }
@@ -116,9 +122,16 @@ void World::step_jump(int u) {
     }
     // A flight isn't stopped by anything, and a jumper shows itself all the way, but for what has its own cloak (no script of those calls PokeDecloakUnit) or lands
     // with a blast, which does so only then.
-    if (!(d.flags & ZK_U_CAN_CLOAK) && d.landing_weapon < 0) show_for_action(u);
+    // What's thrown is shown whatever it is (unit_thrower.lua).
+    if (j.thrown_by >= 0 || (!(d.flags & ZK_U_CAN_CLOAK) && d.landing_weapon < 0)) show_for_action(u);
     j.at = std::min(1.0f, j.at + j.step * frames);
-    const float nx = j.from_x + (j.to_x - j.from_x) * j.at, nz = j.from_z + (j.to_z - j.from_z) * j.at;
+    // The sideways push is given while it's going up, and is lost if the thrower can't finish it.  It comes back down where it was.
+    if (j.thrown_by >= 0 && j.at < j.sideways && (!alive[size_t(j.thrown_by)] || hp[size_t(j.thrown_by)] <= 0.0f || stunned(j.thrown_by) || disarmed(j.thrown_by))) {
+        j.to_x = j.from_x;
+        j.to_z = j.from_z;
+    }
+    const float across = j.sideways > 0.0f ? std::clamp((j.at - j.sideways) / (1.0f - j.sideways), 0.0f, 1.0f) : j.at;
+    const float nx = j.from_x + (j.to_x - j.from_x) * across, nz = j.from_z + (j.to_z - j.from_z) * across;
     vx[i] = (nx - x[i]) / frames;
     vz[i] = (nz - z[i]) / frames;
     speed[i] = std::hypot(vx[i], vz[i]);
@@ -134,6 +147,9 @@ void World::update_jumps() {
         if (slow_update) try_jump(u);
         step_jump(u);
     }
+    for (int u : thrown)
+        if (alive[size_t(u)]) step_jump(u);
+    thrown.erase(std::remove_if(thrown.begin(), thrown.end(), [this](int u) { return !alive[size_t(u)] || !jump[size_t(u)].busy; }), thrown.end());
 }
 
 // A ground unit stops (GG.StartStopMovingControl), and digs in a moment later.  Starting to move brings it straight back up.  A Blastwing polls for being slow

@@ -17,7 +17,7 @@ import numpy as np
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 import policy_sim_env as se  # noqa: E402
-from policy_opening import Footing, Ground, Opening, Seat, modelled  # noqa: E402
+from policy_opening import Footing, Ground, Opening, Seat  # noqa: E402
 from policy_script import FightScript, ScriptData  # noqa: E402
 import zksim  # noqa: E402
 from zkbot import catalog as bot_catalog, units as bot_units  # noqa: E402
@@ -48,7 +48,7 @@ class Roster:
 
     def __init__(self, table: tables.TypeTable, cat: zksim.Catalog):
         self.table, self.cat = table, cat
-        usable = lambda name: name in cat.index and modelled(cat, name)  # noqa: E731
+        usable = lambda name: name in cat.index  # noqa: E731  what the sim doesn't model the weapon of can still stand there and be seen
         self.factories = [r for r, name in enumerate(table.names) if table.factory[r] and usable(name) and any(usable(n) for n in bot_catalog.roster(name))]
         self.by_factory = {r: np.array([table.names.index(n) for n in bot_catalog.roster(table.names[r]) if usable(n)]) for r in self.factories}
         self.mobile = np.unique(np.concatenate(list(self.by_factory.values())))
@@ -72,6 +72,10 @@ class Roster:
                 self.footing[r] = Footing.of(u)
                 self.is_energy[r] = not table.mobile[r] and u["energy_make"] > 0.0
         self.is_turret = ~table.mobile & table.armed & ~table.factory
+        self.is_silo = np.zeros(len(table.names) + 1, bool)
+        for r, name in enumerate(table.names):
+            self.is_silo[r] = name in cat.index and cat.units[cat.index[name]]["missile_pads"] > 0
+        self.missiles = np.array([i for i, u in enumerate(cat.units) if u["flags"] & zksim.MISSILE], np.int32)
         self.fighters = {r: units[table.combat[units] & ~table.builder[units]] for r, units in self.by_factory.items()}
         self.fighters = {r: (f if len(f) else self.by_factory[r]) for r, f in self.fighters.items()}
         self.makers = {r: units[table.builder[units]] for r, units in self.by_factory.items()}
@@ -109,18 +113,29 @@ def extractors(table: tables.TypeTable) -> np.ndarray:
 @dataclass
 class FrameFight(FightScript):
     """As the fight script, but each sends its units somewhere their class can be, a side whose units can't reach the enemy's start looks for its buildings after a while,
-    and what can jump does, whenever it's charged: frames should have jumpers in the air, and waiting to jump again."""
+    and what can jump does, whenever it's charged: frames should have jumpers in the air, and waiting to jump again.  So with the rest of what a few units can do: a Lobster throws
+    whoever's around it along the way, a Newton or a Sumo goes between pushing and pulling, and a Djinn leaves a beacon at the rally and goes ahead for others to come over to."""
     ground: Ground | None = None
+    beacons: dict[int, tuple[float, float, float]] = field(default_factory=dict)    # a Djinn's uid: where its beacon went, and when
+    switched: int = 0
 
     GIVE_UP_ON_START = 360.0     # seconds
     JUMP_FROM = 150.0            # elmos from where it's going: past this it jumps there
     JUMP_SHORT = 0.95            # of its range: on its own, an order to go exactly that far would walk a bit first
+    SWITCH_EVERY = 60.0          # seconds, between pushing and pulling
+    BEACON_TAKES = 15.0          # seconds a Djinn stands there for one to appear
+    BEACON_AGAIN = 90.0          # seconds, if it's lost one
+    BEACON_FOUND = 40.0          # elmos from where it went
+    STAND_AT = 0.5               # of the way from the rally to the enemy
+    ARRIVED_THERE = 150.0        # elmos
+    COME_OVER_FROM = 400.0       # elmos from a beacon
 
     def orders(self, own: np.ndarray, enemies: np.ndarray, seconds: float) -> np.ndarray:
         self.reached_start = self.reached_start or seconds >= self.GIVE_UP_ON_START
         out = super().orders(own, enemies, seconds)
+        switches = self._switch(own, seconds)
         if not len(out):
-            return out
+            return switches
         table = self.data.table
         rows = table.rows(own["def_id"])
         classes = table.move_class[rows[self.data.fights[rows] & ((own["flags"] & rf.BEING_BUILT) == 0)]]
@@ -133,7 +148,81 @@ class FrameFight(FightScript):
                 place = self.ground.near(int(c), float(out["x"][i]), float(out["z"][i]))
                 if place is not None:
                     out["x"][i], out["z"][i] = place
-        self._jump(own[self.data.fights[rows] & ((own["flags"] & rf.BEING_BUILT) == 0)], out)
+        fighters = own[self.data.fights[rows] & ((own["flags"] & rf.BEING_BUILT) == 0)]
+        self._jump(fighters, out)
+        self._throw(fighters, own, out)
+        return np.concatenate((self._teleport(fighters, own, out, seconds), switches))
+
+    def _throw(self, fighters: np.ndarray, own: np.ndarray, out: np.ndarray) -> None:
+        """What can throw and has someone to throw does, along the way."""
+        data, table = self.data, self.data.table
+        rows = table.rows(fighters["def_id"])
+        ready = (data.throw_radius[rows] > 0.0) & ((fighters["flags"] & rf.JUMP_READY) != 0)
+        if not ready.any():
+            return
+        own_rows = table.rows(own["def_id"])
+        throwable = own[table.mobile[own_rows] & (table.move_class[own_rows] != tables.NO_CLASS) & ((own["flags"] & rf.BEING_BUILT) == 0)]
+        for i in np.flatnonzero(ready):
+            dx, dz = float(out["x"][i] - fighters["x"][i]), float(out["z"][i] - fighters["z"][i])
+            away = float(np.hypot(dx, dz))
+            if away < self.JUMP_FROM:
+                continue
+            near = np.hypot(throwable["x"] - fighters["x"][i], throwable["z"] - fighters["z"][i]) <= data.throw_radius[rows[i]]
+            if not (near & (throwable["uid"] != fighters["uid"][i])).any():
+                continue
+            hop = min(away, float(data.throw_reach[rows[i]]) * self.JUMP_SHORT) / away
+            x, z = np.array([fighters["x"][i] + dx * hop], np.float32), np.array([fighters["z"][i] + dz * hop], np.float32)
+            if self.ground.can(int(table.move_class[rows[i]]), x, z)[0]:
+                out["kind"][i], out["x"][i], out["z"][i], out["target"][i] = rf.MANUAL_FIRE, x[0], z[0], -1
+
+    def _teleport(self, fighters: np.ndarray, own: np.ndarray, out: np.ndarray, seconds: float) -> np.ndarray:
+        """A Djinn leaves a beacon where this side's units gather and stands halfway to the enemy, and some of those about the beacon wait there to come over."""
+        data, table = self.data, self.data.table
+        rows = table.rows(fighters["def_id"])
+        djinns = np.flatnonzero(data.teleports[rows])
+        if not len(djinns):
+            return out
+        own_rows = table.rows(own["def_id"])
+        beacons = own[data.beacon[own_rows]]
+        keep = np.ones(len(out), bool)
+        for i in djinns:
+            uid, c = int(fighters["uid"][i]), int(table.move_class[rows[i]])
+            placed = self.beacons.get(uid)
+            beacon = None
+            if placed is not None and len(beacons):
+                apart = np.hypot(beacons["x"] - placed[0], beacons["z"] - placed[1])
+                if apart.min() <= self.BEACON_FOUND:
+                    beacon = beacons[int(np.argmin(apart))]
+            if beacon is None:
+                if placed is not None and seconds - placed[2] < self.BEACON_AGAIN:
+                    keep[i] = seconds - placed[2] >= self.BEACON_TAKES
+                    continue
+                x, z = self.ground.near(c, *self.rally) or self.rally
+                self.beacons[uid] = float(x), float(z), seconds
+                out[i] = (uid, zksim.ORDER_PLACE_BEACON, x, z, -1)
+                continue
+            x = self.rally[0] + self.STAND_AT * (self.enemy_start[0] - self.rally[0])
+            z = self.rally[1] + self.STAND_AT * (self.enemy_start[1] - self.rally[1])
+            x, z = self.ground.near(c, float(x), float(z)) or (fighters["x"][i], fighters["z"][i])
+            if np.hypot(fighters["x"][i] - x, fighters["z"][i] - z) > self.ARRIVED_THERE:
+                out["kind"][i], out["x"][i], out["z"][i], out["target"][i] = rf.MOVE, x, z, -1
+                continue
+            keep[i] = False
+            if not fighters["flags"][i] & rf.IDLE:
+                continue
+            around = (np.hypot(fighters["x"] - beacon["x"], fighters["z"] - beacon["z"]) <= self.COME_OVER_FROM) & (fighters["uid"] % 2 == 0) & ~data.teleports[rows]
+            out["kind"][around], out["target"][around] = zksim.ORDER_WAIT_AT_BEACON, int(beacon["uid"])
+        return out[keep]
+
+    def _switch(self, own: np.ndarray, seconds: float) -> np.ndarray:
+        """What both pushes and pulls goes from one to the other every so often, not all at once."""
+        turn = int(seconds / self.SWITCH_EVERY)
+        if turn == self.switched:
+            return np.zeros(0, zksim.ORDER_DTYPE)
+        self.switched = turn
+        units = own[self.data.switches[self.data.table.rows(own["def_id"])] & ((own["flags"] & rf.BEING_BUILT) == 0)]
+        out = np.zeros(len(units), zksim.ORDER_DTYPE)
+        out["unit"], out["kind"], out["target"] = units["uid"], zksim.ORDER_ON_OFF, (units["uid"] + turn) % 2
         return out
 
     def _jump(self, fighters: np.ndarray, out: np.ndarray) -> None:
@@ -155,6 +244,8 @@ def fight_data(table: tables.TypeTable, cat: zksim.Catalog) -> ScriptData:
     """Builders have work of their own, so the fight script leaves them be."""
     data = ScriptData(table, cat)
     data.fights = data.fights & ~table.builder
+    data.throw_radius, data.throw_reach = table.throw_radius, table.throw_reach
+    data.teleports, data.beacon, data.switches = table.teleports, table.beacon, table.switches
     return data
 
 
@@ -262,6 +353,11 @@ class BaseScript:
             if seconds >= self.change_at.get(uid, 0.0):
                 self.change_at[uid] = seconds + float(self.rng.uniform(*self.PRODUCE_FOR))
                 out.append((uid, rf.PRODUCE, 0.0, 0.0, self._next_unit(int(rows[i]), rows, seconds)))
+        for i in np.flatnonzero(finished & roster.is_silo[rows]):
+            uid = int(own["uid"][i])
+            if seconds >= self.change_at.get(uid, 0.0):
+                self.change_at[uid] = seconds + float(self.rng.uniform(*self.PRODUCE_FOR))
+                out.append((uid, rf.PRODUCE, 0.0, 0.0, int(self.rng.choice(roster.missiles))))
         idle = np.flatnonzero(finished & table.builder[rows] & table.mobile[rows] & ((own["flags"] & rf.IDLE) != 0) & (own["uid"] != busy))
         if len(idle):
             spots = self.ground.bundle.spot_list
@@ -321,7 +417,7 @@ class WideOpening(Opening):
             if not u["flags"] & zksim.PLOPPABLE or name not in table.names or table.names.index(name) not in roster.by_factory:
                 continue
             raider = bot_catalog.pick(name, "raid")
-            if raider is None or raider not in cat.index or not modelled(cat, raider):
+            if raider is None or raider not in cat.index:
                 fighters = roster.fighters[table.names.index(name)]
                 raider = table.names[int(fighters[np.argmin(table.cost[fighters])])]
             self.factories.append((i, cat.index[raider]))

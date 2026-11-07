@@ -21,7 +21,7 @@ from zkbot import units  # noqa: E402
 DATA = ROOT / "tests" / "policy" / "data"
 # Game, and frame number nearest: chosen to show a fight, blips, ghosts, sites changing hands and an idle army.
 PICKS = (("game-001", 10968), ("game-002", 18198), ("game-002", 36198), ("game-003", 12090), ("game-003", 23610))
-ARRAYS = ("unit_x", "unit_name", "unit_ally", "unit_player", "reg_x", "site_x", "feat_x", "glob_x", "tok_kind", "pair_bucket", "kind_mask", "ptr_enemy", "ptr_region", "ptr_jump", "route_bias", "uids", "enemy_tokens", "north", "region_radius")
+ARRAYS = ("unit_x", "unit_name", "unit_ally", "unit_player", "reg_x", "site_x", "feat_x", "glob_x", "tok_kind", "pair_bucket", "kind_mask", "ptr_enemy", "ptr_region", "ptr_jump", "ptr_wait", "ptr_produce", "own_beacons", "beacon_regions", "route_bias", "uids", "enemy_tokens", "north", "region_radius")
 
 
 def pick_frames(recording: pathlib.Path) -> None:

@@ -40,7 +40,7 @@ import policy_model as pm  # noqa: E402
 from zkbot.policy import actions as act, bundle as bd, featurize as fz, rawframe as rf, tables  # noqa: E402
 
 torch.backends.cuda.matmul.allow_tf32 = True
-HEADS = ("kind", "region", "enemy", "fine")
+HEADS = ("kind", "region", "enemy", "fine", "produce")
 NAME_DROPOUT = 0.3
 ENTROPY_FLOOR = 0.3         # of a head's maximum
 ENTROPY_BASE = 0.01
@@ -147,6 +147,7 @@ class Step:
     enemy: np.ndarray
     region: np.ndarray
     fine: np.ndarray
+    produce: np.ndarray
     logp: np.ndarray
     value: float = 0.0
     reward: float = 0.0
@@ -279,7 +280,7 @@ class Player:
             _, units, reg_h, new_glob, new_regions = self.actor.encode(b, glob, regions)
             a = pm.sample_actions(self.actor, b, units, reg_h)
             value = self.critic(b, glob)
-        out = {k: getattr(a, k).cpu().numpy() for k in ("kind", "enemy", "region", "fine", "logp")}
+        out = {k: getattr(a, k).cpu().numpy() for k in ("kind", "enemy", "region", "fine", "produce", "logp")}
         return out, value.float().cpu().numpy(), new_glob.float(), new_regions.float()
 
     def act(self, frames: list[tuple[rf.Frame, bd.Bundle, np.ndarray]], glob: torch.Tensor, regions: torch.Tensor):
@@ -446,7 +447,7 @@ class Learner:
 
     def adjust_entropy(self, metrics: dict[str, float]) -> None:
         """Keeps each head above a share of its maximum, so none collapses."""
-        maxima = {"kind": math.log(4.0), "region": math.log(4.0), "enemy": math.log(8.0), "fine": math.log(fz.FINE_OPTIONS)}
+        maxima = {"kind": math.log(4.0), "region": math.log(4.0), "enemy": math.log(8.0), "fine": math.log(fz.FINE_OPTIONS), "produce": math.log(4.0)}
         for h in HEADS:
             e = metrics.get(f"entropy_{h}")
             if e is None:
@@ -503,7 +504,8 @@ def _stored_actions(steps: list[Step], b: pm.Batch, device: str) -> pm.Actions:
     enemy = _pad([s.enemy for s in steps], shape, -1, device, torch.int64)
     region = _pad([s.region for s in steps], shape, -1, device, torch.int64)
     fine = _pad([s.fine for s in steps], shape, -1, device, torch.int64)
-    return pm.Actions(kind, enemy, region, fine, torch.zeros(shape, device=device))
+    produce = _pad([s.produce for s in steps], shape, -1, device, torch.int64)
+    return pm.Actions(kind, enemy, region, fine, produce, torch.zeros(shape, device=device))
 
 
 def finish(trajectories: list[Trajectory], gae: float) -> tuple[list[Segment], list[float], list[float]]:
@@ -596,12 +598,12 @@ class Collector:
                 kind_counts += np.bincount(kind, minlength=rf.KIND_COUNT)
                 raw = frames[k][0]
                 step = Step(rf.Frame(raw.units.copy(), raw.sites.copy(), raw.glob.copy(), raw.features.copy()), kind, out["enemy"][k, :c].copy(),
-                            out["region"][k, :c].copy(), out["fine"][k, :c].copy(), out["logp"][k, :c].copy(), float(value[k]))
+                            out["region"][k, :c].copy(), out["fine"][k, :c].copy(), out["produce"][k, :c].copy(), out["logp"][k, :c].copy(), float(value[k]))
                 tr = current[seat]
                 tr.steps.append(step)
                 stored += 1
                 x, z = act.world_positions(t, tr.bundle)
-                env.give_orders(seat, act.decode(_Decision(step.kind, step.enemy, step.region, step.fine), t, tr.bundle, x, z))
+                env.give_orders(seat, act.decode(_Decision(step.kind, step.enemy, step.region, step.fine, step.produce), t, tr.bundle, x, z))
                 # A segment ends here: the next step's stored state is what the net has now.
                 if len(tr.steps) - tr.segment_start == cfg.segment:
                     _cut(tr, segments, new_glob[k], new_regions[k])
@@ -648,6 +650,7 @@ class _Decision:
     enemy: np.ndarray
     region: np.ndarray
     fine: np.ndarray
+    produce: np.ndarray
 
 
 def _cut(tr: Trajectory, segments: list[Segment], glob: torch.Tensor, regions: torch.Tensor) -> None:
@@ -685,7 +688,7 @@ def evaluate(learner: Learner, make_env, opponent: str, games: int, seed: int) -
             for k, seat in enumerate(acting):
                 t = items[k]
                 c = t.controllable
-                d = _Decision(out["kind"][k, :c], out["enemy"][k, :c], out["region"][k, :c], out["fine"][k, :c])
+                d = _Decision(out["kind"][k, :c], out["enemy"][k, :c], out["region"][k, :c], out["fine"][k, :c], out["produce"][k, :c])
                 b = env.bundle_of(seat)
                 x, z = act.world_positions(t, b)
                 env.give_orders(seat, act.decode(d, t, b, x, z))

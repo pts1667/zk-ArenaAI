@@ -117,10 +117,16 @@ int World::add(int t, int s, float px, float pz, float head, float hp_frac, floa
     burrow_at.push_back(frame + BURROW_FRAMES);
     jump.emplace_back();
     if (d.jump_range > 0.0f) jumpers.push_back(u);
+    skid.emplace_back();
+    low_power.push_back(d.needed_link > 0.0f ? 1 : 0);     // until the first look at the grids
+    pulling.push_back(0);
+    wait_since.push_back(-1);
+    if (d.throw_radius > 0.0f) throwers.push_back(u);
+    if (d.teleport_rate > 0.0f) teleporters.push_back(Teleporter{u});
     if (d.drop_weapon >= 0) droppers.push_back(u);
     if (d.area_cloak_radius > 0.0f) area_cloakers.push_back(u);
     if (d.energy_upkeep > 0.0f || d.area_cloak_upkeep > 0.0f) upkeepers.push_back(u);
-    if (d.pylon_range > 0.0f) pylons.push_back(u);
+    if (d.pylon_range > 0.0f || d.needed_link > 0.0f) pylons.push_back(u);
     if (d.build_speed > 0.0f) builders.push_back(u);
     if (d.metal_make > 0.0f || d.energy_make > 0.0f || d.extract_mult > 0.0f) earners.push_back(u);
     float power = 0.0f;
@@ -171,6 +177,20 @@ void World::order_unit(int u, int kind, float gx, float gz, int target) {
         ai[size_t(u)].tactics_off = target == 0;
         return;
     }
+    if (kind == ZK_ORDER_ON_OFF) {
+        pulling[size_t(u)] = target == 0;
+        return;
+    }
+    if (kind == ZK_ORDER_PLACE_BEACON && d.teleport_rate <= 0.0f) return;
+    if (kind == ZK_ORDER_WAIT_AT_BEACON) {
+        // Either the beacon or who it belongs to.  Nothing that stands still can go, nor anything to the other side's.
+        const Teleporter* via = target >= 0 && target < count() ? teleporter_of(target) : nullptr;
+        if (via) target = via->beacon;
+        bool beacon = false;
+        for (const Teleporter& t : teleporters) beacon = beacon || (target >= 0 && t.beacon == target);
+        if (!beacon || !alive[size_t(target)] || side[size_t(target)] != side[size_t(u)] || !(d.flags & ZK_U_MOBILE)) return;
+        if (order[size_t(u)] != kind || order_target[size_t(u)] != target) wait_since[size_t(u)] = frame;   // told again, it keeps its place
+    }
     if (kind == ZK_ORDER_SELF_DESTRUCT) {
         if (d.kamikaze_distance > 0.0f && !stunned(u)) self_destruct(u);
         return;
@@ -184,7 +204,8 @@ void World::order_unit(int u, int kind, float gx, float gz, int target) {
     if ((kind == ZK_ORDER_BUILD || kind == ZK_ORDER_ASSIST) && d.build_speed <= 0.0f) return;
     if (kind == ZK_ORDER_RECLAIM && (d.reclaim_speed <= 0.0f || (d.flags & ZK_U_FACTORY))) return;
     if (!(d.flags & ZK_U_FACTORY)) work_on[size_t(u)] = -1;
-    jump[size_t(u)].stranded = jump[size_t(u)].busy && kind != ZK_ORDER_JUMP;
+    // Thrown, it's only falling, and does what it was told once it's down.
+    jump[size_t(u)].stranded = jump[size_t(u)].busy && jump[size_t(u)].thrown_by < 0 && kind != ZK_ORDER_JUMP;
     order[size_t(u)] = kind;
     goal_x[size_t(u)] = gx;
     goal_z[size_t(u)] = gz;
@@ -201,10 +222,11 @@ void World::order_unit(int u, int kind, float gx, float gz, int target) {
         goal_z[size_t(u)] = gz = std::clamp(gz, 1.0f, map->depth() - 1.0f);
         try_jump(u);
     }
-    mem_kind[size_t(u)] = kind;
+    // The net has kinds for what it can tell a unit to do, and these aren't among them: it sees a unit going somewhere.
+    mem_kind[size_t(u)] = kind == ZK_ORDER_PLACE_BEACON || kind == ZK_ORDER_WAIT_AT_BEACON ? int(ZK_ORDER_MOVE) : kind;
     mem_frame[size_t(u)] = frame;
     // A build's target is a type, an assist's is one of ours and a reclaim's is a feature: none is what the net means by an aim.
-    mem_target[size_t(u)] = kind == ZK_ORDER_BUILD || kind == ZK_ORDER_ASSIST || kind == ZK_ORDER_RECLAIM ? -1 : target;
+    mem_target[size_t(u)] = kind == ZK_ORDER_BUILD || kind == ZK_ORDER_ASSIST || kind == ZK_ORDER_RECLAIM || kind == ZK_ORDER_WAIT_AT_BEACON ? -1 : target;
     mem_x[size_t(u)] = gx;
     mem_z[size_t(u)] = gz;
     // Battery: a plain move order stops the unit until its next slow update.  A fight order doesn't.
@@ -241,7 +263,7 @@ void World::tick() {
     { ZK_PROF(FIRE); fire_weapons(); }
     { ZK_PROF(SHOTS); resolve_shots(); }
     { ZK_PROF(BURN); burn_areas(); }
-    { ZK_PROF(MOVE); update_jumps(); move_units(); }
+    { ZK_PROF(MOVE); update_throwers(); update_teleporters(); update_jumps(); move_units(); }
     { ZK_PROF(DEATHS); finish_deaths(); }
     // After deaths: a build step adds health, and mustn't bring back what this tick killed.
     if (economy_on) { ZK_PROF(ECONOMY); run_economy(); }

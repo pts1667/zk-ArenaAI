@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define ZK_ABI_VERSION 14
+#define ZK_ABI_VERSION 15
 #define ZK_MAX_MOUNTS 8
 #define ZK_ARMOR_CLASSES 5
 #define ZK_ARMOR_SHIELD 4
@@ -28,7 +28,7 @@ enum {
     ZK_W_DISARM_ONLY = 256,   /* no health damage (disarm_defs.lua normalDamage) */
     ZK_W_MANUAL = 512,        /* fires only on a manual-fire order */
     ZK_W_STOCKPILE = 1024,    /* each shot uses one from the unit's stock */
-    ZK_W_UNMODELLED = 2048,   /* what it's for isn't in the sim: capture, spawning, pushing, throwing */
+    ZK_W_UNMODELLED = 2048,   /* what it's for isn't in the sim: capture, spawning, an area that pulls */
     ZK_W_UNLINKED = 4096,     /* a shield that shares charge with nothing (unit_shield_link.lua) */
     ZK_W_HIGH_ARC = 8192,     /* a cannon that takes the higher of its two paths */
     ZK_W_BEAM = 16384,        /* burns for some frames, so that a shield can stop part of it */
@@ -37,7 +37,8 @@ enum {
     ZK_W_OKP_TARGET_SPEED = 131072, /* ... or that, plus a margin for a target's speed */
     ZK_W_SCRIPT_BURST = 262144,     /* its salvo is the script firing shot by shot, so overkill prevention looks at each */
     ZK_W_PIERCES = 524288,          /* noExplode: flies on to the end of its range and hurts what it goes through, on every frame it's inside */
-    ZK_W_ONE_HIT_EACH = 1048576     /* ... but once per unit (weapon_single_hit.lua) */
+    ZK_W_ONE_HIT_EACH = 1048576,    /* ... but once per unit (weapon_single_hit.lua) */
+    ZK_W_THROWS = 2097152           /* fired by a manual-fire order, it throws what's around the unit (unit_thrower.lua) */
 };
 
 /* Times are in frames and distances in elmos. */
@@ -68,6 +69,7 @@ typedef struct {
     /* Overkill prevention, as the unit's script asks for it (unit_overkill_prevention.lua).  0 damage for none. */
     float okp_damage, okp_frames, okp_full_frames, okp_hit_mod, okp_min_range, okp_fast_mult, okp_radar_mult;
     float radar_wobble_penalty, radar_dot_penalty;   /* target_priority_defs.lua: what firing at a radar dot costs a target's rating */
+    float impulse;              /* what a hit pushes with, away from the shooter, or towards it if negative (weapon_impulse.lua) */
     int32_t kind, flags, shield_intercept, intercepted_by;
 } zk_weapon_rec;
 
@@ -78,6 +80,8 @@ enum { ZK_U_MOBILE = 1, ZK_U_AIR = 2, ZK_U_ARMED = 4, ZK_U_FIREPROOF = 8, ZK_U_F
        ZK_U_AREA_CLOAK_ON = 1024,      /* its area cloak starts on */
        ZK_U_KAMIKAZE_BLIND = 4096,     /* as a bomb, needs no sight of what's near it to go off */
        ZK_U_FLOATS = 8192,             /* stands on the water rather than the sea bed */
+       ZK_U_MISSILE = 16384,           /* a silo's: gone once it has fired (cruisemissile.lua) */
+       ZK_U_NEUTRAL = 32768,           /* nothing shoots at it unless told to: a teleport beacon */
        ZK_U_LEAVES_GHOST = 2048 };     /* a building: once seen, radar shows just where it is */
 
 typedef struct {
@@ -111,6 +115,11 @@ typedef struct {
     /* Jumping (unit_jumpjets.lua).  0 range for what doesn't.  speed: along the arc.  reload and delay: frames. */
     float jump_range, jump_speed, jump_height, jump_reload, jump_delay;
     float burrow_speed;          /* it digs in and cloaks below this speed; 0 for what doesn't */
+    float mass;                  /* for falling, and how long it takes to teleport */
+    float push_scale;            /* speed per unit of impulse, along the ground or through the air */
+    float needed_link;           /* its weapons need a grid that makes this much energy (unit_mex_overdrive.lua); 0 for none */
+    float throw_radius;          /* what its throwing weapon gathers (unit_thrower.lua) */
+    float teleport_rate, beacon_frames;   /* Djinn: mass per frame it brings over, and frames to make a beacon */
     int32_t move_state, fire_state;   /* to start with: hold position 0, maneuver 1, roam 2; hold fire 0, return fire 1, fire at will 2 */
     int32_t no_chase;                 /* categories it doesn't go after on its own */
     int32_t bait_level;               /* unit_bait_prevention.lua: 0 shoots at anything */
@@ -121,6 +130,8 @@ typedef struct {
     int32_t explode_weapon, n_mounts;
     int32_t landing_weapon;      /* goes off where it lands from a jump, or -1 */
     int32_t drop_weapon;         /* dropped when it dies, or -1 */
+    int32_t missile_pads;        /* a silo's, which its missiles stand on and wait for */
+    int32_t beacon_type;         /* what a teleporter makes */
     int32_t mount_weapon[ZK_MAX_MOUNTS];
     int32_t mount_only[ZK_MAX_MOUNTS];
     int32_t mount_bad[ZK_MAX_MOUNTS];
@@ -153,17 +164,27 @@ enum { ZK_ORDER_NONE = 0, ZK_ORDER_MOVE = 1, ZK_ORDER_FIGHT = 2, ZK_ORDER_ATTACK
        ZK_ORDER_PRODUCE = 14,   /* target: the type a factory builds over and over, or -1 to stop.  Leaves other orders alone. */
        ZK_ORDER_MOVE_STATE = 15, ZK_ORDER_FIRE_STATE = 16,    /* target: the state.  Leave other orders alone. */
        ZK_ORDER_UNIT_AI = 17,    /* target: 0 turns off the tactical AI, as a player can, and 1 back on */
-       ZK_ORDER_SELF_DESTRUCT = 18 };  /* a bomb goes off now, unless it's stunned.  Nothing else does. */
+       ZK_ORDER_SELF_DESTRUCT = 18,    /* a bomb goes off now, unless it's stunned.  Nothing else does. */
+       ZK_ORDER_PLACE_BEACON = 19,     /* x, z: a teleporter stops and makes its beacon there, replacing the one it has.  It deploys whenever it's standing with one. */
+       ZK_ORDER_WAIT_AT_BEACON = 20,   /* target: a beacon of its side, or the teleporter it belongs to.  It walks there and waits its turn. */
+       ZK_ORDER_ON_OFF = 21 };         /* target: 0 is off, 1 on.  What has both pulls when off and pushes when on.  Leaves other orders alone. */
+/* ZK_ORDER_MANUAL_FIRE: a target, or for what throws, x, z with a target of -1. */
 
 typedef struct {
     float x, z, vx, vz, heading, speed, hp, damage_taken, para, shield, disarm, build;
     float heat;
     float jump_charge;     /* 1 when it can jump */
+    float altitude;        /* off the ground: jumping, thrown or pushed */
     int32_t alive, order, target, stock, cloaked;
     int32_t chasing;       /* the enemy its fight order or idleness has it attacking, or -1 */
     int32_t dodging;       /* the tactical AI has it stepping away */
     int32_t shots_fired;
-    int32_t jumping;       /* 1 waiting to take off, 2 in the air */
+    int32_t jumping;       /* 1 waiting to take off, 2 in the air, thrown as well */
+    int32_t skidding;      /* pushed, and not walking until it stops */
+    int32_t low_power;     /* its grid can't run its weapons */
+    int32_t deployed;      /* a teleporter that's ready to bring things over */
+    int32_t beacon;        /* a teleporter's, or -1 */
+    int32_t pulling;       /* what has both is pulling */
 } zk_unit_state;
 
 int zk_abi_version(void);
@@ -192,6 +213,7 @@ int zk_world_add(void* world, int type, int side, float x, float z, float headin
 void zk_world_order(void* world, int unit, int kind, float x, float z, int target);
 void zk_world_step(void* world, int ticks);
 int zk_world_frame(const void* world);
+int zk_world_count(const void* world);
 /* Sets the frame number, which only the slow-update phase of units depends on. */
 void zk_world_set_frame(void* world, int frame);
 void zk_world_get(const void* world, int unit, zk_unit_state* out);

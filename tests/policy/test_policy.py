@@ -146,7 +146,7 @@ def test_tensor_shapes_and_token_order(small_map, table):
     assert t.unit_ally.shape == t.unit_player.shape == (6,)
     assert t.tok_kind[-1] == fz.TK_GLOBAL
     assert (t.pair_bucket >= 0).all() and (t.pair_bucket < fz.NUM_BUCKETS).all()
-    assert t.kind_mask.shape == (1, 16) and t.ptr_region.shape == (1, small_map.regions)
+    assert t.kind_mask.shape == (1, rf.KIND_COUNT) and t.ptr_region.shape == (1, small_map.regions)
     assert t.ptr_enemy.shape == (3, 1, 2)
     assert np.isfinite(t.unit_x).all() and np.isfinite(t.reg_x).all() and np.isfinite(t.glob_x).all()
 
@@ -207,7 +207,7 @@ def test_pair_buckets_read_distance_side_and_hops(small_map, table):
 # Masks: one hand-made frame for each row of 02-policy.md section 4.1.
 def kinds_of(units, small_map, table, **kw):
     t = run(units, small_map, table, **kw)
-    return t, {k for k in range(16) if t.kind_mask[0, k]}
+    return t, {k for k in range(rf.KIND_COUNT) if t.kind_mask[0, k]}
 
 
 def test_a_fresh_unit_may_keep_move_fight_stop(small_map, table):
@@ -451,6 +451,7 @@ def test_permuting_tokens_permutes_the_output(small_map, table, policy):
     p.unit_ally, p.unit_player = t.unit_ally[perm[:u]], t.unit_player[perm[:u]]
     p.pair_bucket = t.pair_bucket[np.ix_(perm, perm)]
     p.kind_mask, p.route_bias, p.ptr_region, p.ptr_jump = t.kind_mask[perm[:12]], t.route_bias[perm[:12]], t.ptr_region[perm[:12]], t.ptr_jump[perm[:12]]
+    p.ptr_wait, p.ptr_produce = t.ptr_wait[perm[:12]], t.ptr_produce[perm[:12]]
     p.ptr_enemy = t.ptr_enemy[:, perm[:12]]
     s = net.State.initial(small_map.regions)
     a, b = policy.decide(t, s), policy.decide(p, s)

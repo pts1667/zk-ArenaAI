@@ -214,7 +214,7 @@ bool World::can_hit_now(int u, int t) const {
 bool World::valid_chase_target(int u, int t) const {
     const auto& d = type_of(u);
     const auto& td = type_of(t);
-    if (d.no_chase & td.category) return false;
+    if ((d.no_chase & td.category) || (td.flags & ZK_U_NEUTRAL)) return false;
     if (ai[size_t(u)].move_state == HOLD_POSITION) return can_hit_now(u, t);
     for (int m = 0; m < d.n_mounts; ++m) {
         const auto& w = cat->weapons[size_t(d.mount_weapon[m])];

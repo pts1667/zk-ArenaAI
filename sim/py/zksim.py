@@ -19,7 +19,7 @@ sys.path.insert(0, str(ROOT / "py"))
 sys.path.insert(0, str(ROOT.parent / "bots"))
 import zknav  # noqa: E402
 from zkbot.policy import rawframe  # noqa: E402
-ABI_VERSION = 14
+ABI_VERSION = 15
 MAX_MOUNTS = 8
 TICK_FRAMES = 5
 FRAMES_PER_SECOND = 30
@@ -27,10 +27,12 @@ MOVE_CLASSES = ("kbot", "tank", "spider", "amph", "hover", "ship")
 ADVANCE, HOLD, ORDERS, SCRIPTED = 0, 1, 2, 3
 ORDER_NONE, ORDER_MOVE, ORDER_FIGHT, ORDER_ATTACK, ORDER_MANUAL_FIRE, ORDER_JUMP, ORDER_CLOAK_ON, ORDER_CLOAK_OFF = 0, 1, 2, 3, 6, 7, 8, 9
 ORDER_BUILD, ORDER_ASSIST, ORDER_RECLAIM, ORDER_PRODUCE, ORDER_MOVE_STATE, ORDER_FIRE_STATE, ORDER_UNIT_AI, ORDER_SELF_DESTRUCT = 10, 11, 13, 14, 15, 16, 17, 18
+ORDER_PLACE_BEACON, ORDER_WAIT_AT_BEACON, ORDER_ON_OFF = 19, 20, 21
 MOBILE, AIR, ARMED, FIREPROOF, FACTORY, PLOPPABLE, COMMANDER, CAN_CLOAK, STARTS_CLOAKED, FIRES_CLOAKED, AREA_CLOAK_ON, LEAVES_GHOST, KAMIKAZE_BLIND, FLOATS = 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192
+MISSILE, NEUTRAL = 16384, 32768
 FEATURES_PER_SIDE = 256             # records a frame can hold: more than is in sight in any game looked at
 W_TURRET, W_NO_AUTO_TARGET, W_MANUAL, W_UNMODELLED = 2, 16, 512, 2048
-W_PIERCES, W_ONE_HIT_EACH = 524288, 1048576
+W_PIERCES, W_ONE_HIT_EACH, W_THROWS = 524288, 1048576, 2097152
 
 
 class WeaponRec(ct.Structure):
@@ -44,7 +46,7 @@ class WeaponRec(ct.Structure):
         "area_dps", "area_radius", "area_plateau", "area_range_fall", "area_plateau_fall", "area_time_fall", "area_frames",
         "burn_frames", "burn_random", "burn_chance", "burn_damage",
         "okp_damage", "okp_frames", "okp_full_frames", "okp_hit_mod", "okp_min_range", "okp_fast_mult", "okp_radar_mult",
-        "radar_wobble_penalty", "radar_dot_penalty")] + [(n, ct.c_int32) for n in (
+        "radar_wobble_penalty", "radar_dot_penalty", "impulse")] + [(n, ct.c_int32) for n in (
             "kind", "flags", "shield_intercept", "intercepted_by")]
 
 
@@ -56,9 +58,9 @@ class TypeRec(ct.Structure):
         "metal_cost", "energy_cost", "build_time", "build_speed", "build_range", "metal_make", "energy_make", "extract_mult", "pylon_range",
         "reclaim_speed", "wreck_metal", "wreck_hp", "heap_metal", "heap_hp", "energy_upkeep", "stockpile_cost", "close_frames",
         "cloak_cost", "cloak_cost_moving", "decloak_distance", "bestowed_decloak", "area_cloak_radius", "area_cloak_upkeep",
-        "perceived_range", "heat_per_shot", "heat_decay", "heat_max_slow", "heat_initial", "bait_cost", "kamikaze_distance", "detonate_reach", "drop_height", "drop_gravity", "jump_range", "jump_speed", "jump_height", "jump_reload", "jump_delay", "burrow_speed")] + [(n, ct.c_int32) for n in (
+        "perceived_range", "heat_per_shot", "heat_decay", "heat_max_slow", "heat_initial", "bait_cost", "kamikaze_distance", "detonate_reach", "drop_height", "drop_gravity", "jump_range", "jump_speed", "jump_height", "jump_reload", "jump_delay", "burrow_speed", "mass", "push_scale", "needed_link", "throw_radius", "teleport_rate", "beacon_frames")] + [(n, ct.c_int32) for n in (
             "move_state", "fire_state", "no_chase", "bait_level", "bait_target", "bait_target_armor",
-            "def_id", "wreck_feature", "heap_feature", "armor_class", "move_class", "category", "flags", "explode_weapon", "n_mounts", "landing_weapon", "drop_weapon")] + [
+            "def_id", "wreck_feature", "heap_feature", "armor_class", "move_class", "category", "flags", "explode_weapon", "n_mounts", "landing_weapon", "drop_weapon", "missile_pads", "beacon_type")] + [
         ("mount_weapon", ct.c_int32 * MAX_MOUNTS), ("mount_only", ct.c_int32 * MAX_MOUNTS),
         ("mount_bad", ct.c_int32 * MAX_MOUNTS)]
 
@@ -74,8 +76,8 @@ class TacticsRec(ct.Structure):
 
 class UnitState(ct.Structure):
     _fields_ = [(n, ct.c_float) for n in (
-        "x", "z", "vx", "vz", "heading", "speed", "hp", "damage_taken", "para", "shield", "disarm", "build", "heat", "jump_charge")] + [
-        (n, ct.c_int32) for n in ("alive", "order", "target", "stock", "cloaked", "chasing", "dodging", "shots_fired", "jumping")]
+        "x", "z", "vx", "vz", "heading", "speed", "hp", "damage_taken", "para", "shield", "disarm", "build", "heat", "jump_charge", "altitude")] + [
+        (n, ct.c_int32) for n in ("alive", "order", "target", "stock", "cloaked", "chasing", "dodging", "shots_fired", "jumping", "skidding", "low_power", "deployed", "beacon", "pulling")]
 
 
 def _load_library() -> ct.CDLL:
@@ -100,6 +102,7 @@ def _load_library() -> ct.CDLL:
     lib.zk_world_order.argtypes = [vp, it, it, fl, fl, it]
     lib.zk_world_step.argtypes = [vp, it]
     lib.zk_world_frame.argtypes = [cvp]
+    lib.zk_world_count.argtypes = [cvp]
     lib.zk_world_set_frame.argtypes = [vp, it]
     lib.zk_world_get.argtypes = [cvp, it, ct.POINTER(UnitState)]
     lib.zk_world_ready_weapons.argtypes = [vp]
@@ -319,6 +322,25 @@ class World:
 
     def manual_fire(self, unit: int, target: int) -> None:
         _lib.zk_world_order(self.handle, unit, ORDER_MANUAL_FIRE, 0.0, 0.0, target)
+
+    def manual_fire_at(self, unit: int, x: float, z: float) -> None:
+        """At a place: what throws, throws there."""
+        _lib.zk_world_order(self.handle, unit, ORDER_MANUAL_FIRE, x, z, -1)
+
+    def set_on_off(self, unit: int, on: bool) -> None:
+        """What has both pulls when off and pushes when on."""
+        _lib.zk_world_order(self.handle, unit, ORDER_ON_OFF, 0.0, 0.0, 1 if on else 0)
+
+    def place_beacon(self, unit: int, x: float, z: float) -> None:
+        _lib.zk_world_order(self.handle, unit, ORDER_PLACE_BEACON, x, z, -1)
+
+    def wait_at_beacon(self, unit: int, beacon: int) -> None:
+        """beacon: it, or the teleporter it belongs to."""
+        _lib.zk_world_order(self.handle, unit, ORDER_WAIT_AT_BEACON, 0.0, 0.0, beacon)
+
+    def count(self) -> int:
+        """Handles given out so far, the dead included."""
+        return _lib.zk_world_count(self.handle)
 
     def ready_weapons(self) -> None:
         _lib.zk_world_ready_weapons(self.handle)

@@ -21,6 +21,7 @@ constexpr int UF_TYPE_KNOWN = 32;
 constexpr int UF_DAMAGED = 64;
 constexpr int UF_RESERVED = 128;
 constexpr int UF_JUMP_READY = 256;
+constexpr int UF_PULLING = 512;
 
 struct UnitRecord {
     int64_t uid;

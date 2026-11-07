@@ -23,6 +23,7 @@ constexpr int ESCAPE_TICKS = 18;               // 3 s, doubling with each attemp
 constexpr int ESCAPE_MAX_DOUBLINGS = 3;
 constexpr float AT_CENTRE = 64.0f;             // near enough: a turning circle can keep a unit from getting closer
 constexpr float BACK_ON_LINE = 64.0f;          // MobileCAI.cpp: going back to a fight's line is over this close to it
+constexpr float BEACON_WALK_TO = 150.0f;       // unit_teleporter.lua: BEACON_WAIT_RANGE_MOVE
 
 float wrap(float a) {
     while (a > PI) a -= 2.0f * PI;
@@ -154,6 +155,11 @@ bool World::wants_to_walk(int u, float& gx, float& gz) {
     if (o == ZK_ORDER_MANUAL_FIRE) {
         const int t = order_target[size_t(u)];
         const float reach = cat->weapons[size_t(d.mount_weapon[manual_mount(u)])].range;
+        if (t < 0 && d.throw_radius > 0.0f) {
+            gx = goal_x[size_t(u)];
+            gz = goal_z[size_t(u)];
+            return std::hypot(gx - x[size_t(u)], gz - z[size_t(u)]) > reach;
+        }
         if (t < 0 || !alive[size_t(t)] || std::hypot(x[size_t(t)] - x[size_t(u)], z[size_t(t)] - z[size_t(u)]) <= reach)
             return false;
         gx = x[size_t(t)];
@@ -165,6 +171,16 @@ bool World::wants_to_walk(int u, float& gx, float& gz) {
         gx = goal_x[size_t(u)];
         gz = goal_z[size_t(u)];
         return std::hypot(gx - x[size_t(u)], gz - z[size_t(u)]) >= d.jump_range;
+    }
+    if (o == ZK_ORDER_WAIT_AT_BEACON) {
+        const int t = order_target[size_t(u)];
+        if (t < 0 || !alive[size_t(t)]) {
+            order[size_t(u)] = ZK_ORDER_NONE;
+            return false;
+        }
+        gx = x[size_t(t)];
+        gz = z[size_t(t)];
+        return std::hypot(gx - x[size_t(u)], gz - z[size_t(u)]) > BEACON_WALK_TO;
     }
     if (o == ZK_ORDER_BUILD) {
         gx = goal_x[size_t(u)];
@@ -234,6 +250,11 @@ void World::move_one(int u) {
         return;
     }
     const auto& d = type_of(u);
+    if (skid[size_t(u)].on && !(d.flags & ZK_U_AIR)) {
+        track_progress(u, false);
+        step_skid(u);
+        return;
+    }
     float gx = 0.0f, gz = 0.0f;
     bool walking;
     {
@@ -288,6 +309,7 @@ void World::move_one(int u) {
             v = 0.0f;
         }
     }
+    if (skid[size_t(u)].on) step_air_skid(u, px, pz);
     const float frames = float(ZK_TICK_FRAMES);
     px = std::clamp(px, 0.0f, map->width() - 1.0f);
     pz = std::clamp(pz, 0.0f, map->depth() - 1.0f);

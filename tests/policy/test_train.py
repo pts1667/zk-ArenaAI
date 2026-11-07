@@ -53,7 +53,7 @@ def _segments(learner) -> list[pt.Segment]:
             frame = game.frame_for(0)
             items, acts, value, glob, regions = learner.act([(frame, bundle, names)], glob, regions)
             c = items[0].controllable
-            steps.append(pt.Step(frame, *(acts[h][0, :c] for h in ("kind", "enemy", "region", "fine", "logp")), float(value[0]),
+            steps.append(pt.Step(frame, *(acts[h][0, :c] for h in ("kind", "enemy", "region", "fine", "produce", "logp")), float(value[0]),
                                  advantage=float(rng.normal()), ret=float(rng.normal())))
             game.apply(1, toy.script_focus(game, 1, rng))
             game.step()
@@ -166,7 +166,7 @@ def test_a_minibatch_budgets_its_padded_size(learner):
     """A few frames from a big map can't ride along with many small ones: padded, they would all cost as much as the big map's."""
     def segment(n_units, regions, length):
         frame = rf.Frame(np.zeros(n_units, rf.UNIT_DTYPE), np.zeros(0, rf.SITE_DTYPE), np.zeros(len(rf.GLOBAL_FIELDS), np.float32))
-        return pt.Segment([pt.Step(frame, *(np.zeros(0) for _ in range(5)))] * length, np.zeros(1), np.zeros((regions, 1)), SimpleNamespace(regions=regions), np.zeros(1))
+        return pt.Segment([pt.Step(frame, *(np.zeros(0) for _ in range(6)))] * length, np.zeros(1), np.zeros((regions, 1)), SimpleNamespace(regions=regions), np.zeros(1))
     segments = [segment(40, 24, 32) for _ in range(40)] + [segment(20, 76, 32) for _ in range(40)]
     budget = learner.cfg.token_budget
     learner.cfg.token_budget = 100_000
@@ -185,7 +185,7 @@ def test_big_frames_get_fewer_tokens_in_a_minibatch(learner):
     """Attention's pairs: a frame of many tokens costs more memory per token."""
     def segment(n_units):
         frame = rf.Frame(np.zeros(n_units, rf.UNIT_DTYPE), np.zeros(0, rf.SITE_DTYPE), np.zeros(len(rf.GLOBAL_FIELDS), np.float32))
-        return pt.Segment([pt.Step(frame, *(np.zeros(0) for _ in range(5)))] * 32, np.zeros(1), np.zeros((76, 1)), SimpleNamespace(regions=76), np.zeros(1))
+        return pt.Segment([pt.Step(frame, *(np.zeros(0) for _ in range(6)))] * 32, np.zeros(1), np.zeros((76, 1)), SimpleNamespace(regions=76), np.zeros(1))
     budget = learner.cfg.token_budget
     learner.cfg.token_budget = 165_000
     try:

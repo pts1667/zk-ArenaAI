@@ -54,6 +54,7 @@ class TypeTable:
         self.cloak = np.zeros(n + 1, bool)
         for row, name in enumerate(names):
             self._fill(row, name, units.BY_NAME[name], moves.get(name))
+        self._fill_specials(names)
         top = max(int(k) for k in units.BY_ID)
         self.row_of_def = np.full(top + 2, n, np.int32)   # the last entry stands for -1
         for def_id, d in units.BY_ID.items():
@@ -94,6 +95,28 @@ class TypeTable:
         v += [float(t in tags) for t in TAGS]
         self.stats[row] = v
 
+    def _fill_specials(self, names: list[str]) -> None:
+        n = len(names) + 1
+        row = {name: r for r, name in enumerate(names)}
+        special = catalog.SPECIALS
+        self.throw_radius, self.throw_reach = np.zeros(n, np.float32), np.zeros(n, np.float32)
+        for name, facts in special["throwers"].items():
+            if name in row:
+                self.throw_radius[row[name]], self.throw_reach[row[name]] = facts["radius"], facts["reach"]
+        self.switches, self.teleports, self.beacon = np.zeros(n, bool), np.zeros(n, bool), np.zeros(n, bool)
+        self.switches[[row[name] for name in special["switches"] if name in row]] = True
+        for name, beacon in special["teleporters"].items():
+            if name in row:
+                self.teleports[row[name]], self.beacon[row[beacon]] = True, True
+        # What a PRODUCE can point at, and who can make which: silos, until factories get theirs at stage 3.
+        silos = {row[name]: [row[o] for o in options if o in row] for name, options in special["silos"].items() if name in row}
+        self.producible = np.array(sorted({o for options in silos.values() for o in options}), np.int64)
+        self.produces = np.zeros((n, len(self.producible)), bool)
+        for silo, options in silos.items():
+            self.produces[silo, np.searchsorted(self.producible, options)] = True
+        # Those the policy gives orders to though they aren't fighters that walk.
+        self.acts_in_place = self.switches | self.produces.any(axis=1)
+
     def rows(self, def_ids: np.ndarray) -> np.ndarray:
         """Catalog row per def id; -1 and anything unheard of give the unknown row."""
         ids = np.where((def_ids < 0) | (def_ids >= len(self.row_of_def) - 1), len(self.row_of_def) - 1, def_ids)
@@ -102,7 +125,7 @@ class TypeTable:
 
 def _catalog_hash() -> str:
     h = hashlib.sha256()
-    for name in ("units.json", "weapons.json", "abilities.json", "moveclass.json", "jumprange.json"):
+    for name in ("units.json", "weapons.json", "abilities.json", "moveclass.json", "jumprange.json", "specials.json"):
         h.update((_DATA / name).read_bytes().replace(b"\r\n", b"\n"))
     return h.hexdigest()[:16]
 

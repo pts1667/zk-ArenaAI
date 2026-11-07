@@ -1021,6 +1021,25 @@ In same-factory games the first and second halves are 8.4% and 8.3% wins, where 
 
 Both sources take both seats and see under fog, with `economy=True`.
 
+**The collection in `/mnt/d/zk-learned/frames/pool3`** (2026-11-07, 25 GB, 18 minutes beside a training run): as below, with everything that can stand on the board let in, and a scenario's structures up to 6,500 metal, which takes in a Singularity and the big guns and no superweapon.  Scripts now throw with Lobsters, flip Newtons and Sumos between pushing and pulling, send a Djinn ahead of a beacon with others waiting at it, and build missiles in silos (`FrameFight`, `BaseScript`; `01-simulator.md` 8.17).  Feature version 5, as the token layout hasn't changed, so `pool2` and `pool3` are the same shape.  Share of frames holding one, from scripts and from scenarios, of 1M each:
+
+| Unit | Script | Scenario |
+|---|---|---|
+| Sumo | 1.7% | 4.8% |
+| Lobster | 2.9% | 8.1% |
+| Djinn / its beacon | 2.1% / 1.9% | 7.4% / 5.1% |
+| Newton | 11.6% | 11.4% |
+| Missile silo | 0.6% | 6.1% |
+| Each kind of missile | 0.01-0.03% | about 0.9% |
+| Fusion | 11.2% | 10.1% |
+| Singularity | 0% | 2.5% |
+| Cerberus | 0.2% | 3.8% |
+| Heavy artillery (`staticheavyarty`) | 0% | 1.4% |
+| `turretheavy`, `turretantiheavy` | 1.8%, 0.4% | 5.9%, 4.6% |
+| Those with unmodelled weapons (`jumpblackhole`, `veharty`, `vehcapture`, `bomberassault`) | 1.2-3.6% | 5.8-7.6% |
+
+`turretsunlance`, `zenith`, `dronecarry` and `hoverminer` didn't appear.  Missiles are rare from scripts as games are short: 64 script games over 12.5 minutes finished 43, with no draws, at a median of 8.7 minutes, and a silo costs what a side doesn't often have by then.  `pool3` hasn't been trained on as of this note.
+
 **The collection in `/mnt/d/zk-learned/frames/pool2`,** feature version 5, replacing `pool1`, since deleted, which the trainer would no longer accept because unit tokens gained jump charge: 1M frames from each source, 25 GB, 15 minutes on 8 processes at about 2,250 and 2,630 frames a second (one process manages about 420).  A frame takes about 13 kB.  At the 50th, 90th and 99th percentile a frame has 27, 70 and 129 unit tokens, up to 236, and 44, 94 and 134 regions, up to 148.
 
 | Share of frames with any | Script | Scenario |
@@ -1146,3 +1165,206 @@ About 4.8 hours and 100 MB.  A `stop` file in the run's directory ends it at the
 * **How `z` reaches the main model.**  A single vector can't drive per-unit orders and target pointers, because those need a token per unit.  So `z` can replace the GRU's frame input and give the critic and global context, with unit tokens kept for the heads, but it can't replace them.  `tools/policy_model.py` isn't changed.
 * **The live bot has no forward for it.**  `bots/zkbot/policy/net.py` runs in numpy and the encoder is torch only, so a numpy port with a parity test comes first.
 * **Whether to start the long run**, with the stopping rule in 11.3.  `selfplay-6h` (10.6) points at the policy's updates and the factory matchups, rather than the frame input, as the first problems, so this may not fix what that run showed.
+
+### 11.5 The frame VAE (2026-11-07)
+
+`tools/frame_vae.py`, `tests/policy/test_frame_vae.py`.  It replaces the LeJEPA objective, whose long run wasn't started.  **Why:** LeJEPA asks a frame's latent to match the same frame with up to 60% of units dropped, and 2 s later, so it's taught to leave out which units are where, and parts of a frame mostly can't be predicted from other parts anyway.  The goal is a small latent the actor reads as tokens, in place of all its tokens, unit tokens included, so the latent should keep what's there.
+
+**The model:** `FrameEncoder` as before, with its 24 queries kept apart rather than flattened.  Each gives a mean and variance of 32 numbers, 768 in all.  The decoder is 2 rounds of cross-attention with `d` 96.
+
+**The decoder is asked about regions.**  A list of units has no order and no set length, and rebuilding one needs matching.  So each region's static columns and a sine code of its place make a query, and it answers with what's in that region now:
+
+* reg_x's columns that change: own, seen enemy and radar value, own and seen enemy DPS, remembered structures, wreck metal.
+* Value for each of own and enemy by structure, builder, air, ship and other ground units, worked out from the unit tokens, each counted for the nearest region centre.  Summary tokens add nothing here, though they do to the columns above.
+* The global token, by one more query.
+
+No new frames were needed.  It's asked only what the seat sees.  Each column is scaled to variance 1 first.
+
+**The loss** is a Gaussian ELBO with variance `beta` on those scaled targets, summed over a frame's cells and divided by the mean cells in a frame.  So beta is roughly how much of a column may stay unexplained.  Beta rises from 0 over 2,000 steps.
+
+**5,000-step checks on `pool2`, on held-out maps.**  The learning rate falls to 0 by the end, which accounts for some of the flattening from step 3,000.  3 at once ran 9 steps a second each, including probes.
+
+| | Untrained | beta 0.03 | beta 0.1 | beta 0.3 |
+|---|---|---|---|---|
+| Latent size, bits a frame | | 637 | 231 | 111 |
+| Reconstruction R^2, regions | -0.31 | 0.69 | 0.38 | 0.27 |
+| Reconstruction R^2, global | -0.34 | 0.48 | 0.36 | 0.25 |
+| Probe: own value | 0.72 | 0.86 | 0.86 | 0.85 |
+| Probe: own air | 0.17 | 0.82 | 0.82 | 0.81 |
+| Probe: own ships | -0.16 | 0.78 | 0.87 | 0.82 |
+| Probe: what's known of the enemy | 0.70 | 0.87 | 0.90 | 0.88 |
+| Probe: commander health | 0.26 | 0.92 | 0.87 | 0.85 |
+| Probe: clock | 0.51 | 0.65 | 0.71 | 0.65 |
+| Probe: metal | 0.21 | 0.41 | 0.39 | 0.37 |
+| Probe: enemy value (partly hidden) | 0.27 | 0.45 | 0.47 | 0.45 |
+| Probe: enemy air (partly hidden) | 0.04 | 0.49 | 0.49 | 0.49 |
+| Probe: outcome | 0.15 | 0.28 | 0.38 | 0.40 |
+| Probe: sea share | 0.77 | 0.54 | 0.42 | 0.53 |
+
+Knowing only each region's mean on that map, over those same frames, gets a reconstruction R^2 of 0.15.
+
+**What that says:**
+
+* **The objective works.**  Almost every probe ends well above untrained, where LeJEPA's mostly ended below (11.3), though a linear probe has 768 numbers to read here against 256 there, so compare each against its own untrained column.
+* **Not good enough yet on where things are.**  Over cells that hold something, R^2 is negative at every column but remembered structures: at beta 0.03, -2.0 for seen enemy value and -2.7 for own ground.  So the predictions are worse there than that column's mean over occupied cells; I'd guess too low, from blurring over regions, but haven't measured the sign.  The map baseline is -10 and -11, so this is much better than nothing, but blurred.
+* **Metal and the clock are well short** of the ceiling's 1.00, as the global token is 1 query's answer among many cells.
+* **Sea share falls below untrained**, as expected: it isn't asked for, and the actor would have the map another way.
+* **Whether 768 numbers carry enough for the actor isn't shown by any of this.**
+
+**The long run,** `/mnt/d/zk-learned/runs/frame-vae-b001`, beta 0.01, 100,000 steps, started 2026-11-07.  One at beta 0.03, `frame-vae-b003`, was stopped at step 8,500 once 0.01 was clearly ahead.  At 0.03 the command was:
+
+    wsl ~/zkml/bin/python tools/frame_vae.py train --data /mnt/d/zk-learned/frames/pool2 --run /mnt/d/zk-learned/runs/frame-vae-b003 --steps 100000 --beta 0.03
+
+A `stop` file in a run's directory ends it at the next report.
+
+**How `frame-vae-b001` ended,** at step 99,999 on `pool2`, 1.9 hours, on held-out maps.  The marks set beforehand were a region R^2 of about 0.9 or better, and clearly positive R^2 over occupied cells for seen enemy value and own ground units.  It met the first two and not the third:
+
+| | Step 80,000 | 85,000 | 90,000 | 95,000 | 99,999 |
+|---|---|---|---|---|---|
+| Region R^2 (the map alone: 0.14) | 0.942 | 0.928 | 0.938 | 0.949 | 0.945 |
+| Global R^2 | 0.942 | 0.929 | 0.952 | 0.947 | 0.946 |
+| Occupied: seen enemy value | 0.842 | 0.816 | 0.793 | 0.879 | 0.865 |
+| Occupied: own value | 0.760 | 0.774 | 0.773 | 0.774 | 0.774 |
+| Occupied: remembered | 0.932 | 0.935 | 0.948 | 0.934 | 0.940 |
+| Occupied: own structures | 0.310 | 0.209 | 0.348 | 0.498 | 0.243 |
+| Occupied: own ground | 0.021 | -0.041 | -0.062 | -0.014 | 0.199 |
+| Occupied: enemy ground | 0.286 | 0.174 | 0.115 | 0.332 | 0.368 |
+| Occupied: own builders | -0.898 | -1.661 | -0.713 | -0.614 | -0.930 |
+| Occupied: enemy builders | -0.531 | -1.248 | -0.081 | 0.206 | -0.095 |
+| Occupied: own air | -0.042 | -0.345 | -0.054 | -0.115 | 0.064 |
+| Linear probe: metal | 0.797 | 0.801 | 0.762 | 0.763 | 0.790 |
+| Linear probe: own x | 0.687 | 0.628 | 0.648 | 0.711 | 0.665 |
+| Linear probe: enemy x | 0.401 | 0.293 | 0.299 | 0.329 | 0.343 |
+| Linear probe: outcome | 0.109 | 0.108 | 0.146 | 0.044 | 0.062 |
+
+The learning rate was all but gone by then, so these swings are what one check differs from another, not progress: own ground's 0.199 is the highest of the five, and the mean of the five is 0.02.
+
+So value, firepower and memory come through well, and counts of a particular kind of unit, spread thin over the map, do not.  Linear probes of position fell through the run (own x 0.85 at step 20,000, enemy x 0.58, outcome 0.24) while reconstruction rose.  That doesn't show the information has gone, as the actor needn't read it linearly, nor that it can be used.  Own units matter less here, as the actor would read their raw features; enemy units are the concern.
+
+**The larger run,** `/mnt/d/zk-learned/runs/frame-vae-large`, started 2026-11-07 on the user's standing go-ahead for a run that missed, on `pool3`: 3.05M parameters from 1.05M or so, a latent of 32 x 40 = 1280 numbers from 768.  It changes the size of all three parts and the frames at once, so it can't say which helped, and its held-out maps have new kinds of unit on them, so the numbers above aren't quite the same test.
+
+    wsl ~/zkml/bin/python tools/frame_vae.py train --data /mnt/d/zk-learned/frames/pool3 --run /mnt/d/zk-learned/runs/frame-vae-large --steps 100000 --beta 0.01 --latent 40 --queries 32 --d 184 --rounds 3 --decoder-d 136
+
+**How it went: stopped at the user's request at step 57,400,** since more parameters weren't helping.  Its learning rate had 0.00018 left to fall, and `frame-vae-b001` gained most of its last gains over that part, so this is a comparison at the same steps, on harder frames.
+
+| Held-out maps | b001, 30k | large, 30k | b001, 55k | large, 55k | b001, end |
+|---|---|---|---|---|---|
+| Region R^2 | 0.901 | 0.879 | 0.921 | 0.912 | 0.945 |
+| KL, nats | 656 | 659 | 550 | 610 | 488 |
+| Numbers active, of 768 and 1280 | 682 | 969 | 600 | 928 | 600 |
+| Effective rank | 211 | 218 | 214 | 220 | 216 |
+| Seen enemy value, occupied | 0.636 | 0.686 | 0.772 | 0.741 | 0.865 |
+| Own ground, occupied | -0.46 | -0.79 | -0.17 | -0.39 | 0.20 |
+
+KL and rank hardly moved for 1.67 times the numbers, which suggests beta sets how much gets through, not the size.
+
+**Where its error is,** `vae-last.pt`, 1,536 held-out frames, 62,850 region cells.  Deterministic R^2 0.929, with the latent's noise 0.925.  KL 585 nats a frame; tokens carry 1.2 to 29.4 each.  `where` is the share that are filled of as many cells as are, taken from those it rates highest; `how much` is R^2 over those it got right.
+
+| Column | In the encoder's input? | Filled | R^2 | Occupied R^2 | Where | How much |
+|---|---|---|---|---|---|---|
+| seen_enemy_value | yes | 3.1% | 0.990 | 0.863 | 0.990 | 0.950 |
+| seen_enemy_dps | yes | 2.1% | 0.992 | 0.899 | 0.993 | 0.949 |
+| own_value | yes | 13.7% | 0.971 | 0.685 | 0.970 | 0.856 |
+| own_dps | yes | 7.3% | 0.974 | 0.707 | 0.975 | 0.875 |
+| enemy_ground | no | 1.8% | 0.917 | 0.412 | 0.929 | 0.687 |
+| own_ground | no | 6.2% | 0.861 | -0.107 | 0.890 | 0.433 |
+| own_structure | no | 9.1% | 0.908 | 0.344 | 0.922 | 0.524 |
+| own_builder | no | 5.4% | 0.875 | -0.807 | 0.908 | 0.106 |
+| enemy_builder | no | 0.8% | 0.916 | -0.393 | 0.951 | 0.457 |
+
+Two things follow.  **The occupied-cell mark was harsher than it looked:** filled cells differ little (spread about 0.15 about a mean near 0.55), so own builders score -0.81 with 91% of its top cells right.  It does know roughly where things are.  **What it has to work out does worse than what it's handed:** `reg_x` gives the encoder value and DPS by region, and the split by class it can only get from the units.  The encoder's queries read by softmax attention with no layers over the tokens, which averages and can't simply count.  That split also needs more information through the same latent, so this doesn't separate the two causes; only a run can.
+
+`--autoencoder`: no noise, no KL, a LayerNorm with no weights on each latent token.
+
+**Summing units into regions and two answers for each cell** (`--region-pool`, `--two-part`, 2026-11-07).  The columns worked out from units did worst, and attention averages, so it can't simply count.  `FrameEncoder.pooled` sums what each unit says into its nearest region's token before the queries read, each number squashed by asinh.  And since most cells are empty and filled ones hardly differ, a cell can answer twice: a Bernoulli for whether anything's there, and a Gaussian for how much, on filled cells only.  `recon` and every R^2 use the expected value, so runs compare.  `how_much_` uses the second answer, which flatters a two-part run a little.
+
+**The short runs,** `/mnt/d/zk-learned/runs/encoder-grid`, on `pool3`, 25,000 steps, the same cosine.  Nine were planned, to separate the three changes; the user stopped the rest after the first two as it doesn't matter which change did what, only that the encoder is slim, usable by the actor, and quick to train.  So **the table can't say which of the three helped.**  `ae-plain` and `vae-pool` were stopped within minutes and mean nothing.
+
+    wsl ~/zkml/bin/python tools/frame_vae.py train --data /mnt/d/zk-learned/frames/pool3 --run /mnt/d/zk-learned/runs/encoder-grid/ae-pool-two --steps 25000 --autoencoder --region-pool 32 --two-part
+
+| Held-out maps, step 25,000 | `vae-plain`, beta 0.01 | `ae-pool-two` |
+|---|---|---|
+| Region R^2 | 0.921 | **0.989** |
+| Own ground R^2, where, how much | 0.858, 0.89, 0.46 | **0.993, 0.996, 0.96** |
+| Own builders R^2, where, how much | 0.853, 0.89, 0.12 | **0.991, 0.99, 0.96** |
+| Enemy ground where, how much | 0.90, 0.58 | **0.99, 0.97** |
+| Effective rank | 209 | 215 |
+| Encoder parameters (decoder another 237k or so) | 871k | 916k |
+| CPU for a frame, one thread, torch, 28 to 112 units | 1.6 to 1.8 ms | 1.7 to 2.1 ms |
+| Time, sharing the GPU with one other run | 33 minutes | 33 minutes |
+
+About 20 steps a second alone.
+
+**Could an actor use it?**  Frozen latents, 2,048 held-out frames.  A fresh decoder of one design, two-part, 8,000 steps, gets region R^2 0.966 from `ae-pool-two` and 0.908 from `vae-plain`, with per-class columns 0.99 against 0.87 to 0.91, so the autoencoder's latents really hold more about regions and it isn't its decoder's doing.  A fresh reader, as the planned actor would read (own unit's features reading the latents), was asked about circles around the unit, which no decoder ever was:
+
+| R^2, own units, held-out | No latents | Untrained encoder | `ae-pool-two` | `vae-plain` |
+|---|---|---|---|---|
+| Enemy value within 0.15 of the unit | 0.55 | 0.57 | 0.78 | **0.82** |
+| Own value within 0.15 | 0.55 | 0.58 | 0.81 | **0.84** |
+| Nearest enemy | 0.46 | 0.46 | 0.94 | **0.95** |
+| Enemy value within 0.05 | 0.47 | 0.48 | 0.64 | **0.67** |
+| Own value within 0.05 | 0.37 | 0.40 | 0.57 | **0.59** |
+
+The first two columns are 3,000 steps; the last two 15,000, which added about 0.03 to each.  The VAE's small lead held, so it isn't only a short reader.  Why isn't measured.  **Neither holds fine position:** the latent's only asked about regions, of which there are 44 in a median frame, so very roughly 0.3 across in map coordinates against 0.05.
+
+Noise on the latents, by each number's own spread: `ae-pool-two` 0.989 at 0, 0.982 at 0.2, 0.841 at 0.5; `vae-plain` 0.928, 0.921, 0.865.  Taking away one unit moves a latent by 0.076 (autoencoder) or 0.040 (VAE) of the median distance between two frames.  Cutting the autoencoder's latent to its top directions, with no retraining: 512 numbers 0.974, 384 0.927, 256 0.796.  A latent trained at that size might do better; that isn't measured.  These figures are in `encoder-grid/usable.json` and `usable2.json`, from scripts not in the repo.
+
+**Questions about units and wrecks** (`--questions`, 2026-11-07; the idea of asking "where's unit X" is the user's).  To make it keep per-unit detail and fine position, each frame also gets 64 sampled questions.  Twenty ask where a thing of this description is: a unit's type, side, knowledge, velocity, health, build and flags, or a wreck's metal, with nothing that gives away a place, so no position, altitude, orders, rays, or a wreck's distances to base and army.  Identical units make that ambiguous, so it answers with 8 places and a weight for each.  Forty-four ask what's at this exact place, within 0.02 of the map's -1..1: 16 at units, 4 at wrecks, 16 just beside units and 8 anywhere; it says whether a unit and a wreck are there, and if so its type, side and state or metal.  No slots, no matching, and the cost is fixed.  Each question's cost is added in nats, as a region cell's is.  Unit IDs were considered and left out: raw ones mean nothing, and random tags spend latent on telling apart units the actor treats alike and put noise in the latents.
+
+**Muon** (`--muon-lr`, `Optimisers`, `torch.optim.Muon`) takes the weight matrices of hidden layers; AdamW keeps embeddings, learned queries, biases, norms and the `_out` layers.  Both follow one schedule.
+
+**The short test,** `/mnt/d/zk-learned/runs/encoder-questions`, on `pool3`: autoencoder, pooling, two-part and questions, 5,000 steps with the cosine that long, so a warmup of 2,000.  The user judged this enough to compare optimisers, so no 25,000-step run followed.  One seed; **AdamW's rate wasn't tuned, and Muon's best is the highest tried.**
+
+    wsl ~/zkml/bin/python tools/frame_vae.py train --data /mnt/d/zk-learned/frames/pool3 --run /mnt/d/zk-learned/runs/encoder-questions/sweep-muon-008 --steps 5000 --autoencoder --region-pool 32 --two-part --questions --muon-lr 0.008
+
+| Held-out maps | AdamW 5e-4 | Muon 0.0005 | Muon 0.002 | Muon 0.008 |
+|---|---|---|---|---|
+| Region R^2 | 0.590 | 0.488 | 0.801 | **0.843** |
+| "Where" cost, nats (uniform on the map 1.39) | -2.21 | -1.32 | -2.90 | **-4.63** |
+| Any place within 0.05 | 0.461 | 0.200 | 0.544 | **0.710** |
+| Likeliest place within 0.05 | 0.291 | 0.137 | 0.399 | **0.585** |
+| A unit at a place: found, false alarms | 0.76, 0.32 | 0.67, 0.34 | 0.77, 0.15 | **0.84, 0.07** |
+| Type right, side right | 0.40, 0.96 | 0.33, 0.94 | 0.59, 0.98 | **0.73, 0.98** |
+| Health R^2, x velocity R^2 | 0.15, 0.17 | 0.09, 0.08 | 0.32, 0.49 | **0.58, 0.66** |
+| Wreck at a place: found | 0.38 | 0.34 | 0.62 | 0.62 |
+| Wreck metal R^2 | -0.14 | -0.01 | **0.13** | -0.03 |
+| Time, sharing the GPU with one other run | **8.8 min** | 11.2 | 11.6 | 11.9 |
+
+Muon 0.008's distance to its nearest place, median, by named units in the frame: 0.006 up to 30, 0.021 for 31 to 70, 0.052 above 70.  To its likeliest: 0.010, 0.041, 0.085.  So it does run out of room in crowded frames, as a latent of 768 numbers should.
+
+The same 3,000-step reader as above, frozen latents, held-out frames.  Muon 0.008's encoder is only 5,000 steps old, the other two 25,000:
+
+| R^2 | `ae-pool-two` | `vae-plain` | Questions, Muon 0.008 |
+|---|---|---|---|
+| Enemy value within 0.05 of a unit | 0.59 | 0.63 | **0.76** |
+| Enemy value within 0.15 | 0.75 | 0.80 | **0.86** |
+| Own value within 0.05 | 0.54 | 0.56 | **0.62** |
+| Own value within 0.15 | 0.79 | 0.81 | **0.84** |
+| Nearest enemy | 0.92 | 0.94 | **0.95** |
+
+So the questions did put finer position where a reader finds it.  Region R^2 at this step is lower than the 0.891 `ae-pool-two` had at its step 5,000, on a schedule five times as long, so what the questions cost regions when trained out isn't known.  Reader figures: `encoder-questions/usable3.json`.
+
+Muon 0.03 on the same 5,000 steps came out a little under 0.008 (region R^2 0.821, any place within 0.05 0.673, found 0.74, type 0.705), so the rate was left at 0.008.
+
+**The final encoder,** `/mnt/d/zk-learned/runs/encoder-questions/final/vae-last.pt`, 25,000 steps, 50.5 minutes alone, with the GPU about a quarter busy, so what limits its speed isn't the GPU:
+
+    wsl ~/zkml/bin/python tools/frame_vae.py train --data /mnt/d/zk-learned/frames/pool3 --run /mnt/d/zk-learned/runs/encoder-questions/final --steps 25000 --autoencoder --region-pool 32 --two-part --questions --muon-lr 0.008
+
+| Held-out maps | 5,000 steps (`sweep-muon-008`) | 25,000 steps (`final`) | No questions, AdamW (`ae-pool-two`) |
+|---|---|---|---|
+| Region R^2 | 0.843 | **0.948** | 0.989 |
+| Own ground, builders, enemy ground R^2 | 0.921, 0.928, 0.902 | 0.953, 0.967, 0.942 | 0.993, 0.991, 0.987 or so |
+| "Where" cost, nats | -4.63 | **-5.28** | not asked |
+| Any place within 0.02, 0.05, 0.15 | 0.565, 0.710, 0.901 | **0.622, 0.748, 0.918** | |
+| Likeliest place within 0.02, 0.05, 0.15 | 0.471, 0.585, 0.794 | **0.527, 0.625, 0.816** | |
+| A unit at a place: found, false alarms | 0.84, 0.07 | 0.83, 0.07 | |
+| Type, side | 0.73, 0.98 | 0.74, 0.97 | |
+| Health, x velocity, build R^2 | 0.58, 0.66, 0.60 | 0.60, 0.63, 0.63 | |
+| Wreck at a place found, metal R^2 | 0.62, -0.03 | 0.68, 0.19 | |
+| Fresh reader: enemy within 0.05, 0.15 | **0.76, 0.86** | 0.71, 0.83 | 0.59, 0.75 |
+| Fresh reader: own within 0.05, 0.15 | **0.62, 0.84** | 0.60, 0.83 | 0.54, 0.79 |
+| Fresh reader: nearest enemy | **0.95** | 0.94 | 0.92 |
+
+Nearest place, median, by named units in a frame: 0.003 up to 30, 0.017 for 31 to 70, 0.036 above 70; likeliest place, 0.003, 0.033, 0.061.  **More steps went mostly to regions and to position; a unit's other state hardly moved after 5,000 steps,** and a fresh reader did a little worse on the final encoder.  Why isn't measured; the signs are of a latent that's full.  Its numbers matter more: noise at 0.2 of each number's spread takes R^2 from 0.949 to 0.886 (without questions 0.989 to 0.982), losing one unit moves a latent by 0.129 of the distance between frames (0.076), and keeping 512 directions of 768 leaves 0.772 (0.974).  A larger latent might help; that isn't measured.  Encoder 916k parameters, 320k more in training only; 1.6 to 1.9 ms a frame on one CPU thread with torch.  `final/usable.json`.
+
+**For the actor, not built yet:** its transformer reads only latent tokens, each own unit's features read those latents to make its decision, and pointers score against embeddings of the raw features of what they point at.  The user chose sine codes of position in those embeddings, since the dot product of two sine codes depends on the difference of the positions, which a linear embedding of raw coordinates can't give.

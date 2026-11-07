@@ -12,6 +12,7 @@ namespace zk {
 
 constexpr float MAX_SLOW = 0.5f;
 constexpr int BURROW_FRAMES = 12;       // Sleep(400) in the scripts: what has idle_cloak digs in this long after stopping
+constexpr float GRAVITY = 120.0f / 900.0f;   // elmos a frame squared: Game.gravity, which every map has here
 
 struct Catalog {
     std::vector<zk_type_rec> types;
@@ -144,6 +145,31 @@ struct JumpState {
     float at = 0.0f, step = 0.0f;           // how far along the flight, and how much of it a frame is
     float from_x = 0.0f, from_z = 0.0f, to_x = 0.0f, to_z = 0.0f;
     float charge = 1.0f;
+    float height = 0.0f;                    // the top of this flight's arc
+    float sideways = 0.0f;                  // how far along the flight it starts across: a throw goes up first
+    int thrown_by = -1;
+};
+
+// Pushed: abilities.cpp.  A ground unit goes where this says rather than walking, until it stops.
+struct Skid {
+    bool on = false;
+    float vx = 0.0f, vz = 0.0f, vy = 0.0f, y = 0.0f;
+};
+
+// A Djinn and its beacon.
+struct Teleporter {
+    int unit;
+    int beacon = -1;
+    bool deployed = false, making = false;
+    float make_x = 0.0f, make_z = 0.0f, make_left = 0.0f;
+    int still_since = -1;
+    int carrying = -1;
+    float carry_left = 0.0f;
+};
+
+// A missile and the silo whose pad it stands on.
+struct SiloMissile {
+    int unit, silo, pad;
 };
 
 // What overkill prevention thinks is on its way to a unit.
@@ -252,6 +278,13 @@ struct World {
     std::vector<int> burrow_at;            // frame it can dig in from
     std::vector<JumpState> jump;
     std::vector<int> jumpers;
+    std::vector<int> thrown;               // in the air, and not among the jumpers
+    std::vector<Skid> skid;
+    std::vector<int> throwers;
+    std::vector<uint8_t> low_power, pulling;
+    std::vector<Teleporter> teleporters;
+    std::vector<int> wait_since;           // frame it was told to wait at a beacon
+    std::vector<SiloMissile> silo_missiles;
     std::vector<int> droppers;             // what drops a bomb when it goes
     // Wrecks, by id.  One with nothing left stays in the list, so an id stays good, and leaves the others.
     std::vector<Wreck> wrecks;
@@ -287,6 +320,9 @@ struct World {
     const zk_type_rec& type_of(int u) const { return cat->types[size_t(type[size_t(u)])]; }
     bool stunned(int u) const { return para[size_t(u)] > 1.0f; }
     bool disarmed(int u) const { return disarm[size_t(u)] > 1.0f; }
+    bool power_off(int u) const { return economy_on && low_power[size_t(u)]; }
+    const Teleporter* teleporter_of(int u) const;
+    bool throw_ready(int u) const;
     float slow_now(int u) const { return slow[size_t(u)] < MAX_SLOW ? slow[size_t(u)] : MAX_SLOW; }
     bool active(int u) const { return build[size_t(u)] >= 1.0f && !stunned(u); }
     bool wreck_exists(int id) const { return id >= 0 && id < int(wrecks.size()) && wrecks[size_t(id)].left > 0.0f; }
@@ -376,6 +412,19 @@ private:
     void land(int u);
     void update_jumps();
     void update_burrows();
+    void push_from(int u, int source, float impulse);
+    void step_skid(int u);
+    void step_air_skid(int u, float& px, float& pz);
+    void update_throwers();
+    void throw_around(int u, float tx, float tz);
+    bool someone_to_throw(int u) const;
+    void update_teleporters();
+    void teleport_waiter(Teleporter& t);
+    int next_waiter(const Teleporter& t) const;
+    void send_through(int u, const Teleporter& t);
+    int free_pad(int silo) const;
+    void launch_missile(int u);
+    void destroy_missiles_of(int silo);
     void forget_commands(int u);
     bool walk_to_target(int u, int t, float& gx, float& gz);
     bool sees_point(int from, float tx, float tz) const;

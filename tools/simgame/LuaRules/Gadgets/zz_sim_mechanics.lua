@@ -5,7 +5,7 @@ function gadget:GetInfo()
 end
 
 local mode = (Spring.GetModOptions() or {}).sim_mode
-local active = mode == "mechanics" or mode == "pierce" or mode == "pierce_slow"
+local active = mode == "mechanics" or mode == "pierce" or mode == "pierce_slow" or mode == "abilities"
 local SPEED = 40
 local LEAD_IN = 300    -- frames before the first case: commanders exist
 local SAFE = 1500      -- elmos from any other unit
@@ -1294,8 +1294,397 @@ local function pierce()
 	clear()
 end
 
+-- Grids that run weapons, pushing and pulling, throwing, silos and teleporting.
+local function abilities()
+	local TOUGH = 100000
+	local CMD_PLACE_BEACON, CMD_WAIT_AT_BEACON = 35170, 35171     -- customcmds.lua
+	local CMD_PUSH_PULL = Spring.Utilities.CMD.PUSH_PULL          -- CMD.ONOFF is refused: cmd_onoff.lua
+	local level = Spring.GetGroundHeight(here.x, here.z)
+	Spring.LevelHeightMap(here.x - 1700, here.z - 1700, here.x + 1700, here.z + 1700, level)
+	wait(30)
+	log("ground", level, Spring.GetGroundHeight(here.x, here.z + 300), Spring.GetGroundHeight(here.x, here.z + 1000), Spring.GetGroundHeight(here.x + 1000, here.z - 1000))
+	local function tough(name, team, dx, dz)
+		local unit = add(name, team, dx, dz)
+		passive(unit)
+		Spring.GiveOrderToUnit(unit, CMD.MOVE_STATE, {0}, 0)
+		Spring.SetUnitRulesParam(unit, "disable_tac_ai", 1)
+		Spring.SetUnitMaxHealth(unit, TOUGH)
+		Spring.SetUnitHealth(unit, TOUGH)
+		return unit
+	end
+	local function lost(unit)
+		return TOUGH - (Spring.GetUnitHealth(unit) or 0)
+	end
+	local function track(case, units, frames, every)
+		for f = 0, frames, every do
+			if f > 0 then
+				wait(every)
+			end
+			for name, unit in pairs(units) do
+				if Spring.ValidUnitID(unit) then
+					local x, y, z = Spring.GetUnitPosition(unit)
+					local _, _, _, speed = Spring.GetUnitVelocity(unit)
+					log(case, name, f, x - here.x, y - Spring.GetGroundHeight(x, z), z - here.z, speed, lost(unit))
+				else
+					log(case, name, f, "gone")
+				end
+			end
+		end
+	end
+	local function own(name, dx, dz)
+		local unit = add(name, OWN, dx, dz)
+		Spring.GiveOrderToUnit(unit, CMD.MOVE_STATE, {0}, 0)
+		Spring.SetUnitRulesParam(unit, "disable_tac_ai", 1)
+		return unit
+	end
+
+	-- Pushing, on what's light and what isn't.
+	for _, name in ipairs({"cloakraid", "cloakassault", "tankassault", "jumpsumo", "striderdetriment"}) do
+		own("turretimpulse", 0, 0)
+		local target = tough(name, FOE, 0, 300)
+		track("push_" .. name, {t = target}, 300, 15)
+		clear()
+	end
+	do
+		own("turretimpulse", 0, 0)
+		local target = tough("cloakassault", FOE, 0, 400)
+		track("push_far_cloakassault", {t = target}, 300, 15)
+		clear()
+	end
+	for facing, label in pairs({[1] = "side", [2] = "at_gun"}) do
+		for _, name in ipairs({"cloakraid", "cloakassault"}) do
+			own("turretimpulse", 0, 0)
+			local x, z = here.x, here.z + 300
+			local target = Spring.CreateUnit(name, x, Spring.GetGroundHeight(x, z), z, facing, FOE)
+			made[#made + 1] = target
+			passive(target)
+			Spring.GiveOrderToUnit(target, CMD.MOVE_STATE, {0}, 0)
+			Spring.SetUnitMaxHealth(target, TOUGH)
+			Spring.SetUnitHealth(target, TOUGH)
+			track("facing_" .. label .. "_" .. name, {t = target}, 150, 15)
+			clear()
+		end
+	end
+	-- Walking at it.
+	for _, name in ipairs({"cloakraid", "cloakassault"}) do
+		own("turretimpulse", 0, 0)
+		local target = tough(name, FOE, 0, 400)
+		Spring.GiveOrderToUnit(target, CMD.MOVE, {here.x, level, here.z + 100}, 0)
+		track("walking_" .. name, {t = target}, 150, 15)
+		clear()
+	end
+	-- Pulling.
+	for _, state in ipairs({0, 1}) do
+		for _, name in ipairs({"cloakassault", "cloakraid"}) do
+			local newton = own("turretimpulse", 0, 0)
+			Spring.GiveOrderToUnit(newton, CMD_PUSH_PULL, {state}, 0)
+			wait(5)
+			log("pushpull_state", state, "active", Spring.GetUnitStates(newton).active)
+			local target = tough(name, FOE, 0, 400)
+			track("pushpull_" .. state .. "_" .. name, {t = target}, 300, 15)
+			log("pushpull_state_after", state, "active", Spring.GetUnitStates(newton).active)
+			clear()
+		end
+	end
+	-- A Sumo at it.
+	do
+		own("jumpsumo", 0, 0)
+		local target = tough("cloakraid", FOE, 0, 300)
+		track("sumo_cloakraid", {t = target}, 150, 15)
+		clear()
+	end
+	-- A gunship.
+	do
+		own("turretimpulse", 0, 0)
+		local target = add("gunshipheavyskirm", FOE, 0, 300)
+		passive(target)
+		track("push_gunship", {t = target}, 150, 15)
+		clear()
+	end
+
+	-- Throwing.
+	do
+		local lobster = own("amphlaunch", 0, 0)
+		passive(lobster)
+		local pal, foe = tough("cloakassault", OWN, 100, 0), tough("cloakassault", FOE, 0, -100)
+		local far, tower = tough("cloakassault", OWN, 400, 0), tough("turretlaser", OWN, -80, 0)
+		wait(30)
+		local x, z = here.x, here.z + 500
+		Spring.GiveOrderToUnit(lobster, CMD.MANUALFIRE, {x, Spring.GetGroundHeight(x, z), z}, 0)
+		track("throw", {pal = pal, foe = foe, far = far, tower = tower, lobster = lobster}, 210, 15)
+		local cmd = Spring.GetUnitCurrentCommand(lobster)
+		log("throw_order_after", cmd or "none")
+		clear()
+	end
+	-- With nothing to throw.
+	do
+		local lobster = own("amphlaunch", 0, 0)
+		passive(lobster)
+		wait(30)
+		local x, z = here.x, here.z + 500
+		Spring.GiveOrderToUnit(lobster, CMD.MANUALFIRE, {x, Spring.GetGroundHeight(x, z), z}, 0)
+		wait(90)
+		log("throw_nobody_order", Spring.GetUnitCurrentCommand(lobster) or "none")
+		clear()
+	end
+	-- Told to fire out of range.
+	do
+		local lobster = own("amphlaunch", 0, 0)
+		passive(lobster)
+		local pal = tough("cloakassault", OWN, 50, 0)
+		wait(30)
+		local x, z = here.x, here.z + 1000
+		Spring.GiveOrderToUnit(lobster, CMD.MANUALFIRE, {x, Spring.GetGroundHeight(x, z), z}, 0)
+		track("throw_far", {lobster = lobster, pal = pal}, 90, 30)
+		clear()
+	end
+	-- Stunned just after firing.
+	do
+		local lobster = own("amphlaunch", 0, 0)
+		passive(lobster)
+		local pal = tough("cloakassault", OWN, 50, 0)
+		wait(30)
+		local x, z = here.x, here.z + 500
+		Spring.GiveOrderToUnit(lobster, CMD.MANUALFIRE, {x, Spring.GetGroundHeight(x, z), z}, 0)
+		for _ = 1, 40 do
+			wait(1)
+			local _, _, _, speed = Spring.GetUnitVelocity(pal)
+			if speed > 1 then
+				break
+			end
+		end
+		Spring.SetUnitHealth(lobster, {paralyze = 100000})
+		track("throw_stunned", {pal = pal}, 210, 30)
+		clear()
+	end
+	-- Twice: what it takes to reload.
+	do
+		local lobster = own("amphlaunch", 0, 0)
+		passive(lobster)
+		local pal = tough("cloakassault", OWN, 50, 0)
+		wait(30)
+		local x, z = here.x, here.z + 300
+		Spring.GiveOrderToUnit(lobster, CMD.MANUALFIRE, {x, Spring.GetGroundHeight(x, z), z}, 0)
+		wait(180)
+		local cx, _, cz = Spring.GetUnitPosition(pal)
+		Spring.GiveOrderToUnit(pal, CMD.MOVE, {here.x + 20, Spring.GetGroundHeight(here.x + 20, here.z), here.z}, 0)
+		wait(200)
+		x, z = here.x, here.z - 300
+		Spring.GiveOrderToUnit(lobster, CMD.MANUALFIRE, {x, Spring.GetGroundHeight(x, z), z}, 0)
+		local started = Spring.GetGameFrame()
+		for _ = 1, 900 do
+			wait(1)
+			local _, _, _, speed = Spring.GetUnitVelocity(pal)
+			if speed > 3 then
+				break
+			end
+		end
+		log("throw_again_after", Spring.GetGameFrame() - started + 380)
+		clear()
+	end
+
+	-- What needs a grid.
+	for _, grid in ipairs({{}, {"energysolar"}, {"energyfusion"}, {"energyfusion", "energyfusion"}, {"energysingu"}}) do
+		local gun = own("staticarty", 0, 0)
+		Spring.GiveOrderToUnit(gun, CMD.FIRE_STATE, {2}, 0)
+		for i, name in ipairs(grid) do
+			add(name, OWN, 100 + 90 * (i - 1), 0)
+		end
+		local target = tough("cloakassault", FOE, 0, 1000)
+		local spotter = add("cloakcon", OWN, 0, 950)
+		passive(spotter)
+		Script.SetWatchWeapon(UnitDefNames["staticarty"].weapons[1].weaponDef, true)
+		shotCounts = {}
+		wait(900)
+		log("grid_" .. #grid .. "_" .. (grid[1] or "none"), "low", Spring.GetUnitRulesParam(gun, "lowpower") or -1, "lost", lost(target), "shots", shotCounts[gun] or 0, "linked", Spring.GetUnitRulesParam(gun, "OD_gridCurrent") or -1)
+		Spring.GiveOrderToUnit(gun, CMD.ATTACK, {target}, 0)
+		wait(900)
+		log("grid_ordered_" .. #grid .. "_" .. (grid[1] or "none"), "lost", lost(target), "shots", shotCounts[gun] or 0, "reload", Spring.GetUnitWeaponState(gun, 1, "reloadState") - Spring.GetGameFrame(), "range", Spring.GetUnitWeaponState(gun, 1, "range"))
+		shotCounts = nil
+		clear()
+		wait(150)
+	end
+
+	-- Told to go.
+	do
+		local missile = add("tacnuke", OWN, 0, 0)
+		local target = tough("cloakassault", FOE, 0, 1000)
+		local spotter = add("cloakcon", OWN, 0, 950)
+		passive(spotter)
+		wait(10)
+		Spring.GiveOrderToUnit(missile, CMD.ATTACK, {target}, 0)
+		for f = 30, 600, 30 do
+			wait(30)
+			local alive = Spring.ValidUnitID(missile)
+			local x, _, z
+			if alive then
+				x, _, z = Spring.GetUnitPosition(missile)
+			end
+			log("missile_ordered", f, "valid", alive, "x", x and x - here.x or 0, "lost", lost(target))
+		end
+		clear()
+	end
+	-- A silo.
+	do
+		local silo = add("staticmissilesilo", OWN, 0, 0)
+		wait(5)
+		for _ = 1, 6 do
+			Spring.GiveOrderToUnit(silo, -UnitDefNames["tacnuke"].id, {}, 0)
+		end
+		for f = 450, 9000, 450 do
+			Spring.AddTeamResource(OWN, "metal", 2000)
+			Spring.AddTeamResource(OWN, "energy", 2000)
+			wait(450)
+			local n, whole = 0, 0
+			for _, u in ipairs(Spring.GetUnitsInCylinder(here.x, here.z, 200)) do
+				if u ~= silo and Spring.GetUnitDefID(u) == UnitDefNames["tacnuke"].id then
+					n = n + 1
+					local _, _, _, _, build = Spring.GetUnitHealth(u)
+					if build >= 1 then
+						whole = whole + 1
+					end
+					if f == 9000 then
+						local x, _, z = Spring.GetUnitPosition(u)
+						log("silo_pad", x - here.x, z - here.z)
+					end
+				end
+			end
+			log("silo", f, "missiles", n, "finished", whole)
+		end
+		-- Lost with its silo.
+		local near = Spring.GetUnitsInCylinder(here.x, here.z, 200)
+		Spring.DestroyUnit(silo, false, false)
+		wait(10)
+		local left = 0
+		for _, u in ipairs(near) do
+			if Spring.ValidUnitID(u) and u ~= silo then
+				left = left + 1
+			end
+		end
+		log("silo_gone_left", left)
+		clear()
+	end
+
+	-- A Djinn.
+	do
+		local djinn = own("amphtele", 0, 0)
+		passive(djinn)
+		wait(10)
+		local bx, bz = here.x, here.z + 1000
+		Spring.GiveOrderToUnit(djinn, CMD_PLACE_BEACON, {bx, Spring.GetGroundHeight(bx, bz), bz}, 0)
+		local started, beacon = Spring.GetGameFrame(), nil
+		for _ = 1, 600 do
+			wait(1)
+			for _, u in ipairs(Spring.GetUnitsInCylinder(bx, bz, 30)) do
+				if Spring.GetUnitDefID(u) == UnitDefNames["tele_beacon"].id then
+					beacon = u
+				end
+			end
+			if beacon then
+				break
+			end
+		end
+		local dx, _, dz = Spring.GetUnitPosition(djinn)
+		log("beacon_after", Spring.GetGameFrame() - started, "djinn_moved", math.hypot(dx - here.x, dz - here.z))
+		made[#made + 1] = beacon
+		local deployed = Spring.GetGameFrame()
+		for _ = 1, 300 do
+			wait(1)
+			if Spring.GetUnitRulesParam(djinn, "deploy") == 1 then
+				break
+			end
+		end
+		log("deployed_after", Spring.GetGameFrame() - deployed)
+		-- Who comes first, and when, by mass.
+		local first = tough("cloakassault", OWN, 60, 1000)
+		local second = tough("cloakraid", OWN, -60, 1000)
+		local heavy = tough("jumpsumo", OWN, 0, 1150)
+		Spring.GiveOrderToUnit(first, CMD_WAIT_AT_BEACON, {beacon}, 0)
+		wait(1)
+		Spring.GiveOrderToUnit(second, CMD_WAIT_AT_BEACON, {beacon}, 0)
+		wait(1)
+		Spring.GiveOrderToUnit(heavy, CMD_WAIT_AT_BEACON, {beacon}, 0)
+		local start = Spring.GetGameFrame()
+		local waiting = {first = first, second = second, heavy = heavy}
+		for _ = 1, 2400 do
+			wait(1)
+			for name, u in pairs(waiting) do
+				local x, _, z = Spring.GetUnitPosition(u)
+				if math.hypot(x - dx, z - dz) < 300 then
+					local _, _, _, speed = Spring.GetUnitVelocity(u)
+					log("teleported", name, Spring.GetGameFrame() - start, "from_djinn", math.hypot(x - dx, z - dz), "speed", speed, "order", Spring.GetUnitCurrentCommand(u) or "none")
+					waiting[name] = nil
+				end
+			end
+			if next(waiting) == nil then
+				break
+			end
+		end
+		-- Told to walk: undeploys.  Told to stop: deploys.
+		local x2, z2 = here.x + 100, here.z
+		Spring.GiveOrderToUnit(djinn, CMD.MOVE, {x2, Spring.GetGroundHeight(x2, z2), z2}, 0)
+		wait(30)
+		log("walking_deploy", Spring.GetUnitRulesParam(djinn, "deploy") or -1)
+		wait(150)
+		local waited = 0
+		for _ = 1, 300 do
+			if Spring.GetUnitRulesParam(djinn, "deploy") == 1 then
+				break
+			end
+			wait(1)
+			waited = waited + 1
+		end
+		log("deploy_again_after", waited, "speed", select(4, Spring.GetUnitVelocity(djinn)))
+		-- Does anyone shoot at the beacon, and does a Djinn's death take it.
+		local shooter = add("cloakassault", FOE, 0, 1080)
+		wait(150)
+		log("beacon_shot_at", "lost", 1500 - (Spring.GetUnitHealth(beacon) or 0))
+		Spring.DestroyUnit(djinn, false, false)
+		wait(10)
+		log("beacon_after_djinn", Spring.ValidUnitID(beacon))
+		clear()
+	end
+
+	-- A missile: does it go by itself, and what happens when it goes.
+	for _, name in ipairs({"tacnuke", "seismic", "empmissile", "napalmmissile", "missileslow"}) do
+		local missile = add(name, OWN, 0, 0)
+		passive(missile)
+		Spring.GiveOrderToUnit(missile, CMD.FIRE_STATE, {2}, 0)
+		local target = add("cloakassault", FOE, 0, 1000)
+		if not target then
+			log("missile_alone_" .. name, "no_target_can_be_made", "foe_dead", select(3, Spring.GetTeamInfo(FOE)))
+			clear()
+			break
+		end
+		passive(target)
+		Spring.GiveOrderToUnit(target, CMD.MOVE_STATE, {0}, 0)
+		Spring.SetUnitMaxHealth(target, TOUGH)
+		Spring.SetUnitHealth(target, TOUGH)
+		local spotter = add("cloakcon", OWN, 0, 950)
+		passive(spotter)
+		tracing, traceTarget, traceStart = "missile_alone_" .. name, target, Spring.GetGameFrame()
+		local gone
+		for f = 1, 300 do
+			wait(1)
+			if not gone and (not Spring.ValidUnitID(missile) or select(2, Spring.GetUnitPosition(missile)) > Spring.GetGroundHeight(here.x, here.z) + 100) then
+				gone = f
+			end
+		end
+		tracing = nil
+		log("missile_alone_" .. name, "fire_state", (Spring.GetUnitStates(missile) or {}).firestate or -1, "left_after", gone or -1, "lost", lost(target), "target_valid", Spring.ValidUnitID(target), "foe_dead", select(3, Spring.GetTeamInfo(FOE)))
+		clear()
+		wait(150)
+	end
+end
+
 local script = coroutine.create(function()
 	wait(LEAD_IN)
+	if mode == "abilities" then
+		here = findOpenPlace() or findSafePlace()
+		abilities()
+		Spring.SetGameRulesParam("sim_mechanics_done", 1)
+		return
+	end
 	if mode == "pierce" or mode == "pierce_slow" then
 		here = findOpenPlace() or findSafePlace()
 		pierce()

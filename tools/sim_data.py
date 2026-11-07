@@ -48,12 +48,15 @@ MISSILE_TYPES = {"MissileLauncher", "StarburstLauncher", "TorpedoLauncher"}
 W_DISARM_ONLY, W_MANUAL, W_STOCKPILE, W_UNMODELLED, W_UNLINKED, W_HIGH_ARC, W_BEAM = 256, 512, 1024, 2048, 4096, 8192, 16384
 W_IMPACT_ONLY, W_TURRET, W_PARALYZER, W_NO_SELF_DAMAGE, W_NO_AUTO_TARGET, W_NO_FRIENDLY_FIRE, W_SLOW_ONLY, W_AREA_SLOWS = 1, 2, 4, 8, 16, 32, 64, 128
 W_OKP_STATIC_ONLY, W_OKP_FLIGHT, W_OKP_TARGET_SPEED, W_SCRIPT_BURST = 32768, 65536, 131072, 262144
-W_PIERCES, W_ONE_HIT_EACH = 524288, 1048576
+W_PIERCES, W_ONE_HIT_EACH, W_THROWS = 524288, 1048576, 2097152
 # Metal and energy per second from the module all new commanders have (dynamic_comm_defs.lua, "econ"); it's not in the unit def.
 # Logged games agree: income less 2 per extractor and solar is 6 and 8, this and the team's innate 2 and 2.
 COMMANDER_ECON = (4.0, 6.0)
 U_MOBILE, U_AIR, U_ARMED, U_FIREPROOF, U_FACTORY, U_PLOPPABLE, U_COMMANDER = 1, 2, 4, 8, 16, 32, 64
-U_FLOATS = 8192
+U_FLOATS, U_MISSILE, U_NEUTRAL = 8192, 16384, 32768
+# weapon_impulse.lua: GRAVITY_BASELINE, and what a unit gets of an impulse by how it moves.
+IMPULSE_BASELINE, IMPULSE_PLANE, IMPULSE_GUNSHIP, IMPULSE_GROUND = 120.0, 0.022, 0.004, 0.0036
+BEACON_SECONDS_PER_SPAWN_TIME = 9.0 / 8.0  # amphtele.lua: 90 steps of 0.1 s at a speed of 8 over its def's time
 U_CAN_CLOAK, U_STARTS_CLOAKED, U_FIRES_CLOAKED, U_AREA_CLOAK_ON, U_LEAVES_GHOST, U_KAMIKAZE_BLIND = 128, 256, 512, 1024, 2048, 4096
 # bait_prevention_defs.lua: a target whose build time is up to the n-th of these is at bait level n.
 BAIT_COST_BANDS = (10.0, 89.9, 239.9, 419.9)
@@ -173,11 +176,17 @@ def _weapon_record(w: dict, velocity: tuple[float, float, float], alpha: float, 
     fire_starter = float(w.get("fireStarter") or 0.0)
     damage = [float(damages[str(i)]) * SCATTER_DAMAGE.get(w["name"], 1.0) for i in range(5)]
     # What these are for isn't in the sim, so no army may rely on them: capture (a capture weapon does
-    # no health damage, unit_capture.lua), spawned units, pushing and pulling, throwing.
-    if {"is_capture", "spawns_name", "impulse", "thower_weapon"} & custom.keys() or custom.get("area_damage_is_impulse", "0") != "0":
+    # no health damage, unit_capture.lua), spawned units, an area that pulls.
+    if {"is_capture", "spawns_name"} & custom.keys() or custom.get("area_damage_is_impulse", "0") != "0":
         flags |= W_UNMODELLED
     if "is_capture" in custom:
         damage = [0.0] * 5
+    # weapon_impulse.lua: all it does is push, unless it says otherwise.
+    if "impulse" in custom and "normaldamage" not in custom:
+        damage = [0.0] * 5
+    # A Lobster's guns fire only when told to (ATTACK_BLOCK_DEFAULT) and do nothing but throw (unit_thrower.lua).
+    if "thower_weapon" in custom:
+        flags |= W_THROWS | W_NO_AUTO_TARGET
     # Slow: timeslow_defs.lua.  Slow-only weapons default to 1; an absolute amount scales with the damage.
     raw_damage = _custom(w, "raw_damage")
     slow_factor = _custom(w, "timeslow_damagefactor", 1.0 if "timeslow_onlyslow" in custom else 0.0)
@@ -223,6 +232,7 @@ def _weapon_record(w: dict, velocity: tuple[float, float, float], alpha: float, 
         "burn_random": _custom(w, "burntimerand", DEFAULT_BURN_RANDOM),
         "burn_chance": _custom(w, "burnchance", fire_starter / 10.0) if on_fire else 0.0,
         "burn_damage": _custom(w, "burndamage", DEFAULT_BURN_DAMAGE),
+        "impulse": _custom(w, "impulse"),
         "kind": _weapon_kind(w), "flags": flags,
         "shield_intercept": int(w["shieldInterceptType"]), "intercepted_by": int(w["interceptedByShieldType"]),
     }
@@ -290,6 +300,16 @@ def _jump(custom: dict, mobile: bool) -> dict:
             "jump_delay": float(custom.get("jump_delay") or 0.0) if can else 0.0}
 
 
+def _push_scale(u: dict, air: bool) -> float:
+    """weapon_impulse.lua's AddGadgetImpulse: the speed a unit of impulse gives it."""
+    mass = float(u.get("mass") or 0.0)
+    if mass <= 0.0:
+        return 0.0
+    if not air:
+        return IMPULSE_BASELINE * IMPULSE_GROUND / mass
+    return IMPULSE_BASELINE * (IMPULSE_GUNSHIP if u.get("isHoveringAirUnit") else IMPULSE_PLANE) / mass
+
+
 def _burrow(custom: dict, air: bool) -> float:
     """The speed under which what has idle_cloak digs in: GG.StartStopMovingControl's, or what gunshipbomb.lua polls for."""
     if not custom.get("idle_cloak"):
@@ -329,7 +349,7 @@ def _unit_record(u: dict, weapon_index: dict[str, int], weapons_by_id: dict[int,
     max_range = 0.0
     for name, _ in picked:
         rec = records[weapon_index[name]]
-        attacks = rec["kind"] != KIND_SHIELD and not rec["flags"] & W_NO_AUTO_TARGET and max(rec["damage"]) > 0.0
+        attacks = rec["kind"] != KIND_SHIELD and not rec["flags"] & W_NO_AUTO_TARGET and (max(rec["damage"]) > 0.0 or rec["impulse"] != 0.0)
         if attacks:
             armed = True
             max_range = max(max_range, rec["range"])
@@ -383,6 +403,11 @@ def _unit_record(u: dict, weapon_index: dict[str, int], weapons_by_id: dict[int,
         "perceived_range": float(custom.get("percieved_range") or max_range),
         "reclaim_speed": u.get("reclaimSpeed", 0.0), "energy_upkeep": float(custom.get("upkeep_energy") or 0.0),
         "stockpile_cost": float(custom.get("stockpilecost") or 0.0), "close_frames": float(custom.get("auto_close_time") or 0.0) * FRAMES,
+        "mass": float(u.get("mass") or 0.0), "push_scale": _push_scale(u, air), "needed_link": float(custom.get("neededlink") or 0.0),
+        "throw_radius": float(custom.get("thrower_gather") or 0.0),
+        "teleport_rate": float(custom.get("teleporter_throughput") or 0.0) / FRAMES,
+        "beacon_frames": float(custom.get("teleporter_beacon_spawn_time") or 0.0) * BEACON_SECONDS_PER_SPAWN_TIME * FRAMES,
+        "missile_pads": int(custom.get("missile_silo_capacity") or 0), "beacon_type": 0,
         "name": u["name"], "cost": u["cost"], "hp": u["health"], "speed": speed,
         "accel": u["maxAcc"], "brake": u["maxDec"], "turn_rate": turn, "slow_turn_speed": slow_turn,
         "footprint_radius": footprint, "hit_radius": hit_radius,
@@ -407,6 +432,40 @@ def _unit_record(u: dict, weapon_index: dict[str, int], weapons_by_id: dict[int,
         "mount_only": [_mask(m.get("onlyTargets"), categories) for _, m in picked],
         "mount_bad": [_mask(m.get("badTargets"), categories) for _, m in picked],
     }, truncated
+
+
+def _link_abilities(units: list[dict], raw_units: dict[str, dict]) -> None:
+    """What one unit's def says of another: a silo of its missiles, and a teleporter of its beacon."""
+    index = {u["name"]: i for i, u in enumerate(units)}
+    by_id = {int(u["id"]): u["name"] for u in raw_units.values()}
+    for u in units:
+        raw = raw_units[u["name"]]
+        custom = raw.get("customParams") or {}
+        if u["missile_pads"] > 0:
+            for option in (raw.get("buildOptions") or {}).values():
+                units[index[by_id[int(option)]]]["flags"] |= U_MISSILE
+        beacon = custom.get("teleporter_beacon_unit")
+        if beacon:
+            u["beacon_type"] = index[beacon]
+            units[index[beacon]]["flags"] |= U_NEUTRAL
+
+
+def _specials(units: list[dict], weapons: list[dict], raw_units: dict[str, dict]) -> dict:
+    """What the policy's masks need to know of the few units that do something other than walk and shoot.  The bot can't read the sim's catalog."""
+    by_id = {int(u["id"]): u["name"] for u in raw_units.values()}
+    out: dict = {"throwers": {}, "switches": [], "teleporters": {}, "silos": {}}
+    for u in units:
+        mounts = [weapons[m] for m in u["mount_weapon"]]
+        impulses = [w["impulse"] for w in mounts]
+        if u["throw_radius"] > 0.0:
+            out["throwers"][u["name"]] = {"radius": u["throw_radius"], "reach": max(w["range"] for w in mounts if w["flags"] & W_THROWS)}
+        if impulses and min(impulses) < 0.0 < max(impulses):
+            out["switches"].append(u["name"])
+        if u["teleport_rate"] > 0.0:
+            out["teleporters"][u["name"]] = units[u["beacon_type"]]["name"]
+        if u["missile_pads"] > 0:
+            out["silos"][u["name"]] = sorted(by_id[int(o)] for o in (raw_units[u["name"]].get("buildOptions") or {}).values())
+    return out
 
 
 def _read_priority() -> tuple[list[str], dict[str, tuple[tuple[float, float, float], float, np.ndarray]]]:
@@ -615,6 +674,7 @@ def catalog() -> None:
         if raw_units[n].get("highTrajectoryType") == 1:
             for mount in rec["mount_weapon"]:
                 weapons[mount]["flags"] |= W_HIGH_ARC
+    _link_abilities(units, raw_units)
     extras = json.loads((DUMP / "tactics.json").read_text("utf8", "replace"))
     print("scripts read for overkill prevention:", _apply_overkill(units, weapons, raw_units, extras["overkill"]))
     for w in weapons:
@@ -631,6 +691,7 @@ def catalog() -> None:
     moves = {u["name"]: MOVE_CLASS_NAMES[u["move_class"]] for u in units if u["move_class"] >= 0}
     (ROOT / "bots/zkbot/data/moveclass.json").write_text(json.dumps(moves, indent=0, sort_keys=True), "utf8")
     (ROOT / "bots/zkbot/data/jumprange.json").write_text(json.dumps({u["name"]: u["jump_range"] for u in units if u["jump_range"] > 0.0}, indent=0, sort_keys=True), "utf8")
+    (ROOT / "bots/zkbot/data/specials.json").write_text(json.dumps(_specials(units, weapons, raw_units), indent=0, sort_keys=True), "utf8")
     print(f"{len(units)} units, {len(weapons)} weapons, priority {table.shape}; more than {MAX_MOUNTS} mounts: {truncated}")
     bad = _cross_check(units, weapons)
     print(f"cross-check against bots/zkbot/data: {bad} mismatches")

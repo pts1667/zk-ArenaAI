@@ -140,7 +140,7 @@ the region graph differs between sim and live (unverified which maps are affecte
 | `enemy_tokens` | E | the unit tokens that can be aimed at: any other alliance's, in LOS or on radar |
 | `pair_bucket` | N x N int8 | unit-unit: log2 distance (12) x hostile, same alliance or same player (3), and in place of those, a unit and what it's ordered to shoot, each way (2); unit-region: same region or hop 1-6+ (8); region-region: hop 0-6+ (7); all else one bucket per token-kind pair |
 | `feat_x` | F x 5 | a wreck or the like in sight: x, z, log1p metal / 8, distance to base, distance to army (both over map size).  F is at most 32.  Its pair buckets are 12 log2 distances to each unit, and one for each other group.  Region column 33 is log1p of all the metal in sight in that region / 10, so what the cap leaves out still shows |
-| `kind_mask` | U x 16 | legal action kinds, see 4.1 and 4.4 |
+| `kind_mask` | C x 21 | legal action kinds, see 4.1 and 4.4 |
 | `ptr_*_mask` | U x E, U x U, U x R, U x S, U x T | legal pointer targets; T is the candidate type list |
 | `route_bias` | U x R | walking cost from the unit's region to each region; class-specific, a per-game region-to-region table on the gate graph (3.3) |
 
@@ -311,12 +311,12 @@ Every controllable unit has one kind per decision.  KEEP is the default and emit
 
 | Kind | Target | Live command | Existing code | Mask rule (both paths) |
 |---|---|---|---|---|
-| 0 KEEP | none | none | n/a | illegal if the unit is IDLE (4.4) |
+| 0 KEEP | none | none | n/a | illegal if the unit is IDLE and can walk (4.4) |
 | 1 MOVE | region pointer + fine 9-way | `move` pos | `military.py:750` `_order` | mobile; region reachable for its class; not commit-locked |
 | 2 FIGHT | region pointer + fine 9-way | `fight` pos | `order_fight` (`military.py:715`) | as MOVE, armed |
 | 3 ATTACK_UNIT | enemy-token pointer (LOS only) | `attack` targetId | `order_attack` (`military.py:721`) | armed with a weapon that can hit the target's class (catalog `dps_air` / `dps_ground`); target in LOS |
 | 4 ATTACK_GROUND | enemy or blip token pointer + fine 9-way at 200 elmos | `custom` cmd 20 | `order_attack_ground` (`military.py:729`) | armed; target in range x1.5 + 300 |
-| 5 STOP | none | `stop` | new | not during a committed attack |
+| 5 STOP | none | `stop` | new | not during a committed attack; not for what neither walks nor shoots |
 | 6 MANUAL_FIRE | enemy-token pointer | `custom` cmd 105 [x,y,z] | `beh_manual_fire` (`behaviours.py:218-260`) | tag `manualfire`; in catalog manual-weapon range; memory of last shot older than the weapon's reload (catalog) |
 | 7 JUMP | region pointer + fine 9-way | `custom` cmd 38521, params [x,y,z] (unverified format) | new | tag `jump`; charged; region walkable or within catalog jump range, and one its class can stand on |
 | 8 CLOAK_ON / 9 CLOAK_OFF | none | `custom` cmd 37382, state 1 / 0 (unverified; the Off/On state convention is in `Zero-K/LuaUI/Configs/customCmdTypes.lua:40`) | new | tag `cloak`, state from `isCloaked` |
@@ -324,19 +324,26 @@ Every controllable unit has one kind per decision.  KEEP is the default and emit
 | 11 ASSIST | own unfinished unit pointer | `guard` targetId | `construction.py:300`, `production.py:372` | builder; target unfinished |
 | 12 REPAIR | own damaged unit pointer | `repair` targetId | `construction.py:796` | builder; target damaged |
 | 13 RECLAIM | feature pointer | `reclaim` featureId | `reclaim.py:100` | builder; feature within reach |
-| 14 PRODUCE | type pointer over the factory roster | `build` on the factory uid | `production.py:257` | factory finished; roster from `catalog.roster`; queue below cap |
+| 14 PRODUCE | type pointer over what it makes | `build` on the silo's or factory's uid | `production.py:257` | silos now (their options, `specials.json`); factories at stage 3: finished, roster from `catalog.roster`, queue below cap |
 | 15 reserved | | | | always illegal |
+| 16 THROW | region pointer + fine 9-way, aim clamped to 98% of reach | `custom` cmd 105 [x,y,z] (unverified) | new | `specials.json` thrower; ready (`JUMP_READY`); someone beside it to throw; region in reach and one its class can stand on |
+| 17 PUSH / 18 PULL | none | `custom` cmd 35666, state 1 / 0 (`CMD.ONOFF` is refused by `cmd_onoff.lua`) | new | `specials.json` switch; only the one it isn't doing now |
+| 19 PLACE_BEACON | region pointer + fine 9-way | `custom` cmd 35170 [x,y,z] (unverified) | new | `specials.json` teleporter; a region it could walk to |
+| 20 WAIT_AT_BEACON | region pointer, among regions with a beacon of ours; the nearest beacon there | `custom` cmd 35171 (unverified) | new | walks, isn't a teleporter; a finished beacon of ours in a region it can walk to |
 
-Stage 2 enables kinds 0-9 only; kinds 10-14 are masked off for every unit.  Their weights exist but get
-no gradient until stage 3.
+Stage 2 enables kinds 0-9 and 14 and 16-20; kinds 10-13 are masked off for every unit.  Their weights exist
+but get no gradient until stage 3.
+
+**The bot sends none of these yet.**  `runtime.py` runs in shadow and throws its decisions away, so the live
+commands above are where each kind would go, and those marked unverified haven't been tried against a game.
 
 ### 4.2 Pointers and positions
 
 Pointer heads are scaled dot products between a unit's query and keys of a candidate set, masked
 per unit.  Key sets by kind: enemy and blip tokens for kinds 3, 4 and 6; own unit tokens for 11 and 12; region
-tokens for 1, 2 and 7; site tokens for 10; type tokens for 10 and 14; feature tokens for 13 (stage 3).
-Type keys come from the type MLP on the catalog stats, so a new roster unit is a new key, not a new
-output.
+tokens for 1, 2, 7, 16, 19 and 20; site tokens for 10; type tokens for 10 and 14; feature tokens for 13 (stage 3).
+Type keys are a linear layer (`type_key`) on the catalog stats, so a new roster unit is a new key, not a new
+output.  Only what `table.producible` holds is scored for now, which is a silo's five missiles.
 
 Coarse position is the region pointer.  Fine position is 9 options: the centre of the region, or one
 of eight compass points at half the region's equivalent radius, in a frame whose north points from our
@@ -349,9 +356,31 @@ rotation-equivariant.
 Factories (stage 3) pick a roster unit by a type pointer, so the head does not need to know the
 roster's names.  The cap on queued units (memory) keeps the queue short.  Construction is the same
 pointer scheme over sites from the static bundle.  Assist, repair and reclaim point at tokens.
-Ability kinds are three: manual fire, jump, and cloak on or off.  A unit gets them through its tags
-(`manualfire`, `jump`, `cloak`).  The other tags (shield, regen, emp, slow and so on) are input features
-only in v1.
+Ability kinds are manual fire, jump and cloak on or off, which a unit gets through its tags (`manualfire`,
+`jump`, `cloak`), and throw, push, pull, place beacon and wait at beacon, and producing from a silo, which
+it gets through `bots/zkbot/data/specials.json`.  That file is generated with the catalog (`tools/sim_data.py`)
+and is part of its hash.  The other tags (shield, regen, emp, slow and so on) are input features only in v1.
+
+**The kinds of 2026-11-07, and what they leave alone.**  Token order memory keeps its 16 slots
+(`rf.ORDER_SLOTS`), so `UNIT_DIM` and `FEATURE_VERSION` didn't change, and frames and encoders from before
+still load; `KIND_COUNT` is what grew, so `net.ACTION_VERSION` refuses weights from before, as a trainer
+checkpoint fails on `head_kind`'s width.  A thrown order shows in memory as manual fire, and a beacon's as a
+move.  Push or pull has no order behind it: it's frame flag `PULLING`, shown in slot `RESERVED_KIND` of the order
+memory, which no order uses and which frames so far hold at 0.  A throw shares `ptr_jump`, as nothing both throws
+and jumps.  Turrets that switch and silos join the controllable units, and aren't counted in where the army is.
+
+**Live, these are unchecked:** a thrower's reload is a weapon's and ControllerAI doesn't show it, so it always
+counts as ready.  `PULLING` is never set, since the bot would have to remember what it told a unit, and it tells
+them nothing yet.
+
+**Nothing in training has these units yet.**  A training game's factories repeat a raider (`policy_opening.py`), so
+Lobster, Djinn, Sumo, Newton and silos only come up in frames and tests.  Their kinds stay masked for want of the
+units until factories are the policy's at stage 3, or the opening or scenarios add them.
+
+Checked with an untrained policy sampling in 16 sim games of 350 s, with all of these on both sides: 0 illegal
+choices, 251 throws chosen and 241 seen to fire, 96 units seen pulling, 112 beacons, 59 missiles of all five
+types, and 11 waiting units seen to move over 150 elmos at once, which counts a throw as well.
+`tests/policy/test_policy_actions.py` tells each one by the policy's own path and checks that the sim does it.
 
 Jumping is on in training and in the bot's runtime (2026-11-07).  Charge is frame flag `JUMP_READY`
 (schema 4), a column of the unit token (`FEATURE_VERSION` 5): the sim sets it for an own unit with a full

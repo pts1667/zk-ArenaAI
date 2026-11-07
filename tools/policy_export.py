@@ -18,7 +18,7 @@ from zkbot.policy import net, tables  # noqa: E402
 
 def write(path: str | pathlib.Path, weights: dict[str, np.ndarray]) -> None:
     table = tables.table()
-    meta = {"meta_feature_version": net.FEATURE_VERSION, "meta_catalog_hash": table.hash, "meta_names": np.array(table.names)}
+    meta = {"meta_feature_version": net.FEATURE_VERSION, "meta_action_version": net.ACTION_VERSION, "meta_catalog_hash": table.hash, "meta_names": np.array(table.names)}
     pathlib.Path(path).parent.mkdir(parents=True, exist_ok=True)
     np.savez(path, **weights, **meta)
 

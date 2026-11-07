@@ -20,19 +20,18 @@ import torch.nn.functional as F
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "bots"))
-from zkbot.policy import featurize as fz, net as npnet, rawframe as rf  # noqa: E402
+from zkbot.policy import featurize as fz, net as npnet, rawframe as rf, tables  # noqa: E402
 from zkbot.policy.bundle import GATE_DIM  # noqa: E402
 
 D, LAYERS, HEADS = npnet.D, npnet.LAYERS, npnet.HEADS
 ILLEGAL = -1e9
-KINDS_WITH_REGION = (rf.MOVE, rf.FIGHT, rf.JUMP)
-KINDS_WITH_FINE = (rf.MOVE, rf.FIGHT, rf.JUMP, rf.ATTACK_GROUND)
+KINDS_WITH_REGION, KINDS_WITH_FINE = fz.KINDS_WITH_REGION, fz.KINDS_WITH_FINE
 
 
 # What the encoder reads, per recurrent step.  Everything else is read once per minibatch, from `join`.
 ENCODER_FIELDS = frozenset(("unit_x", "unit_name", "unit_ally", "unit_player", "reg_x", "site_x", "feat_x", "glob_x", "tok_kind", "bucket", "key_mask", "gate_i", "gate_a", "gate_b", "gate_x"))
 JOINED_FIELDS = ("unit_x", "unit_name", "unit_ally", "unit_player", "hidden_ally", "hidden_player", "unit_mask", "reg_x", "reg_mask", "site_x", "site_mask", "feat_x", "feat_mask", "glob_x", "tok_kind", "ctrl_mask", "kind_mask", "ptr_enemy",
-                 "enemy_tokens", "enemy_mask", "ptr_region", "ptr_jump", "route_bias", "hidden_x", "hidden_name", "hidden_mask")
+                 "enemy_tokens", "enemy_mask", "ptr_region", "ptr_jump", "ptr_wait", "ptr_produce", "route_bias", "hidden_x", "hidden_name", "hidden_mask")
 
 
 @dataclass
@@ -56,12 +55,14 @@ class Batch:
     gate_b: object          # G
     gate_x: object          # G x GATE_DIM
     ctrl_mask: object       # B x C
-    kind_mask: object       # B x C x 16
+    kind_mask: object       # B x C x KIND_COUNT
     ptr_enemy: object       # B x 3 x C x E
     enemy_tokens: object    # B x E
     enemy_mask: object      # B x E
     ptr_region: object      # B x C x R
     ptr_jump: object        # B x C x R
+    ptr_wait: object        # B x C x R
+    ptr_produce: object     # B x C x T
     route_bias: object      # B x C x R
     hidden_x: object        # B x H x UNIT_DIM, critic only
     hidden_name: object     # B x H
@@ -118,6 +119,8 @@ def collate(items: list[fz.Tensors], regions: int = 0) -> Batch:
     enemy_mask = np.zeros((b, e), bool)
     ptr_region = np.zeros((b, c, r), bool)
     ptr_jump = np.zeros((b, c, r), bool)
+    ptr_wait = np.zeros((b, c, r), bool)
+    ptr_produce = np.zeros((b, c, items[0].ptr_produce.shape[1]), bool)
     route_bias = np.zeros((b, c, r), np.float32)
     hidden_x = np.zeros((b, h, fz.UNIT_DIM), np.float32)
     hidden_name = np.zeros((b, h), np.int64)
@@ -146,6 +149,8 @@ def collate(items: list[fz.Tensors], regions: int = 0) -> Batch:
             enemy_mask[i, :ne] = True
         ptr_region[i, :nc, :nr] = t.ptr_region
         ptr_jump[i, :nc, :nr] = t.ptr_jump
+        ptr_wait[i, :nc, :nr] = t.ptr_wait
+        ptr_produce[i, :nc] = t.ptr_produce
         route_bias[i, :nc, :nr] = t.route_bias
         nh = len(t.hidden_x)
         hidden_x[i, :nh], hidden_name[i, :nh], hidden_mask[i, :nh] = t.hidden_x, t.hidden_name, True
@@ -156,7 +161,7 @@ def collate(items: list[fz.Tensors], regions: int = 0) -> Batch:
         gate_x.append(t.gate_x)
     return Batch(unit_x, unit_name, unit_mask, reg_x, reg_mask, site_x, site_mask, feat_x, feat_mask, glob_x, tok_kind, bucket, key_mask,
                  np.concatenate(gate_i), np.concatenate(gate_a), np.concatenate(gate_b), np.concatenate(gate_x),
-                 ctrl_mask, kind_mask, ptr_enemy, enemy_tokens, enemy_mask, ptr_region, ptr_jump, route_bias, hidden_x, hidden_name, hidden_mask,
+                 ctrl_mask, kind_mask, ptr_enemy, enemy_tokens, enemy_mask, ptr_region, ptr_jump, ptr_wait, ptr_produce, route_bias, hidden_x, hidden_name, hidden_mask,
                  unit_ally, unit_player, hidden_ally, hidden_player)
 
 
@@ -248,6 +253,9 @@ class Actor(nn.Module):
         self.q_feature = nn.Linear(D, D)
         self.fine0 = nn.Linear(2 * D, D)
         self.fine1 = nn.Linear(D, fz.FINE_OPTIONS)
+        table = tables.table()
+        self.type_key = nn.Linear(tables.TYPE_DIM, D)
+        self.register_buffer("produce_stats", torch.from_numpy(table.stats[table.producible].copy()), persistent=False)
         self.route_scale = nn.Parameter(torch.tensor(npnet.ROUTE_SCALE_START))
         self.pair_w = nn.Parameter(torch.zeros(npnet.RBF_DIM, LAYERS * HEADS))
         self.register_buffer("rbf", torch.randn(fz.NUM_BUCKETS, npnet.RBF_DIM))
@@ -292,7 +300,7 @@ class Actor(nn.Module):
         return h, h[:, :u], h[:, u:u + r], new_glob, new_regions
 
     def heads(self, b: Batch, units: torch.Tensor, reg_h: torch.Tensor):
-        """Float32 logits with the illegal choices taken out: kind, and enemy per pointer kind.  Which regions are legal depends on the kind: region_legal."""
+        """Float32 logits with the illegal choices taken out: kind, enemy per pointer kind, and what to produce.  Which regions are legal depends on the kind: region_legal."""
         c = b.kind_mask.shape[1]
         me = units[:, :c]
         kind = self.head_kind(me).float().masked_fill(~b.kind_mask, ILLEGAL)
@@ -301,7 +309,8 @@ class Actor(nn.Module):
         enemy_h = torch.gather(units, 1, b.enemy_tokens[:, :, None].expand(-1, -1, D))
         enemy = (self.q_enemy(me) @ enemy_h.transpose(1, 2)).float() / math.sqrt(D)
         enemy = enemy[:, None].expand(-1, b.ptr_enemy.shape[1], -1, -1).masked_fill(~b.ptr_enemy, ILLEGAL)
-        return kind, region, enemy, enemy_h
+        produce = (self.q_type(me) @ self.type_key(self.produce_stats).T).float() / math.sqrt(D)
+        return kind, region, enemy, enemy_h, produce.masked_fill(~b.ptr_produce, ILLEGAL)
 
     def fine(self, me: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         return self.fine1(F.gelu(self.fine0(torch.cat((me, target), -1)), approximate="tanh")).float()
@@ -309,7 +318,9 @@ class Actor(nn.Module):
 
 def region_legal(b: Batch, scores: torch.Tensor, kind: torch.Tensor) -> torch.Tensor:
     """The region scores, with what each unit's kind can't go to taken out."""
-    return scores.masked_fill(~torch.where((kind == rf.JUMP)[:, :, None], b.ptr_jump, b.ptr_region), ILLEGAL)
+    reach = torch.isin(kind, torch.tensor((rf.JUMP, rf.THROW), device=kind.device))[:, :, None]
+    legal = torch.where(reach, b.ptr_jump, torch.where((kind == rf.WAIT_AT_BEACON)[:, :, None], b.ptr_wait, b.ptr_region))
+    return scores.masked_fill(~legal, ILLEGAL)
 
 
 def _masked_entropy(logits: torch.Tensor) -> torch.Tensor:
@@ -372,11 +383,12 @@ class Actions:
     enemy: torch.Tensor     # B x C, -1 if unused
     region: torch.Tensor    # B x C, -1 if unused
     fine: torch.Tensor      # B x C, -1 if unused
+    produce: torch.Tensor   # B x C, -1 if unused
     logp: torch.Tensor      # B x C
 
 
 def sample_actions(actor: Actor, b: Batch, units: torch.Tensor, reg_h: torch.Tensor) -> Actions:
-    kind_l, region_l, enemy_l, enemy_h = actor.heads(b, units, reg_h)
+    kind_l, region_l, enemy_l, enemy_h, produce_l = actor.heads(b, units, reg_h)
     kind = _sample(kind_l)
     logp = _pick(kind_l, kind)
     uses_region = torch.isin(kind, torch.tensor(KINDS_WITH_REGION, device=kind.device))
@@ -398,13 +410,17 @@ def sample_actions(actor: Actor, b: Batch, units: torch.Tensor, reg_h: torch.Ten
     fine = _sample(fine_l)
     uses_fine = torch.isin(kind, torch.tensor(KINDS_WITH_FINE, device=kind.device))
     logp = logp + uses_fine * _pick(fine_l, fine)
+    produce = _sample(produce_l)
+    uses_produce = kind == rf.PRODUCE
+    logp = logp + uses_produce * _pick(produce_l, produce)
     off = ~b.ctrl_mask
-    return Actions(kind, enemy.masked_fill(off, -1), region.masked_fill(~uses_region | off, -1), fine.masked_fill(~uses_fine | off, -1), logp.masked_fill(off, 0.0))
+    return Actions(kind, enemy.masked_fill(off, -1), region.masked_fill(~uses_region | off, -1), fine.masked_fill(~uses_fine | off, -1),
+                   produce.masked_fill(~uses_produce | off, -1), logp.masked_fill(off, 0.0))
 
 
 def evaluate_actions(actor: Actor, b: Batch, units: torch.Tensor, reg_h: torch.Tensor, a: Actions) -> tuple[torch.Tensor, dict[str, tuple[torch.Tensor, torch.Tensor]]]:
     """Log-probability of stored actions, per unit; and each head's entropy with the mask of units it applies to."""
-    kind_l, region_l, enemy_l, enemy_h = actor.heads(b, units, reg_h)
+    kind_l, region_l, enemy_l, enemy_h, produce_l = actor.heads(b, units, reg_h)
     legal_choices = b.kind_mask.sum(-1) > 1
     logp = _pick(kind_l, a.kind)
     ent = {"kind": (_masked_entropy(kind_l), b.ctrl_mask & legal_choices)}
@@ -428,6 +444,9 @@ def evaluate_actions(actor: Actor, b: Batch, units: torch.Tensor, reg_h: torch.T
     fine_l = actor.fine(units[:, :a.kind.shape[1]], target)
     logp = logp + uses_fine * _pick(fine_l, a.fine.clamp_min(0))
     ent["fine"] = (_masked_entropy(fine_l), uses_fine)
+    uses_produce = a.produce >= 0
+    logp = logp + uses_produce * _pick(produce_l, a.produce.clamp_min(0))
+    ent["produce"] = (_masked_entropy(produce_l), uses_produce)
     return logp.masked_fill(~b.ctrl_mask, 0.0), ent
 
 

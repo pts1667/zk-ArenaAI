@@ -113,7 +113,7 @@ float World::target_score(int u, int slot, int t) {
     const auto& w = cat->weapons[size_t(d.mount_weapon[slot])];
     const auto& td = type_of(t);
     const int s = side[size_t(u)];
-    if (!(td.category & d.mount_only[slot]) || !in_range(u, w, t) || !can_be_aimed_at(s, t) || bait_blocks(u, t)) return -1.0f;
+    if ((td.flags & ZK_U_NEUTRAL) || !(td.category & d.mount_only[slot]) || !in_range(u, w, t) || !can_be_aimed_at(s, t) || bait_blocks(u, t)) return -1.0f;
     const bool known = identified(s, t);
     float p = known ? cat->target_priority(d.mount_weapon[slot], type[size_t(t)]) : UNIDENTIFIED_PRIORITY;
     if (td.category & d.mount_bad[slot]) p += BAD_CATEGORY;
@@ -163,6 +163,11 @@ void World::pick_targets() {
         for (int m = 0; m < d.n_mounts; ++m) {
             const auto& w = cat->weapons[size_t(d.mount_weapon[m])];
             int& current = weapon_target[size_t(u) * ZK_MAX_MOUNTS + size_t(m)];
+            // The script holds its fire (turretheavy.lua), and throwing has no target to hold (update_throwers).  On means it pushes, and off that it pulls: one or the other is blocked.
+            if (power_off(u) || (w.flags & ZK_W_THROWS) || (w.impulse != 0.0f && (w.impulse < 0.0f) != (pulling[size_t(u)] != 0))) {
+                current = -1;
+                continue;
+            }
             // A manual weapon answers only to a manual-fire order, and the others don't take that order's
             // target (Weapon.cpp:1023).
             if (w.flags & ZK_W_MANUAL) {
@@ -283,18 +288,18 @@ void World::fire_weapons() {
         if (!alive[size_t(u)]) continue;
         const auto& d = type_of(u);
         // Disarm stops the reload as well (unit_attributes.lua reloadMult), and stun doesn't.
-        const bool can_fire = active(u) && !disarmed(u);
+        const bool can_fire = active(u) && !disarmed(u) && !power_off(u);
         UnitAI& a = ai[size_t(u)];
         // turretriot.lua: it overheats, and it cools unless stunned or unfinished.
         if (d.heat_per_shot > 0.0f && active(u)) a.heat = std::max(0.0f, a.heat - d.heat_decay * float(ZK_TICK_FRAMES));
         const float heat_rate = 1.0f - a.heat * d.heat_max_slow;
         const float rate = disarmed(u) ? 0.0f : (1.0f - slow_now(u)) * heat_rate;
         const int tactics_mount = cat->tactics[size_t(type[size_t(u)])].weapon_num;
-        for (int m = 0; m < d.n_mounts; ++m) {
+        for (int m = 0; m < d.n_mounts && alive[size_t(u)]; ++m) {
             const auto& w = cat->weapons[size_t(d.mount_weapon[m])];
             if (w.kind == ZK_WEAPON_SHIELD) continue;
             const size_t i = size_t(u) * ZK_MAX_MOUNTS + size_t(m);
-            for (int f = 0; f < ZK_TICK_FRAMES; ++f) {
+            for (int f = 0; f < ZK_TICK_FRAMES && alive[size_t(u)]; ++f) {
                 if (cooldown[i] > 0.0f) cooldown[i] -= rate;
                 if (!can_fire) continue;
                 if (salvo_left[i] > 0) {
@@ -328,6 +333,7 @@ void World::fire_weapons() {
                         salvo_timer[i] = w.salvo_delay;
                         // Firing finishes the order (CommandAI.cpp WeaponFired).
                         if ((w.flags & ZK_W_MANUAL) && order[size_t(u)] == ZK_ORDER_MANUAL_FIRE) order[size_t(u)] = ZK_ORDER_NONE;
+                        if (d.flags & ZK_U_MISSILE) launch_missile(u);
                     }
                 }
             }
@@ -389,7 +395,7 @@ void World::explode(int weapon, float px, float pz, int source, int source_side,
         if (u == source && (w.flags & ZK_W_NO_SELF_DAMAGE)) return;
         if ((w.flags & ZK_W_NO_FRIENDLY_FIRE) && side[size_t(u)] == source_side) return;
         const float dx = x[size_t(u)] - px, dz = z[size_t(u)] - pz;
-        const float dy = jump[size_t(u)].flying ? jump_altitude(u) - height : -height;
+        const float dy = jump_altitude(u) - height;
         const float dist = std::sqrt(dx * dx + dz * dz + dy * dy);
         const float surface = std::max(0.0f, dist - type_of(u).hit_radius);
         if (surface <= 0.0f && dist < best) {
@@ -401,10 +407,12 @@ void World::explode(int weapon, float px, float pz, int source, int source_side,
         const float rim = surface * edge;
         const float mod = (edge >= 1.0f || surface < 1.0f) ? 1.0f : (radius + 0.001f - surface) / (radius + 0.001f - rim);
         damage_unit(u, w, mod * power);
+        if (w.impulse != 0.0f && source >= 0) push_from(u, source, w.impulse);
         note_attacker(u, source, source_side);
     });
     if (impact_only && direct >= 0) {
         damage_unit(direct, w, power);
+        if (w.impulse != 0.0f && source >= 0) push_from(direct, source, w.impulse);
         note_attacker(direct, source, source_side);
     }
     if (!air && !impact_only && hurts_health(w)) hurt_wrecks(w, px, pz, power);
@@ -527,6 +535,7 @@ void World::finish_deaths() {
             explode(d.explode_weapon, x[size_t(u)], z[size_t(u)], -1, side[size_t(u)], false);
         if (d.drop_weapon >= 0 && build[size_t(u)] >= 1.0f) drop_bomb(u);
         leave_remains(u);
+        if (d.missile_pads > 0) destroy_missiles_of(u);
     }
 }
 

@@ -13,6 +13,7 @@ import numpy as np
 
 from . import featurize as fz
 from . import rawframe as rf
+from . import tables
 
 D, LAYERS, HEADS = 192, 4, 4
 FFN = 4 * D
@@ -25,6 +26,7 @@ KEEP_START = 2.0
 ROUTE_SCALE_START = -3.0    # softplus gives 0.05 nats per walking second: near regions first, and a far one is still sampled
 HEAD_GAIN = 0.01          # an untrained kind head says only what KEEP_START says
 FEATURE_VERSION = 5
+ACTION_VERSION = 2          # the kinds and heads: head_kind's width, and the produce head
 
 
 def weight_shapes(vocabulary: int) -> dict[str, tuple[int, ...]]:
@@ -65,6 +67,7 @@ def weight_shapes(vocabulary: int) -> dict[str, tuple[int, ...]]:
         linear(f"q_{p}", D, D)
     linear("fine0", 2 * D, D)
     linear("fine1", D, fz.FINE_OPTIONS)
+    linear("type_key", tables.TYPE_DIM, D)
     return out
 
 
@@ -148,8 +151,9 @@ class Decision:
     enemy: np.ndarray             # C: index into enemy_tokens, or -1
     region: np.ndarray            # C: region index, or -1
     fine: np.ndarray              # C: fine option, or -1
+    produce: np.ndarray           # C: place in table.producible, or -1
     logp: np.ndarray              # C
-    kinds: np.ndarray = field(default_factory=lambda: np.zeros(0))   # C x 16, probabilities, for the logs
+    kinds: np.ndarray = field(default_factory=lambda: np.zeros(0))   # C x KIND_COUNT, probabilities, for the logs
     state: State | None = None
 
 
@@ -206,7 +210,9 @@ def region_logits(w: dict[str, np.ndarray], enc: Encoded, t: fz.Tensors, kind: n
     scores = q @ enc.regions.T / math.sqrt(D)
     # Near regions first, until the policy learns otherwise.
     scores = scores - _softplus(float(w["route_scale"])) * t.route_bias
-    legal = t.ptr_region if kind is None else np.where(kind[:, None] == rf.JUMP, t.ptr_jump, t.ptr_region)
+    legal = t.ptr_region
+    if kind is not None:
+        legal = np.where(np.isin(kind, (rf.JUMP, rf.THROW))[:, None], t.ptr_jump, np.where(kind[:, None] == rf.WAIT_AT_BEACON, t.ptr_wait, t.ptr_region))
     return np.where(legal, scores, -1e9)
 
 
@@ -215,6 +221,14 @@ def enemy_logits(w: dict[str, np.ndarray], enc: Encoded, t: fz.Tensors) -> np.nd
     q = _linear(w, "q_enemy", enc.units[:t.controllable])
     scores = q @ enc.units[t.enemy_tokens].T / math.sqrt(D)
     return np.where(t.ptr_enemy, scores[None, :, :], -1e9)
+
+
+def produce_logits(w: dict[str, np.ndarray], enc: Encoded, t: fz.Tensors) -> np.ndarray:
+    """C x T.  A type's key comes from its catalog stats, so a new unit is a new key."""
+    table = tables.table()
+    q = _linear(w, "q_type", enc.units[:t.controllable])
+    scores = q @ _linear(w, "type_key", table.stats[table.producible]).T / math.sqrt(D)
+    return np.where(t.ptr_produce, scores, -1e9)
 
 
 def fine_logits(w: dict[str, np.ndarray], unit: np.ndarray, target: np.ndarray) -> np.ndarray:
@@ -247,17 +261,17 @@ class Policy:
         enc = encode(w, self.bias_table, t, state)
         c = t.controllable
         kind = np.zeros(c, np.int64)
-        enemy, region, fine = np.full(c, -1, np.int64), np.full(c, -1, np.int64), np.full(c, -1, np.int64)
+        enemy, region, fine, produce = np.full(c, -1, np.int64), np.full(c, -1, np.int64), np.full(c, -1, np.int64), np.full(c, -1, np.int64)
         logp = np.zeros(c, np.float32)
         if not c:
-            return Decision(kind, enemy, region, fine, logp, np.zeros((0, rf.KIND_COUNT), np.float32), enc.state)
+            return Decision(kind, enemy, region, fine, produce, logp, np.zeros((0, rf.KIND_COUNT), np.float32), enc.state)
         temperature = self.temperature
         kinds = _softmax(kind_logits(w, enc, t) / temperature)
         kind = _sample(kinds, rng)
         rows = np.arange(c)
         logp += np.log(np.maximum(kinds[rows, kind], 1e-30))
         target_h = np.zeros((c, D), np.float32)
-        wants_region = np.isin(kind, (rf.MOVE, rf.FIGHT, rf.JUMP))
+        wants_region = np.isin(kind, fz.KINDS_WITH_REGION)
         if wants_region.any():
             idx = np.flatnonzero(wants_region)
             p = _softmax(region_logits(w, enc, t, kind)[idx] / temperature)
@@ -275,13 +289,18 @@ class Policy:
                 enemy[idx] = _sample(p, rng)
                 logp[idx] += np.log(np.maximum(p[np.arange(len(idx)), enemy[idx]], 1e-30))
                 target_h[idx] = enc.units[t.enemy_tokens[enemy[idx]]]
-        wants_fine = np.isin(kind, (rf.MOVE, rf.FIGHT, rf.JUMP, rf.ATTACK_GROUND))
+        wants_fine = np.isin(kind, fz.KINDS_WITH_FINE)
         if wants_fine.any():
             idx = np.flatnonzero(wants_fine)
             p = _softmax(fine_logits(w, enc.units[idx], target_h[idx]) / temperature)
             fine[idx] = _sample(p, rng)
             logp[idx] += np.log(np.maximum(p[np.arange(len(idx)), fine[idx]], 1e-30))
-        return Decision(kind, enemy, region, fine, logp, kinds, enc.state)
+        idx = np.flatnonzero(kind == rf.PRODUCE)
+        if len(idx):
+            p = _softmax(produce_logits(w, enc, t)[idx] / temperature)
+            produce[idx] = _sample(p, rng)
+            logp[idx] += np.log(np.maximum(p[np.arange(len(idx)), produce[idx]], 1e-30))
+        return Decision(kind, enemy, region, fine, produce, logp, kinds, enc.state)
 
 
 def load(path: Any, table_hash: str | None = None) -> dict[str, np.ndarray]:
@@ -290,6 +309,9 @@ def load(path: Any, table_hash: str | None = None) -> dict[str, np.ndarray]:
         version = int(d["meta_feature_version"]) if "meta_feature_version" in d else -1
         if version != FEATURE_VERSION:
             raise ValueError(f"{path}: feature version {version}, this code uses {FEATURE_VERSION}")
+        actions = int(d["meta_action_version"]) if "meta_action_version" in d else -1
+        if actions != ACTION_VERSION:
+            raise ValueError(f"{path}: action version {actions}, this code uses {ACTION_VERSION}")
         if table_hash is not None and str(d["meta_catalog_hash"]) != table_hash:
             raise ValueError(f"{path}: trained on catalog {d['meta_catalog_hash']}, the game's is {table_hash}")
         return {k: d[k].astype(np.float32) for k in d.files if not k.startswith("meta_")}

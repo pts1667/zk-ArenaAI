@@ -24,7 +24,8 @@ from zkbot.policy import bundle as bd, rawframe as rf, tables  # noqa: E402
 from policy_opening import Ground, Opening, Seat, is_buildable, modelled  # noqa: E402
 from policy_script import FightScript, ScriptData  # noqa: E402
 
-KINDS = (rf.KEEP, rf.MOVE, rf.FIGHT, rf.ATTACK_UNIT, rf.MANUAL_FIRE, rf.JUMP, rf.CLOAK_ON, rf.CLOAK_OFF)
+KINDS = (rf.KEEP, rf.MOVE, rf.FIGHT, rf.ATTACK_UNIT, rf.MANUAL_FIRE, rf.JUMP, rf.CLOAK_ON, rf.CLOAK_OFF,
+         rf.PRODUCE, rf.THROW, rf.PUSH, rf.PULL, rf.PLACE_BEACON, rf.WAIT_AT_BEACON)
 TICKS_PER_DECISION = 3
 TIME_LIMIT_DECISIONS = 2400         # 20 minutes
 VALUE_CONSTANT = 1000.0
@@ -123,6 +124,26 @@ def pool() -> list[tuple[zksim.Map, bd.Bundle, MapFacts]]:
             bundle = bd.Bundle.load(zksim.DATA / "maps" / f"{slug}.bundle.npz")
             _POOL.append((zksim.Map.load(zksim.DATA / "maps" / f"{slug}.npz"), bundle, _map_facts(slug)))
     return _POOL
+
+
+def sim_orders(orders: list) -> np.ndarray:
+    """The policy's orders as the sim's.  Its kinds up to PRODUCE have the same numbers; a thrower's fire at the ground, and a switch's target, are the sim's own."""
+    table, cat = tables.table(), catalog()
+    out = np.zeros(len(orders), zksim.ORDER_DTYPE)
+    for i, o in enumerate(orders):
+        kind, target = o.kind, o.target
+        if kind == rf.THROW:
+            kind = zksim.ORDER_MANUAL_FIRE
+        elif kind == rf.PUSH or kind == rf.PULL:
+            kind, target = zksim.ORDER_ON_OFF, int(kind == rf.PUSH)
+        elif kind == rf.PLACE_BEACON:
+            kind = zksim.ORDER_PLACE_BEACON
+        elif kind == rf.WAIT_AT_BEACON:
+            kind = zksim.ORDER_WAIT_AT_BEACON
+        elif kind == rf.PRODUCE:
+            target = cat.index[table.names[target]]
+        out[i] = (o.uid, kind, o.x, o.z, target)
+    return out
 
 
 def army_types(table: tables.TypeTable) -> dict[str, np.ndarray]:
@@ -309,7 +330,7 @@ class SimEnv:
                 seat = g * 2 + side
                 orders = self.pending.pop(seat, None)
                 if orders is not None:
-                    part = np.array([(o.uid, o.kind, o.x, o.z, o.target) for o in orders], zksim.ORDER_DTYPE)
+                    part = sim_orders(orders)
                 elif not self._is_policy(seat):
                     part = self.script_orders(g, side)
                 else:

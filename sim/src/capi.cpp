@@ -157,6 +157,8 @@ void zk_world_resources(const void* world, int side, float* out) {
     out[5] = p.overdrive_energy;
 }
 
+int zk_world_count(const void* world) { return static_cast<const World*>(world)->count(); }
+
 void zk_world_get(const void* world, int unit, zk_unit_state* out) {
     const auto* w = static_cast<const World*>(world);
     const size_t u = size_t(unit);
@@ -176,6 +178,19 @@ void zk_world_get(const void* world, int unit, zk_unit_state* out) {
     out->heat = w->ai[u].heat;
     out->jump_charge = w->jump[u].charge;
     out->jumping = w->jump[u].flying ? 2 : (w->jump[u].busy ? 1 : 0);
+    {
+        const auto& flight = w->jump[u];
+        const float bend = 2.0f * flight.at - 1.0f;
+        out->altitude = flight.flying ? (1.0f - bend * bend) * flight.height : w->skid[u].y;
+    }
+    out->skidding = w->skid[u].on;
+    out->low_power = w->power_off(unit);
+    out->pulling = w->pulling[u];
+    {
+        const Teleporter* t = w->teleporter_of(unit);
+        out->deployed = t && t->deployed;
+        out->beacon = t ? t->beacon : -1;
+    }
     out->chasing = w->ai[u].chasing;
     out->dodging = w->ai[u].dodging;
     out->shots_fired = w->ai[u].shots_fired;

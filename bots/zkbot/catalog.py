@@ -38,6 +38,12 @@ try:
         ABILITIES: dict[str, dict[str, Any]] = json.load(_f)
 except OSError:
     ABILITIES = {}
+try:
+    # Who throws, who both pushes and pulls, who teleports and what a silo makes: generated with the sim's catalog (tools/sim_data.py).
+    with (_HERE / "data" / "specials.json").open("r", encoding="utf8") as _f:
+        SPECIALS: dict[str, Any] = json.load(_f)
+except OSError:
+    SPECIALS = {"throwers": {}, "switches": [], "teleporters": {}, "silos": {}}
 
 COMBAT_ROLES = ("raid", "scout", "riot", "skirm", "assault", "snipe", "arty", "aa", "antiheavy", "bomb")
 

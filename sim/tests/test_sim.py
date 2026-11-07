@@ -221,7 +221,7 @@ def test_capture_weapons_do_no_damage_and_stay_out_of_armies():
     w.step(36)
     assert w.get(t).damage_taken == 0.0
     flagged = {u["name"] for u in CAT.units if any(CAT.weapons[m]["flags"] & zksim.W_UNMODELLED for m in u["mount_weapon"])}
-    assert {"vehcapture", "veharty", "hoverminer", "jumpblackhole", "amphlaunch"} <= flagged, flagged
+    assert {"vehcapture", "veharty", "hoverminer", "jumpblackhole"} <= flagged and "amphlaunch" not in flagged, flagged
 
 
 def test_a_manual_weapon_waits_for_its_order_and_its_stock():
