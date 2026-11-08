@@ -16,7 +16,7 @@ from zkbot.policy import rawframe as rf  # noqa: E402
 
 @pytest.fixture(scope="module")
 def env():
-    e = se.SimEnv(1, 5, ["scripts"], threads=1)
+    e = se.SimEnv(1, 5, ["scripts"], threads=1, script_impl="python")     # tests here read the script objects
     e.begin()
     return e
 
@@ -116,7 +116,7 @@ def test_the_army_script_aims_missiles_so_that_its_aims_are_labels(env):
 
 
 def test_in_sim_games_the_economy_grows_and_its_orders_are_not_the_scripts(env):
-    games = se.SimEnv(4, 9, ["scripts"], threads=2)
+    games = se.SimEnv(4, 9, ["scripts"], threads=2, script_impl="python")     # it reads the script objects
     games.begin()
     built_by_script = 0
     for _ in range(720):         # 6 minutes

@@ -284,11 +284,16 @@ void World::move_one(int u) {
     int& wait = order_wait[size_t(u)];
     int& lag = order_lag[size_t(u)];
     ZK_PROF(MOVE_FRAMES);
+    // The heading's sine and cosine, kept from one frame's step to the next frame's terrain, and the map cell it stands in, kept
+    // from the test of where it steps to.
+    float sin_h = cls >= 0 ? std::sin(h) : 0.0f, cos_h = cls >= 0 ? std::cos(h) : 0.0f;
+    size_t here = cls >= 0 ? size_t(map->cell_index(px, pz)) : 0;
+    const float* walkable = cls >= 0 ? map->speed_grid(cls) : nullptr;
     for (int f = 0; f < ZK_TICK_FRAMES; ++f) {
         const bool go = walking && (wait == 0 || lag > 0);
         if (wait > 0) --wait;
         if (lag > 0) --lag;
-        const float terrain = cls >= 0 ? map->speed_along(cls, px, pz, std::sin(h), std::cos(h)) : 1.0f;
+        const float terrain = cls >= 0 ? map->speed_along_at(cls, here, sin_h, cos_h) : 1.0f;
         float top = go ? d.speed * std::max(terrain, MIN_TERRAIN_SPEED) * slow_mult : 0.0f;
         if (speed_limit > 0.0f) top = std::min(top, speed_limit);
         // What flies comes to a stop at its goal, rather than getting there at full speed and coming back.
@@ -297,14 +302,25 @@ void World::move_one(int u) {
         const float limit = std::fabs(diff) > SLOW_TURN_ANGLE ? std::min(top, d.slow_turn_speed) : top;
         h = wrap(h + std::clamp(diff, -d.turn_rate, d.turn_rate));
         v += std::clamp(limit - v, -d.brake, d.accel);
-        const float nx = px + std::sin(h) * v, nz = pz + std::cos(h) * v;
-        if (cls < 0 || map->speed_at(cls, nx, nz) > 0.0f) {
+        sin_h = std::sin(h);
+        cos_h = std::cos(h);
+        const float nx = px + sin_h * v, nz = pz + cos_h * v;
+        if (cls < 0) {
             px = nx;
             pz = nz;
-        } else if (map->speed_at(cls, nx, pz) > 0.0f) {
-            px = nx;  // slide along what blocks the way
-        } else if (map->speed_at(cls, px, nz) > 0.0f) {
+            continue;
+        }
+        size_t to = size_t(map->cell_index(nx, nz));
+        if (walkable[to] > 0.0f) {
+            px = nx;
             pz = nz;
+            here = to;
+        } else if (walkable[to = size_t(map->cell_index(nx, pz))] > 0.0f) {
+            px = nx;  // slide along what blocks the way
+            here = to;
+        } else if (walkable[to = size_t(map->cell_index(px, nz))] > 0.0f) {
+            pz = nz;
+            here = to;
         } else {
             v = 0.0f;
         }
@@ -328,13 +344,16 @@ void World::separate() {
         const auto& d = type_of(u);
         if (!(d.flags & ZK_U_MOBILE) || (d.flags & ZK_U_AIR) || jump[size_t(u)].flying) continue;
         float push_x = 0.0f, push_z = 0.0f;
-        for_near(x[size_t(u)], z[size_t(u)], d.footprint_radius + SEPARATION_MARGIN, [&](int o) {
-            if (o == u || !alive[size_t(o)]) return;
+        // Nothing can reach further than this, so what's further needn't be looked at.
+        const float widest = d.footprint_radius + cat_max_footprint, widest2 = widest * widest;
+        const float ux = x[size_t(u)], uz = z[size_t(u)];
+        for_near(ux, uz, d.footprint_radius + SEPARATION_MARGIN, [&](int o) {
+            const float dx = ux - x[size_t(o)], dz = uz - z[size_t(o)];
+            const float d2 = dx * dx + dz * dz;
+            if (d2 >= widest2 || o == u || !alive[size_t(o)]) return;
             const auto& od = type_of(o);
             if ((od.flags & ZK_U_AIR) || jump[size_t(o)].flying) return;
-            const float dx = x[size_t(u)] - x[size_t(o)], dz = z[size_t(u)] - z[size_t(o)];
             const float reach = d.footprint_radius + od.footprint_radius;
-            const float d2 = dx * dx + dz * dz;
             if (d2 >= reach * reach || d2 < 0.0001f) return;
             const float dist = std::sqrt(d2);
             // Immobile things push fully, mobile neighbours share the overlap.

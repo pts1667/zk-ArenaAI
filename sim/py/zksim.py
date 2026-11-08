@@ -124,6 +124,10 @@ def _load_library() -> ct.CDLL:
     lib.zk_batch_world.restype = vp
     lib.zk_batch_world.argtypes = [vp, it]
     lib.zk_batch_step.argtypes = [vp, ip, it, vp, ip, it, vp, it, ip, fp, fp, vp, it, ip]
+    if hasattr(lib, "zk_batch_step_begin"):     # older builds step only whole
+        lib.zk_batch_step_begin.argtypes = [vp, ip, it, vp, ip, it, vp, it, ip, fp, fp, vp, it, ip]
+        lib.zk_batch_step_wait.argtypes = [vp]
+        lib.zk_batch_set_threads.argtypes = [vp, it]
     lib.zk_replay.argtypes = [cvp, ct.POINTER(vp), ip, it, ip, ip, ip, fp, fp, fp, fp, ct.POINTER(ct.c_uint8), it,
                               ct.c_uint64, ip, it, it, it, fp]
     if lib.zk_abi_version() != ABI_VERSION:
@@ -420,6 +424,7 @@ class Batch:
         self.feature_counts = np.zeros((games, 2), np.int32)
         self.sites: list[np.ndarray] = [np.zeros(0, rawframe.SITE_DTYPE)] * games
         self.positions = np.arange(games, dtype=np.int32)
+        self._in_flight = None      # what a step begun and not yet waited for reads
 
     def __del__(self):
         if getattr(self, "handle", None):
@@ -451,15 +456,33 @@ class Batch:
         for x, z, metal, hp, radius, feature_def in features:
             _lib.zk_world_add_feature(world, x, z, metal, hp, radius, int(feature_def))
 
-    def step(self, orders: np.ndarray | None = None, order_offsets: np.ndarray | None = None, games: np.ndarray | None = None, ticks: int = 3) -> None:
-        """orders: ORDER_DTYPE, grouped by listed game; order_offsets: where each listed game's begin, plus the end."""
-        listed = self.positions if games is None else np.asarray(games, np.int32)
+    def _step_args(self, orders, order_offsets, games, ticks) -> tuple:
+        listed = self.positions if games is None else np.require(games, np.int32, "C")
         if orders is None:
             orders = np.zeros(0, ORDER_DTYPE)
             order_offsets = np.zeros(len(listed) + 1, np.int32)
-        _lib.zk_batch_step(self.handle, _ints(listed), len(listed), orders.ctypes.data, _ints(np.asarray(order_offsets, np.int32)), ticks,
-                           self.records.ctypes.data, self.cap, _ints(self.counts), _floats(self.globs), _floats(self.stats),
-                           self.features.ctypes.data, FEATURES_PER_SIDE, _ints(self.feature_counts))
+        orders, order_offsets = np.require(orders, ORDER_DTYPE, "C"), np.require(order_offsets, np.int32, "C")
+        call = (self.handle, _ints(listed), len(listed), orders.ctypes.data, _ints(order_offsets), ticks,
+                self.records.ctypes.data, self.cap, _ints(self.counts), _floats(self.globs), _floats(self.stats),
+                self.features.ctypes.data, FEATURES_PER_SIDE, _ints(self.feature_counts))
+        return call, (listed, orders, order_offsets)
+
+    def step(self, orders: np.ndarray | None = None, order_offsets: np.ndarray | None = None, games: np.ndarray | None = None, ticks: int = 3) -> None:
+        """orders: ORDER_DTYPE, grouped by listed game; order_offsets: where each listed game's begin, plus the end."""
+        call, _keep = self._step_args(orders, order_offsets, games, ticks)
+        _lib.zk_batch_step(*call)
+
+    def step_begin(self, orders: np.ndarray | None = None, order_offsets: np.ndarray | None = None, games: np.ndarray | None = None, ticks: int = 3) -> None:
+        """`step`, on the batch's threads while this returns at once.  The frames are being written until `step_wait`."""
+        call, self._in_flight = self._step_args(orders, order_offsets, games, ticks)
+        _lib.zk_batch_step_begin(*call)
+
+    def step_wait(self) -> None:
+        _lib.zk_batch_step_wait(self.handle)
+        self._in_flight = None
+
+    def set_threads(self, threads: int) -> None:
+        _lib.zk_batch_set_threads(self.handle, threads)
 
     def refresh(self, game: int) -> None:
         """This game's frames, in place, without stepping: after a reset, while the rest of the batch stays as it was."""

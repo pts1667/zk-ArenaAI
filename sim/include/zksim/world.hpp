@@ -1,6 +1,7 @@
 // Struct-of-arrays state of one game, and the read-only catalog and map it shares with others.
 #pragma once
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -13,6 +14,7 @@ namespace zk {
 constexpr float MAX_SLOW = 0.5f;
 constexpr int BURROW_FRAMES = 12;       // Sleep(400) in the scripts: what has idle_cloak digs in this long after stopping
 constexpr float GRAVITY = 120.0f / 900.0f;   // elmos a frame squared: Game.gravity, which every map has here
+constexpr float SEARCH_PAD = 1.0f;      // elmos added to a grid search's radius, so rounding can't leave out what the exact test takes
 
 struct Catalog {
     std::vector<zk_type_rec> types;
@@ -70,8 +72,24 @@ struct Map {
     int segment_at(int cls, float x, float z) const { return nearest_segment[size_t(cls) * size_t(rows) * size_t(cols) + size_t(cell_index(x, z))]; }
     float width() const { return float(cols) * cell; }
     float depth() const { return float(rows) * cell; }
+    // Dividing by a power of two is exactly multiplying by its inverse, which is quicker; any other cell divides.
+    float inv_cell = 1.0f / 16.0f;
+    bool cell_pow2 = true;
+    void set_cell(float c) {
+        int e;
+        cell = c;
+        cell_pow2 = std::frexp(c, &e) == 0.5f;
+        inv_cell = 1.0f / c;
+    }
     int cell_index(float x, float z) const {
-        int cx = int(x / cell), cz = int(z / cell);
+        int cx, cz;
+        if (cell_pow2) {
+            cx = int(x * inv_cell);
+            cz = int(z * inv_cell);
+        } else {
+            cx = int(x / cell);
+            cz = int(z / cell);
+        }
         cx = cx < 0 ? 0 : (cx >= cols ? cols - 1 : cx);
         cz = cz < 0 ? 0 : (cz >= rows ? rows - 1 : cz);
         return cz * cols + cx;
@@ -80,8 +98,8 @@ struct Map {
     const float* speed_grid(int cls) const { return &speed[size_t(cls) * size_t(rows) * size_t(cols)]; }
     float speed_at(int cls, float x, float z) const { return speed_grid(cls)[size_t(cell_index(x, z))]; }
     // CMoveMath's speed for a move in this direction: climbing slows a unit, descending doesn't.
-    float speed_along(int cls, float x, float z, float dir_x, float dir_z) const {
-        const size_t i = size_t(cell_index(x, z));
+    float speed_along(int cls, float x, float z, float dir_x, float dir_z) const { return speed_along_at(cls, size_t(cell_index(x, z)), dir_x, dir_z); }
+    float speed_along_at(int cls, size_t i, float dir_x, float dir_z) const {
         const float base = speed_grid(cls)[i], mod = slope_mod[size_t(cls)], s = slope[i];
         if (base <= 0.0f || mod <= 0.0f || s <= 0.0f || height[i] < 0.0f) return base;
         const float climb = -(dir_x * normal_x[i] + dir_z * normal_z[i]);
@@ -106,6 +124,11 @@ struct Shot {
     float power;   // of its damage, after falling with distance
     float origin_x, origin_z;
     bool aimed_at_blip;   // a guided one goes for where radar shows it
+};
+
+// Where along a piercing shot's line it meets a unit, and how many times over.
+struct PierceHit {
+    float along, times;
 };
 
 // What a unit does on its own, between orders.  unit_ai.cpp.
@@ -232,6 +255,7 @@ struct World {
     const Map* map;
     Rng rng;
     int behaviour;
+    float cat_max_footprint = 0.0f;       // the widest footprint radius of any type
     int frame = 0;
     int tick_count = 0;
 
@@ -256,7 +280,6 @@ struct World {
     std::vector<int> mem_kind, mem_frame, mem_target;
     std::vector<float> mem_x, mem_z, last_damage;
     SideView views[2];
-    float max_los = 0.0f;                 // of the units in this game
     std::vector<int> radar_units;
     // Economy, only for worlds that turn it on.
     bool economy_on = false;
@@ -268,6 +291,9 @@ struct World {
     std::vector<float> overdrive;         // extra metal per second, as of the last update
     std::vector<int> builders, earners, pylons;   // handles, so a tick needn't look through everyone
     std::vector<int> upkeepers;
+    std::vector<int> grid_nodes, grid_parent;     // overdrive's working, kept so it needn't allocate
+    std::vector<float> grid_capacity, grid_squares, grid_px, grid_pz, grid_range;
+    std::vector<char> grid_maxed;
     std::vector<ShieldUnit> shields;
     std::vector<uint8_t> unpaid;          // its upkeep wasn't paid, so it's off
     // Cloak.
@@ -290,18 +316,30 @@ struct World {
     std::vector<Wreck> wrecks;
     std::vector<int> live_wrecks;
     std::vector<std::vector<int>> wreck_cells;   // ids per grid cell: wrecks don't move
+    // The live wrecks again, by grid cell (wreck_start, as cell_start), with their places alongside; remade when one comes or goes.
+    std::vector<int> wreck_start, wreck_ids, wreck_slot;     // wreck_slot: by id, where a live one is in wreck_ids
+    std::vector<float> wreck_px, wreck_pz;
+    bool wreck_index_stale = true;
     std::vector<float> burn_rate, burn_frames;
     std::vector<FireArea> areas;
     // Weapons, ZK_MAX_MOUNTS per unit.
     std::vector<float> cooldown, salvo_timer;
     std::vector<int> salvo_left, weapon_target;
 
-    // Spatial index, rebuilt each tick.
+    // Spatial index, rebuilt each tick: the live units by side, then grid cell (row by row), then handle.  Side s's units in cell c
+    // are cell_units[cell_start[k] .. cell_start[k + 1]] for k = s * grid_cells() + c, so a row of cells is one run of them.
     int grid_cols = 0, grid_rows = 0;
-    std::vector<int> cell_start, cell_units, cell_fill;
+    std::vector<int> cell_start, cell_units, unit_key;
+    size_t grid_cells() const { return size_t(grid_cols) * size_t(grid_rows); }
+    std::vector<uint8_t> scratch_seen;     // per unit or wreck, for a sweep that marks what's in sight
+    std::vector<int> scratch_eyes;         // a side's finished units, for the same
+    struct EmitLists {
+        std::vector<int> own, seen, blips, memory, hidden;
+    } emit_lists;                          // emit_view's five kinds of record, in the order it writes them
 
     // Shots by the tick they land.
     std::vector<std::vector<Shot>> ring;
+    std::vector<PierceHit> pierce_hits;
 
     World(const Catalog* c, const Map* m, uint64_t seed, int behaviour_);
     int add(int type, int side, float x, float z, float heading, float hp_frac, float build_frac);
@@ -309,7 +347,7 @@ struct World {
     void ready_weapons();
     void set_economy(int n_spots, const float* spot_triples, float metal, float energy, float innate_metal, float innate_energy, float storage);
     int add_wreck(float px, float pz, float metal, float wreck_hp, float radius, int feature_def, int heap_of);
-    int emit_features(int side, FeatureRecord* out, int cap) const;
+    int emit_features(int side, FeatureRecord* out, int cap);
     void step(int ticks);
     int count() const { return int(type.size()); }
     void ensure_views();
@@ -331,8 +369,17 @@ struct World {
     bool armoured_for_hit(int u) const;
     void hit_closes(int u);
 
+    // The grid cells a square round a point touches.
+    struct CellBox {
+        int x0, x1, z0, z1;
+    };
+    CellBox cell_box(float cx, float cz, float radius) const;
+    // Every live unit in the cells round a point, cell by cell (row by row), each cell's in handle order.
     template <class F>
     void for_near(float cx, float cz, float radius, F&& f) const;
+    // The same, of one side only: for_near with the other side's left out, in the same order.
+    template <class F>
+    void for_side(int side, float cx, float cz, float radius, F&& f) const;
 
 private:
     void tick();
@@ -363,6 +410,7 @@ private:
     void leave_remains(int u);
     void hurt_wrecks(const zk_weapon_rec& w, float px, float pz, float power);
     void remove_wreck(int id);
+    void index_wrecks();
     void reclaim_step(int u);
     bool pay_energy(int s, float amount);
     void pay_upkeep();
@@ -447,11 +495,9 @@ private:
     bool faces(int u, const zk_weapon_rec& w, int target) const;
     void waypoint(int u, float gx, float gz, float& wx, float& wz) const;
     bool clear_sight(int from, int to) const;
-    bool point_seen_by(int side, float x, float z) const;
 };
 
-template <class F>
-void World::for_near(float cx, float cz, float radius, F&& f) const {
+inline World::CellBox World::cell_box(float cx, float cz, float radius) const {
     constexpr float CELL = 128.0f;
     int x0 = int((cx - radius) / CELL), x1 = int((cx + radius) / CELL);
     int z0 = int((cz - radius) / CELL), z1 = int((cz + radius) / CELL);
@@ -459,11 +505,44 @@ void World::for_near(float cx, float cz, float radius, F&& f) const {
     z0 = z0 < 0 ? 0 : z0;
     x1 = x1 >= grid_cols ? grid_cols - 1 : x1;
     z1 = z1 >= grid_rows ? grid_rows - 1 : z1;
-    for (int gz = z0; gz <= z1; ++gz)
-        for (int gx = x0; gx <= x1; ++gx) {
-            const size_t c = size_t(gz) * size_t(grid_cols) + size_t(gx);
-            for (int i = cell_start[c]; i < cell_start[c + 1]; ++i) f(cell_units[size_t(i)]);
+    return {x0, x1, z0, z1};
+}
+
+template <class F>
+void World::for_side(int s, float cx, float cz, float radius, F&& f) const {
+    const CellBox b = cell_box(cx, cz, radius);
+    const size_t base = size_t(s) * grid_cells();
+    for (int gz = b.z0; gz <= b.z1; ++gz) {
+        const size_t row = base + size_t(gz) * size_t(grid_cols);
+        const int end = cell_start[row + size_t(b.x1) + 1];
+        for (int i = cell_start[row + size_t(b.x0)]; i < end; ++i) f(cell_units[size_t(i)]);
+    }
+}
+
+template <class F>
+void World::for_near(float cx, float cz, float radius, F&& f) const {
+    const CellBox b = cell_box(cx, cz, radius);
+    const size_t other = grid_cells();
+    for (int gz = b.z0; gz <= b.z1; ++gz) {
+        const size_t row = size_t(gz) * size_t(grid_cols);
+        const size_t first = row + size_t(b.x0), last = row + size_t(b.x1) + 1;
+        // A row with one side in it is that side's run; otherwise each cell's two runs go together by handle.
+        if (cell_start[other + first] == cell_start[other + last]) {
+            for (int i = cell_start[first]; i < cell_start[last]; ++i) f(cell_units[size_t(i)]);
+            continue;
         }
+        if (cell_start[first] == cell_start[last]) {
+            for (int i = cell_start[other + first]; i < cell_start[other + last]; ++i) f(cell_units[size_t(i)]);
+            continue;
+        }
+        for (size_t c = first; c < last; ++c) {
+            int i = cell_start[c], j = cell_start[other + c];
+            const int i_end = cell_start[c + 1], j_end = cell_start[other + c + 1];
+            while (i < i_end && j < j_end) f(cell_units[size_t(cell_units[size_t(i)] < cell_units[size_t(j)] ? i++ : j++)]);
+            while (i < i_end) f(cell_units[size_t(i++)]);
+            while (j < j_end) f(cell_units[size_t(j++)]);
+        }
+    }
 }
 
 }  // namespace zk

@@ -27,8 +27,8 @@ void World::show_for_action(int u) {
 
 bool World::enemy_within(int u, float reach) const {
     bool found = false;
-    for_near(x[size_t(u)], z[size_t(u)], reach, [&](int e) {
-        if (found || side[size_t(e)] == side[size_t(u)] || !alive[size_t(e)] || build[size_t(e)] < 1.0f) return;
+    for_side(1 - side[size_t(u)], x[size_t(u)], z[size_t(u)], reach, [&](int e) {
+        if (found || !alive[size_t(e)] || build[size_t(e)] < 1.0f) return;
         const float dx = x[size_t(e)] - x[size_t(u)], dz = z[size_t(e)] - z[size_t(u)];
         found = dx * dx + dz * dz <= reach * reach;
     });
@@ -71,8 +71,8 @@ void World::update_cloak() {
         const size_t i = size_t(c);
         if (!alive[i] || !area_on[i] || !active(c) || disarmed(c) || unpaid[i]) continue;
         const float r = type_of(c).area_cloak_radius;
-        for_near(x[i], z[i], r, [&](int u) {
-            if (side[size_t(u)] != side[i] || !alive[size_t(u)]) return;
+        for_side(side[i], x[i], z[i], r, [&](int u) {
+            if (!alive[size_t(u)]) return;
             const float dx = x[size_t(u)] - x[i], dz = z[size_t(u)] - z[i];
             if (dx * dx + dz * dz <= r * r) area_cloaked[size_t(u)] = 1;
         });

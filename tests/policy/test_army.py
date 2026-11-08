@@ -156,7 +156,7 @@ def test_each_role_on_a_roster_is_its_cheapest_modelled_unit(data):
 # The sim: what a recorder reads.
 
 def test_a_factory_is_told_what_to_build_only_when_that_changes_and_it_is_its_own():
-    env = se.SimEnv(8, 3, ["scripts"], threads=4)
+    env = se.SimEnv(8, 3, ["scripts"], threads=4, script_impl="python")    # it reads the script objects
     env.begin()
     last: dict[tuple, str] = {}
     told = 0

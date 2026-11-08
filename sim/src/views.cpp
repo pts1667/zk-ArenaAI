@@ -15,6 +15,7 @@ constexpr int BLIP_WINDOW_FRAMES = 60;       // blips.py's SPEED_WINDOW
 constexpr int BLIP_MIN_SPAN_FRAMES = 36;     // ... and 0.6 of it before a track counts
 constexpr float AIR_ALTITUDE = 150.0f;
 constexpr float FRAMES_PER_SECOND = 30.0f;
+constexpr float GRID_CELL = 128.0f;          // as the unit grid and wreck_cells
 
 inline float surface(const Map& m, float x, float z) { return std::max(0.0f, m.height_at(x, z)); }
 }  // namespace
@@ -50,16 +51,6 @@ bool World::sees_point(int from, float tx, float tz) const {
     return true;
 }
 
-bool World::point_seen_by(int s, float px, float pz) const {
-    bool seen = false;
-    for_near(px, pz, max_los, [&](int o) {
-        if (seen || side[size_t(o)] != s || !alive[size_t(o)] || build[size_t(o)] < 1.0f) return;
-        const float r = type_of(o).los_radius, dx = x[size_t(o)] - px, dz = z[size_t(o)] - pz;
-        if (dx * dx + dz * dz <= r * r) seen = true;
-    });
-    return seen;
-}
-
 void World::update_view(int s) {
     ZK_PROF(FOG);
     SideView& v = views[size_t(s)];
@@ -69,28 +60,53 @@ void World::update_view(int s) {
     radar_units.clear();
     for (int o = 0; o < n; ++o)
         if (side[size_t(o)] == s && alive[size_t(o)] && build[size_t(o)] >= 1.0f && type_of(o).radar_radius > 0.0f && !unpaid[size_t(o)]) radar_units.push_back(o);
+    // Who's in sight, from each of the side's eyes outward: it visits only the grid cells eyes can reach, where going from each enemy
+    // would look through every cell within the game's longest sight.  Whether something is seen doesn't depend on which eye looks first.
+    std::vector<uint8_t>& sighted = scratch_seen;
+    std::vector<int>& eyes = scratch_eyes;
+    sighted.assign(size_t(n), 0);
+    eyes.clear();
+    for (int o = 0; o < n; ++o)
+        if (side[size_t(o)] == s && alive[size_t(o)] && build[size_t(o)] >= 1.0f) eyes.push_back(o);
+    ZK_PROF(FOG_SWEEP);
+    for (int o : eyes) {
+        const size_t eye = size_t(o);
+        const auto& od = type_of(o);
+        const bool from_air = (od.flags & ZK_U_AIR) != 0;
+        const float ex = x[eye], ez = z[eye], reach = std::max(od.los_radius, od.air_los_radius);
+        for_side(1 - s, ex, ez, reach + SEARCH_PAD, [&](int e) {
+            const size_t i = size_t(e);
+            if (sighted[i] || cloaked[i] || !alive[i]) return;
+            const float dx = ex - x[i], dz = ez - z[i], d2 = dx * dx + dz * dz;
+            if (d2 > reach * reach) return;     // beyond either radius: r <= reach, so r * r <= reach * reach
+            const bool flying = (type_of(e).flags & ZK_U_AIR) != 0;
+            const float r = flying ? od.air_los_radius : od.los_radius;
+            if (d2 > r * r) return;
+            if (flying || from_air || clear_sight(o, e)) sighted[i] = 1;
+        });
+    }
     bool contact = false;
     for (int e = 0; e < n; ++e) {
         const size_t i = size_t(e);
         if (side[i] == s) continue;
         if (!alive[i]) {
             // A remembered building is forgotten once its place is back in sight.
-            if (v.remembered[i] && point_seen_by(s, x[i], z[i])) v.remembered[i] = 0;
+            if (v.remembered[i]) {
+                ZK_PROF(FOG_GONE);
+                for (int o : eyes) {
+                    const float r = type_of(o).los_radius, dx = x[size_t(o)] - x[i], dz = z[size_t(o)] - z[i];
+                    if (dx * dx + dz * dz <= r * r) {
+                        v.remembered[i] = 0;
+                        break;
+                    }
+                }
+            }
             v.in_los[i] = v.in_radar[i] = v.known[i] = 0;
             continue;
         }
         const auto& d = type_of(e);
-        const bool flying = (d.flags & ZK_U_AIR) != 0;
-        bool los = false;
         // LosHandler.cpp: a cloaked enemy isn't in sight, and unit_stealth.lua keeps it off radar too.
-        if (!cloaked[i]) for_near(x[i], z[i], max_los, [&](int o) {
-            if (los || side[size_t(o)] != s || !alive[size_t(o)] || build[size_t(o)] < 1.0f) return;
-            const auto& od = type_of(o);
-            const float r = flying ? od.air_los_radius : od.los_radius;
-            const float dx = x[size_t(o)] - x[i], dz = z[size_t(o)] - z[i];
-            if (dx * dx + dz * dz > r * r) return;
-            if (flying || (od.flags & ZK_U_AIR) || clear_sight(o, e)) los = true;
-        });
+        const bool los = sighted[i] != 0;
         bool radar = false;
         if (!cloaked[i] && !los)
             for (int o : radar_units) {
@@ -168,10 +184,31 @@ int World::emit_view(int s, UnitRecord* out, int cap, float* glob, int commander
         r.flags = uint16_t(flags);
         return r;
     };
-    // Own units first, then what's seen, then radar, then memory, then what's hidden: each in handle order.
-    for (int u = 0; u < n && w < cap; ++u) {
+    // Own units first, then what's seen, then radar, then memory, then what's hidden: each in handle order.  One pass sorts them
+    // into those five, which don't overlap.
+    auto& [own, seen, blips, memory, hidden] = emit_lists;
+    own.clear();
+    seen.clear();
+    blips.clear();
+    memory.clear();
+    hidden.clear();
+    for (int u = 0; u < n; ++u) {
         const size_t i = size_t(u);
-        if (side[i] != s || !alive[i]) continue;
+        if (side[i] == s) {
+            if (alive[i]) own.push_back(u);
+        } else if (v.in_los[i]) {
+            if (alive[i]) seen.push_back(u);
+        } else if (alive[i] && v.in_radar[i]) {
+            blips.push_back(u);
+        } else if (v.remembered[i]) {
+            memory.push_back(u);
+        } else if (alive[i]) {
+            hidden.push_back(u);
+        }
+    }
+    for (int u : own) {
+        if (w >= cap) break;
+        const size_t i = size_t(u);
         const auto& d = type_of(u);
         int flags = UF_IN_LOS | UF_TYPE_KNOWN;
         const bool aims = order[i] == ZK_ORDER_ATTACK || order[i] == ZK_ORDER_MANUAL_FIRE;
@@ -195,29 +232,31 @@ int World::emit_view(int s, UnitRecord* out, int cap, float* glob, int commander
             r.ord_target = mem_kind[i] == ZK_ORDER_PRODUCE && mem_target[i] >= 0 ? cat->types[size_t(mem_target[i])].def_id : mem_target[i];
         }
     }
-    for (int u = 0; u < n && w < cap; ++u)
-        if (side[size_t(u)] != s && alive[size_t(u)] && v.in_los[size_t(u)]) common(u, KNOW_LOS, UF_IN_LOS | UF_TYPE_KNOWN);
-    for (int u = 0; u < n && w < cap; ++u) {
+    for (int u : seen) {
+        if (w >= cap) break;
+        common(u, KNOW_LOS, UF_IN_LOS | UF_TYPE_KNOWN);
+    }
+    for (int u : blips) {
+        if (w >= cap) break;
         const size_t i = size_t(u);
-        if (side[i] == s || !alive[i] || v.in_los[i] || !v.in_radar[i]) continue;
         UnitRecord& r = common(u, KNOW_RADAR, v.known[i] ? UF_TYPE_KNOWN : 0);
         if (!v.known[i]) r.def_id = -1;
         r.hp_frac = std::nanf("");
         r.build_frac = 0.0f;
         r.blip_top_speed = v.tracks[i].top;
     }
-    for (int u = 0; u < n && w < cap; ++u) {
+    for (int u : memory) {
+        if (w >= cap) break;
         const size_t i = size_t(u);
-        if (side[i] == s || !v.remembered[i] || v.in_los[i] || (alive[i] && v.in_radar[i])) continue;
         UnitRecord& r = common(u, KNOW_MEMORY, UF_TYPE_KNOWN);
         r.hp_frac = v.ghost_hp[i];
         r.build_frac = v.ghost_build[i];
         r.vx = r.vz = 0.0f;
         r.ord_age = float(frame - v.seen_frame[i]);
     }
-    for (int u = 0; u < n && w < cap; ++u) {
-        const size_t i = size_t(u);
-        if (side[i] != s && alive[i] && !v.in_los[i] && !v.in_radar[i] && !v.remembered[i]) common(u, KNOW_HIDDEN, 0);
+    for (int u : hidden) {
+        if (w >= cap) break;
+        common(u, KNOW_HIDDEN, 0);
     }
     if (glob) {
         std::fill(glob, glob + G_COUNT, 0.0f);
@@ -249,21 +288,66 @@ int World::emit_view(int s, UnitRecord* out, int cap, float* glob, int commander
     return w;
 }
 
-// In ground sight of the side, as a feature is (AICallback.cpp).  One ray per wreck and unit, as for units.
-int World::emit_features(int s, FeatureRecord* out, int cap) const {
+void World::index_wrecks() {
+    if (!wreck_index_stale) return;
+    wreck_index_stale = false;
+    const size_t cells = grid_cells();
+    wreck_start.assign(cells + 1, 0);
+    auto cell_of = [&](int id) {
+        const Wreck& w = wrecks[size_t(id)];
+        const int gx = std::clamp(int(w.x / GRID_CELL), 0, grid_cols - 1), gz = std::clamp(int(w.z / GRID_CELL), 0, grid_rows - 1);
+        return size_t(gz) * size_t(grid_cols) + size_t(gx);
+    };
+    for (int id : live_wrecks) ++wreck_start[cell_of(id)];
+    for (size_t c = 1; c <= cells; ++c) wreck_start[c] += wreck_start[c - 1];
+    wreck_ids.resize(live_wrecks.size());
+    wreck_px.resize(live_wrecks.size());
+    wreck_pz.resize(live_wrecks.size());
+    wreck_slot.resize(wrecks.size());
+    for (int id : live_wrecks) {
+        const size_t k = size_t(--wreck_start[cell_of(id)]);
+        wreck_ids[k] = id;
+        wreck_slot[size_t(id)] = int(k);
+        wreck_px[k] = wrecks[size_t(id)].x;
+        wreck_pz[k] = wrecks[size_t(id)].z;
+    }
+}
+
+// In ground sight of the side, as a feature is (AICallback.cpp).  One ray per wreck and unit, as for units.  From each of the side's
+// eyes outward, a row of the wreck grid at a time, as for units in update_view.
+int World::emit_features(int s, FeatureRecord* out, int cap) {
+    if (live_wrecks.empty() || cap <= 0) return 0;
+    {
+        ZK_PROF(FEATURES_INDEX);
+        index_wrecks();
+    }
+    ZK_PROF(FEATURES_SWEEP);
+    std::vector<uint8_t>& sighted = scratch_seen;      // by place in the index
+    sighted.assign(wreck_ids.size(), 0);
+    const int n = count();
+    for (int o = 0; o < n; ++o) {
+        const size_t eye = size_t(o);
+        if (side[eye] != s || !alive[eye] || build[eye] < 1.0f) continue;
+        const auto& od = type_of(o);
+        const float ex = x[eye], ez = z[eye], reach2 = od.los_radius * od.los_radius;
+        const bool from_air = (od.flags & ZK_U_AIR) != 0;
+        const CellBox b = cell_box(ex, ez, od.los_radius + SEARCH_PAD);
+        for (int gz = b.z0; gz <= b.z1; ++gz) {
+            const size_t row = size_t(gz) * size_t(grid_cols);
+            const size_t end = size_t(wreck_start[row + size_t(b.x1) + 1]);
+            for (size_t k = size_t(wreck_start[row + size_t(b.x0)]); k < end; ++k) {
+                if (sighted[k]) continue;
+                const float dx = ex - wreck_px[k], dz = ez - wreck_pz[k];
+                if (dx * dx + dz * dz > reach2) continue;
+                if (from_air || sees_point(o, wreck_px[k], wreck_pz[k])) sighted[k] = 1;
+            }
+        }
+    }
     int w = 0;
     for (int id : live_wrecks) {
         if (w >= cap) break;
+        if (!sighted[size_t(wreck_slot[size_t(id)])]) continue;
         const Wreck& wreck = wrecks[size_t(id)];
-        bool seen = false;
-        for_near(wreck.x, wreck.z, max_los, [&](int o) {
-            if (seen || side[size_t(o)] != s || !alive[size_t(o)] || build[size_t(o)] < 1.0f) return;
-            const auto& od = type_of(o);
-            const float dx = x[size_t(o)] - wreck.x, dz = z[size_t(o)] - wreck.z;
-            if (dx * dx + dz * dz > od.los_radius * od.los_radius) return;
-            if ((od.flags & ZK_U_AIR) || sees_point(o, wreck.x, wreck.z)) seen = true;
-        });
-        if (!seen) continue;
         FeatureRecord& r = out[w++];
         r.feat_id = id;
         r.x = wreck.x;

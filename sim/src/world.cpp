@@ -46,7 +46,8 @@ World::World(const Catalog* c, const Map* m, uint64_t seed, int behaviour_)
     : cat(c), map(m), rng(seed), behaviour(behaviour_), ring(RING_SLOTS) {
     grid_cols = std::max(1, int(std::ceil(m->width() / GRID_CELL)));
     grid_rows = std::max(1, int(std::ceil(m->depth() / GRID_CELL)));
-    cell_start.resize(size_t(grid_cols) * size_t(grid_rows) + 1);
+    cell_start.resize(2 * grid_cells() + 1);
+    for (const auto& t : c->types) cat_max_footprint = std::max(cat_max_footprint, t.footprint_radius);
 }
 
 int World::add(int t, int s, float px, float pz, float head, float hp_frac, float build_frac) {
@@ -94,7 +95,6 @@ int World::add(int t, int s, float px, float pz, float head, float hp_frac, floa
     order_wait.push_back(0);
     order_lag.push_back(0);
     progress.push_back(WalkProgress{px, pz, 0, 0, -1, 0});
-    max_los = std::max(max_los, std::max(d.los_radius, d.air_los_radius));
     mem_kind.push_back(-1);
     mem_frame.push_back(0);
     mem_target.push_back(-1);
@@ -264,14 +264,23 @@ void World::tick() {
             ZK_PROF(UNIT_AI);
             update_unit_ai();
         }
-        if (behaviour == ZK_BEHAVIOUR_ORDERS || behaviour == ZK_BEHAVIOUR_SCRIPTED) update_kamikaze();
+        if (behaviour == ZK_BEHAVIOUR_ORDERS || behaviour == ZK_BEHAVIOUR_SCRIPTED) { ZK_PROF(KAMIKAZE); update_kamikaze(); }
         { ZK_PROF(TARGETS); pick_targets(); }
     }
-    if (behaviour == ZK_BEHAVIOUR_ORDERS || behaviour == ZK_BEHAVIOUR_SCRIPTED) update_droppers();
+    if (behaviour == ZK_BEHAVIOUR_ORDERS || behaviour == ZK_BEHAVIOUR_SCRIPTED) { ZK_PROF(KAMIKAZE); update_droppers(); }
     { ZK_PROF(FIRE); fire_weapons(); }
     { ZK_PROF(SHOTS); resolve_shots(); }
     { ZK_PROF(BURN); burn_areas(); }
-    { ZK_PROF(MOVE); update_throwers(); update_teleporters(); update_jumps(); move_units(); }
+    {
+        ZK_PROF(MOVE);
+        {
+            ZK_PROF(MOVE_ABILITIES);
+            update_throwers();
+            update_teleporters();
+            update_jumps();
+        }
+        move_units();
+    }
     { ZK_PROF(DEATHS); finish_deaths(); }
     // After deaths: a build step adds health, and mustn't bring back what this tick killed.
     if (economy_on) { ZK_PROF(ECONOMY); run_economy(); }
@@ -282,24 +291,27 @@ void World::tick() {
 
 void World::rebuild_grid() {
     const int n = count();
+    const size_t cells = grid_cells();
     std::fill(cell_start.begin(), cell_start.end(), 0);
-    auto cell_of = [&](int u) {
+    unit_key.resize(size_t(n));
+    int live = 0;
+    for (int u = 0; u < n; ++u) {
+        if (!alive[size_t(u)]) continue;
         int gx = int(x[size_t(u)] / GRID_CELL), gz = int(z[size_t(u)] / GRID_CELL);
         gx = gx < 0 ? 0 : (gx >= grid_cols ? grid_cols - 1 : gx);
         gz = gz < 0 ? 0 : (gz >= grid_rows ? grid_rows - 1 : gz);
-        return size_t(gz) * size_t(grid_cols) + size_t(gx);
-    };
-    int live = 0;
-    for (int u = 0; u < n; ++u)
-        if (alive[size_t(u)]) {
-            ++cell_start[cell_of(u) + 1];
-            ++live;
-        }
-    for (size_t c = 1; c < cell_start.size(); ++c) cell_start[c] += cell_start[c - 1];
+        const int key = int(size_t(side[size_t(u)]) * cells + size_t(gz) * size_t(grid_cols) + size_t(gx));
+        unit_key[size_t(u)] = key;
+        ++cell_start[size_t(key)];
+        ++live;
+    }
+    // Each key's end, then filled backwards so that each key's begin is left behind with its units in handle order.  The sum is
+    // kept in a register: through memory, each add would wait on the store before it.
+    int sum = 0;
+    for (int& c : cell_start) c = sum += c;
     cell_units.resize(size_t(live));
-    cell_fill.assign(cell_start.begin(), cell_start.end() - 1);
-    for (int u = 0; u < n; ++u)
-        if (alive[size_t(u)]) cell_units[size_t(cell_fill[cell_of(u)]++)] = u;
+    for (int u = n; u-- > 0;)
+        if (alive[size_t(u)]) cell_units[size_t(--cell_start[size_t(unit_key[size_t(u)])])] = u;
 }
 
 void World::find_nearest() {
@@ -310,8 +322,8 @@ void World::find_nearest() {
         // Fights are small and the grid coarse: widen until something turns up.
         float best = 1e18f;
         for (float r : NEAREST_RADII) {
-            for_near(x[size_t(u)], z[size_t(u)], r, [&](int e) {
-                if (side[size_t(e)] == side[size_t(u)] || !can_be_aimed_at(side[size_t(u)], e)) return;
+            for_side(1 - side[size_t(u)], x[size_t(u)], z[size_t(u)], r, [&](int e) {
+                if (!can_be_aimed_at(side[size_t(u)], e)) return;
                 const float dx = x[size_t(e)] - x[size_t(u)], dz = z[size_t(e)] - z[size_t(u)];
                 const float d = dx * dx + dz * dz;
                 if (d < best) {

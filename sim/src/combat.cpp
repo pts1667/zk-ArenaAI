@@ -194,8 +194,7 @@ void World::pick_targets() {
             }
             float best = 1e30f;
             int chosen = -1;
-            for_near(x[size_t(u)], z[size_t(u)], w.range + SEARCH_MARGIN, [&](int t) {
-                if (side[size_t(t)] == side[size_t(u)]) return;
+            for_side(1 - side[size_t(u)], x[size_t(u)], z[size_t(u)], w.range + SEARCH_MARGIN, [&](int t) {
                 const float score = target_score(u, m, t);
                 if (score >= 0.0f && score < best) {
                     best = score;
@@ -499,12 +498,10 @@ void World::pierce(const Shot& s, float px, float pz, float power) {
     const float ux = (px - ox) / aimed, uz = (pz - oz) / aimed, reach = std::max(w.range, aimed);
     // Up to a jumper it was aimed at, and on.
     const float rise = s.target >= 0 && jump[size_t(s.target)].flying ? jump_altitude(s.target) / aimed : 0.0f;
-    struct Hit {
-        float along, times;
-    };
-    std::vector<Hit> hits;
-    for_near(ox + ux * reach * 0.5f, oz + uz * reach * 0.5f, reach * 0.5f + BLAST_MARGIN, [&](int u) {
-        if (!alive[size_t(u)] || u == s.source || side[size_t(u)] == s.source_side) return;
+    std::vector<PierceHit>& hits = pierce_hits;      // nothing below pierces again
+    hits.clear();
+    for_side(1 - s.source_side, ox + ux * reach * 0.5f, oz + uz * reach * 0.5f, reach * 0.5f + BLAST_MARGIN, [&](int u) {
+        if (!alive[size_t(u)] || u == s.source) return;
         if (((type_of(u).flags & ZK_U_AIR) != 0) != s.air) return;
         const float r = type_of(u).hit_radius, dx = x[size_t(u)] - ox, dz = z[size_t(u)] - oz;
         const float along = dx * ux + dz * uz;
@@ -514,7 +511,7 @@ void World::pierce(const Shot& s, float px, float pz, float power) {
         if (left <= 0.0f) return;
         hits.push_back({at, (w.flags & ZK_W_ONE_HIT_EACH) || w.speed <= 0.0f ? 1.0f : 1.0f + 2.0f * std::sqrt(left) / w.speed});
     });
-    for (const Hit& h : hits) explode(s.weapon, ox + ux * h.along, oz + uz * h.along, s.source, s.source_side, s.air, power * h.times, rise * h.along);
+    for (const PierceHit& h : hits) explode(s.weapon, ox + ux * h.along, oz + uz * h.along, s.source, s.source_side, s.air, power * h.times, rise * h.along);
 }
 
 void World::resolve_shots() {

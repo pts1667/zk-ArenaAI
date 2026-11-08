@@ -16,9 +16,10 @@ A Zero-K AI that beats CircuitAI, now pursued as a Pluto-style learned policy: a
   if wanted).  `bots/zkbot` is now the policy's host in the engine (section 3).
 * **Nothing plays in the engine.**  The host chooses a commander and sends no commands, until the policy's hand-off is built:
   its decoded orders sent as commands, and the opening and the economy script as the sim plays them.
-* **In the sim**, both sides play a scripted opening (`tools/policy_opening.py`), the economy script runs their constructors
-  (`tools/policy_eco.py`), and the army script (`tools/policy_army.py`) or the policy runs their fighters, factories, silo
-  missiles and the Trinity.
+* **In the sim**, both sides play a scripted opening (`tools/policy_opening.py`), the economy script runs their constructors,
+  and the army script or the policy runs their fighters, factories, silo missiles and the Trinity.  The economy and army
+  scripts are C++ (`sim/scripts/`, `libzkscripts.so`, through `tools/policy_scripts_cpp.py`), threaded over games; the Python
+  versions (`tools/policy_eco.py`, `tools/policy_army.py`) are what they were ported from.
 * **The actor** (`tools/policy_latent.py`) reads a frozen frame encoder's latent tokens, frame after frame, with what it did at
   each frame as 4 action tokens after that frame's: `[frame 1 latents] [actions at 1] [frame 2 latents] ...`, causal, windowed
   8 s in each of 2 layers.
@@ -32,8 +33,8 @@ A Zero-K AI that beats CircuitAI, now pursued as a Pluto-style learned policy: a
 * Windows Python 3.13 runs the bot (`pip install requests websockets orjson numpy`).
 * WSL (Ubuntu) runs the sim and training: `~/zkml/bin/python` (PyTorch, RTX 4070), pytest in `~/zksim/pt`
   (`~/zkml/bin/python -m pip install -q --target ~/zksim/pt pytest`), so `PYTHONPATH=$HOME/zksim/pt:bots`.
-* The sim library: `cmake -S sim -B ~/zksim/build && cmake --build ~/zksim/build` gives `~/zksim/build/libzksim.so`
-  (`ZKSIM_LIB` overrides).  Rebuild after any change under `sim/`.
+* The sim library: `cmake -S sim -B ~/zksim/build && cmake --build ~/zksim/build -j8` gives `~/zksim/build/libzksim.so`
+  and the scripts' `libzkscripts.so` beside it (`ZKSIM_LIB` overrides).  Rebuild after any change under `sim/`.
 * Data on D:, not in git (`/mnt/d/zk-learned`):
 
   | Path | What |
@@ -55,12 +56,14 @@ A Zero-K AI that beats CircuitAI, now pursued as a Pluto-style learned policy: a
     `tools/policy_schema.py`), the map bundle, type tables, featurizer, action encode and decode.
   * Unit data: `units.py`, `catalog.py`, `data/*.json` (rebuilt by `tools/extract_weapons.py`, `tools/extract_abilities.py`,
     `tools/dump_defs.py`).  Terrain: `terrain.py`, `hazards.py`, `mapdata.py`.  `params.py`: `ZKBOT_FLAGS`.
-* `sim/`: the C++ simulator (`src/`), its ctypes binding (`py/zksim.py`, `py/zknav.py`), data (`data/`) and tests (`tests/`).
+* `sim/`: the C++ simulator (`src/`), the economy and army scripts (`scripts/`), its ctypes binding (`py/zksim.py`,
+  `py/zknav.py`), data (`data/`) and tests (`tests/`).  A batch steps its games on a pool of threads of its own.
 * `tools/`:
   * Sim data and checks against the engine: `sim_data.py`, `sim_engine.py` (with `simgame/` gadgets), `sim_battery.py`,
     `sim_profile.py`, `sim_batch_bench.py`, `sim_segment_check.py`, `terrain_map.py`, `map_gen.py`.
   * The sim as a game: `policy_sim_env.py`, `policy_opening.py`, `policy_eco.py`, `policy_army.py`, `policy_mix.py`,
-    `policy_script.py` (the scripts' shared data).
+    `policy_script.py` (the scripts' shared data), `policy_scripts_cpp.py` (the C++ scripts' binding),
+    `policy_scripts_parity.py` (C++ against Python, order by order).  `sim_step_bench.py` times the sim's step alone.
   * Frames and encoders: `frame_world.py` (games for frames, with the first fight script), `frame_data.py`, `frame_model.py`
     (the encoder, batches, shards, probes), `frame_vae.py` (its training).
   * The policy: `policy_model.py` (batches, heads' sampling, the critic), `policy_latent.py` (the actor), `policy_train.py` (PPO),
@@ -90,7 +93,10 @@ README.md has the template's rules for engine games (headless, max speed; window
 
 Latest first; each item's numbers are in the section named.
 
-* **The trim** (`03-training.md` 11.10): the rules bot, the first actor and its numpy forward, the toy, the JEPA encoder and
+* **A faster sim, and the scripts in C++** (`03-training.md` 11.11): with both sides scripted, 128 games step at 92,000 seat
+  decisions a second on 8 threads, 17x the Python scripts.  The sim alone is 1.7 to 3.3x faster and plays the same games
+  bit for bit; the C++ scripts give the same orders as the Python ones on the same frames.
+* **The trim** (11.10): the rules bot, the first actor and its numpy forward, the toy, the JEPA encoder and
   the raider-only script in the sim are gone.
 * **Cloning, with and without action tokens** (11.9): 3,000 steps on `army-3` each.  No measurable difference: the NLL of the
   script's acts is 3.51 with tokens and 3.49 without, an act's kind right 24% and 23%; tokens cost 19% in speed.  Both are

@@ -132,7 +132,8 @@ def _maps(args: argparse.Namespace) -> tuple[list | None, np.ndarray | None]:
 
 def _record_part(args: argparse.Namespace, worker: int, decisions: int) -> dict:
     maps, weights = _maps(args)
-    env = se.SimEnv(args.games, args.seed * 1000 + worker, ["scripts"], threads=max(1, args.threads // args.workers), maps=maps, weights=weights, scripts=("army", "army"))
+    env = se.SimEnv(args.games, args.seed * 1000 + worker, ["scripts"], threads=max(1, args.threads // args.workers), maps=maps, weights=weights, scripts=("army", "army"),
+                    script_impl=getattr(args, "script_impl", "cpp"))
     env.begin()
     rec = Recorder(env, pathlib.Path(args.out), f"game-w{worker:02d}")
     began = time.perf_counter()
@@ -164,7 +165,8 @@ def record(args: argparse.Namespace) -> None:
     decisions = sum(p["decisions"] for p in parts)
     summary = {"games": sum(p["games"] for p in parts), "decisions": decisions, "seconds": seconds, "loading_maps_seconds": loaded,
                "decisions_a_second_playing": decisions / max(max(p["seconds"] for p in parts), 1e-9), "ended": dict(ended),
-               "maps": args.maps or "training", "seed": args.seed, "workers": args.workers, "data_version": DATA_VERSION}
+               "maps": args.maps or "training", "seed": args.seed, "workers": args.workers, "data_version": DATA_VERSION,
+               "script_impl": args.script_impl}
     (out / "summary.json").write_text(json.dumps(summary, indent=1))
     print(json.dumps(summary))
 
@@ -210,6 +212,7 @@ def main() -> None:
     r.add_argument("--seed", type=int, default=1)
     r.add_argument("--threads", type=int, default=16, help="sim threads, shared among the workers")
     r.add_argument("--workers", type=int, default=1)
+    r.add_argument("--script-impl", choices=("python", "cpp"), default="cpp", help="the scripts in Python, or in C++ (libzkscripts)")
     c = sub.add_parser("check")
     c.add_argument("--data", required=True)
     c.add_argument("--maps")

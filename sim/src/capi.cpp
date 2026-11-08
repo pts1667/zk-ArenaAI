@@ -1,10 +1,15 @@
 // The C ABI, and the threaded replay of logged fights.
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <memory>
+#include <mutex>
 #include <thread>
 #include <vector>
+
+#include <unistd.h>
 
 #include "zksim/profile.hpp"
 #include "zksim/world.hpp"
@@ -34,13 +39,240 @@ struct Game {
     std::unique_ptr<World> world;
     int commander[2] = {-1, -1};
     float base[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    long long cost = 0;     // nanoseconds its last step took: what the schedule goes by, never the results
 };
 
-struct Batch {
-    const Catalog* cat = nullptr;
-    int threads = 1;
-    std::vector<Game> games;
+// What zk_batch_step was given: the caller keeps it alive until the step is over.
+struct StepArgs {
+    const int* games = nullptr;
+    int n_games = 0;
+    const zk_order_rec* orders = nullptr;
+    const int* order_offsets = nullptr;
+    int ticks = 0;
+    UnitRecord* records = nullptr;
+    int cap = 0;
+    int* counts = nullptr;
+    float* globs = nullptr;
+    float* stats = nullptr;
+    FeatureRecord* features = nullptr;
+    int feature_cap = 0;
+    int* feature_counts = nullptr;
 };
+
+// A batch's games and the threads that step them.  The threads live as long as the batch and wait between steps.  A step
+// hands out games one at a time, costliest first, to whichever thread is free; each game is stepped whole by one thread
+// and has its own RNG and output slots, so the results are the same for any thread count and any schedule.  Batches share
+// nothing but the read-only catalog and maps, so several can step at once from different threads.
+class Batch {
+public:
+    const Catalog* cat = nullptr;
+    std::vector<Game> games;
+
+    Batch(const Catalog* c, int n, int threads_) : cat(c), games(size_t(n)) { set_threads(threads_); }
+
+    ~Batch() {
+        if (forked()) return;       // the threads are the parent's, and there's no one here to stop
+        wait();
+        {
+            std::lock_guard<std::mutex> lock(sync->mutex);
+            stopping = true;
+        }
+        sync->wake.notify_all();
+        for (auto& t : workers) t.join();
+    }
+
+    void set_threads(int n) {
+        wait();
+        threads = std::clamp(n, 1, 256);
+#ifdef ZKSIM_PROFILE
+        if (counters.size() < size_t(threads) + 1) counters.resize(size_t(threads) + 1);
+#endif
+    }
+
+    // Steps on the calling thread and threads - 1 workers, and returns when every game is done.
+    void step(const StepArgs& a) {
+        wait();
+        prepare(a);
+        if (threads == 1 || a.n_games <= 1) {
+            run(0);
+            return;
+        }
+        launch(threads - 1);
+        run(0);
+        wait();
+    }
+
+    // Steps on `threads` workers and returns at once; wait() is when it's over.
+    void begin(const StepArgs& a) {
+        wait();
+        prepare(a);
+        launch(threads);
+    }
+
+    void wait() {
+        if (forked()) adopt();
+        std::unique_lock<std::mutex> lock(sync->mutex);
+        sync->done.wait(lock, [&] { return running == 0; });
+    }
+
+#ifdef ZKSIM_PROFILE
+    void read_profile(long long* nanos, long long* calls, bool reset) {
+        wait();
+        std::fill(nanos, nanos + prof::PHASE_COUNT, 0LL);
+        std::fill(calls, calls + prof::PHASE_COUNT, 0LL);
+        for (auto& c : counters) {
+            c.add_to(nanos, calls);
+            if (reset) c.clear();
+        }
+    }
+#endif
+
+private:
+    int threads = 1;
+    StepArgs args;
+    std::vector<int> schedule;          // positions in args.games, costliest game first
+    std::atomic<int> next{0};
+    std::vector<std::thread> workers;
+    struct Sync {
+        std::mutex mutex;
+        std::condition_variable wake, done;
+    };
+    std::unique_ptr<Sync> sync = std::make_unique<Sync>();
+    pid_t owner = getpid();             // the process the workers belong to
+    unsigned long long generation = 0;  // of the step the workers are told about
+    int taking_part = 0;                // workers with an index below this step the current one
+    int running = 0;                    // of those, the ones not yet finished
+    bool stopping = false;
+#ifdef ZKSIM_PROFILE
+    std::vector<prof::Counters> counters;   // the caller's, then each worker's
+#endif
+
+    bool forked() const { return owner != getpid(); }
+
+    // A child of fork() has the parent's batch but none of its threads.  Their handles can't be joined or destroyed, nor the
+    // locks trusted, so all of them are let go (a little memory, once) and the batch starts again with its own.  A fork in the
+    // middle of a step leaves that step's games half done.
+    void adopt() {
+        new std::vector<std::thread>(std::move(workers));
+        workers.clear();
+        (void)sync.release();
+        sync = std::make_unique<Sync>();
+        owner = getpid();
+        generation = 0;
+        taking_part = running = 0;
+        stopping = false;
+    }
+
+    void prepare(const StepArgs& a) {
+        args = a;
+        schedule.resize(size_t(a.n_games));
+        for (int i = 0; i < a.n_games; ++i) schedule[size_t(i)] = i;
+        std::sort(schedule.begin(), schedule.end(), [&](int p, int q) {
+            const long long cp = games[size_t(a.games[p])].cost, cq = games[size_t(a.games[q])].cost;
+            return cp != cq ? cp > cq : p < q;
+        });
+        next.store(0, std::memory_order_relaxed);
+    }
+
+    void launch(int helpers) {
+        while (int(workers.size()) < helpers) {
+            const int index = int(workers.size());
+            const unsigned long long now = generation;      // only this thread changes it
+            workers.emplace_back([this, index, now] { work(index, now); });
+        }
+        {
+            std::lock_guard<std::mutex> lock(sync->mutex);
+            taking_part = helpers;
+            running = helpers;
+            ++generation;
+        }
+        sync->wake.notify_all();
+    }
+
+    void work(int index, unsigned long long seen) {
+        Sync& s = *sync;
+        for (;;) {
+            {
+                std::unique_lock<std::mutex> lock(s.mutex);
+                s.wake.wait(lock, [&] { return stopping || generation != seen; });
+                if (stopping) return;
+                seen = generation;
+                if (index >= taking_part) continue;
+            }
+            run(index + 1);
+            bool last;
+            {
+                std::lock_guard<std::mutex> lock(s.mutex);
+                last = --running == 0;
+            }
+            if (last) s.done.notify_all();
+        }
+    }
+
+    void run(int slot) {
+#ifdef ZKSIM_PROFILE
+        prof::Redirect into(&counters[size_t(slot)]);
+#else
+        (void)slot;
+#endif
+        for (;;) {
+            const int k = next.fetch_add(1, std::memory_order_relaxed);
+            if (k >= args.n_games) return;
+            step_game(schedule[size_t(k)]);
+        }
+    }
+
+    void step_game(int i) {
+        const auto start = std::chrono::steady_clock::now();
+        const StepArgs& a = args;
+        Game& game = games[size_t(a.games[i])];
+        World& w = *game.world;
+        {
+            ZK_PROF(ORDERS);
+            for (int o = a.order_offsets[i]; o < a.order_offsets[i + 1]; ++o)
+                if (w.alive[size_t(a.orders[o].unit)]) w.order_unit(a.orders[o].unit, a.orders[o].kind, a.orders[o].x, a.orders[o].z, a.orders[o].target);
+        }
+        if (a.ticks > 0) w.step(a.ticks);
+        w.ensure_views();
+        w.rebuild_index();
+        for (int s = 0; s < 2; ++s) {
+            const size_t slot = size_t(i) * 2 + size_t(s);
+            w.update_view(s);
+            {
+                ZK_PROF(EMIT);
+                a.counts[slot] = w.emit_view(s, a.records + slot * size_t(a.cap), a.cap, a.globs + slot * G_COUNT, game.commander[s], game.base + 2 * s);
+            }
+            {
+                ZK_PROF(STATS);
+                w.side_stats(s, a.stats + slot * ZK_STATS);
+            }
+            {
+                ZK_PROF(FEATURES);
+                a.feature_counts[slot] = w.emit_features(s, a.features + slot * size_t(a.feature_cap), a.feature_cap);
+            }
+        }
+        game.cost = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
+    }
+};
+
+StepArgs step_args(const int* games, int n_games, const zk_order_rec* orders, const int* order_offsets, int ticks, void* records, int cap,
+                   int* counts, float* globs, float* stats, void* features, int feature_cap, int* feature_counts) {
+    StepArgs a;
+    a.games = games;
+    a.n_games = n_games;
+    a.orders = orders;
+    a.order_offsets = order_offsets;
+    a.ticks = ticks;
+    a.records = static_cast<UnitRecord*>(records);
+    a.cap = cap;
+    a.counts = counts;
+    a.globs = globs;
+    a.stats = stats;
+    a.features = static_cast<FeatureRecord*>(features);
+    a.feature_cap = feature_cap;
+    a.feature_counts = feature_counts;
+    return a;
+}
 
 }  // namespace
 
@@ -71,7 +303,7 @@ void* zk_map_new(int cols, int rows, float cell, const float* height, const floa
     m->cols = cols;
     m->rows = rows;
     m->classes = classes;
-    m->cell = cell;
+    m->set_cell(cell);
     const size_t n = size_t(cols) * size_t(rows);
     m->height.assign(height, height + n);
     m->speed.assign(speed, speed + n * size_t(classes));
@@ -253,15 +485,11 @@ int zk_world_view(void* world, int side, void* records, int cap, float* glob, in
     return w->emit_view(side, static_cast<UnitRecord*>(records), cap, glob, commander, base);
 }
 
-void* zk_batch_new(const void* catalog, int games, int threads) {
-    auto* b = new Batch;
-    b->cat = static_cast<const Catalog*>(catalog);
-    b->games.resize(size_t(games));
-    b->threads = std::max(1, threads);
-    return b;
-}
+void* zk_batch_new(const void* catalog, int games, int threads) { return new Batch(static_cast<const Catalog*>(catalog), games, threads); }
 
 void zk_batch_free(void* batch) { delete static_cast<Batch*>(batch); }
+
+void zk_batch_set_threads(void* batch, int threads) { static_cast<Batch*>(batch)->set_threads(threads); }
 
 void zk_batch_reset(void* batch, int g, const void* map, uint64_t seed, int behaviour, int n, const int* type, const int* side,
                     const float* x, const float* z, const float* heading, const float* hp_frac, const float* build_frac,
@@ -281,35 +509,15 @@ void* zk_batch_world(void* batch, int g) { return static_cast<Batch*>(batch)->ga
 
 void zk_batch_step(void* batch, const int* games, int n_games, const zk_order_rec* orders, const int* order_offsets, int ticks,
                    void* records, int cap, int* counts, float* globs, float* stats, void* features, int feature_cap, int* feature_counts) {
-    auto* b = static_cast<Batch*>(batch);
-    auto* out = static_cast<UnitRecord*>(records);
-    auto* out_features = static_cast<FeatureRecord*>(features);
-    auto worker = [&](int slice) {
-        for (int i = slice; i < n_games; i += b->threads) {
-            Game& game = b->games[size_t(games[i])];
-            World& w = *game.world;
-            for (int o = order_offsets[i]; o < order_offsets[i + 1]; ++o)
-                if (w.alive[size_t(orders[o].unit)]) w.order_unit(orders[o].unit, orders[o].kind, orders[o].x, orders[o].z, orders[o].target);
-            if (ticks > 0) w.step(ticks);
-            w.ensure_views();
-            w.rebuild_index();
-            for (int s = 0; s < 2; ++s) {
-                const size_t slot = size_t(i) * 2 + size_t(s);
-                w.update_view(s);
-                counts[slot] = w.emit_view(s, out + slot * size_t(cap), cap, globs + slot * G_COUNT, game.commander[s], game.base + 2 * s);
-                w.side_stats(s, stats + slot * ZK_STATS);
-                feature_counts[slot] = w.emit_features(s, out_features + slot * size_t(feature_cap), feature_cap);
-            }
-        }
-    };
-    if (b->threads == 1 || n_games <= 1) {
-        for (int t = 0; t < b->threads; ++t) worker(t);
-        return;
-    }
-    std::vector<std::thread> pool;
-    for (int t = 0; t < b->threads; ++t) pool.emplace_back(worker, t);
-    for (auto& t : pool) t.join();
+    static_cast<Batch*>(batch)->step(step_args(games, n_games, orders, order_offsets, ticks, records, cap, counts, globs, stats, features, feature_cap, feature_counts));
 }
+
+void zk_batch_step_begin(void* batch, const int* games, int n_games, const zk_order_rec* orders, const int* order_offsets, int ticks,
+                         void* records, int cap, int* counts, float* globs, float* stats, void* features, int feature_cap, int* feature_counts) {
+    static_cast<Batch*>(batch)->begin(step_args(games, n_games, orders, order_offsets, ticks, records, cap, counts, globs, stats, features, feature_cap, feature_counts));
+}
+
+void zk_batch_step_wait(void* batch) { static_cast<Batch*>(batch)->wait(); }
 
 }  // extern "C"
 
@@ -318,11 +526,13 @@ extern "C" {
 int zk_prof_count() { return zk::prof::PHASE_COUNT; }
 const char* zk_prof_name(int phase) { return zk::prof::NAMES[phase]; }
 void zk_prof_read(long long* nanos, long long* calls, int reset) {
+    auto& own = zk::prof::own;
     for (int i = 0; i < zk::prof::PHASE_COUNT; ++i) {
-        nanos[i] = zk::prof::nanos[i];
-        calls[i] = zk::prof::calls[i];
-        if (reset) zk::prof::nanos[i] = zk::prof::calls[i] = 0;
+        nanos[i] = own.nanos[i];
+        calls[i] = own.calls[i];
     }
+    if (reset) own.clear();
 }
+void zk_batch_prof_read(void* batch, long long* nanos, long long* calls, int reset) { static_cast<Batch*>(batch)->read_profile(nanos, calls, reset != 0); }
 }
 #endif

@@ -1,0 +1,496 @@
+// The C API of libzkscripts: the shared data, the runner with its thread pool, and a seat's plumbing.
+#include <algorithm>
+#include <atomic>
+#include <climits>
+#include <condition_variable>
+#include <cstring>
+#include <functional>
+#include <mutex>
+#include <thread>
+
+#include "scripts.hpp"
+
+namespace zks {
+
+// Ground
+
+int Ground::part_at(int c, double x, double z) const {
+    if (c < 0 || c >= ZKS_MOVE_CLASSES || labels[c].empty()) return -1;
+    int i = std::min(std::max((int)(z / cell), 0), rows - 1);
+    int j = std::min(std::max((int)(x / cell), 0), cols - 1);
+    int label = labels[c][(size_t)i * cols + j];
+    if (label >= 0) return label;
+    return largest[c];     // Ground.near gives a cell of the largest part, if there's one
+}
+
+bool Ground::fits(double x, double z, double r, int mask) const {
+    if (x < r || z < r || x > map_w - r || z > map_h - r) return false;
+    int r0 = (int)((z - r) / cell), r1 = std::min((int)((z + r) / cell) + 1, rows);
+    int c0 = (int)((x - r) / cell), c1 = std::min((int)((x + r) / cell) + 1, cols);
+    const std::vector<uint8_t>& m = masks[mask];
+    for (int a = r0; a < r1; a++)
+        for (int b = c0; b < c1; b++)
+            if (!m[(size_t)a * cols + b]) return false;
+    return true;
+}
+
+// Data
+
+bool Data::can_build(int builder, int row) const {
+    return std::binary_search(options.begin() + option_offsets[builder], options.begin() + option_offsets[builder + 1], row);
+}
+
+int Data::first_extractor_option(int builder) const {
+    for (int k = option_offsets[builder]; k < option_offsets[builder + 1]; k++)
+        if (has(options[k], ZKS_EXTRACTOR)) return options[k];
+    return -1;
+}
+
+// Draws: xoshiro256**, seeded by splitmix64
+
+namespace {
+uint64_t splitmix(uint64_t& x) {
+    uint64_t z = (x += 0x9e3779b97f4a7c15ULL);
+    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+    return z ^ (z >> 31);
+}
+uint64_t rotl(uint64_t x, int k) { return (x << k) | (x >> (64 - k)); }
+}  // namespace
+
+void Draws::seed(uint64_t seed) {
+    for (auto& v : s) v = splitmix(seed);
+    has_spare = false;
+    tape.clear();
+    tape_kinds.clear();
+    tape_at = 0;
+    taped = false;
+    misses = 0;
+}
+
+double Draws::own_uniform() {
+    uint64_t r = rotl(s[1] * 5, 7) * 9;
+    uint64_t t = s[1] << 17;
+    s[2] ^= s[0];
+    s[3] ^= s[1];
+    s[1] ^= s[2];
+    s[0] ^= s[3];
+    s[2] ^= t;
+    s[3] = rotl(s[3], 45);
+    return (double)(r >> 11) * 0x1.0p-53;
+}
+
+double Draws::own_normal() {
+    if (has_spare) {
+        has_spare = false;
+        return spare;
+    }
+    double u, v, q;
+    do {
+        u = 2.0 * own_uniform() - 1.0;
+        v = 2.0 * own_uniform() - 1.0;
+        q = u * u + v * v;
+    } while (q >= 1.0 || q == 0.0);
+    double f = std::sqrt(-2.0 * std::log(q) / q);
+    spare = v * f;
+    has_spare = true;
+    return u * f;
+}
+
+double Draws::uniform() {
+    if (taped) {
+        if (tape_at < tape.size() && tape_kinds[tape_at] == 0) return tape[tape_at++];
+        misses++;
+    }
+    return own_uniform();
+}
+
+double Draws::normal() {
+    if (taped) {
+        if (tape_at < tape.size() && tape_kinds[tape_at] == 1) return tape[tape_at++];
+        misses++;
+    }
+    return own_normal();
+}
+
+void Draws::end_step() {
+    if (!taped) return;
+    misses += (int)(tape.size() - tape_at);
+    tape.clear();
+    tape_kinds.clear();
+    tape_at = 0;
+    taped = false;
+}
+
+// Seat
+
+void Seat::reset(const Data* d, const Ground* g, int side_, P2 base_, P2 enemy, P2 rally_, bool economy_, bool aimer_, uint64_t seed) {
+    data = d;
+    ground = g;
+    side = side_;
+    active = true;
+    economy = economy_;
+    aimer = aimer_;
+    base = base_, enemy_base = enemy, rally = rally_;
+    // _waypoints(rally, enemy_start), as numpy does it
+    double vx = enemy.x - rally_.x, vz = enemy.z - rally_.z;
+    double sx = -vz * 0.3, sz = vx * 0.3;
+    waypoints[0] = {rally_.x + vx * 0.3 + sx, rally_.z + vz * 0.3 + sz};
+    waypoints[1] = {rally_.x + vx * 0.55 - sx, rally_.z + vz * 0.55 - sz};
+    waypoints[2] = {rally_.x + vx * 0.8 + sx, rally_.z + vz * 0.8 + sz};
+    waypoints[3] = {rally_.x + vx * 0.55, rally_.z + vz * 0.55};
+    for (auto* v : {&state, &ordered_kind, &way}) v->clear();
+    ordered_x.clear(), ordered_z.clear(), squad_of.clear(), current.clear(), born.clear(), patrol.clear(), helps.clear();
+    noted.clear(), stamp.clear(), fighter_of.clear(), raider_stamp.clear(), view_stamp.clear(), view_index.clear();
+    call = 0;
+    squad_live.clear(), squad_target.clear(), since_has.clear(), since_t.clear(), since_d.clear();
+    next_squad = 0;
+    given_up.clear();
+    has_waiting_since = false;
+    waiting_since = 0.0;
+    reached_start = false;
+    made.assign(d->n_roles, 0);
+    seen_air = seen_kitable = seen_heavy = false;
+    aimed.clear();
+    log.clear();
+    floating = energy_low = false;
+    checks_eligible = checks_stalled = 0;
+    counts.clear();
+    nuke_drawn = -1;
+    for (double& p : pending) p = -1e9;
+    going.clear();
+    avoid.clear();
+    for (int& f : finished) f = 0;
+    draws.seed(seed);
+}
+
+void Seat::grow(int64_t uid) {
+    size_t n = (size_t)uid + 1;
+    if (state.size() >= n) return;
+    state.resize(n, S_NEW);
+    ordered_kind.resize(n, 0);
+    ordered_x.resize(n, 0.0);
+    ordered_z.resize(n, 0.0);
+    way.resize(n, -1);
+    squad_of.resize(n, -1);
+    current.resize(n, -1);
+    born.resize(n, 0);
+    patrol.resize(n, 0);
+    helps.resize(n, INT64_MIN);
+    noted.resize(n, 0);
+    stamp.resize(n, -1);
+    fighter_of.resize(n, 0);
+    raider_stamp.resize(n, -1);
+    view_stamp.resize(n, -1);
+    view_index.resize(n, 0);
+}
+
+void Seat::run(const Ctx& c) {
+    const Data& d = *data;
+    own.clear(), enemies.clear(), own_rows.clear(), enemy_rows.clear(), seen.clear();
+    army_out.clear(), eco_out.clear();
+    int64_t most = -1;
+    for (int k = 0; k < c.own_n; k++) {
+        const Rec* u = c.own_frame + k;
+        if (u->player == side) {
+            own.push_back(u);
+            own_rows.push_back(d.row_of(u->def_id));
+            most = std::max(most, u->uid);
+        } else if (u->knowledge == zk::KNOW_LOS || u->knowledge == zk::KNOW_RADAR) {
+            seen.push_back(u->uid);
+        }
+    }
+    for (int k = 0; k < c.enemy_n; k++) {
+        const Rec* u = c.enemy_frame + k;
+        if (u->player == 1 - side) {
+            enemies.push_back(u);
+            enemy_rows.push_back(d.row_of(u->def_id));
+            most = std::max(most, u->uid);
+        }
+    }
+    std::sort(seen.begin(), seen.end());
+    if (most >= 0) grow(most);
+    call++;
+    for (const Rec* u : own) stamp[u->uid] = call;
+    if (c.army_due) army(c);
+    if (c.eco_due) eco(c);
+    draws.end_step();
+}
+
+// A pool of threads kept between steps.  Work is handed out an item at a time; the calling thread works too.
+
+class Pool {
+public:
+    explicit Pool(int threads) {
+        for (int t = 1; t < threads; t++) workers_.emplace_back([this] { loop(); });
+    }
+    ~Pool() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stop_ = true;
+            generation_++;
+        }
+        wake_.notify_all();
+        for (auto& w : workers_) w.join();
+    }
+    void run(int items, const std::function<void(int)>& fn) {
+        if (workers_.empty() || items <= 1) {
+            for (int i = 0; i < items; i++) fn(i);
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            fn_ = &fn;
+            items_ = items;
+            next_.store(0);
+            busy_ = (int)workers_.size();
+            generation_++;
+        }
+        wake_.notify_all();
+        work();
+        std::unique_lock<std::mutex> lock(mutex_);
+        done_.wait(lock, [this] { return busy_ == 0; });
+        fn_ = nullptr;
+    }
+
+private:
+    void work() {
+        for (int i; (i = next_.fetch_add(1)) < items_;) (*fn_)(i);
+    }
+    void loop() {
+        uint64_t seen = 0;
+        for (;;) {
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                wake_.wait(lock, [&] { return generation_ != seen; });
+                seen = generation_;
+                if (stop_) return;
+            }
+            work();
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (--busy_ == 0) done_.notify_one();
+            }
+        }
+    }
+    std::vector<std::thread> workers_;
+    std::mutex mutex_;
+    std::condition_variable wake_, done_;
+    const std::function<void(int)>* fn_ = nullptr;
+    std::atomic<int> next_{0};
+    int items_ = 0, busy_ = 0;
+    uint64_t generation_ = 0;
+    bool stop_ = false;
+};
+
+}  // namespace zks
+
+using namespace zks;
+
+struct zks_data {
+    Data d;
+};
+
+struct zks_runner {
+    const Data* data;
+    std::vector<Seat> seats;
+    Pool pool;
+    std::vector<int32_t> listed;
+    int total = 0, army_total = 0;
+    zks_runner(const Data* d, int games, int threads) : data(d), seats(2 * games), pool(std::max(1, threads)) {}
+};
+
+extern "C" {
+
+int zks_abi_version(void) { return ZKS_ABI_VERSION; }
+
+double zks_py_hypot(double a, double b) { return py_hypot(a, b); }
+
+zks_data* zks_data_new(const zks_data_desc* s) {
+    auto* out = new zks_data;
+    Data& d = out->d;
+    int n = s->rows;
+    d.rows = n;
+    d.unknown = n - 1;
+    d.row_of_def.assign(s->row_of_def, s->row_of_def + s->n_def);
+    d.bits.assign(s->bits, s->bits + n);
+    d.cost.assign(s->cost, s->cost + n);
+    d.range.assign(s->range, s->range + n);
+    d.move_class.assign(s->move_class, s->move_class + n);
+    d.catalog_row.assign(s->catalog_row, s->catalog_row + n);
+    d.role.assign(s->role, s->role + n);
+    d.energy.assign(s->energy, s->energy + n);
+    d.pylon.assign(s->pylon, s->pylon + n);
+    d.needs_link.assign(s->needs_link, s->needs_link + n);
+    d.radius.assign(s->radius, s->radius + n);
+    d.footing.assign(s->footing, s->footing + n);
+    d.footing_radius.assign(s->footing_radius, s->footing_radius + n);
+    d.best_missile.assign(s->best_missile, s->best_missile + n);
+    d.generators.assign(s->generators, s->generators + 3 * n);
+    d.option_offsets.assign(s->option_offsets, s->option_offsets + n + 1);
+    d.options.assign(s->options, s->options + s->option_offsets[n]);
+    d.n_roles = s->n_roles;
+    d.menu.assign(s->menu, s->menu + (size_t)n * s->n_roles);
+    std::memcpy(d.role_ids, s->role_ids, sizeof d.role_ids);
+    std::memcpy(d.special, s->special, sizeof d.special);
+    d.cerberus_reach = s->cerberus_reach;
+    d.missile_reach = s->missile_reach;
+    d.extractor_radius = s->extractor_radius;
+    d.n_footings = s->n_footings;
+    d.kind.assign(n, -1);
+    for (int r = 0; r < n; r++)
+        for (int k = 0; k < 9; k++)
+            if (d.role_ids[k] >= 0 && d.role[r] == d.role_ids[k]) d.kind[r] = (int8_t)k;
+    d.special_of.assign(n, -1);
+    for (int k = 0; k < 7; k++)
+        if (d.special[k] >= 0) d.special_of[d.special[k]] = (int8_t)k;
+    int most = 0;
+    for (int r = 0; r < n; r++) most = std::max(most, d.catalog_row[r] + 1);
+    d.row_of_catalog.assign(most, -1);
+    for (int r = 0; r < n; r++)
+        if (d.catalog_row[r] >= 0 && d.row_of_catalog[d.catalog_row[r]] < 0) d.row_of_catalog[d.catalog_row[r]] = r;
+    return out;
+}
+
+int zks_data_add_map(zks_data* data, const zks_map_desc* m) {
+    Data& d = data->d;
+    auto gp = std::make_unique<Ground>();
+    Ground& g = *gp;
+    g.rows = m->rows, g.cols = m->cols;
+    g.cell = m->cell, g.map_w = m->map_w, g.map_h = m->map_h;
+    g.n_spots = m->n_spots;
+    g.spots.assign(m->spots, m->spots + 3 * m->n_spots);
+    size_t cells = (size_t)m->rows * m->cols;
+    for (int f = 0; f < d.n_footings; f++) {
+        g.masks.emplace_back(m->masks[f], m->masks[f] + cells);
+        g.sites.emplace_back(m->sites[f], m->sites[f] + 2 * (size_t)m->site_counts[f]);
+    }
+    for (int c = 0; c < ZKS_MOVE_CLASSES; c++) {
+        g.labels.emplace_back(m->labels[c], m->labels[c] + cells);
+        g.largest[c] = m->largest[c];
+    }
+    d.maps.push_back(std::move(gp));
+    return (int)d.maps.size() - 1;
+}
+
+void zks_data_free(zks_data* data) { delete data; }
+
+zks_runner* zks_runner_new(const zks_data* data, int games, int threads) { return new zks_runner(&data->d, games, threads); }
+
+void zks_runner_free(zks_runner* runner) { delete runner; }
+
+void zks_reset(zks_runner* r, int game, int map, const double* starts, const double* rally, int economy, int aimer, uint64_t seed0,
+               uint64_t seed1) {
+    const Ground* g = r->data->maps[map].get();
+    P2 a{starts[0], starts[1]}, b{starts[2], starts[3]};
+    r->seats[2 * game].reset(r->data, g, 0, a, b, {rally[0], rally[1]}, economy != 0, aimer != 0, seed0);
+    r->seats[2 * game + 1].reset(r->data, g, 1, b, a, {rally[2], rally[3]}, economy != 0, aimer != 0, seed1);
+}
+
+int zks_step(zks_runner* r, const zks_step_args* a, zk_order_rec* out, int out_cap, int32_t* out_offsets, zk_order_rec* army,
+             int army_cap, int32_t* army_offsets) {
+    int n = a->n;
+    r->listed.assign(a->games, a->games + n);
+    const Rec* records = (const Rec*)a->records;
+    for (int s = 0; s < 2 * n; s++) {
+        Seat& seat = r->seats[2 * a->games[s / 2] + s % 2];
+        seat.pre.assign(a->pre ? a->pre + a->pre_offsets[s] : nullptr, a->pre ? a->pre + a->pre_offsets[s + 1] : nullptr);
+        seat.post.assign(a->post ? a->post + a->post_offsets[s] : nullptr, a->post ? a->post + a->post_offsets[s + 1] : nullptr);
+    }
+    r->pool.run(2 * n, [&](int s) {
+        int g = a->games[s / 2], side = s % 2;
+        Seat& seat = r->seats[2 * g + side];
+        seat.army_out.clear(), seat.eco_out.clear();
+        if (!seat.active) return;
+        int d = a->decisions[g];
+        Ctx c;
+        c.own_frame = records + ((size_t)g * 2 + side) * a->cap;
+        c.own_n = a->counts[2 * g + side];
+        c.enemy_frame = records + ((size_t)g * 2 + 1 - side) * a->cap;
+        c.enemy_n = a->counts[2 * g + 1 - side];
+        c.glob = a->globs + ((size_t)g * 2 + side) * zk::G_COUNT;
+        c.busy = a->busy[s];
+        c.seconds = (double)d * a->ticks * a->tick_frames / a->frames_per_second;
+        c.army_due = (a->seat_flags[s] & ZKS_SEAT_ARMY) && d % a->script_every == 0;
+        c.eco_due = seat.economy && d % a->eco_every == 0;
+        if (!c.army_due && !c.eco_due) {
+            seat.draws.end_step();
+            return;
+        }
+        seat.run(c);
+    });
+    int total = 0, army_total = 0;
+    for (int s = 0; s < 2 * n; s++) {
+        const Seat& seat = r->seats[2 * a->games[s / 2] + s % 2];
+        total += (int)(seat.pre.size() + seat.army_out.size() + seat.post.size() + seat.eco_out.size());
+        army_total += (int)seat.army_out.size();
+    }
+    r->total = total, r->army_total = army_total;
+    if (total > out_cap || army_total > army_cap) return total;
+    return zks_collect(r, out, out_cap, out_offsets, army, army_cap, army_offsets);
+}
+
+int zks_collect(zks_runner* r, zk_order_rec* out, int out_cap, int32_t* out_offsets, zk_order_rec* army, int army_cap,
+                int32_t* army_offsets) {
+    if (r->total > out_cap || r->army_total > army_cap) return -1;
+    int n = (int)r->listed.size(), o = 0, a = 0;
+    out_offsets[0] = 0;
+    army_offsets[0] = 0;
+    for (int k = 0; k < n; k++) {
+        for (int side = 0; side < 2; side++) {
+            const Seat& seat = r->seats[2 * r->listed[k] + side];
+            for (auto* part : {&seat.pre, &seat.army_out, &seat.post, &seat.eco_out})
+                for (const auto& order : *part) out[o++] = order;
+            for (const auto& order : seat.army_out) army[a++] = order;
+            army_offsets[2 * k + side + 1] = a;
+        }
+        out_offsets[k + 1] = o;
+    }
+    return o;
+}
+
+void zks_last_counts(const zks_runner* r, int32_t* counts) {
+    counts[0] = r->total;
+    counts[1] = r->army_total;
+}
+
+void zks_seat_counts(const zks_runner* r, int32_t* counts) {
+    for (size_t k = 0; k < r->listed.size(); k++)
+        for (int side = 0; side < 2; side++) {
+            const Seat& s = r->seats[2 * r->listed[k] + side];
+            int32_t* c = counts + 4 * (2 * k + side);
+            c[0] = (int32_t)s.pre.size(), c[1] = (int32_t)s.army_out.size(), c[2] = (int32_t)s.post.size(), c[3] = (int32_t)s.eco_out.size();
+        }
+}
+
+int zks_made(const zks_runner* r, int game, int side, int32_t* made) {
+    const Seat& s = r->seats[2 * game + side];
+    for (int k = 0; k < r->data->n_roles; k++) made[k] = k < (int)s.made.size() ? s.made[k] : 0;
+    return s.active;
+}
+
+void zks_eco_stats(const zks_runner* r, int game, int side, int32_t* out) {
+    const Seat& s = r->seats[2 * game + side];
+    out[0] = s.checks_eligible;
+    out[1] = s.checks_stalled;
+    for (int k = 0; k < 7; k++) out[2 + k] = s.finished[k];
+}
+
+int zks_log(const zks_runner* r, int game, int side, double* seconds, int32_t* what, int32_t* row, int cap) {
+    const Seat& s = r->seats[2 * game + side];
+    int n = (int)s.log.size();
+    for (int k = 0; k < n && k < cap; k++) seconds[k] = s.log[k].seconds, what[k] = s.log[k].what, row[k] = s.log[k].row;
+    return n;
+}
+
+void zks_tape(zks_runner* r, int game, int side, const double* values, const uint8_t* kinds, int n) {
+    Draws& d = r->seats[2 * game + side].draws;
+    d.tape.assign(values, values + n);
+    d.tape_kinds.assign(kinds, kinds + n);
+    d.tape_at = 0;
+    d.taped = true;
+}
+
+int zks_tape_misses(const zks_runner* r, int game, int side) { return r->seats[2 * game + side].draws.misses; }
+
+}  // extern "C"

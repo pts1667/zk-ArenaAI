@@ -1598,3 +1598,34 @@ At the user's request, what the learned policy no longer uses is gone, kept at t
 **Not checked:** an engine game with the host (it imports on Windows and its tests pass offline); `--check-repro` and `--check-kill`, which now run on the sim.
 
 **Tests:** `sim/tests` and `tests/policy`, 599 passed; `tests/test_host.py`, `test_hazards.py`, `test_terrain.py` with `tests/policy/test_policy.py`, 88 passed.  Tests of what's gone went with it; tests that played the toy now play the sim (`test_labels.py` reads frames from 4 minutes in, where there's an army to order; the opening's income test plays 40 games, as the army script's raids leave fewer to check).  `tests/test_hazards.py` is rewritten for what `hazards.py` still does.
+
+### 11.11 A faster sim, and the scripts in C++ (2026-11-08)
+
+The user wants far more cloning data than `army-3`'s 11.5M decisions.  Profiled on 32 mid-game games with both sides scripted, a step's time went 51% to the economy script, 37% to the army script and 7.5% to the sim.  At the user's request, two agents (Opus 5.5, each in a git worktree of its own) made the sim's batch faster and ported the economy and army scripts to C++.
+
+**The sim** (`sim/src`, `sim/include/zksim`).  It plays the same games bit for bit: frame hashes match the old library at 32 and 128 games and at 1, 8 and 16 minutes, and no golden changed.
+
+* A batch keeps a pool of threads; the caller works too, and games are handed out costliest first by the last step's time.  Before, each step started a thread per slice and slices were fixed, so 8 threads did little better than 4.
+* Fog and wreck visibility go out from each side's own units, rather than searching the longest sight range around every target.  The spatial grid is split by side, so a search for enemies reads only theirs, in the same order as before.  Frames are emitted in one pass, and a tick allocates nothing.
+* Several batches can step at once in one process (profile counters are per batch), and a forked process with a live batch starts its own threads.  `zk_batch_step_begin` and `zk_batch_step_wait` let the caller work while the sim steps; `zk_batch_set_threads` changes the pool.
+* Game-steps a second, `tools/sim_step_bench.py`, which times only `zk_batch_step`:
+
+| 128 games, 8 threads | Before | After |
+|---|---|---|
+| 1 minute | 82,132 | 142,943 |
+| 8 minutes | 26,946 | 57,889 |
+| 16 minutes | 12,688 | 33,213 |
+
+At 32 games, 1 thread, 16 minutes, the phases took 387 us a game-step before and 198 after: fog 53 to 13, unit AI 31 to 16, emitting frames and features 134 to 38; movement, now the largest, 120 to 96.  Left out: dividing by a step as a multiply in two line-of-sight loops (4%, not bit-identical).
+
+**The scripts** (`sim/scripts/`, `libzkscripts.so`; `tools/policy_scripts_cpp.py`).  The economy script, the aimer, the army script, the role mix and the constructor quota, with per-seat state and a thread pool of their own.  They read the records the batch writes, so they don't depend on the sim's insides.  `SimEnv(script_impl="cpp")` is the default, and `policy_clone_data.py record --script-impl` chooses.  The opening is still Python.
+
+* Given the same frames and Python's random draws, the C++ scripts give the same orders: 420,621 of 420,621 army orders and 253,856 of 253,857 economy orders (`tools/policy_scripts_parity.py`).  The one that differs is a build at another site: numpy's sort isn't stable, and C++ breaks ties by index.
+* Their own random draws make their games differ from Python's after the economy's first draw.  Over 128 games for each, on two seeds, wins, length, metal lost at the cap (1.8 to 13.3% by phase, against Python's 1.9 to 14.5%), production mix, constructors, income and big-project timing agree within the seeds' spread.
+* Labels from a 64-game recording each: keep 96.70%, fight 2.29%, PRODUCE 0.88%, move 0.13% (Python 96.71, 2.31, 0.85, 0.13).  Orders the policy can't say: 0.88% (Python 0.54%), all of them a sniper's attack, so it follows how many snipers were made.
+
+**Together**, `SimEnv.step` with both sides scripted, 128 games, 8 threads, 8 minutes in: 92,443 seat decisions a second (2.8 ms a step), against 5,423 with the Python scripts (47.2 ms): 17x.  Recording is now held up by Python copying and writing frames: one worker made 6,697 decisions a second with the C++ scripts on the old sim, against 2,298 with Python.
+
+**Not checked:** the new sim at 256 games or past 8 threads; the map pool; memory; the C++ scripts in modes other than army against army, beyond one test of policy seats.
+
+**Tests:** `sim/tests` and `tests/policy`, 611 passed.  New: `sim/tests/test_batch_threads.py` (any thread count and schedule give the same games, two batches at once, a forked child) and `tests/policy/test_scripts_cpp.py` (the same orders as Python, any thread count, two at once, the recorder).

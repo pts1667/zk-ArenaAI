@@ -147,7 +147,8 @@ void World::overdrive_side(int s) {
     p.energy_spent = 0.0f;
 
     // Grids are worked out afresh: stun, death and new buildings all change them, and there are few pylons.
-    std::vector<int> nodes;
+    std::vector<int>& nodes = grid_nodes;
+    nodes.clear();
     for (int u : pylons) {
         if (side[size_t(u)] != s) continue;
         overdrive[size_t(u)] = 0.0f;
@@ -155,24 +156,40 @@ void World::overdrive_side(int s) {
         else low_power[size_t(u)] = type_of(u).needed_link > 0.0f;     // on no grid
     }
     const size_t n = nodes.size();
-    std::vector<int> parent(n);
+    std::vector<int>& parent = grid_parent;
+    parent.resize(n);
     for (size_t a = 0; a < n; ++a) parent[a] = int(a);
     const auto find = [&parent](int a) {
         while (parent[size_t(a)] != a) a = parent[size_t(a)] = parent[size_t(parent[size_t(a)])];
         return a;
     };
+    // Each node's place and range side by side, so the pairs are a tight loop.
+    std::vector<float>& px = grid_px;
+    std::vector<float>& pz = grid_pz;
+    std::vector<float>& range = grid_range;
+    px.resize(n);
+    pz.resize(n);
+    range.resize(n);
+    for (size_t a = 0; a < n; ++a) {
+        px[a] = x[size_t(nodes[a])];
+        pz[a] = z[size_t(nodes[a])];
+        range[a] = type_of(nodes[a]).pylon_range;
+    }
     for (size_t a = 0; a < n; ++a) {
         for (size_t b = a + 1; b < n; ++b) {
-            const size_t ua = size_t(nodes[a]), ub = size_t(nodes[b]);
-            const float reach = type_of(nodes[a]).pylon_range + type_of(nodes[b]).pylon_range;
-            const float dx = x[ua] - x[ub], dz = z[ua] - z[ub];
+            const float reach = range[a] + range[b];
+            const float dx = px[a] - px[b], dz = pz[a] - pz[b];
             if (dx * dx + dz * dz < reach * reach) parent[size_t(find(int(a)))] = find(int(b));
         }
     }
 
     // Per grid, by root.
-    std::vector<float> capacity(n, 0.0f), squares(n, 0.0f);
-    std::vector<char> maxed(n, 0);
+    std::vector<float>& capacity = grid_capacity;
+    std::vector<float>& squares = grid_squares;
+    std::vector<char>& maxed = grid_maxed;
+    capacity.assign(n, 0.0f);
+    squares.assign(n, 0.0f);
+    maxed.assign(n, 0);
     float all_squares = 0.0f;
     for (size_t a = 0; a < n; ++a) {
         const auto& d = type_of(nodes[a]);

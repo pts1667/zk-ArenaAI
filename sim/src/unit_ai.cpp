@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 
+#include "zksim/profile.hpp"
 #include "zksim/world.hpp"
 
 namespace zk {
@@ -228,8 +229,8 @@ int World::closest_target(int u, float cx, float cz, float radius) const {
     float best = radius * radius;
     int found = -1;
     const int s = side[size_t(u)];
-    for_near(cx, cz, radius, [&](int t) {
-        if (side[size_t(t)] == s || !alive[size_t(t)]) return;
+    for_side(1 - s, cx, cz, radius, [&](int t) {
+        if (!alive[size_t(t)]) return;
         const float dx = x[size_t(t)] - cx, dz = z[size_t(t)] - cz, d2 = dx * dx + dz * dz;
         if (d2 < best && can_be_aimed_at(s, t) && valid_chase_target(u, t)) {
             best = d2;
@@ -243,8 +244,8 @@ int World::nearest_seen_enemy(int u, float radius) const {
     float best = radius * radius;
     int found = -1;
     const int s = side[size_t(u)];
-    for_near(x[size_t(u)], z[size_t(u)], radius, [&](int t) {
-        if (side[size_t(t)] == s || !alive[size_t(t)]) return;
+    for_side(1 - s, x[size_t(u)], z[size_t(u)], radius, [&](int t) {
+        if (!alive[size_t(t)]) return;
         const float dx = x[size_t(t)] - x[size_t(u)], dz = z[size_t(t)] - z[size_t(u)], d2 = dx * dx + dz * dz;
         if (d2 < best && can_be_aimed_at(s, t)) {
             best = d2;
@@ -626,11 +627,18 @@ void World::run_tactics(int u) {
 }
 
 void World::update_unit_ai() {
-    update_radar_error();
+    {
+        ZK_PROF(AI_ERROR);
+        update_radar_error();
+    }
     const int n = count();
     for (int u = 0; u < n; ++u) {
         if (!alive[size_t(u)] || !active(u) || !(type_of(u).flags & ZK_U_MOBILE)) continue;
-        run_commands(u);
+        {
+            ZK_PROF(AI_COMMANDS);
+            run_commands(u);
+        }
+        ZK_PROF(AI_TACTICS);
         run_tactics(u);
     }
 }
@@ -661,8 +669,8 @@ bool World::kamikaze_due(int u) const {
     if (a.fire_state < FIRE_AT_WILL) return false;
     bool due = false;
     const int own = side[size_t(u)];
-    for_near(px, pz, reach, [&](int t) {
-        if (due || !alive[size_t(t)] || side[size_t(t)] == own || (type_of(t).flags & ZK_U_AIR)) return;
+    for_side(1 - own, px, pz, reach, [&](int t) {
+        if (due || !alive[size_t(t)] || (type_of(t).flags & ZK_U_AIR)) return;
         if (!within(t, reach)) return;
         due = (d.flags & ZK_U_KAMIKAZE_BLIND) || in_sight(own, t);
     });

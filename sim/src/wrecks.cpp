@@ -22,6 +22,7 @@ int World::add_wreck(float px, float pz, float metal, float wreck_hp, float radi
     const int id = int(wrecks.size());
     wrecks.push_back(Wreck{px, pz, radius, metal, 1.0f, wreck_hp, feature_def, heap_of});
     live_wrecks.push_back(id);
+    wreck_index_stale = true;
     const int gx = std::clamp(int(px / GRID_CELL), 0, grid_cols - 1), gz = std::clamp(int(pz / GRID_CELL), 0, grid_rows - 1);
     wreck_cells[size_t(gz) * size_t(grid_cols) + size_t(gx)].push_back(id);
     return id;
@@ -30,6 +31,7 @@ int World::add_wreck(float px, float pz, float metal, float wreck_hp, float radi
 void World::remove_wreck(int id) {
     Wreck& wreck = wrecks[size_t(id)];
     wreck.left = 0.0f;
+    wreck_index_stale = true;
     const int gx = std::clamp(int(wreck.x / GRID_CELL), 0, grid_cols - 1), gz = std::clamp(int(wreck.z / GRID_CELL), 0, grid_rows - 1);
     auto& cell = wreck_cells[size_t(gz) * size_t(grid_cols) + size_t(gx)];
     cell.erase(std::find(cell.begin(), cell.end(), id));

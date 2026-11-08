@@ -260,9 +260,14 @@ int zk_global_count(void);
 /* One world's frame for one side, computed now.  Returns the number of records. */
 int zk_world_view(void* world, int side, void* records, int cap, float* glob, int commander, const float* base);
 
-/* Many games stepping across threads, each thread owning a fixed slice, so results don't depend on the thread count. */
+/* Many games stepping across a batch's own threads, which live as long as it does.  Free threads take the costliest game
+   left; a game is stepped whole by one thread with its own RNG, so results don't depend on the thread count or the schedule.
+   Batches share only the read-only catalog and maps: several may step at once, from different threads.  One batch takes one
+   call at a time. */
 void* zk_batch_new(const void* catalog, int games, int threads);
 void zk_batch_free(void* batch);
+/* From the next step on.  1 steps on the caller's thread alone. */
+void zk_batch_set_threads(void* batch, int threads);
 /* Starts game `g` afresh.  commander: per side, or -1.  base: x, z per side. */
 void zk_batch_reset(void* batch, int g, const void* map, uint64_t seed, int behaviour, int n, const int* type, const int* side,
                     const float* x, const float* z, const float* heading, const float* hp_frac, const float* build_frac,
@@ -274,6 +279,12 @@ void* zk_batch_world(void* batch, int g);
      features[(i * 2 + side) * feature_cap ...], feature_counts[i * 2 + side]. */
 void zk_batch_step(void* batch, const int* games, int n_games, const zk_order_rec* orders, const int* order_offsets, int ticks,
                    void* records, int cap, int* counts, float* globs, float* stats, void* features, int feature_cap, int* feature_counts);
+/* zk_batch_step in two halves: begin returns at once and the batch's threads (all `threads` of them) do the step; wait returns
+   when it's over.  Until then the caller mustn't touch the arrays it passed, nor the batch but to wait; a step, a free or a change
+   of threads waits by itself.  The results are those of zk_batch_step. */
+void zk_batch_step_begin(void* batch, const int* games, int n_games, const zk_order_rec* orders, const int* order_offsets, int ticks,
+                         void* records, int cap, int* counts, float* globs, float* stats, void* features, int feature_cap, int* feature_counts);
+void zk_batch_step_wait(void* batch);
 
 #ifdef __cplusplus
 }
