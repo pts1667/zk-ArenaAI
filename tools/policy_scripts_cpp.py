@@ -1,10 +1,10 @@
 """ctypes binding to libzkscripts (sim/scripts/zkscripts.h): the economy script, the aimer, the army script and its production in
-C++, for many games at once on a thread pool.  The Python modules (policy_eco.py, policy_army.py, policy_mix.py) are the
-specification; `SimEnv(script_impl="cpp")` uses this instead of them.
+C++, for many games at once on a thread pool: what `SimEnv` plays the scripts with.  They were ported from Python, which is gone (it's in
+git at 8e9bca7); policy_eco.py and policy_mix.py describe what they do and build the tables they read.
 
 The library is looked for at ZKSCRIPTS_LIB, else beside ZKSIM_LIB (one build makes both), else ~/zksim/build/libzkscripts.so.
 
-`ScriptsData` is what the scripts know that doesn't change: each type-table row, read from `ScriptData`, `EcoData` and `Mix`,
+`ScriptsData` is what the scripts know that doesn't change: each type-table row, read from `ScriptData`, `EcoData` and the factory menus,
 and each map's ground, read from its `Ground` when a game first starts on it.  `Scripts` is a runner: the state of a number of
 game slots and a thread pool of its own.
 """
@@ -21,12 +21,13 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "sim" / "py"))
 sys.path.insert(0, str(ROOT / "bots"))
 import zksim  # noqa: E402
-from zkbot.policy import bundle as bd, rawframe as rf  # noqa: E402
+from zkbot.policy import bundle as bd  # noqa: E402
 
 import policy_eco as eco  # noqa: E402
-from policy_mix import Mix  # noqa: E402
+from policy_mix import menu as factory_menu  # noqa: E402
+from policy_variants import ROLES, Variant  # noqa: E402
 
-ABI_VERSION = 1
+ABI_VERSION = 2
 MOVE_CLASSES = 6
 SEAT_ARMY = 1
 ROLE_NAMES = ("raid", "riot", "assault", "skirm", "arty", "aa", "snipe", "scout", "builder")
@@ -63,6 +64,18 @@ class StepArgs(ct.Structure):
                 ("pre_offsets", c_i32p), ("post", ct.c_void_p), ("post_offsets", c_i32p)]
 
 
+class Style(ct.Structure):
+    """zks_style: the army script's knobs for one side, as policy_variants.Variant gives them."""
+    _fields_ = [("role_weight", ct.c_double * len(ROLES)), ("commit", ct.c_double), ("gather", ct.c_double),
+                ("patrol_share", ct.c_double), ("patience", ct.c_double), ("retreat_below", ct.c_double)]
+
+
+def _style(v: Variant) -> Style:
+    s = Style(commit=v.commit, gather=v.gather, patrol_share=v.patrol_share, patience=v.patience, retreat_below=v.retreat_below)
+    s.role_weight[:] = v.role_weight
+    return s
+
+
 def _library_path() -> str:
     if os.environ.get("ZKSCRIPTS_LIB"):
         return os.environ["ZKSCRIPTS_LIB"]
@@ -89,7 +102,7 @@ def lib() -> ct.CDLL:
         L.zks_runner_new.restype = vp
         L.zks_runner_new.argtypes = [vp, ct.c_int, ct.c_int]
         L.zks_runner_free.argtypes = [vp]
-        L.zks_reset.argtypes = [vp, ct.c_int, ct.c_int, c_f64p, c_f64p, ct.c_int, ct.c_int, ct.c_uint64, ct.c_uint64]
+        L.zks_reset.argtypes = [vp, ct.c_int, ct.c_int, c_f64p, c_f64p, ct.c_int, ct.c_int, ct.c_uint64, ct.c_uint64, P(Style)]
         L.zks_step.restype = ct.c_int
         L.zks_step.argtypes = [vp, P(StepArgs), vp, ct.c_int, c_i32p, vp, ct.c_int, c_i32p]
         L.zks_collect.restype = ct.c_int
@@ -149,10 +162,9 @@ class ScriptsData:
             offsets.append(len(options))
             if opts:
                 generators[row] = [-1 if g is None else g for g in ed.generators(row)]
-        mix = Mix(sd)
         menu = np.full((n, len(self.roles)), -1, np.int32)
         for row in np.flatnonzero(t.factory[:n]):
-            for role, unit in mix.menu(int(row)).items():
+            for role, unit in factory_menu(sd, int(row)).items():
                 menu[row, role_index[role]] = unit
         best = np.full(n, -1, np.int32)
         for row, m in sd.best_missile.items():
@@ -224,11 +236,13 @@ class Scripts:
             self.handle = None
 
     def reset(self, game: int, ground, starts: tuple[float, float, float, float], rally: tuple[float, float, float, float],
-              economy: bool, aimer: bool, seeds: tuple[int, int] = (0, 0)) -> None:
-        """A new game in this slot.  starts: each side's base, x0, z0, x1, z1.  rally: each side's army script's rally."""
+              economy: bool, aimer: bool, seeds: tuple[int, int] = (0, 0), variants: tuple[Variant, Variant] | None = None) -> None:
+        """A new game in this slot.  starts: each side's base, x0, z0, x1, z1.  rally: each side's army script's rally.  variants: each
+        side's army script knobs (policy_variants.py), or None for the standard script."""
         s, r = np.array(starts, np.float64), np.array(rally, np.float64)
+        styles = None if variants is None else (Style * 2)(*(_style(v) for v in variants))
         self.lib.zks_reset(self.handle, game, self.data.map_index(ground), _ptr(s, c_f64p), _ptr(r, c_f64p), int(economy), int(aimer),
-                           int(seeds[0]) & ((1 << 64) - 1), int(seeds[1]) & ((1 << 64) - 1))
+                           int(seeds[0]) & ((1 << 64) - 1), int(seeds[1]) & ((1 << 64) - 1), styles)
 
     def step(self, batch: zksim.Batch, decisions: np.ndarray, seat_flags: np.ndarray, busy: np.ndarray, ticks: int, script_every: int,
              eco_every: int, games: np.ndarray | None = None, pre: tuple[np.ndarray, np.ndarray] | None = None,
@@ -286,17 +300,10 @@ class Scripts:
         return {"eligible": int(out[0]), "stalled": int(out[1])}, dict(zip(FINISHED, map(int, out[2:])))
 
     def log(self, game: int, side: int, table) -> list[tuple[float, str]]:
-        """Economy.log and Aimer.log together, as (seconds, what) in the Python scripts' words."""
+        """The economy's and the aimer's log together, as (seconds, what)."""
         n = self.lib.zks_log(self.handle, game, side, None, None, None, 0)
         seconds, what, row = np.zeros(n, np.float64), np.zeros(n, np.int32), np.zeros(n, np.int32)
         if n:
             self.lib.zks_log(self.handle, game, side, _ptr(seconds, c_f64p), _ptr(what, c_i32p), _ptr(row, c_i32p), n)
         return [(float(s), f"{LOG_WHAT[w]} {table.names[r]}") for s, w, r in zip(seconds, what, row)]
 
-    def tape(self, game: int, side: int, values: list[float], kinds: list[int]) -> None:
-        """Python's random draws (kind 0 uniform, 1 standard normal), for this seat's economy to use at the next step."""
-        v, k = np.array(values, np.float64), np.array(kinds, np.uint8)
-        self.lib.zks_tape(self.handle, game, side, _ptr(v, c_f64p) if len(v) else None, _ptr(k, c_u8p) if len(k) else None, len(v))
-
-    def tape_misses(self, game: int, side: int) -> int:
-        return int(self.lib.zks_tape_misses(self.handle, game, side))

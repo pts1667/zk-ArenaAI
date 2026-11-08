@@ -1,7 +1,7 @@
 """What the scripts share: `ScriptData`, what the catalog says each kind of unit can do, and the fighters' states and groups.
 
-The army script (policy_army.py) plays the fighting on a side the policy doesn't.  The first, raider-only fight script, built on
-the same states, is now only frame_world.py's base for the frames the encoder learns from (`FightScript` there).
+The army script (C++, sim/scripts/src/army.cpp; this is the data it's given) plays the fighting on a side the policy doesn't.  The
+first, raider-only fight script, built on the same states, is now only frame_world.py's base for the frames the encoder learns from (`FightScript` there).
 """
 from __future__ import annotations
 

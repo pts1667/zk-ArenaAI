@@ -18,13 +18,21 @@ A Zero-K AI that beats CircuitAI, now pursued as a Pluto-style learned policy: a
   its decoded orders sent as commands, and the opening and the economy script as the sim plays them.
 * **In the sim**, both sides play a scripted opening (`tools/policy_opening.py`), the economy script runs their constructors,
   and the army script or the policy runs their fighters, factories, silo missiles and the Trinity.  The economy and army
-  scripts are C++ (`sim/scripts/`, `libzkscripts.so`, through `tools/policy_scripts_cpp.py`), threaded over games; the Python
-  versions (`tools/policy_eco.py`, `tools/policy_army.py`) are what they were ported from.
+  scripts are C++ (`sim/scripts/`, `libzkscripts.so`, through `tools/policy_scripts_cpp.py`), threaded over games.  The Python
+  versions they were ported from are gone (in git at `8e9bca7`); `tools/policy_eco.py` and `tools/policy_mix.py` describe what
+  the scripts do and build the tables they're given.  The encoder's frame games (`frame_world.FrameGames`,
+  `frame_data.ScenarioEnv`) play their own Python scripts instead (`SimEnv.own_scripts`).
 * **The actor** (`tools/policy_latent.py`) reads a frozen frame encoder's latent tokens, frame after frame, with what it did at
   each frame as 4 action tokens after that frame's: `[frame 1 latents] [actions at 1] [frame 2 latents] ...`, causal, windowed
   8 s in each of 2 layers.
 * **Cloning** (`tools/policy_clone_train.py`) learns the army script's choices from recorded games
   (`tools/policy_clone_data.py`), with keep weighted down.  Latest dataset `army-3`; latest result in `03-training.md` 11.9.
+* **Recording** is C++ (`sim/record/`, `libzkrecord.so`, through `sim/py/zkrecord.py`): straight from the batch's arrays, a
+  `.zkr` file a game, both sides, narrowed and compressed (192 bytes a decision against the npz's 516).  Data version 4; the
+  trainer and `check` read the old npz files too.
+* **Script variants** (`tools/policy_variants.py`): with `--variants`, each side's army script draws its own role mix and
+  aggression at game start, recorded in the game's file.  Without it, play is as before.
+* **How the model works**, with diagrams: `docs/model.md`.
 
 ## 2. Environment
 
@@ -33,8 +41,9 @@ A Zero-K AI that beats CircuitAI, now pursued as a Pluto-style learned policy: a
 * Windows Python 3.13 runs the bot (`pip install requests websockets orjson numpy`).
 * WSL (Ubuntu) runs the sim and training: `~/zkml/bin/python` (PyTorch, RTX 4070), pytest in `~/zksim/pt`
   (`~/zkml/bin/python -m pip install -q --target ~/zksim/pt pytest`), so `PYTHONPATH=$HOME/zksim/pt:bots`.
-* The sim library: `cmake -S sim -B ~/zksim/build && cmake --build ~/zksim/build -j8` gives `~/zksim/build/libzksim.so`
-  and the scripts' `libzkscripts.so` beside it (`ZKSIM_LIB` overrides).  Rebuild after any change under `sim/`.
+* The sim library: `cmake -S sim -B ~/zksim/build && cmake --build ~/zksim/build -j8` gives `~/zksim/build/libzksim.so`,
+  and the scripts' `libzkscripts.so` and the recorder's `libzkrecord.so` beside it (`ZKSIM_LIB` overrides).  The recorder needs
+  `libzstd-dev`.  Rebuild after any change under `sim/`.
 * Data on D:, not in git (`/mnt/d/zk-learned`):
 
   | Path | What |
@@ -42,7 +51,8 @@ A Zero-K AI that beats CircuitAI, now pursued as a Pluto-style learned policy: a
   | `maps/` | the map pool: 98 real and 200 made-up maps (`tools/map_gen.py`).  About 7.5 GB in memory when loaded |
   | `frames/pool2`, `frames/pool3` | 1M script frames and 1M scenario frames each (`tools/frame_data.py`), for encoders |
   | `runs/encoder-questions/final/vae-last.pt` | the frozen encoder the actor reads (`policy_latent.ENCODER`) |
-  | `clone/army-1`, `army-2`, `army-3` | recorded army-script games, data versions 1 to 3; only `army-3` matches the current scripts |
+  | `clone/army-1`, `army-2`, `army-3` | recorded army-script games, data versions 1 to 3 (npz, a file a side) |
+  | `clone/army-4` | 3,243 games (3.8 GB) of the standard script, .zkr; a 100 GB run stopped early to add variants first |
   | `runs/` | every training run, one directory each |
 
 * `sim/data/maps` is gitignored too: after a pull, `python tools/sim_data.py maps`.
@@ -56,14 +66,14 @@ A Zero-K AI that beats CircuitAI, now pursued as a Pluto-style learned policy: a
     `tools/policy_schema.py`), the map bundle, type tables, featurizer, action encode and decode.
   * Unit data: `units.py`, `catalog.py`, `data/*.json` (rebuilt by `tools/extract_weapons.py`, `tools/extract_abilities.py`,
     `tools/dump_defs.py`).  Terrain: `terrain.py`, `hazards.py`, `mapdata.py`.  `params.py`: `ZKBOT_FLAGS`.
-* `sim/`: the C++ simulator (`src/`), the economy and army scripts (`scripts/`), its ctypes binding (`py/zksim.py`,
-  `py/zknav.py`), data (`data/`) and tests (`tests/`).  A batch steps its games on a pool of threads of its own.
+* `sim/`: the C++ simulator (`src/`), the economy and army scripts (`scripts/`), the recorder (`record/`), their ctypes
+  bindings (`py/zksim.py`, `py/zknav.py`, `py/zkrecord.py`, and `tools/policy_scripts_cpp.py` for the scripts), data (`data/`)
+  and tests (`tests/`).  A batch steps its games on a pool of threads of its own.
 * `tools/`:
   * Sim data and checks against the engine: `sim_data.py`, `sim_engine.py` (with `simgame/` gadgets), `sim_battery.py`,
     `sim_profile.py`, `sim_batch_bench.py`, `sim_segment_check.py`, `terrain_map.py`, `map_gen.py`.
-  * The sim as a game: `policy_sim_env.py`, `policy_opening.py`, `policy_eco.py`, `policy_army.py`, `policy_mix.py`,
-    `policy_script.py` (the scripts' shared data), `policy_scripts_cpp.py` (the C++ scripts' binding),
-    `policy_scripts_parity.py` (C++ against Python, order by order).  `sim_step_bench.py` times the sim's step alone.
+  * The sim as a game: `policy_sim_env.py`, `policy_opening.py`, `policy_scripts_cpp.py` (the C++ scripts' binding), and the
+    tables it's given: `policy_eco.py`, `policy_mix.py`, `policy_script.py`.  `sim_step_bench.py` times the sim's step alone.
   * Frames and encoders: `frame_world.py` (games for frames, with the first fight script), `frame_data.py`, `frame_model.py`
     (the encoder, batches, shards, probes), `frame_vae.py` (its training).
   * The policy: `policy_model.py` (batches, heads' sampling, the critic), `policy_latent.py` (the actor), `policy_train.py` (PPO),
@@ -77,7 +87,7 @@ In WSL, from the repo (`cd /mnt/c/Users/Thoma/Documents/sources/zk-ArenaAI`), wi
 
     ~/zkml/bin/python -m pytest -q sim/tests tests                     # about 3 minutes; all should pass
     ~/zkml/bin/python tools/policy_clone_data.py record --out /mnt/d/zk-learned/clone/NAME --games 32 --decisions 10000000 \
-        --workers 12 --threads 12 --seed 1 --maps /mnt/d/zk-learned/maps
+        --workers 12 --threads 12 --seed 1 --maps /mnt/d/zk-learned/maps          # --level: zstd's, 3 by default
     ~/zkml/bin/python tools/policy_clone_data.py check --data /mnt/d/zk-learned/clone/NAME --maps /mnt/d/zk-learned/maps
     ~/zkml/bin/python tools/policy_clone_train.py --data /mnt/d/zk-learned/clone/army-3 --maps /mnt/d/zk-learned/maps \
         --run /mnt/d/zk-learned/runs/NAME --steps 3000 --workers 12          # --blind: no action tokens, for comparison
@@ -93,6 +103,11 @@ README.md has the template's rules for engine games (headless, max speed; window
 
 Latest first; each item's numbers are in the section named.
 
+* **Script variants** (`03-training.md` 11.13): 4 presets (standard, rush, turtle, skirmish) with jittered knobs.  On 64 games
+  their production mixes differ as meant and each wins and loses.  The script's orders are group orders: where units act, a median
+  of 3 share 1 distinct order.
+* **Recording in C++** (`03-training.md` 11.12): a game's file is 2.7x smaller than the npz pair (192 bytes a decision on the
+  same 6 `army-3` games), and 64 games record at 62,600 decisions a second in one process, the recorder taking 32% of it.
 * **A faster sim, and the scripts in C++** (`03-training.md` 11.11): with both sides scripted, 128 games step at 92,000 seat
   decisions a second on 8 threads, 17x the Python scripts.  The sim alone is 1.7 to 3.3x faster and plays the same games
   bit for bit; the C++ scripts give the same orders as the Python ones on the same frames.
@@ -112,7 +127,12 @@ Latest first; each item's numbers are in the section named.
 
 ## 6. Next
 
-* The user's open question: full attention over all past frames, through summary tokens, in place of the 16 s window.
+* Record the big dataset (about 100 GB) with `--variants`, on the map pool.
+* The user's open questions on the actor:
+  * FlexAttention, with one action token per command or acting unit, causal within a frame, in place of the 4 summary tokens;
+  * group ("area") commands: role or type within a radius of a point, told one order.  First check: what share of the
+    script's orders 8 such commands reproduce exactly;
+  * full attention over all past frames, through summary tokens, in place of the 16 s window.
 * Cloning learns slowly: an act's kind is right a quarter of the time after 3,000 steps.  Whether to run it longer, with or
   without action tokens (the A/B didn't separate them), or to change what it learns from first, is the user's to decide.
   Then the cloned actor playing the army script in the sim.

@@ -23,6 +23,9 @@ enum { R_RAID, R_RIOT, R_ASSAULT, R_SKIRM, R_ARTY, R_AA, R_SNIPE, R_SCOUT, R_BUI
 // Special rows; X_FACTORY is a pending slot only
 enum { X_CERBERUS, X_LUCIFER, X_SILO, X_NUKE, X_FUSION, X_PYLON, X_RADAR, X_FACTORY };
 
+// The standard army script's knobs (army.cpp): what a seat has when it's given none.
+zks_style standard_style();
+
 struct Ground {
     int rows = 0, cols = 0;
     double cell = 16.0, map_w = 0.0, map_h = 0.0;
@@ -146,6 +149,7 @@ struct Seat {
     const Ground* ground = nullptr;
     int side = 0;
     bool active = false, economy = false, aimer = false;
+    zks_style style{};                  // the army script's knobs (standard_style unless the game gave its own)
     P2 base{}, enemy_base{}, rally{};
     P2 waypoints[4];
 
@@ -206,7 +210,8 @@ struct Seat {
     View view;
     std::vector<zk_order_rec> army_out, eco_out, pre, post;
 
-    void reset(const Data* d, const Ground* g, int side, P2 base, P2 enemy, P2 rally, bool economy, bool aimer, uint64_t seed);
+    void reset(const Data* d, const Ground* g, int side, P2 base, P2 enemy, P2 rally, bool economy, bool aimer, uint64_t seed,
+               const zks_style* knobs);
     void grow(int64_t uid);
     void run(const Ctx& c);
 

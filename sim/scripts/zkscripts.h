@@ -1,5 +1,6 @@
-/* The scripted players of tools/policy_sim_env.py in C++: the economy script and the aimer (tools/policy_eco.py), the army
- * script (tools/policy_army.py) and its production (tools/policy_mix.py).  The Python modules are the specification.
+/* The scripted players of tools/policy_sim_env.py in C++: the economy script and the aimer, the army script and its production.
+ * They were ported from Python modules, which were the specification and are in git at 8e9bca7 (tools/policy_eco.py,
+ * tools/policy_army.py, tools/policy_mix.py); policy_eco.py and policy_mix.py now hold only the tables built for them.
  *
  * It reads only the raw-frame records (zksim/rawframe.hpp UnitRecord) and its own inputs, and writes zk_order_rec, never the
  * sim's World.  Static data (what each type is, each map's ground) is given once and shared read-only by every runner made from
@@ -18,8 +19,9 @@
 extern "C" {
 #endif
 
-#define ZKS_ABI_VERSION 1
+#define ZKS_ABI_VERSION 2
 #define ZKS_MOVE_CLASSES 6
+#define ZKS_ROLE_KNOBS 7             /* raid, riot, assault, skirm, arty, aa, snipe: the roles ROLE_ORDER of policy_mix.py has */
 
 /* Per type-table row bits (zks_data_desc.bits). */
 enum {
@@ -90,6 +92,17 @@ typedef struct {
     const int32_t* largest;         /* ZKS_MOVE_CLASSES: Ground._largest_part */
 } zks_map_desc;
 
+/* The army script's knobs for one side: what a variant changes (tools/policy_variants.py).  The standard script is every knob
+ * at its standard value: each role_weight 1, commit 1, gather 1, patrol_share 0.25, patience 1, retreat_below 0.4. */
+typedef struct {
+    double role_weight[ZKS_ROLE_KNOBS];  /* multiplies that role's share of its factory's mix */
+    double commit;          /* a squad goes at a target whose cover is at most its metal / commit: more than 1 is more cautious */
+    double gather;          /* the army waits for the group metal times this before it goes: less than 1 goes sooner */
+    double patrol_share;    /* of the raiders past the first few, the share that patrols our extractors */
+    double patience;        /* scales how long a squad keeps at a target: getting there, and killing it once there */
+    double retreat_below;   /* a regenerating fighter below this share of its health goes back to the rally until it's at 90% */
+} zks_style;
+
 typedef struct zks_data zks_data;
 typedef struct zks_runner zks_runner;
 
@@ -105,9 +118,10 @@ void zks_runner_free(zks_runner* runner);
 
 /* A new game in this slot.  starts: x0, z0, x1, z1, each side's base, which is the other's enemy start.  rally: x0, z0, x1, z1.
  * economy: whether the economy script runs for both sides.  aimer: whether the army script aims missiles and the Trinity.
- * seeds: each side's economy's own random numbers. */
+ * seeds: each side's economy's own random numbers.  styles: each side's army script knobs (two zks_style), or NULL for the
+ * standard script. */
 void zks_reset(zks_runner* runner, int game, int map, const double* starts, const double* rally, int economy, int aimer,
-               uint64_t seed0, uint64_t seed1);
+               uint64_t seed0, uint64_t seed1, const zks_style* styles);
 
 enum {
     ZKS_SEAT_ARMY = 1   /* the army script plays this seat */

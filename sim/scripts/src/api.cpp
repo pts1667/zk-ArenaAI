@@ -124,13 +124,15 @@ void Draws::end_step() {
 
 // Seat
 
-void Seat::reset(const Data* d, const Ground* g, int side_, P2 base_, P2 enemy, P2 rally_, bool economy_, bool aimer_, uint64_t seed) {
+void Seat::reset(const Data* d, const Ground* g, int side_, P2 base_, P2 enemy, P2 rally_, bool economy_, bool aimer_, uint64_t seed,
+                 const zks_style* knobs) {
     data = d;
     ground = g;
     side = side_;
     active = true;
     economy = economy_;
     aimer = aimer_;
+    style = knobs ? *knobs : standard_style();
     base = base_, enemy_base = enemy, rally = rally_;
     // _waypoints(rally, enemy_start), as numpy does it
     double vx = enemy.x - rally_.x, vz = enemy.z - rally_.z;
@@ -380,11 +382,11 @@ zks_runner* zks_runner_new(const zks_data* data, int games, int threads) { retur
 void zks_runner_free(zks_runner* runner) { delete runner; }
 
 void zks_reset(zks_runner* r, int game, int map, const double* starts, const double* rally, int economy, int aimer, uint64_t seed0,
-               uint64_t seed1) {
+               uint64_t seed1, const zks_style* styles) {
     const Ground* g = r->data->maps[map].get();
     P2 a{starts[0], starts[1]}, b{starts[2], starts[3]};
-    r->seats[2 * game].reset(r->data, g, 0, a, b, {rally[0], rally[1]}, economy != 0, aimer != 0, seed0);
-    r->seats[2 * game + 1].reset(r->data, g, 1, b, a, {rally[2], rally[3]}, economy != 0, aimer != 0, seed1);
+    r->seats[2 * game].reset(r->data, g, 0, a, b, {rally[0], rally[1]}, economy != 0, aimer != 0, seed0, styles);
+    r->seats[2 * game + 1].reset(r->data, g, 1, b, a, {rally[2], rally[3]}, economy != 0, aimer != 0, seed1, styles ? styles + 1 : nullptr);
 }
 
 int zks_step(zks_runner* r, const zks_step_args* a, zk_order_rec* out, int out_cap, int32_t* out_offsets, zk_order_rec* army,

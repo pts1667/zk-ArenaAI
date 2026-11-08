@@ -1629,3 +1629,69 @@ At 32 games, 1 thread, 16 minutes, the phases took 387 us a game-step before and
 **Not checked:** the new sim at 256 games or past 8 threads; the map pool; memory; the C++ scripts in modes other than army against army, beyond one test of policy seats.
 
 **Tests:** `sim/tests` and `tests/policy`, 611 passed.  New: `sim/tests/test_batch_threads.py` (any thread count and schedule give the same games, two batches at once, a forked child) and `tests/policy/test_scripts_cpp.py` (the same orders as Python, any thread count, two at once, the recorder).
+
+### 11.12 The Python scripts gone, and recording in C++ (2026-11-08)
+
+**The Python scripts are gone**, at the user's request: the economy script, the aimer, the army script, the role mix, their parity tool and their tests (about 35 unit tests of what the scripts do), and `SimEnv`'s `script_impl` switch.  They're in git at `8e9bca7`.  `policy_eco.py` and `policy_mix.py` keep the tables the C++ is given.  The C++ scripts are tested only through games now (`tests/policy/test_scripts.py`).
+
+Making C++ the default in `8e9bca7` broke the encoder's frame games (`frame_world.FrameGames`, `frame_data.ScenarioEnv`): they play their own Python scripts through `SimEnv`, which then stepped them with the C++ scripts on games it never reset.  No frames were collected in between.  A subclass now sets `own_scripts`, and a test checks they play their own.
+
+**The recorder** (`sim/record/`, `libzkrecord.so`; `sim/py/zkrecord.py`; `zkrecord.h` describes the file).  `policy_clone_data.Recorder` hands it the batch's arrays by pointer each step, so Python copies nothing, and it writes a `.zkr` file a game (data version 4):
+
+* Both sides of a game in one file, compressed with zstd a chunk of 64 frames at a time, so a game in progress holds at most one chunk raw.
+* A unit is 40 bytes, not 80.  x and z are 16-bit fractions of the map, and order targets of [-0.25, 1.25] of it, since targets lie off the map.  y is 16 bits of the game's range, taken from the map's heights.  Velocities, health, experience and a blip's speed are half floats; build progress is 16 bits; an order's age is whole frames.  Everything else is exact, and so are features' metal, the globals, the sites (stored once a game) and the orders.
+* A unit or feature that was in the side's previous frame is stored as each field minus its value there (wrapping), with how many records back that was.  Columns are stored a byte plane at a time.  The reader resolves every chain of records at once, by pointer jumping and a cumulative sum per chain, with no loop over frames.
+* zstd level 3 by default (`--level`).  On the 6 `army-3` games of the study below, 64-frame chunks with both sides came out no larger than whole-game streams: units only, 414 bytes a decision at level 3 and 374 at level 9.  Level 3 compresses at about 1 GB/s, level 9 at 180 MB/s.
+* Files are written on a thread of the recorder's own, beside their name and then renamed, so a reader never sees half a file.
+
+How it was chosen, from 6 `army-3` games (units only unless said): the npz's deflate, 483 bytes a decision; zstd 19 on the records as they are, 816 (4 games, whole files); narrow records with the residuals, 147 at zstd 19.  Rounding positions to 1/16 elmo before the residuals gave 344, still lossless otherwise; the narrow layout is the user's suggestion.
+
+| The same 6 `army-3` games, whole files | npz (data version 3) | .zkr (4) |
+|---|---|---|
+| Bytes a decision | 516 | 192 (2.7x smaller) |
+| Reading, us a decision | 23 | 32 |
+
+Values clamped to fit: none, on those games (map-pool maps) or in the recordings below.
+
+Recording 64 games at once on the training maps, 8 threads of 16 CPUs, until 64 have finished (168,764 decisions): 62,606 decisions a second in one process, 239 bytes a decision.  The sim and the scripts take 68% of the time.  The recorder takes about 30%: narrowing frames 10%, compressing chunks 20%; all games fill a chunk on the same step.  Writing files on the caller's thread had cost 13% (WSL's `/mnt` is slow); on the recorder's own thread it costs 1%.  For comparison, one worker of the Python recorder made 6,697 decisions a second (11.11).
+
+**Not checked:** a full multi-worker recording with the map pool; a training run on `.zkr` data (its data path was: it lists the sides of a game, splits them and makes a sample from one); memory per worker at 64 or more games.
+
+**Tests:** 579 passed.  `tests/policy/test_clone_data.py` records games keeping a Python copy of every frame and order, and checks the file reads back the same: exactly where exact, else within each field's rounding.
+
+### 11.13 Army script variants, and the start of `army-4` (2026-11-08)
+
+**`army-4`** (`/mnt/d/zk-learned/clone/army-4`, data version 4) was started to be about 100 GB of script games.  The user stopped it once it was clear it would be one script mirroring itself, and asked for variants first.  It holds 3,243 finished games (3.8 GB), and has no `summary.json`.
+
+How the army script's orders group, on 24 of those games at the 15,030 decisions where it looks: units act at 8,710.  At those, a median of 3 units act (mean 7.1, 90th percentile 17, max 149), sharing a median of 1 distinct order (mean 1.8, max 9).  Fight is 78% of acting units, produce 20%.  This was measured for the user's question about group ("area") actions.
+
+**Variants** (`tools/policy_variants.py`, `zks_style` in `sim/scripts/zkscripts.h`, ABI 2).  Made by an agent at the user's request.  Each side's army script draws its own knobs at game start, from the environment's generator: `SimEnv(variants=True)`, `policy_clone_data.py record --variants`.  Each game's meta records both sides' knobs.  Without it nothing is drawn and play is the same as before: a seeded 32-game run hashes the same.
+
+* **Knobs.** All were constants the C++ already had:
+  * a weight per role in the factory mix;
+  * `commit`: how much metal over the cover a squad wants before it goes;
+  * `gather`: what the army waits to gather;
+  * `patrol_share`: raiders guarding extractors;
+  * `patience`: give-up timers;
+  * `retreat_below`: the health share at which a fighter goes back to the rally, until 90%.
+* **Presets.** `standard`, `rush`, `turtle`, `skirmish`.  Each side draws one, then each knob is jittered within bounds.
+
+One check, 64 games on the training maps, one seed (128 sides):
+
+| Variant | Sides | Won / drew / lost | Raid | Riot | Assault | Skirm | Arty |
+|---|---|---|---|---|---|---|---|
+| rush | 39 | 17 / 13 / 9 | 48% | 14% | 24% | 10% | 2% |
+| skirmish | 26 | 9 / 8 / 9 | 42% | 15% | 14% | 17% | 12% |
+| standard | 30 | 8 / 12 / 10 | 39% | 19% | 18% | 16% | 5% |
+| turtle | 33 | 9 / 9 / 15 | 29% | 30% | 14% | 19% | 7% |
+
+The mixes differ as meant, and every variant wins and loses.  The win rates aren't separated at this size.
+
+What limits variety in the script itself:
+* Every fighter retreats below 40% health: all 159 fighting types regenerate, so the rule isn't a rare one.  It's now `retreat_below`.
+* Artillery starts at 12 minutes and games last about 13, so it's about 5% of units.
+* Snipers need a slow heavy unit seen after 8 minutes, so they're 0.3%.
+* AA never appears, since nothing flies.
+* The role schedule is a fixed function of time.
+
+**Not checked:** more than one seed, the map pool, a full recording with variants, training on it.  There are no tests of the variant path beyond the default's hash.

@@ -62,20 +62,20 @@ def _setup(bundles: dict, regions: int, vocabulary: int, looked_only: bool) -> N
     _W.update(bundles=bundles, regions=regions, vocabulary=vocabulary, looked_only=looked_only, table=tables.table(), cache={})
 
 
-def _game(path: str):
+def _game(path: str, side: int):
     cache = _W["cache"]
     if path not in cache:
         if len(cache) > 8:
             cache.pop(next(iter(cache)))
-        cache[path] = cd.load(pathlib.Path(path))
-    return cache[path]
+        cache[path] = cd.read_game(pathlib.Path(path))
+    return cache[path][side]
 
 
-def _sample(spec: tuple[str, int, int, int, int]) -> dict:
+def _sample(spec: tuple[str, int, int, int, int, int]) -> dict:
     """One stretch of a game, ready to batch: what the encoder reads (history, then the stretch), what the script did at each of
     those frames (the actor reads it as action tokens), what the heads read (the counted decisions), and their labels."""
-    path, start, length, reach, seed = spec
-    frames, orders, info = _game(path)
+    path, side, start, length, reach, seed = spec
+    frames, orders, info = _game(path, side)
     bundle = _W["bundles"][info["map"]]
     table = _W["table"]
     rng = np.random.default_rng(seed)
@@ -115,29 +115,23 @@ def bundles(maps: str | None) -> dict[str, bd.Bundle]:
 
 # Data -------------------------------------------------------------------------------------------------------------------------------------------------
 
-def _files(data: pathlib.Path) -> tuple[list[tuple[str, int]], list[tuple[str, int]]]:
-    """Game files and their lengths, training and held out."""
+def _files(data: pathlib.Path) -> tuple[list[tuple[str, int, int]], list[tuple[str, int, int]]]:
+    """Sides of games, (path, side, length), training and held out.  Both sides of a game go the same way."""
     train, held = [], []
-    for path in sorted(data.glob("game-*.npz")):
-        try:
-            with np.load(path) as d:
-                n = len(d["unit_counts"])
-        except (OSError, ValueError, KeyError, EOFError):        # still being written
-            continue
-        if n:
-            (held if zlib.crc32(path.name.encode()) % HELD_OUT == 0 else train).append((str(path), n))
+    for path, side, n in cd.sides(data):
+        (held if zlib.crc32(pathlib.Path(path).name.encode()) % HELD_OUT == 0 else train).append((path, side, n))
     return train, held
 
 
-def _specs(files: list[tuple[str, int]], length: int, reach: int, rng: np.random.Generator):
+def _specs(files: list[tuple[str, int, int]], length: int, reach: int, rng: np.random.Generator):
     """Stretches of games, drawn in proportion to their length, without end."""
-    lengths = np.array([n for _, n in files], float)
+    lengths = np.array([n for _, _, n in files], float)
     p = lengths / lengths.sum()
     while True:
         i = int(rng.choice(len(files), p=p))
-        path, n = files[i]
+        path, side, n = files[i]
         start = int(rng.integers(0, max(1, n - length + 1)))
-        yield path, start, length, reach, int(rng.integers(1 << 31))
+        yield path, side, start, length, reach, int(rng.integers(1 << 31))
 
 
 class Prefetch:
@@ -154,7 +148,7 @@ class Prefetch:
         return out
 
 
-def _fixed_specs(files: list[tuple[str, int]], count: int, length: int, reach: int) -> list[tuple]:
+def _fixed_specs(files: list[tuple[str, int, int]], count: int, length: int, reach: int) -> list[tuple]:
     rng = np.random.default_rng(12345)
     gen = _specs(files, length, reach, rng)
     return [next(gen) for _ in range(count)]

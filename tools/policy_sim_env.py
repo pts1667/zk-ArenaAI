@@ -1,11 +1,13 @@
 """The simulator as an environment for tools/policy_train.py, with the same interface as the toy's.
 
 A game starts from a commander in each of two of the map's start boxes.  Both sides play the opening of policy_opening.py by rule,
-so what the policy controls is the raiders it produces.  On the other side, a script controls the fighters and the factory: the army script of policy_army.py by default, or the raider-only fight script of policy_script.py, for comparisons.  The kinds the policy has are those the sim obeys for fighting units; S-M7 adds the rest.
+so what the policy controls is the raiders it produces.  On the other side, the army script (C++, sim/scripts) controls the fighters and the factory, and the economy script (also C++) runs every side's constructors.  The kinds the policy has are those the sim obeys for fighting units; S-M7 adds the rest.
 
 What each script ordered at each decision is in `script_record`, and its production choices are readable with `script_production`.
 
 Passing `units` gives the older start instead, two mirrored armies and no economy, which checks and benchmarks still use.
+
+Passing `variants=True` gives each side's army script its own knobs at the start of each game (policy_variants.py), kept in `styles`.
 """
 from __future__ import annotations
 
@@ -23,10 +25,10 @@ sys.path.insert(0, str(ROOT / "bots"))
 import zksim  # noqa: E402
 from zkbot import catalog as bot_catalog  # noqa: E402
 from zkbot.policy import bundle as bd, rawframe as rf, tables  # noqa: E402
-from policy_army import ArmyScript, make_script  # noqa: E402
-from policy_eco import ECO_EVERY, Aimer, EcoData, Economy  # noqa: E402
+from policy_eco import ECO_EVERY, EcoData  # noqa: E402
 from policy_opening import Ground, Opening, Seat, is_buildable, modelled  # noqa: E402
 from policy_script import ScriptData  # noqa: E402
+import policy_variants as pv  # noqa: E402
 
 KINDS = (rf.KEEP, rf.MOVE, rf.FIGHT, rf.ATTACK_UNIT, rf.MANUAL_FIRE, rf.JUMP, rf.CLOAK_ON, rf.CLOAK_OFF,
          rf.PRODUCE, rf.THROW, rf.PUSH, rf.PULL, rf.PLACE_BEACON, rf.WAIT_AT_BEACON)
@@ -211,34 +213,34 @@ def _far_ahead(value: np.ndarray, other: np.ndarray) -> np.ndarray:
 
 class SimEnv:
     eval_opponents = ("fight",)
+    # A subclass that plays its own Python scripts (frame_world.FrameGames, frame_data.ScenarioEnv) sets this: then `scripts[g]`
+    # holds one for each side, with `orders(own, enemy, seconds)`, and nothing but those and the opening runs a side.  Otherwise
+    # the army and economy scripts are C++ (policy_scripts_cpp.py).
+    own_scripts = False
 
     def __init__(self, games: int, seed: int, modes: list[str], units: int | None = None, threads: int = 16, decide_every: int = 1, maps: list | None = None,
-                 weights: np.ndarray | None = None, scripts: tuple[str, str] = ("army", "army"), economy: bool = True, script_impl: str = "cpp",
-                 script_threads: int | None = None):
-        """maps: as `pool` or `load_pool` give, and weights how likely each is, if not evenly.  scripts: the kind of script each side
-        plays, as policy_army.make_script names them.  When the two differ, each game gives them to the sides at random, so that
-        the games compare the two whichever side has which.  economy: whether constructors and big buildings are run for every
-        side (policy_eco.py); without it, a side's economy is its opening, as before 2026-11-08.  script_impl: "cpp" (the default) runs
-        the army and economy scripts as libzkscripts (policy_scripts_cpp.py) on `script_threads` threads (`threads` if not given),
-        "python" as the Python modules.  The opening is Python either way."""
-        if script_impl not in ("python", "cpp"):
-            raise ValueError(f"no script implementation called {script_impl!r}")
-        if script_impl == "cpp" and set(scripts) != {"army"}:
-            raise ValueError("the C++ scripts are the army script's")
-        self.script_impl = script_impl
+                 weights: np.ndarray | None = None, economy: bool = True, script_threads: int | None = None, variants: bool = False):
+        """maps: as `pool` or `load_pool` give, and weights how likely each is, if not evenly.  economy: whether the economy script
+        runs constructors and big buildings for every side (policy_eco.py); without it, a side's economy is its opening, as before
+        2026-11-08.  The army and economy scripts run in C++ on `script_threads` threads (`threads` if not given); the opening is
+        Python.  variants: whether each side's army script draws its own knobs at each game's start (policy_variants.py); otherwise
+        every side plays the standard script."""
         self.count, self.modes, self.units = games, modes, units
         self.maps = pool() if maps is None else maps
         self.grounds = {id(b): Ground(b, f) for _, b, f in self.maps}
         self.weights = weights
         self.self_play_share = 0.0      # of games starting from now on, whatever `modes` says
         self.ended: dict[int, dict] = {}    # a seat's last finished game, for a test to note
-        self.script_pair = scripts
-        self.script_kinds: list[tuple[str, str]] = [scripts] * games
+        self.script_kinds: list[tuple[str, str]] = [("army", "army")] * games
+        self.variants_on = variants
+        self.styles: list[tuple[pv.Variant, pv.Variant] | None] = [None] * games    # each side's army script knobs, when variants are on
         self.script_record: dict[int, np.ndarray] = {}      # seat -> the orders its script gave this decision, as the sim takes them
+        # The same with the C++ scripts, over every seat: (orders, where each seat's start).  None with a subclass's own scripts.
+        self.army_orders: tuple[np.ndarray, np.ndarray] | None = None
         self.outcomes: list[dict] = []                      # every side of every finished game, for a measurement to take and clear
         self.opening = Opening(catalog(), decide_every) if units is None else None
         self.seats: list[tuple[Seat, Seat] | None] = [None] * games
-        self.scripts: list[tuple[object, object] | None] = [None] * games
+        self.scripts: list[tuple[object, object] | None] = [None] * games     # a subclass's own scripts: `own_scripts`
         # In slots of TICKS_PER_DECISION.  Game time stays what it was: the time limit, and how often the script re-orders.
         self.ticks = TICKS_PER_DECISION * decide_every
         self.time_limit = TIME_LIMIT_DECISIONS // decide_every
@@ -250,10 +252,9 @@ class SimEnv:
         self.table = tables.table()
         self.script_data = ScriptData(self.table, catalog())
         self.eco_data = EcoData(self.table, catalog())
-        self.economies: list[tuple[Economy, Economy] | None] = [None] * games     # constructors and big buildings, for every side: policy_eco.py
         self.economy = economy
-        self.cpp = None         # policy_scripts_cpp.Scripts, which plays the scripts of every game when script_impl is "cpp"
-        if script_impl == "cpp":
+        self.cpp = None         # policy_scripts_cpp.Scripts, which plays the army and economy scripts of every game
+        if not self.own_scripts:
             import policy_scripts_cpp
             self.cpp_data = policy_scripts_cpp.ScriptsData(self.script_data, self.eco_data)
             self.cpp = policy_scripts_cpp.Scripts(self.cpp_data, games, threads if script_threads is None else script_threads)
@@ -290,10 +291,6 @@ class SimEnv:
         self.mode[g] = self.modes[int(self.rng.integers(len(self.modes)))]
         if self.rng.random() < self.self_play_share:
             self.mode[g] = "mirror"
-        kinds = self.script_pair
-        if kinds[0] != kinds[1] and self.rng.random() < 0.5:
-            kinds = (kinds[1], kinds[0])
-        self.script_kinds[g] = kinds
         # As Zero-K's "allshuffle": who gets which box is by chance, and on a map with more boxes than sides some stay empty.
         own, other = self.rng.choice(len(boxes), 2, replace=False)
         x0, z0 = boxes[own].pick(self.rng, bundle)
@@ -307,6 +304,11 @@ class SimEnv:
         self.starts[g] = (x0, z0, x1, z1)
         self.decisions[g] = 0
 
+    def _draw_styles(self, g: int) -> tuple[pv.Variant, pv.Variant] | None:
+        """Each side's army script knobs for game `g`: drawn from the environment's generator when variants are on, else None."""
+        self.styles[g] = (pv.draw(self.rng), pv.draw(self.rng)) if self.variants_on else None
+        return self.styles[g]
+
     def _start_armies(self, g: int, world_map: zksim.Map, bundle: bd.Bundle, x0: float, z0: float, x1: float, z1: float) -> None:
         types = army_types(self.table)
         pick = self.rng.integers(0, len(types["index"]), self.units)
@@ -314,12 +316,9 @@ class SimEnv:
         bx, bz = place(bundle, self.rng, types["classes"][pick], x1, z1)
         self.batch.reset(g, world_map, int(self.rng.integers(1 << 62)), np.tile(types["index"][pick], 2), np.repeat([0, 1], self.units),
                          np.concatenate((ax, bx)), np.concatenate((az, bz)), base=(x0, z0, x1, z1), sites=bundle.sites())
-        kinds = self.script_kinds[g]
+        styles = self._draw_styles(g)
         if self.cpp is not None:
-            self.scripts[g] = None
-            self.cpp.reset(g, self.grounds[id(bundle)], (x0, z0, x1, z1), (x0, z0, x1, z1), economy=False, aimer=False)
-            return
-        self.scripts[g] = (make_script(kinds[0], self.script_data, (x0, z0), (x1, z1)), make_script(kinds[1], self.script_data, (x1, z1), (x0, z0)))
+            self.cpp.reset(g, self.grounds[id(bundle)], (x0, z0, x1, z1), (x0, z0, x1, z1), economy=False, aimer=False, variants=styles)
 
     def _start_commanders(self, g: int, world_map: zksim.Map, bundle: bd.Bundle, box0: StartBox, box1: StartBox, x0: float, z0: float, x1: float, z1: float) -> None:
         """Handles 0 and 1 are the commanders, so a side's first own record is its commander while it lives."""
@@ -331,21 +330,12 @@ class SimEnv:
         # A side plans towards where the enemy's box says it should be: what a player knows, then.
         ground = self.grounds[id(bundle)]
         self.seats[g] = (self.opening.seat(self.rng, 0, ground, (x0, z0), box1.point), self.opening.seat(self.rng, 1, ground, (x1, z1), box0.point))
-        kinds, seats = self.script_kinds[g], self.seats[g]
+        seats = self.seats[g]
+        styles = self._draw_styles(g)
         if self.cpp is not None:
-            # The same draws from the environment's generator as the Python economies take, so that both play the same games' starts.
             seeds = tuple(int(self.rng.integers(1 << 62)) for _ in range(2)) if self.economy else (0, 0)
-            self.scripts[g] = None
-            self.cpp.reset(g, ground, (x0, z0, x1, z1), (*seats[0].plan.rally, *seats[1].plan.rally), economy=self.economy, aimer=True, seeds=seeds)
-            return
-        self.scripts[g] = tuple(
-            make_script(kinds[side], self.script_data, seats[side].plan.rally, (x1, z1) if side == 0 else (x0, z0),
-                        self.script_data.row_of_index(seats[side].raider_type), Aimer(self.eco_data))
-            for side in (0, 1))
-        if self.economy:
-            self.economies[g] = tuple(
-                Economy(self.eco_data, ground, side, base, enemy, np.random.default_rng(int(self.rng.integers(1 << 62))))
-                for side, base, enemy in ((0, (x0, z0), (x1, z1)), (1, (x1, z1), (x0, z0))))
+            self.cpp.reset(g, ground, (x0, z0, x1, z1), (*seats[0].plan.rally, *seats[1].plan.rally), economy=self.economy, aimer=True, seeds=seeds,
+                           variants=styles)
 
     def _opening_orders(self, g: int, side: int) -> np.ndarray | None:
         """The commander's next step, if it has finished this one or run out of time on it."""
@@ -361,22 +351,6 @@ class SimEnv:
             return None
         orders = seat.advance(units, int(self.decisions[g]))
         return np.array(orders, zksim.ORDER_DTYPE) if orders else None
-
-    def _economy_orders(self, g: int, side: int) -> np.ndarray | None:
-        """Constructors' and big buildings' orders, for either kind of side.  Not the policy's, so not recorded as the script's."""
-        economies = self.economies[g]
-        if economies is None or self.decisions[g] % ECO_EVERY:
-            return None
-        mine = self.batch.frame(g, side)
-        units, theirs = mine.units, self.batch.frame(g, 1 - side).units
-        seconds = float(self.decisions[g]) * self.ticks * zksim.TICK_FRAMES / zksim.FRAMES_PER_SECOND
-        seats = self.seats[g]
-        busy = side if seats is not None and not seats[side].done else -1      # the commander, while the opening has it
-        glob = mine.glob
-        out = economies[side].orders(units[units["player"] == side], theirs[theirs["player"] == 1 - side],
-                                     float(glob[rf.G["metal_income"]]), seconds, busy, float(glob[rf.G["metal"]]), float(glob[rf.G["metal_storage"]]),
-                                     float(glob[rf.G["energy"]]), float(glob[rf.G["energy_storage"]]))
-        return out if len(out) else None
 
     def _is_policy(self, seat: int) -> bool:
         mode = self.mode[seat // 2]
@@ -398,18 +372,13 @@ class SimEnv:
         self.pending[seat] = orders
 
     def script_orders(self, g: int, side: int) -> np.ndarray:
+        """A subclass's own script's orders for this side (`own_scripts`)."""
         if self.decisions[g] % self.script_every:
             return np.zeros(0, zksim.ORDER_DTYPE)
         mine = self.batch.frame(g, side)
         own, enemy = mine.units, self.batch.frame(g, 1 - side).units
         seconds = float(self.decisions[g]) * self.ticks * zksim.TICK_FRAMES / zksim.FRAMES_PER_SECOND
-        script = self.scripts[g][side]
-        if isinstance(script, ArmyScript):
-            theirs = own["player"] != side
-            seen = own["uid"][theirs & np.isin(own["knowledge"], (rf.KNOW_LOS, rf.KNOW_RADAR))]
-            return script.orders(own[own["player"] == side], enemy[enemy["player"] == 1 - side], seconds, float(mine.glob[rf.G["metal_income"]]),
-                                 seen)
-        return script.orders(own[own["player"] == side], enemy[enemy["player"] == 1 - side], seconds)
+        return self.scripts[g][side].orders(own[own["player"] == side], enemy[enemy["player"] == 1 - side], seconds)
 
     def step_scripted_only(self) -> None:
         self.step(0.0)
@@ -425,8 +394,8 @@ class SimEnv:
                 if o["kind"] == zksim.ORDER_PRODUCE]
 
     def _scripts_cpp(self) -> tuple[np.ndarray, np.ndarray]:
-        """Every game's orders with the scripts in C++: the policy's and the opening's from here, the scripts' from libzkscripts, in
-        the order the Python path gives them.  Fills `script_record` as it does."""
+        """Every game's orders: the policy's and the opening's from here, the scripts' from libzkscripts.  Fills `script_record`
+        with the army script's."""
         n = 2 * self.count
         flags, busy = np.zeros(n, np.int32), np.full(n, -1, np.int32)
         pre, post = [], []
@@ -453,6 +422,7 @@ class SimEnv:
         orders, offsets, army, army_offsets = self.cpp.step(self.batch, self.decisions, flags, busy, self.ticks, self.script_every, ECO_EVERY,
                                                             pre=join(pre, pre_counts) if pre else None, post=join(post, post_counts) if post else None)
         self.script_record = {int(s): army[army_offsets[s]:army_offsets[s + 1]] for s in np.flatnonzero(flags)}
+        self.army_orders = (army, army_offsets)
         return orders, offsets
 
     def step(self, progress: float) -> None:
@@ -461,6 +431,7 @@ class SimEnv:
             self.batch.step(all_orders, offsets, ticks=self.ticks)
             self._after_step()
             return
+        # A subclass's own scripts.
         parts, offsets = [], [0]
         self.script_record = {}
         for g in range(self.count):
@@ -478,10 +449,10 @@ class SimEnv:
                 if part is not None:
                     parts.append(part)
                     total += len(part)
-                for extra in (self._opening_orders(g, side), self._economy_orders(g, side)):
-                    if extra is not None:
-                        parts.append(extra)
-                        total += len(extra)
+                extra = self._opening_orders(g, side)
+                if extra is not None:
+                    parts.append(extra)
+                    total += len(extra)
             offsets.append(offsets[-1] + total)
         all_orders = np.concatenate(parts) if parts else np.zeros(0, zksim.ORDER_DTYPE)
         self.batch.step(all_orders, np.array(offsets, np.int32), ticks=self.ticks)
@@ -489,10 +460,7 @@ class SimEnv:
 
     def _made(self, g: int, side: int) -> dict:
         """What the side's army script has started, by role, for the outcome."""
-        if self.cpp is not None:
-            return self.cpp.made(g, side)
-        script = self.scripts[g][side]
-        return dict(script.mix.made) if isinstance(script, ArmyScript) else {}
+        return self.cpp.made(g, side) if self.cpp is not None else {}
 
     def _after_step(self) -> None:
         self.decisions += 1
@@ -532,6 +500,7 @@ class SimEnv:
             "how": "eliminated" if stats[0, 1] == 0 or stats[1, 1] == 0 else ("lead" if won or lost else "limit"),
             "own_value": float(stats[side, 0]), "enemy_value": float(stats[1 - side, 0]),
             "own_factory": names[seats[side].factory_type]["name"] if seats else "", "enemy_factory": names[seats[1 - side].factory_type]["name"] if seats else "",
+            "variant": self.styles[g][side].name if self.styles[g] else "standard",
         }
 
     def reward(self, seat: int, beta: float) -> float:

@@ -505,6 +505,7 @@ class WideOpening(Opening):
 
 class FrameGames(BaseOrders, se.SimEnv):
     """Games from the start on any map, with both sides' factories and builders at work.  What frames of a game are, as near as a script can get."""
+    own_scripts = True      # FrameFight and BaseScript, not the C++ army and economy scripts
 
     def __init__(self, games: int, seed: int, threads: int = 16, maps: list | None = None, weights: np.ndarray | None = None):
         super().__init__(games, seed, ["scripts"], threads=threads, maps=maps, weights=weights)

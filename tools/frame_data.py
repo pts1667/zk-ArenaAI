@@ -366,6 +366,7 @@ def draw_side(rng: np.random.Generator, rules: ScenarioRules, roster: Roster, gr
 
 class ScenarioEnv(BaseOrders, se.SimEnv):
     """Games that start in the middle: both sides drawn by `draw_side`, playing from there, and over after a short while."""
+    own_scripts = True      # FrameFight and BaseScript, not the C++ army and economy scripts
 
     def __init__(self, games: int, seed: int, rules: ScenarioRules = ScenarioRules(), threads: int = 16, maps: list | None = None, weights: np.ndarray | None = None):
         self.rules = rules

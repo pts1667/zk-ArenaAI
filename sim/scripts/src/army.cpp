@@ -95,6 +95,13 @@ zk_order_rec order(int64_t uid, int kind, double x, double z, int64_t target) {
 
 }  // namespace
 
+zks_style standard_style() {
+    zks_style s{};
+    for (double& w : s.role_weight) w = 1.0;
+    s.commit = COMMIT, s.gather = 1.0, s.patrol_share = PATROL_SHARE, s.patience = 1.0, s.retreat_below = RETREAT_BELOW;
+    return s;
+}
+
 void Seat::observe() {
     const Data& d = *data;
     for (size_t e = 0; e < enemies.size(); e++) {
@@ -146,6 +153,7 @@ int Seat::choose(int factory_row, double seconds, int constructors, double metal
     double weights[7];
     int n = 0;
     auto add = [&](int r, double w) {
+        w *= style.role_weight[r];
         if (w > 0.0 && d.menu_of(factory_row, r) >= 0) roles[n] = r, weights[n] = w, n++;
     };
     add(R_RAID, interp(minutes, RAID_X, RAID_Y, 5));
@@ -281,7 +289,7 @@ void Seat::fight(const Ctx& c, std::vector<Fighter>& f, const std::vector<P2>& e
         int back = (scout_or_raid(f[k].kind) || seconds < GROUPS_FROM) ? S_SENT : S_WAITING;
         int s = state[uid];
         if (s == S_NEW) s = back;
-        if (data->has(f[k].row, ZKS_REGENERATES) && f[k].hp < RETREAT_BELOW)
+        if (data->has(f[k].row, ZKS_REGENERATES) && f[k].hp < style.retreat_below)
             s = S_RETREATING;
         else if (s == S_RETREATING && f[k].hp >= RECOVERED)
             s = back;
@@ -299,7 +307,7 @@ void Seat::fight(const Ctx& c, std::vector<Fighter>& f, const std::vector<P2>& e
             has_waiting_since = false;
         } else {
             if (!has_waiting_since) has_waiting_since = true, waiting_since = seconds;
-            if (sum >= group_metal(seconds) || seconds - waiting_since >= LONGEST_WAIT) {
+            if (sum >= group_metal(seconds) * style.gather || seconds - waiting_since >= LONGEST_WAIT) {
                 for (int k = 0; k < n; k++)
                     if (state[f[k].uid] == S_WAITING && !scout_or_raid(f[k].kind)) state[f[k].uid] = S_SENT;
                 has_waiting_since = false;
@@ -434,7 +442,7 @@ bool Seat::acceptable(int64_t target, double metal, double reach) {
     std::vector<double> cv;
     std::vector<uint8_t> hv;
     cover(&view.x[i], &view.z[i], 1, reach, true, cv, hv);
-    return !hv[0] && cv[0] <= metal / COMMIT;
+    return !hv[0] && cv[0] <= metal / style.commit;
 }
 
 int64_t Seat::choose_target(P2 origin, double metal, double reach, const std::vector<int64_t>& taken) {
@@ -453,7 +461,7 @@ int64_t Seat::choose_target(P2 origin, double metal, double reach, const std::ve
     double bk = INFINITY;
     bool any = false;
     for (size_t k = 0; k < cand.size(); k++) {
-        bool ok = !hv[k] && cv[k] <= metal / COMMIT;
+        bool ok = !hv[k] && cv[k] <= metal / style.commit;
         any |= ok;
         double key = ok ? std::hypot(cx[k] - origin.x, cz[k] - origin.z) + (view.extractor[cand[k]] ? 0.0 : FAR) : INFINITY;
         if (best < 0 || key < bk) best = (int)k, bk = key;
@@ -484,7 +492,7 @@ P2 Seat::probe(P2 centre, double metal, double reach) {
     std::vector<uint8_t> hv;
     cover(px.data(), pz.data(), len, reach, false, cv, hv);
     for (int i = 0; i < len; i++)
-        if (!hv[i] && cv[i] <= metal / COMMIT) return {px[i], pz[i]};
+        if (!hv[i] && cv[i] <= metal / style.commit) return {px[i], pz[i]};
     return frm;
 }
 
@@ -500,7 +508,7 @@ void Seat::raids(const Ctx& c, std::vector<Fighter>& f, const std::vector<int>& 
     int nr = (int)alive.size();
     int want = 0;
     if (!extractors.empty()) {
-        want = (int)std::ceil(PATROL_SHARE * nr);
+        want = (int)std::ceil(style.patrol_share * nr);
         if (seconds >= PATROL_MIN_FROM) want = std::max(want, PATROL_MIN);
         want = std::min(want, std::max(0, nr - FIRST_STRAIGHT));
     }
@@ -594,7 +602,7 @@ void Seat::raids(const Ctx& c, std::vector<Fighter>& f, const std::vector<int>& 
         int i = view_of(kept);
         bool near = py_hypot(view.x[i] - centre[s].x, view.z[i] - centre[s].z) <= NEAR_TARGET;
         double started = since_has[s] ? since_t[s] : seconds, distance = since_has[s] ? since_d[s] : 0.0;
-        double allowed = GIVE_UP_SLACK + distance / TRAVEL_SPEED + (near ? PATIENCE_AT_TARGET : 0.0);
+        double allowed = GIVE_UP_SLACK * style.patience + distance / TRAVEL_SPEED + (near ? PATIENCE_AT_TARGET * style.patience : 0.0);
         if (seconds - started <= allowed) {
             target[s] = kept, has_target[s] = 1;
         } else {
