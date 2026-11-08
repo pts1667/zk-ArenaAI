@@ -1,17 +1,16 @@
-"""Schema, shapes, masks, net and the live producer, on frames made by hand."""
+"""Schema, shapes, masks and the live producer, on frames made by hand."""
 from __future__ import annotations
 
 import copy
 import json
 import pathlib
-import time
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 from zkbot import units as unit_data
-from zkbot.policy import actions, bundle as bd, featurize as fz, net, rawframe as rf
+from zkbot.policy import bundle as bd, featurize as fz, rawframe as rf
 from zkbot.policy.bundle import Bundle
 
 from conftest import BLIP, ENEMY, HIDDEN, MEMORY, make_frame, make_units
@@ -92,18 +91,6 @@ def test_features_get_tokens_before_the_global_one(small_map, table):
     assert np.array_equal(t.unit_x, bare.unit_x) and np.array_equal(t.ptr_enemy, bare.ptr_enemy)
 
 
-def test_a_unit_knows_how_far_a_feature_is_and_the_rest_read_as_groups(small_map, table):
-    units = make_units({"uid": 1, "x": 500.0, "z": 500.0}, {"uid": 2, "side": ENEMY, "x": 900.0, "z": 500.0})
-    t = _with_features(units, _features((510.0, 500.0, 5.0), (2500.0, 500.0, 5.0)), small_map, table)
-    b = t.pair_bucket
-    first, last = len(b) - 3, len(b) - 2
-    assert b[0, first] == fz._UF and b[first, 0] == fz._UF
-    assert fz._UF < b[0, last] < fz._UF + 12 and b[last, 0] == b[0, last]
-    assert b[first, last] == fz._OTHER + 4 * fz._GROUPS + 4
-    assert b[first, -1] == fz._OTHER + 4 * fz._GROUPS + 5
-    assert (b >= 0).all() and (b < fz.NUM_BUCKETS).all()
-
-
 def test_the_cap_keeps_most_metal_for_the_walk_and_regions_count_the_rest(small_map, table):
     units = make_units({"uid": 1, "x": 500.0, "z": 500.0})
     many = [(600.0, 500.0, 1.0)] * (fz.CAP_FEATURES + 5) + [(650.0, 500.0, 500.0)]
@@ -118,16 +105,6 @@ def test_the_cap_keeps_most_metal_for_the_walk_and_regions_count_the_rest(small_
     assert np.array_equal(t.feat_ids, again.feat_ids) and np.array_equal(t.feat_x, again.feat_x)
 
 
-def test_a_feature_in_sight_reaches_what_the_net_thinks(small_map, table, policy):
-    units = make_units({"uid": 1, "x": 500.0, "z": 500.0})
-    plain = _with_features(units, _features(), small_map, table)
-    richer = _with_features(units, _features((520.0, 500.0, 300.0)), small_map, table)
-    state = net.State.initial(small_map.regions)
-    a, b = net.encode(policy.w, policy.bias_table, plain, state), net.encode(policy.w, policy.bias_table, richer, state)
-    assert a.tokens.shape[0] + 1 == b.tokens.shape[0]
-    assert np.abs(a.tokens[0] - b.tokens[0]).max() > 1e-4
-
-
 def test_tensor_shapes_and_token_order(small_map, table):
     units = make_units({"name": "cloakraid", "uid": 1}, {"name": "cloakcon", "uid": 2}, {"name": "staticmex", "uid": 3},
                        {"name": "cloakriot", "side": ENEMY, "uid": 4, "x": 800.0},
@@ -139,13 +116,12 @@ def test_tensor_shapes_and_token_order(small_map, table):
     assert t.unit_x.shape == (6, fz.UNIT_DIM) and t.unit_name.shape == (6,)
     assert t.reg_x.shape == (small_map.regions, fz.REGION_DIM)
     n = 6 + small_map.regions + 0 + 1
-    assert t.tok_kind.shape == (n,) and t.pair_bucket.shape == (n, n)
+    assert t.tok_kind.shape == (n,)
     assert t.controllable == 1 and t.uids[0] == 1
     kinds = {int(uid): int(k) for uid, k in zip(t.uids, t.tok_kind)}
     assert kinds == {1: fz.TK_SEEN, 2: fz.TK_SEEN, 3: fz.TK_SEEN, 4: fz.TK_SEEN, 5: fz.TK_BLIP, 6: fz.TK_MEMORY}
     assert t.unit_ally.shape == t.unit_player.shape == (6,)
     assert t.tok_kind[-1] == fz.TK_GLOBAL
-    assert (t.pair_bucket >= 0).all() and (t.pair_bucket < fz.NUM_BUCKETS).all()
     assert t.kind_mask.shape == (1, rf.KIND_COUNT) and t.ptr_region.shape == (1, small_map.regions)
     assert t.ptr_enemy.shape == (3, 1, 2)
     assert np.isfinite(t.unit_x).all() and np.isfinite(t.reg_x).all() and np.isfinite(t.glob_x).all()
@@ -180,7 +156,6 @@ def test_sorted_tokens_do_not_depend_on_record_order(small_map, table):
     b = run(make_units(*rows[::-1]), small_map, table)
     assert a.uids.tolist() == b.uids.tolist()
     assert np.array_equal(a.unit_x, b.unit_x)
-    assert np.array_equal(a.pair_bucket, b.pair_bucket)
 
 
 def test_rays_see_walls_and_enemies(small_map, table):
@@ -192,16 +167,6 @@ def test_rays_see_walls_and_enemies(small_map, table):
     enemy_dps = t.unit_x[0, fz._R + 8:fz._R + 16]
     assert enemy_dps[2] > 0 and enemy_dps[6] == 0 and enemy_dps[0] == 0
     assert not t.unit_x[0, fz._R + 16:fz._R + 24].any()
-
-
-def test_pair_buckets_read_distance_side_and_hops(small_map, table):
-    t = run(make_units({"uid": 1, "x": 500.0, "z": 500.0}, {"uid": 2, "x": 510.0, "z": 500.0}, {"uid": 3, "side": ENEMY, "x": 500.0, "z": 1500.0}), small_map, table)
-    b = t.pair_bucket
-    assert b[0, 1] == fz._UU + 0 + 24          # near, same player
-    assert b[0, 2] < 12 and b[0, 2] > 0        # far, other side
-    region = int(small_map.region_at(500.0, 500.0))
-    assert b[0, 3 + region] == fz._UR          # its own region
-    assert b[3 + region, 3 + region] == fz._RR
 
 
 # Masks: one hand-made frame for each row of 02-policy.md section 4.1.
@@ -384,92 +349,8 @@ def test_hidden_units_only_ever_reach_the_critic(small_map, table):
     assert np.array_equal(actor.unit_x, critic.unit_x)
 
 
-# The net.
-@pytest.fixture(scope="module")
-def policy(table):
-    return net.Policy(net.random_weights(len(table.names) + 1, seed=3))
-
-
-def battle(n=12, seed=1):
-    rng = np.random.default_rng(seed)
-    names = ("cloakraid", "cloakskirm", "cloakriot", "cloakassault")
-    own = [{"uid": i + 1, "name": names[i % 4], "x": 500.0 + rng.uniform(0, 300), "z": 500.0 + rng.uniform(0, 300)} for i in range(n)]
-    foe = [{"uid": 100 + i, "name": names[i % 4], "side": ENEMY, "x": 900.0 + rng.uniform(0, 300), "z": 700.0 + rng.uniform(0, 300)} for i in range(n)]
-    return make_units(*own, *foe, {"uid": 500, "name": None, "side": BLIP, "x": 1500.0, "z": 900.0, "hp_frac": np.nan})
-
-
-def test_parameter_count_matches_the_plan(table):
-    shapes = net.weight_shapes(len(table.names) + 1)
-    trainable = sum(int(np.prod(s)) for name, s in shapes.items() if name != "rbf")
-    assert 2.5e6 < trainable < 3.3e6, trainable
-
-
-def test_a_decision_is_legal_and_decodes(small_map, table, policy):
-    t = run(battle(), small_map, table)
-    d = policy.decide(t, net.State.initial(small_map.regions), np.random.default_rng(0))
-    assert len(d.kind) == t.controllable == 12
-    assert t.kind_mask[np.arange(12), d.kind].all()
-    for i in range(12):
-        k = int(d.kind[i])
-        assert (d.region[i] >= 0) == (k in (rf.MOVE, rf.FIGHT, rf.JUMP))
-        assert (d.enemy[i] >= 0) == (k in fz.ENEMY_POINTER_KINDS)
-        assert (d.fine[i] >= 0) == (k in (rf.MOVE, rf.FIGHT, rf.JUMP, rf.ATTACK_GROUND))
-        if d.region[i] >= 0:
-            assert (t.ptr_jump if k == rf.JUMP else t.ptr_region)[i, d.region[i]]
-        if d.enemy[i] >= 0:
-            assert t.ptr_enemy[fz.ENEMY_POINTER_KINDS.index(k), i, d.enemy[i]]
-    assert np.isfinite(d.logp).all()
-    x, z = actions.world_positions(t, small_map)
-    orders = actions.decode(d, t, small_map, x, z)
-    assert sum(1 for k in d.kind if k != rf.KEEP) == len(orders)
-    assert all(o.kind != rf.KEEP and 0 <= o.x <= 3000 for o in orders)
-
-
-def test_keep_starts_out_likely(small_map, table, policy):
-    t = run(battle(), small_map, table)
-    d = policy.decide(t, net.State.initial(small_map.regions))
-    assert d.kinds[:, rf.KEEP].mean() > 0.3
-
-
-def test_the_state_moves_and_changes_the_next_decision(small_map, table, policy):
-    t = run(battle(), small_map, table)
-    s0 = net.State.initial(small_map.regions)
-    d1 = policy.decide(t, s0)
-    assert np.abs(d1.state.glob).sum() > 0 and np.abs(d1.state.regions).sum() > 0
-    d2 = policy.decide(t, d1.state)
-    assert not np.allclose(d1.kinds, d2.kinds)
-
-
-def test_permuting_tokens_permutes_the_output(small_map, table, policy):
-    t = run(battle(), small_map, table)
-    # Swap two controllable tokens, with their rows and pair buckets.
-    perm = np.arange(len(t.tok_kind))
-    perm[[0, 3]] = perm[[3, 0]]
-    u = len(t.unit_x)
-    p = fz.Tensors(**{**t.__dict__})
-    p.unit_x, p.unit_name = t.unit_x[perm[:u]], t.unit_name[perm[:u]]
-    p.unit_ally, p.unit_player = t.unit_ally[perm[:u]], t.unit_player[perm[:u]]
-    p.pair_bucket = t.pair_bucket[np.ix_(perm, perm)]
-    p.kind_mask, p.route_bias, p.ptr_region, p.ptr_jump = t.kind_mask[perm[:12]], t.route_bias[perm[:12]], t.ptr_region[perm[:12]], t.ptr_jump[perm[:12]]
-    p.ptr_wait, p.ptr_produce = t.ptr_wait[perm[:12]], t.ptr_produce[perm[:12]]
-    p.ptr_enemy = t.ptr_enemy[:, perm[:12]]
-    s = net.State.initial(small_map.regions)
-    a, b = policy.decide(t, s), policy.decide(p, s)
-    assert np.allclose(a.kinds[perm[:12]], b.kinds, atol=1e-4)
-
-
-def test_forward_cost_at_a_typical_size(small_map, table, policy):
-    """Not a gate, just a guard against something absurd; real numbers come from shadow mode."""
-    t = run(battle(n=80), small_map, table)
-    s = net.State.initial(small_map.regions)
-    t0 = time.perf_counter()
-    for _ in range(5):
-        policy.decide(t, s)
-    assert (time.perf_counter() - t0) / 5 < 1.0
-
-
-# The live producer, over a stand-in for the Brain.
-class FakeBrain:
+# The live producer, over a stand-in for the host (bots/zkbot/host.py).
+class FakeHost:
     def __init__(self):
         self.unit_order = {1: ("fight", 900.0, 910.0, None, 870), 2: ("attack", 0.0, 0.0, 20, 840)}
         self.units = {1: SimpleNamespace(name="cloakraid", is_mobile=True, is_finished=True, is_builder=False, uid=1, alive_frac=0.5),
@@ -480,7 +361,6 @@ class FakeBrain:
         self.base_pos = (100.0, 200.0)
         self.map = SimpleNamespace(width=2560.0, height=2560.0, spots=[SimpleNamespace(x=400.0, z=500.0, income=2.5, status="ours")])
         self.blip_tracks = {30: {"smax": 88.0}}
-        self.gremlin_scouts = set()
         self.last_enemy_seen_frame = 880
         self.enemy_structures = {40: (SimpleNamespace(def_id=7, x=1.0, y=2.0, z=3.0, health=50.0, max_health=100.0, build_progress=1.0, is_being_built=False), 600),
                                  20: (SimpleNamespace(def_id=7, x=1.0, y=2.0, z=3.0, health=50.0, max_health=100.0, build_progress=1.0, is_being_built=False), 600)}
@@ -509,17 +389,17 @@ class FakeBrain:
         return raw - 10000.0 if raw > 10000.0 else raw
 
 
-def test_from_brain_reads_what_is_left_of_a_feature_in_sight():
+def test_from_host_reads_what_is_left_of_a_feature_in_sight():
     obs = {"frame": 900, "units": {}, "enemies": {}, "radarBlips": {},
            "features": {"9": {"defId": 12, "pos": [100.0, 5.0, 200.0], "reclaimLeft": 0.5, "definition": {"containedResources": {"Metal": 60.0, "Energy": 0.0}}},
                         "10": {"defId": 13, "pos": [300.0, 5.0, 400.0], "definition": {"containedResources": {"Metal": 20.0}}}}}
-    f = rf.from_brain(FakeBrain(), obs, rf.LiveMemory(), region_of=lambda x, z: 4)
+    f = rf.from_host(FakeHost(), obs, rf.LiveMemory(), region_of=lambda x, z: 4)
     by_id = {int(r["feat_id"]): r for r in f.features}
     assert (by_id[9]["x"], by_id[9]["z"], by_id[9]["metal"], by_id[9]["def_id"]) == (100.0, 200.0, 30.0, 12)
     assert by_id[10]["metal"] == 20.0
 
 
-def test_from_brain_reads_everything_the_schema_asks_for():
+def test_from_host_reads_everything_the_schema_asks_for():
     obs = {
         "frame": 900,
         "units": {"1": {"defId": 5, "pos": [10.0, 20.0, 30.0], "vel": [1.0, 0.0, -1.0], "health": 50.0, "maxHealth": 100.0, "buildProgress": 1.0, "experience": 0.25},
@@ -532,15 +412,14 @@ def test_from_brain_reads_everything_the_schema_asks_for():
     memory.health = {1: 60.0, 2: 10.0}
     memory.note_events({"frame": 860, "events": [{"topic": 7, "unitId": 1}]})    # before its last order: no longer idle
     memory.note_events({"frame": 885, "events": [{"topic": 7, "unitId": 3}, {"topic": 9, "unitId": 2}]})
-    brain = FakeBrain()
-    f = rf.from_brain(brain, obs, memory, region_of=lambda x, z: 4)
+    f = rf.from_host(FakeHost(), obs, memory, region_of=lambda x, z: 4)
     u = {int(r["uid"]): r for r in f.units}
     assert set(u) == {1, 2, 3, 20, 30, 40}
     assert (u[1]["x"], u[1]["y"], u[1]["z"], u[1]["vx"], u[1]["vz"]) == (10.0, 20.0, 30.0, 1.0, -1.0)
     assert u[1]["hp_frac"] == 0.5 and u[1]["experience"] == 0.25
     assert u[1]["flags"] & rf.DAMAGED and not u[1]["flags"] & rf.IDLE
     assert u[1]["ord_kind"] == rf.FIGHT and u[1]["ord_age"] == 30 and (u[1]["ord_x"], u[1]["ord_z"]) == (900.0, 910.0) and u[1]["ord_target"] == -1
-    assert u[2]["ord_kind"] == rf.ATTACK_UNIT and u[2]["ord_target"] == 20 and u[2]["flags"] & rf.CLOAKED and u[2]["flags"] & rf.RESERVED
+    assert u[2]["ord_kind"] == rf.ATTACK_UNIT and u[2]["ord_target"] == 20 and u[2]["flags"] & rf.CLOAKED and not u[2]["flags"] & rf.RESERVED
     assert not u[2]["flags"] & rf.DAMAGED
     assert u[3]["flags"] & rf.IDLE and u[3]["flags"] & rf.BEING_BUILT and u[3]["flags"] & rf.PARALYZED and u[3]["ord_kind"] == -1
     assert u[20]["knowledge"] == rf.KNOW_LOS and u[20]["flags"] & rf.IN_LOS and u[20]["hp_frac"] == 0.25 and u[20]["vx"] == 0.5

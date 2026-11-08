@@ -262,7 +262,8 @@ void World::run_builder(int u) {
         }
     } else if (order[i] == ZK_ORDER_ASSIST) {
         const int t = order_target[i];
-        const bool helps_factory = t >= 0 && alive[size_t(t)] && (type_of(t).flags & ZK_U_FACTORY);
+        // Help for a finished factory goes to what it's making; one still being built is helped like any other building.
+        const bool helps_factory = t >= 0 && alive[size_t(t)] && (type_of(t).flags & ZK_U_FACTORY) && build[size_t(t)] >= 1.0f;
         const int f = helps_factory ? work_on[size_t(t)] : t;
         if (f < 0 || !alive[size_t(f)] || build[size_t(f)] >= 1.0f) {
             if (!helps_factory) order[i] = ZK_ORDER_NONE;

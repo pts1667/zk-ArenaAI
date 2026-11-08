@@ -1,14 +1,15 @@
-"""The policy network in PyTorch, for training: the same network as bots/zkbot/policy/net.py, with the same weight names.
+"""What the actors share: featurizer output batched for PyTorch, the heads' sampling and scoring, and the critic.
 
 Batches are padded per token group, so every decision in a batch has the layout
 
     units (Umax) | regions (Rmax) | sites (Smax) | features (Fmax) | global | memory state
 
-`collate` builds them from featurizer output, and is numpy so a data worker can run it.
+`collate` builds them from featurizer output, and is numpy so a data worker can run it.  The last token is the first actor's
+recurrent memory, which went with it on 2026-11-08 (git tag `rules-bot-final` has it); it stays as a token kind no actor reads, so
+the layout and saved weights hold.  The actor is tools/policy_latent.py.
 """
 from __future__ import annotations
 
-import math
 import pathlib
 import sys
 from dataclasses import dataclass
@@ -20,16 +21,16 @@ import torch.nn.functional as F
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "bots"))
-from zkbot.policy import featurize as fz, net as npnet, rawframe as rf, tables  # noqa: E402
-from zkbot.policy.bundle import GATE_DIM  # noqa: E402
+from zkbot.policy import featurize as fz, rawframe as rf  # noqa: E402
 
-D, LAYERS, HEADS = npnet.D, npnet.LAYERS, npnet.HEADS
 ILLEGAL = -1e9
+NAME_DIM = 16
+ID_DIM = 8                   # each of ally team and player
+KEEP_START = 2.0
+ROUTE_SCALE_START = -3.0     # softplus gives 0.05 nats per walking second: near regions first, and a far one is still sampled
+HEAD_GAIN = 0.01             # an untrained kind head says only what KEEP_START says
 KINDS_WITH_REGION, KINDS_WITH_FINE = fz.KINDS_WITH_REGION, fz.KINDS_WITH_FINE
 
-
-# What the encoder reads, per recurrent step.  Everything else is read once per minibatch, from `join`.
-ENCODER_FIELDS = frozenset(("unit_x", "unit_name", "unit_ally", "unit_player", "reg_x", "site_x", "feat_x", "glob_x", "tok_kind", "bucket", "key_mask", "gate_i", "gate_a", "gate_b", "gate_x"))
 JOINED_FIELDS = ("unit_x", "unit_name", "unit_ally", "unit_player", "hidden_ally", "hidden_player", "unit_mask", "reg_x", "reg_mask", "site_x", "site_mask", "feat_x", "feat_mask", "glob_x", "tok_kind", "ctrl_mask", "kind_mask", "ptr_enemy",
                  "enemy_tokens", "enemy_mask", "ptr_region", "ptr_jump", "ptr_wait", "ptr_produce", "route_bias", "hidden_x", "hidden_name", "hidden_mask")
 
@@ -48,12 +49,7 @@ class Batch:
     feat_mask: object
     glob_x: object
     tok_kind: object
-    bucket: object
     key_mask: object
-    gate_i: object          # G: decision of each gate
-    gate_a: object          # G
-    gate_b: object          # G
-    gate_x: object          # G x GATE_DIM
     ctrl_mask: object       # B x C
     kind_mask: object       # B x C x KIND_COUNT
     ptr_enemy: object       # B x 3 x C x E
@@ -81,8 +77,8 @@ class Batch:
         return Batch(**out)
 
 
-def collate(items: list[fz.Tensors], regions: int = 0, pairs: bool = True) -> Batch:
-    """regions: pad to at least this many, so the recurrent state's shape holds across a batch.  pairs: whether anything will read pair buckets, which are most of its memory."""
+def collate(items: list[fz.Tensors], regions: int = 0) -> Batch:
+    """regions: pad to at least this many, so batches of one map's decisions line up."""
     b = len(items)
     u = max(max(len(t.unit_x) for t in items), 1)
     r = max(max(len(t.reg_x) for t in items), 1, regions)
@@ -110,7 +106,6 @@ def collate(items: list[fz.Tensors], regions: int = 0, pairs: bool = True) -> Ba
     tok_kind[:, u + r + s:u + r + s + f] = fz.TK_FEATURE
     tok_kind[:, -2] = fz.TK_GLOBAL
     tok_kind[:, -1] = fz.TK_MEMORY_STATE
-    bucket = np.full((b, n, n), fz.MEMORY_BUCKET, np.int64) if pairs else None
     true_name = np.zeros((b, u), np.int64)
     key_mask = np.zeros((b, n), bool)
     key_mask[:, -2:] = True
@@ -129,7 +124,6 @@ def collate(items: list[fz.Tensors], regions: int = 0, pairs: bool = True) -> Ba
     hidden_mask = np.zeros((b, h), bool)
     hidden_ally = np.zeros((b, h), np.int64)
     hidden_player = np.zeros((b, h), np.int64)
-    gate_i, gate_a, gate_b, gate_x = [], [], [], []
     for i, t in enumerate(items):
         nu, nr, ns, nc, ne = len(t.unit_x), len(t.reg_x), len(t.site_x), t.controllable, len(t.enemy_tokens)
         unit_x[i, :nu], unit_name[i, :nu], unit_mask[i, :nu] = t.unit_x, t.unit_name, True
@@ -141,10 +135,7 @@ def collate(items: list[fz.Tensors], regions: int = 0, pairs: bool = True) -> Ba
         feat_x[i, :nf], feat_mask[i, :nf] = t.feat_x, True
         glob_x[i] = t.glob_x
         tok_kind[i, :nu] = t.tok_kind[:nu]
-        idx = np.concatenate((np.arange(nu), u + np.arange(nr), u + r + np.arange(ns), u + r + s + np.arange(nf), [u + r + s + f]))
-        if pairs:
-            bucket[i][np.ix_(idx, idx)] = t.pair_bucket
-        key_mask[i, idx] = True
+        key_mask[i, np.concatenate((np.arange(nu), u + np.arange(nr), u + r + np.arange(ns), u + r + s + np.arange(nf), [u + r + s + f]))] = True
         ctrl_mask[i, :nc] = True
         kind_mask[i, :nc] = t.kind_mask
         if ne:
@@ -159,19 +150,13 @@ def collate(items: list[fz.Tensors], regions: int = 0, pairs: bool = True) -> Ba
         nh = len(t.hidden_x)
         hidden_x[i, :nh], hidden_name[i, :nh], hidden_mask[i, :nh] = t.hidden_x, t.hidden_name, True
         hidden_ally[i, :nh], hidden_player[i, :nh] = t.hidden_ally, t.hidden_player
-        gate_i.append(np.full(len(t.gate_a), i, np.int64))
-        gate_a.append(t.gate_a.astype(np.int64))
-        gate_b.append(t.gate_b.astype(np.int64))
-        gate_x.append(t.gate_x)
-    return Batch(unit_x, unit_name, unit_mask, reg_x, reg_mask, site_x, site_mask, feat_x, feat_mask, glob_x, tok_kind, bucket, key_mask,
-                 np.concatenate(gate_i), np.concatenate(gate_a), np.concatenate(gate_b), np.concatenate(gate_x),
+    return Batch(unit_x, unit_name, unit_mask, reg_x, reg_mask, site_x, site_mask, feat_x, feat_mask, glob_x, tok_kind, key_mask,
                  ctrl_mask, kind_mask, ptr_enemy, enemy_tokens, enemy_mask, ptr_region, ptr_jump, ptr_wait, ptr_produce, route_bias, hidden_x, hidden_name, hidden_mask,
                  unit_ally, unit_player, hidden_ally, hidden_player, true_name)
 
 
 def join(batches: list[Batch]) -> Batch:
-    """Every decision of these batches as one, for what doesn't read the memory state: the heads and the critic.  Each token group
-    is padded on its own, so the groups still line up.  Pair buckets and gates stay out, since only the encoder reads them."""
+    """Every decision of these batches as one.  Each token group is padded on its own, so the groups still line up."""
     out: dict[str, object] = {name: None for name in Batch.__dataclass_fields__}
     for name in JOINED_FIELDS:
         parts = [getattr(b, name) for b in batches]
@@ -184,23 +169,6 @@ def join(batches: list[Batch]) -> Batch:
             at += len(p)
         out[name] = whole
     return Batch(**out)
-
-
-class Gru(nn.Module):
-    """Written out so that the numpy forward has one formula to match, not torch's internal one."""
-
-    def __init__(self, n_in: int, n_state: int):
-        super().__init__()
-        self.ih = nn.Linear(n_in, 3 * n_state)
-        self.hh = nn.Linear(n_state, 3 * n_state)
-
-    def forward(self, x: torch.Tensor, h: torch.Tensor) -> torch.Tensor:
-        new_i, gate_i, reset_i = self.ih(x).chunk(3, -1)
-        new_h, gate_h, reset_h = self.hh(h).chunk(3, -1)
-        reset = torch.sigmoid(reset_h + reset_i)
-        gate = torch.sigmoid(gate_h + gate_i)
-        new = torch.tanh(new_i + new_h * reset)
-        return (h - new) * gate + new
 
 
 class Block(nn.Module):
@@ -227,111 +195,6 @@ class Block(nn.Module):
         return h + self.ff2(F.gelu(self.ff1(self.ln2(h)), approximate="tanh"))
 
 
-class Actor(nn.Module):
-    encoder_fields = ENCODER_FIELDS
-    recurrent = True
-    uses_pairs = True
-
-    def __init__(self, vocabulary: int):
-        super().__init__()
-        self.name_embed = nn.Embedding(vocabulary, npnet.NAME_DIM)
-        self.kind_embed = nn.Embedding(fz.TOKEN_KINDS, D)
-        self.ally_embed = nn.Embedding(fz.MAX_ALLY_TEAMS + 1, npnet.ID_DIM)
-        self.player_embed = nn.Embedding(fz.MAX_PLAYERS + 1, npnet.ID_DIM)
-        self.unit_in0 = nn.Linear(fz.UNIT_DIM + npnet.NAME_DIM + 2 * npnet.ID_DIM, D)
-        self.unit_in1 = nn.Linear(D, D)
-        self.reg_in = nn.Linear(fz.REGION_DIM, D)
-        self.site_in = nn.Linear(fz.SITE_DIM, D)
-        self.feat_in = nn.Linear(fz.FEATURE_DIM, D)
-        self.glob_in = nn.Linear(fz.GLOBAL_DIM, D)
-        self.reg_mem = nn.Linear(npnet.REGION_STATE, D)
-        self.mem_in = nn.Linear(npnet.GLOBAL_STATE, D)
-        self.gate_w = nn.Linear(GATE_DIM, 1)
-        self.gate_m = nn.Linear(D, D)
-        self.blocks = nn.ModuleList(Block(D, HEADS) for _ in range(LAYERS))
-        self.lnf = nn.LayerNorm(D)
-        self.gru_g = Gru(D, npnet.GLOBAL_STATE)
-        self.gru_r = Gru(D, npnet.REGION_STATE)
-        self.head_kind = nn.Linear(D, rf.KIND_COUNT)
-        self.q_enemy = nn.Linear(D, D)
-        self.q_own = nn.Linear(D, D)
-        self.q_region = nn.Linear(D, D)
-        self.q_site = nn.Linear(D, D)
-        self.q_type = nn.Linear(D, D)
-        self.q_feature = nn.Linear(D, D)
-        self.fine0 = nn.Linear(2 * D, D)
-        self.fine1 = nn.Linear(D, fz.FINE_OPTIONS)
-        table = tables.table()
-        self.type_key = nn.Linear(tables.TYPE_DIM, D)
-        self.register_buffer("produce_stats", torch.from_numpy(table.stats[table.producible].copy()), persistent=False)
-        self.route_scale = nn.Parameter(torch.tensor(npnet.ROUTE_SCALE_START))
-        self.pair_w = nn.Parameter(torch.zeros(npnet.RBF_DIM, LAYERS * HEADS))
-        self.register_buffer("rbf", torch.randn(fz.NUM_BUCKETS, npnet.RBF_DIM))
-        nn.init.normal_(self.head_kind.weight, std=npnet.HEAD_GAIN / math.sqrt(D))
-        nn.init.zeros_(self.head_kind.bias)
-        with torch.no_grad():
-            self.head_kind.bias[rf.KEEP] = npnet.KEEP_START
-
-    def encode(self, b: Batch, glob: torch.Tensor, regions: torch.Tensor, name_dropout: float = 0.0, unknown: int = -1, pair_grad: float = 1.0):
-        """Returns all tokens and the new recurrent state.  pair_grad scales the gradient reaching the pair bias, and 0 stops it,
-        with no effect on the output: this lookup's backward is most of what the GPU does in training."""
-        names = b.unit_name
-        if name_dropout > 0.0:
-            names = torch.where(torch.rand(names.shape, device=names.device) < name_dropout, torch.full_like(names, unknown), names)
-        units = torch.cat((b.unit_x, self.name_embed(names), self.ally_embed(b.unit_ally), self.player_embed(b.unit_player)), -1)
-        hu = self.unit_in1(F.gelu(self.unit_in0(units), approximate="tanh"))
-        hr = self.reg_in(b.reg_x) + self.reg_mem(regions)
-        if len(b.gate_a):
-            a = self.gate_w(b.gate_x)[:, 0]
-            nb, nr = hr.shape[:2]
-            adjacency = torch.zeros((nb, nr, nr), device=hr.device, dtype=a.dtype)
-            adjacency = adjacency.index_put((b.gate_i, b.gate_a, b.gate_b), a).index_put((b.gate_i, b.gate_b, b.gate_a), a)
-            hr = hr + self.gate_m(adjacency.to(hr.dtype) @ hr)
-        hs = self.site_in(b.site_x)
-        hf = self.feat_in(b.feat_x)
-        hg = self.glob_in(b.glob_x)[:, None]
-        hm = self.mem_in(glob)[:, None]
-        h = torch.cat((hu, hr, hs, hf, hg, hm), 1) + self.kind_embed(b.tok_kind)
-        # A small table looked up per pair: backward keeps indices, not every pair's RBF features.  index_select because its
-        # backward is an index_add, where plain indexing's sorts every pair on the GPU.
-        table = self.rbf @ self.pair_w.to(self.rbf.dtype)
-        if pair_grad != 1.0:
-            still = table.detach()
-            table = still if pair_grad == 0.0 else still + pair_grad * (table - still)
-        bias = table.index_select(0, b.bucket.view(-1)).view(*b.bucket.shape, -1).permute(0, 3, 1, 2)
-        for i, block in enumerate(self.blocks):
-            h = block(h, bias[:, i * HEADS:(i + 1) * HEADS], b.key_mask)
-        h = self.lnf(h)
-        u, r, s, f = hu.shape[1], hr.shape[1], hs.shape[1], hf.shape[1]
-        new_glob = self.gru_g(h[:, u + r + s + f], glob)
-        new_regions = self.gru_r(h[:, u:u + r], regions)
-        return h, h[:, :u], h[:, u:u + r], new_glob, new_regions
-
-    def initial_state(self, seats: int, regions: int, device: str) -> tuple[torch.Tensor, torch.Tensor]:
-        return initial_state(seats, regions, device)
-
-    def decide(self, b: Batch, glob: torch.Tensor, regions: torch.Tensor):
-        """A decision while playing: what the heads read, what to keep for next time, and anything training will need of this decision."""
-        _, units, reg_h, new_glob, new_regions = self.encode(b, glob, regions)
-        return units, reg_h, new_glob, new_regions, {}
-
-    def heads(self, b: Batch, units: torch.Tensor, reg_h: torch.Tensor):
-        """Float32 logits with the illegal choices taken out: kind, enemy per pointer kind, and what to produce.  Which regions are legal depends on the kind: region_legal."""
-        c = b.kind_mask.shape[1]
-        me = units[:, :c]
-        kind = self.head_kind(me).float().masked_fill(~b.kind_mask, ILLEGAL)
-        region = (self.q_region(me) @ reg_h.transpose(1, 2)).float() / math.sqrt(D)
-        region = region - F.softplus(self.route_scale).float() * b.route_bias
-        enemy_h = torch.gather(units, 1, b.enemy_tokens[:, :, None].expand(-1, -1, D))
-        enemy = (self.q_enemy(me) @ enemy_h.transpose(1, 2)).float() / math.sqrt(D)
-        enemy = enemy[:, None].expand(-1, b.ptr_enemy.shape[1], -1, -1).masked_fill(~b.ptr_enemy, ILLEGAL)
-        produce = (self.q_type(me) @ self.type_key(self.produce_stats).T).float() / math.sqrt(D)
-        return kind, region, enemy, enemy_h, produce.masked_fill(~b.ptr_produce, ILLEGAL)
-
-    def fine(self, me: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        return self.fine1(F.gelu(self.fine0(torch.cat((me, target), -1)), approximate="tanh")).float()
-
-
 def region_legal(b: Batch, scores: torch.Tensor, kind: torch.Tensor) -> torch.Tensor:
     """The region scores, with what each unit's kind can't go to taken out."""
     reach = torch.isin(kind, torch.tensor((rf.JUMP, rf.THROW), device=kind.device))[:, :, None]
@@ -356,12 +219,11 @@ def _sample(logits: torch.Tensor) -> torch.Tensor:
 
 
 class Critic(nn.Module):
-    """A separate encoder over the privileged frame, with the actor's state.  Never in the bot."""
+    """A separate encoder over the privileged frame.  Never in the bot."""
     D = 128
     LAYERS = 2
 
-    def __init__(self, vocabulary: int, actor_state: int = npnet.GLOBAL_STATE):
-        """actor_state: the size of what it's told of the actor's memory, 0 for an actor with none."""
+    def __init__(self, vocabulary: int):
         super().__init__()
         d = self.D
         self.name_embed = nn.Embedding(vocabulary, 8)
@@ -372,20 +234,20 @@ class Critic(nn.Module):
         self.reg_in = nn.Linear(fz.REGION_DIM, d)
         self.site_in = nn.Linear(fz.SITE_DIM, d)
         self.feat_in = nn.Linear(fz.FEATURE_DIM, d)
-        self.glob_in = nn.Linear(fz.GLOBAL_DIM + actor_state, d)
+        self.glob_in = nn.Linear(fz.GLOBAL_DIM, d)
         self.blocks = nn.ModuleList(Block(d, 4) for _ in range(self.LAYERS))
         self.lnf = nn.LayerNorm(d)
         self.value = nn.Linear(d, 1)
         nn.init.zeros_(self.value.weight)
         nn.init.zeros_(self.value.bias)
 
-    def forward(self, b: Batch, actor_state: torch.Tensor | None) -> torch.Tensor:
+    def forward(self, b: Batch) -> torch.Tensor:
         hu = self.unit_in(torch.cat((b.unit_x, self.name_embed(b.unit_name), self.ally_embed(b.unit_ally), self.player_embed(b.unit_player)), -1))
         hh = self.unit_in(torch.cat((b.hidden_x, self.name_embed(b.hidden_name), self.ally_embed(b.hidden_ally), self.player_embed(b.hidden_player)), -1)) + self.kind_embed.weight[fz.TK_HIDDEN]
         hr = self.reg_in(b.reg_x) + self.kind_embed.weight[fz.TK_REGION]
         hs = self.site_in(b.site_x) + self.kind_embed.weight[fz.TK_SITE]
         hf = self.feat_in(b.feat_x) + self.kind_embed.weight[fz.TK_FEATURE]
-        hg = self.glob_in(b.glob_x if actor_state is None else torch.cat((b.glob_x, actor_state.detach()), -1))[:, None]
+        hg = self.glob_in(b.glob_x)[:, None]
         hu = hu + self.kind_embed(b.tok_kind[:, :hu.shape[1]])
         h = torch.cat((hg, hu, hh, hr, hs, hf), 1)
         mask = torch.cat((torch.ones_like(b.unit_mask[:, :1]), b.unit_mask, b.hidden_mask, b.reg_mask, b.site_mask, b.feat_mask), 1)
@@ -404,7 +266,7 @@ class Actions:
     logp: torch.Tensor      # B x C
 
 
-def sample_actions(actor: Actor, b: Batch, units: torch.Tensor, reg_h: torch.Tensor) -> Actions:
+def sample_actions(actor: nn.Module, b: Batch, units: torch.Tensor, reg_h: torch.Tensor) -> Actions:
     kind_l, region_l, enemy_l, enemy_h, produce_l = actor.heads(b, units, reg_h)
     kind = _sample(kind_l)
     logp = _pick(kind_l, kind)
@@ -436,7 +298,7 @@ def sample_actions(actor: Actor, b: Batch, units: torch.Tensor, reg_h: torch.Ten
                    produce.masked_fill(~uses_produce | off, -1), logp.masked_fill(off, 0.0))
 
 
-def evaluate_actions(actor: Actor, b: Batch, units: torch.Tensor, reg_h: torch.Tensor, a: Actions) -> tuple[torch.Tensor, dict[str, tuple[torch.Tensor, torch.Tensor]]]:
+def evaluate_actions(actor: nn.Module, b: Batch, units: torch.Tensor, reg_h: torch.Tensor, a: Actions) -> tuple[torch.Tensor, dict[str, tuple[torch.Tensor, torch.Tensor]]]:
     """Log-probability of stored actions, per unit; and each head's entropy with the mask of units it applies to."""
     kind_l, region_l, enemy_l, enemy_h, produce_l = actor.heads(b, units, reg_h)
     legal_choices = b.kind_mask.sum(-1) > 1
@@ -468,11 +330,3 @@ def evaluate_actions(actor: Actor, b: Batch, units: torch.Tensor, reg_h: torch.T
     ent["produce"] = (_masked_entropy(produce_l), uses_produce)
     return logp.masked_fill(~b.ctrl_mask, 0.0), ent
 
-
-def initial_state(batch: int, regions: int, device: str) -> tuple[torch.Tensor, torch.Tensor]:
-    return torch.zeros(batch, npnet.GLOBAL_STATE, device=device), torch.zeros(batch, regions, npnet.REGION_STATE, device=device)
-
-
-def parameter_counts(vocabulary: int) -> tuple[int, int]:
-    actor, critic = Actor(vocabulary), Critic(vocabulary)
-    return sum(p.numel() for p in actor.parameters()), sum(p.numel() for p in critic.parameters())

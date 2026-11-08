@@ -158,7 +158,7 @@ class Client:
     # ------------------------------------------------------------------ query
     query_time = 0.0
     query_counts: dict = {}
-    # Game frame of the current observation; set by the brain each step.
+    # Game frame of the current observation; set by the host each step.
     frame = 0
     # Results of these queries change slowly (terrain, build-site occupancy),
     # so identical queries within the TTL (in frames) reuse the answer instead

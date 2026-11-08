@@ -13,7 +13,7 @@ try:
     import policy_sim_env as se
     import policy_opening as po
     import zksim
-    from zkbot.policy import featurize as fz, rawframe as rf
+    from zkbot.policy import bundle as bd, featurize as fz, rawframe as rf
 except OSError:
     pytest.skip("needs the built sim library", allow_module_level=True)
 
@@ -213,14 +213,15 @@ def bundle_spot_income(bundle: bd.Bundle, x: float, z: float) -> float:
 
 
 def test_the_commander_finishes_on_the_factory_and_income_shows_the_plan():
-    # The old script: the army's raids take extractors early, and this test is about the opening's income, not the raids.
-    env = se.SimEnv(16, 7, ["scripts"], threads=4, scripts=("fight", "fight"))
+    # Without the economy script, which takes the commander off the factory once the opening's done.
+    # The army script raids extractors, which this test has to skip, so it plays more games than it needs.
+    env = se.SimEnv(40, 7, ["scripts"], threads=4, economy=False)
     env.begin()
     for _ in range(420):                                # 3.5 minutes, early enough that few games have ended
         env.step(0.0)
         env.finished_seats()
     checked = 0
-    for g in range(16):
+    for g in range(40):
         for s in (0, 1):
             seat = env.seats[g][s]
             units = env.batch.records[g, s, :env.batch.counts[g, s]]

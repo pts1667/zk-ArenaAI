@@ -119,8 +119,13 @@ class TypeTable:
         self.produces = np.zeros((n, len(self.producible)), bool)
         for maker, options in makers.items():
             self.produces[maker, np.searchsorted(self.producible, options)] = True
+        # What a silo makes, and what fires a manual weapon from where it stands (the Trinity): neither moves, and neither counts as
+        # armed in the type stats, but the policy aims them (2026-11-08), at what's in sight or on radar.
+        self.missile = np.zeros(n, bool)
+        self.missile[[row[o] for options in special["silos"].values() for o in options if o in row]] = True
+        self.launcher = self.manualfire & ~self.mobile
         # Those the policy gives orders to though they aren't fighters that walk.
-        self.acts_in_place = self.switches | self.produces.any(axis=1)
+        self.acts_in_place = self.switches | self.produces.any(axis=1) | self.missile | self.launcher
 
     def rows(self, def_ids: np.ndarray) -> np.ndarray:
         """Catalog row per def id; -1 and anything unheard of give the unknown row."""

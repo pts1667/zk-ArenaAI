@@ -1,14 +1,10 @@
-"""Data structures shared by the bot modules."""
+"""A unit as the host keeps it."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from . import units
-
-
-def _int(value: float) -> int:
-    return int(round(float(value)))
 
 
 @dataclass
@@ -59,23 +55,3 @@ class UnitInfo:
     @property
     def is_air(self) -> bool:
         return units.is_air(self.data)
-
-@dataclass
-class Task:
-    key: str
-    kind: str
-    def_id: int
-    x: float
-    z: float
-    priority: float
-    facing: int = 0
-    assignees: set[int] = field(default_factory=set)
-    created: float = 0.0
-    placed: bool = False
-    placement_attempts: int = 0
-    last_placement_frame: int = -10**9
-    spot_index: int | None = None
-    anchor: tuple[float, float] | None = None
-    max_assignees: int = 1
-    unplaceable: bool = False
-    created_frame: int = 0

@@ -12,6 +12,7 @@ from typing import Any
 
 from .params import FLAGS as _FLAGS
 
+
 _HERE = pathlib.Path(__file__).resolve().parent
 _DATA_PATH = _HERE / "data" / "units.json"
 
@@ -69,19 +70,8 @@ def is_mex(d: dict[str, Any] | None) -> bool:
     return bool(d and d.get("name") == "staticmex")
 
 
-def is_energy(d: dict[str, Any] | None) -> bool:
-    return bool(d and d.get("isEnergy"))
-
-
 def is_defense(d: dict[str, Any] | None) -> bool:
     return bool(d and d.get("isDefense"))
-
-
-def is_aa(d: dict[str, Any] | None) -> bool:
-    if not d:
-        return False
-    n = d.get("name", "")
-    return n.endswith("aa") or "aa" in n or n.startswith("turretaa") or d.get("role") == "aa"
 
 
 def is_air(d: dict[str, Any] | None) -> bool:
@@ -90,13 +80,6 @@ def is_air(d: dict[str, Any] | None) -> bool:
 
 def cost(d: dict[str, Any] | None) -> float:
     return float((d or {}).get("costM") or 0)
-
-
-def value(d: dict[str, Any] | None) -> float:
-    """Rough combat value of a unit, used only for high-level comparisons."""
-    if not d:
-        return 0.0
-    return max(float(d.get("costM") or 0.0), 1.0)
 
 
 # units.json leaves several mainline units as a generic "combat" role, which
@@ -133,132 +116,3 @@ def role_of(d: dict[str, Any] | None) -> str:
             if inferred not in ("other", "static", "builder"):
                 return inferred
     return r
-
-
-# Factory unit preferences.  These names are from the standard Zero-K factories.
-FACTORY_UNITS = {
-    "factorycloak": {
-        "builder": "cloakcon",
-        "raid": "cloakraid",
-        "heavyraid": "cloakheavyraid",
-        "riot": "cloakriot",
-        "skirm": "cloakskirm",
-        "assault": "cloakassault",
-        "arty": "cloakarty",
-        "aa": "cloakaa",
-        "snipe": "cloaksnipe",
-        "bomb": "cloakbomb",
-        "bomb": "cloakbomb",
-        "jammer": "cloakjammer",
-    },
-    "factoryveh": {
-        "builder": "vehcon",
-        "raid": "vehraid",
-        "scout": "vehscout",
-        "skirm": "vehsupport",
-        "riot": "vehriot",
-        "assault": "vehassault",
-        "heavyarty": "vehheavyarty",
-        "aa": "vehaa",
-    },
-    "factoryhover": {
-        "builder": "hovercon",
-        "raid": "hoverraid",
-        "heavyraid": "hoverheavyraid",
-        "skirm": "hoverskirm",
-        "riot": "hoverriot",
-        "assault": "hoverassault",
-        "arty": "hoverarty",
-        "aa": "hoveraa",
-    },
-    "factoryplane": {
-        "builder": "planecon",
-        "scout": "planescout",
-        "fighter": "planefighter",
-        "heavyfighter": "planeheavyfighter",
-        "bomb": "bomberprec",
-        "riot": "bomberriot",
-        "heavy": "bomberheavy",
-        "assault": "bomberassault",
-        "aa": "planefighter",
-    },
-    "factorygunship": {
-        "builder": "gunshipcon",
-        "scout": "gunshipcon",
-        "emp": "gunshipemp",
-        "raid": "gunshipraid",
-        "skirm": "gunshipskirm",
-        "assault": "gunshipassault",
-        "aa": "gunshipaa",
-    },
-    "striderhub": {
-        "assault": "striderdante",
-        "heavy": "striderbantha",
-        "riot": "striderscorpion",
-        "arty": "striderarty",
-        "aa": "striderantiheavy",
-        "antiheavy": "striderantiheavy",
-    },
-    "factoryspider": {
-        "builder": "spidercon",
-        "scout": "spiderscout",
-        "assault": "spiderassault",
-        "riot": "spiderriot",
-        "skirm": "spiderskirm",
-        "aa": "spideraa",
-        "antiheavy": "spiderantiheavy",
-    },
-    "factoryjump": {
-        "builder": "jumpcon",
-        "scout": "jumpscout",
-        "raid": "jumpraid",
-        "skirm": "jumpskirm",
-        "assault": "jumpassault",
-        "arty": "jumparty",
-        "aa": "jumpaa",
-    },
-    "factorytank": {
-        "builder": "tankcon",
-        "raid": "tankraid",
-        "heavyraid": "tankheavyraid",
-        "riot": "tankriot",
-        "assault": "tankassault",
-        "heavyassault": "tankheavyassault",
-        "arty": "tankarty",
-        "aa": "tankaa",
-    },
-    "factoryshield": {
-        "builder": "shieldcon",
-        "scout": "shieldscout",
-        "raid": "shieldraid",
-        "skirm": "shieldskirm",
-        "riot": "shieldriot",
-        "assault": "shieldassault",
-    },
-    "factoryamph": {
-        "builder": "amphcon",
-        "raid": "amphraid",
-        "riot": "amphriot",
-        "assault": "amphassault",
-        "aa": "amphaa",
-    },
-}
-
-
-# Reactors that explode on death: Singularity areaOfEffect 1280 (radius 640,
-# 9500 damage); Fusion's atomic blast is smaller.  Radii include a margin.
-BLAST_RADIUS = {"energysingu": 720.0, "energyfusion": 380.0}
-
-
-def factory_unit(factory_name: str, role: str) -> int | None:
-    table = FACTORY_UNITS.get(factory_name) or {}
-    did = id_of(table.get(role, ""))
-    if did is None and "noinfer" not in _FLAGS:
-        # Roles missing from the hand table (e.g. shield AA/artillery, or a
-        # factory the table doesn't know) come from the stat catalog.
-        from . import catalog
-
-        name = catalog.pick(factory_name, role)
-        if name:
-            did = id_of(name)
-    return did

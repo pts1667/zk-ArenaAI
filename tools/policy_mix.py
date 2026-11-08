@@ -13,6 +13,10 @@ cheapest unit on the factory's roster with that role that the sim models.
 
 A role is built when it's furthest behind its share of the units the side has started.  Losses don't change the mix, so a side that
 loses its raiders keeps building raiders in the same proportion as before.
+
+Constructors aren't in the shares: the factory makes one whenever the side has fewer than CONSTRUCTORS says for the minute, or
+than one for each INCOME_PER_CONSTRUCTOR of metal income, lost ones included, for the economy script (policy_eco.py) to use.
+Without enough of them to spend it, income piles up in storage and is lost.
 """
 from __future__ import annotations
 
@@ -27,6 +31,10 @@ if TYPE_CHECKING:
     from policy_script import ScriptData
 
 SCOUT = "scout"
+BUILDER = "builder"
+CONSTRUCTORS = ((0.0, 0.0), (1.0, 1.0), (3.0, 2.0), (5.0, 3.0), (7.0, 4.0), (10.0, 5.0), (14.0, 6.0))   # (minute, how many), stepwise
+INCOME_PER_CONSTRUCTOR = 3.0    # metal a second: less than a constructor builds (5 to 7.5), since much of its time is walking
+MOST_CONSTRUCTORS = 20
 # Each role's share by minute, interpolated between the points and flat past the last.  Raiders are the whole factory to begin with;
 # the other roles wait for the minutes CircuitAI's early tiers also wait for.
 SCHEDULE: dict[str, tuple[tuple[float, float], ...]] = {
@@ -45,6 +53,11 @@ ROLE_ORDER = ("raid", "riot", "assault", "skirm", "arty", "aa", "snipe")     # t
 
 def scout_quota(seconds: float) -> int:
     return sum(seconds >= t for t in SCOUTS_FROM)
+
+
+def constructor_quota(seconds: float, metal_income: float = 0.0) -> int:
+    by_time = int(max(n for m, n in CONSTRUCTORS if seconds >= m * 60.0))
+    return min(MOST_CONSTRUCTORS, max(by_time, int(metal_income / INCOME_PER_CONSTRUCTOR)))
 
 
 @dataclass
@@ -102,9 +115,12 @@ class Mix:
             self._menus[factory_row] = best
         return self._menus[factory_row]
 
-    def choose(self, factory_row: int, seconds: float) -> int | None:
-        """The table row of the unit this factory should start next, or None when none of its roles is due."""
+    def choose(self, factory_row: int, seconds: float, constructors: int | None = None, metal_income: float = 0.0) -> int | None:
+        """The table row of the unit this factory should start next, or None when none of its roles is due.  constructors: how many
+        the side has, being built included, or None to leave constructors out."""
         menu = self.menu(factory_row)
+        if BUILDER in menu and constructors is not None and constructors < constructor_quota(seconds, metal_income):
+            return menu[BUILDER]
         if SCOUT in menu and self.made.get(SCOUT, 0) < scout_quota(seconds):
             return menu[SCOUT]
         share = {role: w for role, w in shares(seconds, self.seen).items() if w > 0.0 and role in menu}

@@ -172,7 +172,7 @@ def test_a_factory_is_told_what_to_build_only_when_that_changes_and_it_is_its_ow
                 last[key] = name
                 told += 1
                 role = env.script_data.role_of[env.script_data.row_of_name[name]]
-                assert role in pm.ROLE_ORDER + (pm.SCOUT,)
+                assert role in pm.ROLE_ORDER + (pm.SCOUT, pm.BUILDER)
     assert told > 0
 
 
@@ -193,10 +193,16 @@ def test_the_army_gives_the_same_orders_on_any_number_of_threads():
 def test_a_factory_is_given_a_produce_only_when_its_next_type_changes(data):
     script = _script(data)
     factory = _units((7, CLOAK, 100.0, 100.0))
-    first = script.orders(factory, _no_enemies(), 60.0)
+    first = script.orders(factory, _no_enemies(), 30.0)     # before the first constructor is due
     assert [(int(o["unit"]), int(o["kind"])) for o in first] == [(7, rf.PRODUCE)]
     assert int(first[0]["target"]) == int(data.catalog_row[data.row_of_name["cloakraid"]])
-    assert len(script.orders(factory, _no_enemies(), 90.0)) == 0
+    assert len(script.orders(factory, _no_enemies(), 50.0)) == 0
+    # From a minute the side wants a constructor, and has none: the factory makes one, and goes back to raiders once it's there.
+    con = script.orders(factory, _no_enemies(), 60.0)
+    assert data.role_of[data.row_of_index(int(con[0]["target"]))] == pm.BUILDER
+    with_con = np.concatenate((factory, _units((8, "cloakcon", 120.0, 100.0))))
+    back = script.orders(with_con, _no_enemies(), 66.0)
+    assert int(back[0]["target"]) == int(data.catalog_row[data.row_of_name["cloakraid"]])
 
 
 def test_scouts_move_between_waypoints(data):

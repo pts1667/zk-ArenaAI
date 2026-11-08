@@ -8,7 +8,7 @@ import sys
 import numpy as np
 import pytest
 
-from zkbot.policy import bundle as bd, featurize as fz, net, rawframe as rf, tables
+from zkbot.policy import bundle as bd, featurize as fz, rawframe as rf, tables
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 DATA = pathlib.Path(__file__).resolve().parent / "data"
@@ -76,7 +76,7 @@ def test_features_match_the_reviewed_output(i):
 
 
 @pytest.mark.parametrize("i", range(5))
-def test_live_frames_have_legal_actions_and_decide(i):
+def test_live_frames_have_legal_actions(i):
     frames, bundle = golden()
     table = tables.table()
     t = fz.featurize(frames[i], bundle, table)
@@ -84,9 +84,6 @@ def test_live_frames_have_legal_actions_and_decide(i):
     assert t.ptr_region.any(axis=1).all()
     for slot, kind in enumerate(fz.ENEMY_POINTER_KINDS):
         assert t.ptr_enemy[slot][t.kind_mask[:, kind]].any(axis=1).all()
-    policy = net.Policy(net.random_weights(len(table.names) + 1, seed=i))
-    d = policy.decide(t, net.State.initial(bundle.regions), np.random.default_rng(i))
-    assert t.kind_mask[np.arange(t.controllable), d.kind].all()
 
 
 def test_economy_inputs_stay_out_at_stage_2():

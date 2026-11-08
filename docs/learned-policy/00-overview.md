@@ -4,6 +4,13 @@ A single network plays Zero-K through the existing bot client, trained by self-p
 a simplified simulator, following StarCraft's Pluto (without its per-opponent opening
 bandit).  Status: stage 1 is built and Gate 1 was waived by the user on 2026-11-05 (below); Phase B's plumbing is built (below).  Nothing has been trained on the sim yet.
 
+**2026-11-08: the rules bot was removed** at the user's request, with ML stages 1 to 4 (`fightnet`, the value net, the
+observer, `tune.py`), `prun.py` and its reports.  `bots/zkbot` is now only the policy's host (`host.py`).  These documents
+are a record, so their references to that code (`brain.py`, `military.py`, `fightnet.py`, `prun.py`, line numbers) are left
+as they were: they point into the git tag `rules-bot-final`.  Superseded parts of the policy were removed the same day: the
+first actor over every token and its numpy forward, the toy, the JEPA frame model and the raider-only fight script.  Current
+state: `HANDOFF.md`.
+
 * [01-simulator.md](01-simulator.md): the simplified environment
 * [02-policy.md](02-policy.md): the network, its observations and actions
 * [03-training.md](03-training.md): the training pipeline, evaluation and rollout

@@ -1,25 +1,17 @@
-"""A frame model: compresses what a seat sees, from up to several hundred tokens, into one vector the main model can read.  Built after LeJEPA.
+"""What the frame encoders share: frames as padded token batches, the encoder that reads them (`FrameEncoder`, which
+frame_vae.py trains), shards of collected frames, and linear probes of what a latent knows.
 
-There's no decoder and no teacher network, and no stop-gradient (arXiv 2511.08544).  Several views of a frame go through one encoder.  Two things are asked of the result:
-
-    invariance  every view's embedding sits near the mean embedding of the global views
-    SIGReg      over a batch, embeddings look like a standard normal, tested along random directions
-
-The second is what stops every frame getting the same vector, the trivial way to pass the first.
-
-    python tools/frame_jepa.py train --data /mnt/d/zk-learned/frames/NAME --run /mnt/d/zk-learned/runs/NAME
-
-The encoder reads tokens as the main model's are padded, so `FrameEncoder` takes a `policy_model.Batch` as it stands.  Data: tools/frame_data.py.
+The encoder reads tokens as the policy's are padded, so `FrameEncoder` takes a `policy_model.Batch` as it stands, or a
+`FrameBatch` from `collate_frames`.  Data: tools/frame_data.py.  (A LeJEPA-trained encoder, frame_jepa.py, was tried first and
+removed on 2026-11-08: `03-training.md` 11.2 to 11.4.)
 """
 from __future__ import annotations
 
-import argparse
 import json
 import math
 import pathlib
 import sys
-import time
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass
 
 import numpy as np
 import torch
@@ -29,15 +21,14 @@ import torch.nn.functional as F
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT / "bots"))
-from policy_model import Block  # noqa: E402
-from zkbot.policy import featurize as fz, net as npnet, tables  # noqa: E402
+from policy_model import ID_DIM, NAME_DIM, Block  # noqa: E402
+from zkbot.policy import featurize as fz  # noqa: E402
 
 # The first two columns of each token group's features are its place on the map, -1 to 1.
 POSITION_COLUMN = {"unit": fz._I, "reg": 0, "site": 0, "feat": 0}
 FEATURE_LIMIT = 8.0         # a few type stats run to 72 (a jammer's); nothing else passes 4
 GROUPS = (("unit", fz.UNIT_DIM), ("reg", fz.REGION_DIM), ("site", fz.SITE_DIM), ("feat", fz.FEATURE_DIM))
 GROUP_KINDS = {"reg": fz.TK_REGION, "site": fz.TK_SITE, "feat": fz.TK_FEATURE}
-
 
 @dataclass(frozen=True)
 class EncoderConfig:
@@ -49,33 +40,9 @@ class EncoderConfig:
     region_pool: int = 0    # numbers each region token gets from summing its units, as attention averages and so can't count.  0: none.
     z: int = 256            # the latent: what the main model reads
     position_bands: int = 6
-    projector: int = 1024   # width of the projector's hidden layers
-    projected: int = 128    # what the losses see
+    projector: int = 1024   # unused: LeJEPA's projector, kept so that saved configs load
+    projected: int = 128    # unused, likewise
 
-
-@dataclass(frozen=True)
-class View:
-    """What one view keeps of a frame.  Each token is kept or not on its own, and the global token always is."""
-    keep_units: float = 1.0
-    keep_regions: float = 1.0
-    keep_sites: float = 1.0
-    keep_features: float = 1.0
-    unknown_names: float = 0.0  # share of unit names read as unknown, as in training the policy
-    position_jitter: float = 0.0    # of positions, in -1..1 of the map
-    later: bool = False         # the same seat's next frame, if there is one
-
-
-# The whole frame and a moment later are the global views, and the rest must match them from less.
-GLOBAL_VIEWS = (View(), View(later=True))
-LOCAL_VIEWS = (View(0.7, 0.8, 0.8, 0.7, 0.1, 0.005), View(0.7, 0.8, 0.8, 0.7, 0.1, 0.005), View(0.4, 0.5, 0.5, 0.4, 0.1, 0.01), View(0.4, 0.5, 0.5, 0.4, 0.1, 0.01))
-
-
-@dataclass(frozen=True)
-class LossConfig:
-    weight: float = 0.02    # lambda: (1 - lambda) invariance + lambda SIGReg, as in the paper's own code
-    slices: int = 1024
-    points: int = 17
-    t_max: float = 3.0
 
 
 @dataclass
@@ -121,28 +88,6 @@ def collate_frames(items: list[dict[str, np.ndarray]]) -> FrameBatch:
     return FrameBatch(**arrays)
 
 
-def apply_view(b: FrameBatch, view: View, unknown: int, generator: torch.Generator | None = None) -> FrameBatch:
-    """Drops tokens by their masks, on whatever device the batch is on."""
-    def kept(mask: torch.Tensor, rate: float) -> torch.Tensor:
-        if rate >= 1.0:
-            return mask
-        return mask & (torch.rand(mask.shape, device=mask.device, generator=generator) < rate)
-
-    def jittered(x: torch.Tensor, column: int) -> torch.Tensor:
-        if view.position_jitter <= 0.0:
-            return x
-        x = x.clone()
-        x[..., column:column + 2] += view.position_jitter * torch.randn(*x.shape[:-1], 2, device=x.device, generator=generator)
-        return x
-
-    names = b.unit_name
-    if view.unknown_names > 0.0:
-        names = torch.where(torch.rand(names.shape, device=names.device, generator=generator) < view.unknown_names, torch.full_like(names, unknown), names)
-    return replace(b, unit_mask=kept(b.unit_mask, view.keep_units), reg_mask=kept(b.reg_mask, view.keep_regions), site_mask=kept(b.site_mask, view.keep_sites),
-                   feat_mask=kept(b.feat_mask, view.keep_features), unit_name=names, unit_x=jittered(b.unit_x, POSITION_COLUMN["unit"]),
-                   reg_x=jittered(b.reg_x, POSITION_COLUMN["reg"]), site_x=jittered(b.site_x, POSITION_COLUMN["site"]), feat_x=jittered(b.feat_x, POSITION_COLUMN["feat"]))
-
-
 class CrossBlock(nn.Module):
     """Queries reading tokens."""
 
@@ -183,11 +128,11 @@ class FrameEncoder(nn.Module):
         self.cfg, self.vocabulary = cfg, vocabulary
         d = cfg.d
         extra = 4 * cfg.position_bands
-        self.name_embed = nn.Embedding(vocabulary, npnet.NAME_DIM)
-        self.ally_embed = nn.Embedding(fz.MAX_ALLY_TEAMS + 1, npnet.ID_DIM)
-        self.player_embed = nn.Embedding(fz.MAX_PLAYERS + 1, npnet.ID_DIM)
+        self.name_embed = nn.Embedding(vocabulary, NAME_DIM)
+        self.ally_embed = nn.Embedding(fz.MAX_ALLY_TEAMS + 1, ID_DIM)
+        self.player_embed = nn.Embedding(fz.MAX_PLAYERS + 1, ID_DIM)
         self.kind_embed = nn.Embedding(fz.TOKEN_KINDS, d)
-        self.unit_in0 = nn.Linear(fz.UNIT_DIM + extra + npnet.NAME_DIM + 2 * npnet.ID_DIM, d)
+        self.unit_in0 = nn.Linear(fz.UNIT_DIM + extra + NAME_DIM + 2 * ID_DIM, d)
         self.unit_in1 = nn.Linear(d, d)
         self.reg_in = nn.Linear(fz.REGION_DIM + extra + cfg.region_pool, d)
         if cfg.region_pool:
@@ -245,58 +190,8 @@ class FrameEncoder(nn.Module):
         return self.lnf(q)
 
 
-class FrameJepa(nn.Module):
-    """The encoder and the projector that only training sees."""
 
-    def __init__(self, cfg: EncoderConfig, vocabulary: int):
-        super().__init__()
-        self.encoder = FrameEncoder(cfg, vocabulary)
-        w = cfg.projector
-        self.projector = nn.Sequential(nn.Linear(cfg.z, w), nn.LayerNorm(w), nn.GELU(), nn.Linear(w, w), nn.LayerNorm(w), nn.GELU(), nn.Linear(w, cfg.projected))
-
-    def embed_views(self, now: FrameBatch, later: FrameBatch, views: tuple[View, ...], generator: torch.Generator | None = None) -> tuple[torch.Tensor, torch.Tensor]:
-        """Latents and projections, V x B x size, each view in its own forward pass."""
-        z = torch.stack([self.encoder(apply_view(later if v.later else now, v, self.encoder.vocabulary - 1, generator)) for v in views])
-        v, b, size = z.shape
-        return z, self.projector(z.view(v * b, size)).view(v, b, -1)
-
-
-# The loss -----------------------------------------------------------------------------------------------------------------------------------------------
-
-
-def epps_pulley(x: torch.Tensor, points: int = 17, t_max: float = 3.0) -> torch.Tensor:
-    """N x P -> P.  How far each column's empirical characteristic function is from a standard normal's, as N times a weighted squared distance."""
-    t = torch.linspace(0.0, t_max, points, device=x.device, dtype=x.dtype)
-    normal = torch.exp(-0.5 * t.square())
-    dt = t_max / (points - 1)
-    weights = torch.full((points,), 2.0 * dt, device=x.device, dtype=x.dtype)
-    weights[0] = weights[-1] = dt
-    weights = weights * normal
-    at = x.unsqueeze(-1) * t
-    error = (at.cos().mean(0) - normal).square() + at.sin().mean(0).square()
-    return (error @ weights) * x.shape[0]
-
-
-def sigreg(x: torch.Tensor, cfg: LossConfig, generator: torch.Generator | None = None) -> torch.Tensor:
-    """N x K.  The Epps-Pulley statistic along random directions: a fresh set for each call, as a fixed set would leave the rest unchecked."""
-    directions = torch.randn(x.shape[1], cfg.slices, device=x.device, dtype=x.dtype, generator=generator)
-    directions = directions / directions.norm(dim=0, keepdim=True)
-    return epps_pulley(x @ directions, cfg.points, cfg.t_max).mean()
-
-
-def invariance(projected: torch.Tensor, global_views: int) -> torch.Tensor:
-    """V x B x K, global views first.  Every view against the mean of the global views."""
-    centre = projected[:global_views].mean(0)
-    return (projected - centre).square().mean()
-
-
-def lejepa_loss(projected: torch.Tensor, global_views: int, cfg: LossConfig, generator: torch.Generator | None = None) -> tuple[torch.Tensor, dict[str, float]]:
-    pull = invariance(projected, global_views)
-    spread = sigreg(projected.reshape(-1, projected.shape[-1]), cfg, generator)
-    return (1.0 - cfg.weight) * pull + cfg.weight * spread, {"invariance": float(pull.detach()), "sigreg": float(spread.detach())}
-
-
-# The data ------------------------------------------------------------------------------------------------------------------------------------------------
+# The data --------------------------------------------------------------------------------------------------------------------------------------------
 
 
 class Shards:
@@ -349,6 +244,7 @@ class Shards:
         """Frames and what's known about each."""
         drawn = self._draw(count)
         return collate_frames([self.frame(s, i) for s, i in drawn]), np.stack([s["probes"][i] for s, i in drawn])
+
 
 
 # Is the latent any good? ----------------------------------------------------------------------------------------------------------------------------------
@@ -438,156 +334,29 @@ class TrainConfig:
     checkpoint_every: int = 10000
     hours: float = 0.0
     seed: int = 1
-    muon_lr: float = 0.0    # above 0, Muon takes the hidden layers' weights at this rate, on the same schedule, and AdamW the rest (frame_vae.py only)
+    muon_lr: float = 0.0    # above 0, Muon takes the hidden layers' weights at this rate, on the same schedule, and AdamW the rest
 
 
-def save_encoder(path: pathlib.Path, model: FrameJepa, step: int) -> None:
-    """What the main model would load: the encoder only."""
-    torch.save({"cfg": asdict(model.encoder.cfg), "vocabulary": model.encoder.vocabulary, "encoder": model.encoder.state_dict(), "step": step, "feature_version": npnet.FEATURE_VERSION}, path)
 
-
-def load_encoder(path: pathlib.Path, device: str = "cpu") -> FrameEncoder:
-    saved = torch.load(path, map_location=device, weights_only=True)
-    if saved["feature_version"] != npnet.FEATURE_VERSION:
-        raise ValueError(f"{path}: feature version {saved['feature_version']}, this code uses {npnet.FEATURE_VERSION}")
-    encoder = FrameEncoder(EncoderConfig(**saved["cfg"]), saved["vocabulary"])
-    encoder.load_state_dict(saved["encoder"])
-    return encoder.to(device).eval()
-
-
-def _save_state(path: pathlib.Path, model: FrameJepa, optimiser: torch.optim.Optimizer, step: int) -> None:
-    """All a run needs to go on from here, replacing the last.  Interrupted, it leaves the last as it was."""
-    partial = path.with_suffix(".partial")
-    torch.save({"model": model.state_dict(), "optimiser": optimiser.state_dict(), "step": step}, partial)
-    partial.replace(path)
-
-
-def _learning_rate(cfg: TrainConfig, step: int) -> float:
+def learning_rate(cfg: TrainConfig, step: int) -> float:
     if step < cfg.warmup:
         return cfg.lr * (step + 1) / cfg.warmup
     return 0.5 * cfg.lr * (1.0 + math.cos(math.pi * (step - cfg.warmup) / max(1, cfg.steps - cfg.warmup)))
 
 
-def _collection(data: pathlib.Path) -> tuple[dict, list[pathlib.Path], list[int], dict[str, list[int]], tuple[np.ndarray, np.ndarray]]:
+def collection(data: pathlib.Path) -> tuple[dict, list[pathlib.Path], list[int], dict[str, list[int]], tuple[np.ndarray, np.ndarray]]:
     """What tools/frame_data.py collect wrote: its manifest, shards, maps nothing fits on (tools/frame_world.py held_out_maps), groups of maps to report on, and how games ended."""
     manifest = json.loads((data / "manifest.json").read_text(encoding="utf8"))
-    if manifest.get("feature_version") != npnet.FEATURE_VERSION:
-        raise ValueError(f"{data}: frames of feature version {manifest.get('feature_version')}, this code uses {npnet.FEATURE_VERSION}: collect them again")
+    if manifest.get("feature_version") != fz.FEATURE_VERSION:
+        raise ValueError(f"{data}: frames of feature version {manifest.get('feature_version')}, this code uses {fz.FEATURE_VERSION}: collect them again")
     groups = {"real": [m for m, k in enumerate(manifest["kinds"]) if k == "real"], "made": [m for m, k in enumerate(manifest["kinds"]) if k == "made"], "wet": [m for m, w in enumerate(manifest["water"]) if w >= 0.03]}
     with np.load(data / "outcomes.npz") as ends:
         outcomes = (ends["game"], ends["result"])
     return manifest, sorted(data.glob("*-*.npz")), manifest["held_out"], groups, outcomes
 
 
-def train(data: pathlib.Path, run: pathlib.Path, cfg: TrainConfig = TrainConfig(), encoder_cfg: EncoderConfig = EncoderConfig(), loss_cfg: LossConfig = LossConfig(),
-          views: tuple[tuple[View, ...], tuple[View, ...]] = (GLOBAL_VIEWS, LOCAL_VIEWS), device: str | None = None) -> FrameJepa:
-    """A `stop` file in the run's directory ends it at the next report.  A run's directory that holds a state goes on from there, with this run's random numbers."""
-    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-    run.mkdir(parents=True, exist_ok=True)
-    manifest, paths, held_out, groups, outcomes = _collection(data)
-    rng = np.random.default_rng(cfg.seed)
-    torch.manual_seed(cfg.seed)
-    shards = Shards(paths, rng, maps=tuple(m for m in range(len(manifest["maps"])) if m not in held_out))
-    model = FrameJepa(encoder_cfg, len(tables.table().names) + 1).to(device)
-    (run / "config.json").write_text(json.dumps({"train": asdict(cfg), "encoder": asdict(encoder_cfg), "loss": asdict(loss_cfg), "data": str(data)}, indent=1), encoding="utf8")
-    decay = [p for p in model.parameters() if p.dim() > 1]
-    plain = [p for p in model.parameters() if p.dim() <= 1]
-    optimiser = torch.optim.AdamW([{"params": decay, "weight_decay": cfg.weight_decay}, {"params": plain, "weight_decay": 0.0}], lr=cfg.lr)
-    chosen = (*views[0], *views[1])
-    generator = torch.Generator(device).manual_seed(cfg.seed)
-    started = time.time()
-    first = 0
-    if (run / "state.pt").exists():
-        state = torch.load(run / "state.pt", map_location=device, weights_only=True)
-        model.load_state_dict(state["model"])
-        optimiser.load_state_dict(state["optimiser"])
-        first = state["step"] + 1
-    step = first - 1
-    with open(run / "metrics.jsonl", "a", encoding="utf8") as log:
-        for step in range(first, cfg.steps):
-            for group in optimiser.param_groups:
-                group["lr"] = _learning_rate(cfg, step)
-            now, later = shards.sample(cfg.batch)
-            with torch.autocast(device.split(":")[0], dtype=torch.bfloat16):
-                z, projected = model.embed_views(now.to(device), later.to(device), chosen, generator)
-            # In full precision: the statistic is N times a small difference.
-            loss, parts = lejepa_loss(projected.float(), len(views[0]), loss_cfg, generator)
-            optimiser.zero_grad(set_to_none=True)
-            loss.backward()
-            grad = float(nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip))
-            optimiser.step()
-            if step % cfg.report_every == 0 or step == cfg.steps - 1:
-                row = {"step": step, "loss": float(loss.detach()), "grad_norm": grad, "seconds": time.time() - started, "lr": optimiser.param_groups[0]["lr"], **parts, **collapse_report(z[0].detach())}
-                if step % cfg.probe_every == 0:     # from the start, for what an untrained encoder gets
-                    model.eval()
-                    sample = encode_shards(model.encoder, [paths[int(i)] for i in rng.permutation(len(paths))], device, cfg.probe_frames)
-                    row.update(probe_report(sample, tuple(manifest["probes"]), outcomes, held_out, groups))
-                    model.train()
-                log.write(json.dumps(row) + "\n")
-                log.flush()
-                print(row, flush=True)
-                if (run / "stop").exists() or (cfg.hours and time.time() - started > cfg.hours * 3600.0):
-                    break
-            if step and step % cfg.checkpoint_every == 0:
-                save_encoder(run / f"encoder-{step:07d}.pt", model, step)
-                _save_state(run / "state.pt", model, optimiser, step)
-    save_encoder(run / "encoder-last.pt", model, step)
-    _save_state(run / "state.pt", model, optimiser, step)
-    return model
-
-
-def ceiling(data: pathlib.Path, out: pathlib.Path | None = None, cfg: TrainConfig = TrainConfig(steps=4000, warmup=0), encoder_cfg: EncoderConfig = EncoderConfig(), device: str | None = None) -> dict[str, float]:
-    """The most a run could score on the probes: this encoder trained on them directly, then scored the same way.  What it can't reach here isn't in the tokens, or not on unseen maps.  What it can, and a run doesn't, the run's objective left out."""
-    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-    manifest, paths, held_out, groups, outcomes = _collection(data)
-    rng = np.random.default_rng(cfg.seed)
-    torch.manual_seed(cfg.seed)
-    shards = Shards(paths, rng, maps=tuple(m for m in range(len(manifest["maps"])) if m not in held_out))
-    encoder = FrameEncoder(encoder_cfg, len(tables.table().names) + 1).to(device)
-    head = nn.Linear(encoder_cfg.z, len(manifest["probes"])).to(device)
-    every = [*encoder.parameters(), *head.parameters()]
-    optimiser = torch.optim.AdamW(every, lr=cfg.lr, weight_decay=cfg.weight_decay)
-    known = np.concatenate([s["probes"] for s in shards.loaded])
-    mean, std = torch.as_tensor(known.mean(0), device=device), torch.as_tensor(known.std(0) + 1e-6, device=device)
-    for step in range(cfg.steps):
-        frames, truth = shards.sample_probes(cfg.batch)
-        with torch.autocast(device.split(":")[0], dtype=torch.bfloat16):
-            z = encoder(frames.to(device))
-        loss = (head(z.float()) - (torch.as_tensor(truth, device=device) - mean) / std).square().mean()
-        optimiser.zero_grad(set_to_none=True)
-        loss.backward()
-        nn.utils.clip_grad_norm_(every, cfg.grad_clip)
-        optimiser.step()
-    encoder.eval()
-    sample = encode_shards(encoder, [paths[int(i)] for i in rng.permutation(len(paths))], device, cfg.probe_frames)
-    report = probe_report(sample, tuple(manifest["probes"]), outcomes, held_out, groups)
-    if out is not None:
-        out.write_text(json.dumps(report, indent=1), encoding="utf8")
-    return report
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    sub = parser.add_subparsers(dest="command", required=True)
-    c = sub.add_parser("ceiling")
-    c.add_argument("--data", type=pathlib.Path, required=True)
-    c.add_argument("--out", type=pathlib.Path)
-    c.add_argument("--device", default=None)
-    t = sub.add_parser("train")
-    t.add_argument("--data", type=pathlib.Path, required=True)
-    t.add_argument("--run", type=pathlib.Path, required=True)
-    t.add_argument("--steps", type=int, default=TrainConfig.steps)
-    t.add_argument("--batch", type=int, default=TrainConfig.batch)
-    t.add_argument("--hours", type=float, default=0.0)
-    t.add_argument("--z", type=int, default=EncoderConfig.z)
-    t.add_argument("--device", default=None)
-    t.add_argument("--sigreg-weight", type=float, default=LossConfig.weight)
-    args = parser.parse_args()
-    if args.command == "ceiling":
-        print(json.dumps(ceiling(args.data, args.out, device=args.device), indent=1))
-        return
-    train(args.data, args.run, TrainConfig(batch=args.batch, steps=args.steps, hours=args.hours), EncoderConfig(z=args.z), LossConfig(weight=args.sigreg_weight), device=args.device)
-
-
-if __name__ == "__main__":
-    main()
+def save_state(path: pathlib.Path, model: nn.Module, optimiser: torch.optim.Optimizer, step: int) -> None:
+    """All a run needs to go on from here, replacing the last.  Interrupted, it leaves the last as it was."""
+    partial = path.with_suffix(".partial")
+    torch.save({"model": model.state_dict(), "optimiser": optimiser.state_dict(), "step": step}, partial)
+    partial.replace(path)

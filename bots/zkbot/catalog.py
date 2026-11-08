@@ -1,7 +1,7 @@
 """Unit catalog: roles and factory rosters derived from unit stats.
 
-The bot used to know units only by name (units.FACTORY_UNITS, ROLE_OVERRIDES
-and per-name checks).  A balance patch or a new unit then silently falls
+The bot used to know units only by name (hand tables and per-name checks;
+units.ROLE_OVERRIDES is what's left of them).  A balance patch or a new unit then silently falls
 back to "raid" or "other".  This module derives what the bot needs from the
 dumped UnitDefs (data/units.json) and weapon stats (data/weapons.json):
 

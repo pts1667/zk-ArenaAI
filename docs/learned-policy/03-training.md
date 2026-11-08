@@ -1510,3 +1510,91 @@ Profiled at one worker before `rf.join`: the script was 41% of the time, writing
 **Not checked:** which orders couldn't be said; how the script's games compare with the engine; whether labels for a unit should count only decisions where its script looked at it (the script looks every 6 decisions, `SCRIPT_EVERY`, so in 5 of 6 keep is a default, not a judgement).  **Not built:** the cloning trainer.
 
 **Tests:** `sim/tests` and `tests/policy`, 624 passed.  The whole `tests` folder also has 2 failures that need `requests`, which isn't installed in `~/zkml`; they're in the rules bot, untouched here.
+
+### 11.9 The economy script, missiles for the policy, action tokens and a cloning trainer (2026-11-08)
+
+The user asked for more of the game in the script, for metal to be spent almost all the time ("metal stored is an inefficiency"), for missiles and the Trinity to be the policy's units, and for the actor to read what was done between frames: `[frame 1 latent tokens] [actions at frame 1] [frame 2 latent tokens] ...`.  Then for a cloning trainer in which keep counts for less.
+
+**`tools/policy_eco.py`, the economy script.**  It runs for every side in the sim, script or policy, every `ECO_EVERY` decisions.  Its orders aren't labels: they aren't the policy's to give, as the opening's aren't (`SimEnv(economy=False)` turns it off).  A free constructor (idle, helping, or stuck) takes the first job due:
+
+1. finish anything of ours being built nearby, or the big project wherever it is;
+2. the big project, once due;
+3. energy while energy made is below `ENERGY_FIRST` = 1.5 x metal income.  Building costs as much energy as metal, and overdrive takes only what's left, so short of energy everything slows and metal piles up;
+4. expand to the nearest free metal spot on our half that no enemy is near (while metal floats, only while fewer than `FLOAT_EXPANDERS` = 4 are on the way to one);
+5. **spend**, while metal floats (above `FLOATING` = 50% of storage, until it's below `FLOATING_UNTIL` = 15%): energy if that's what's short, else another factory like the first while income is above `FACTORY_PER_INCOME` = 12 a factory (at most 6), else help the nearest factory;
+6. energy up to `ENERGY_SHARE` x income, which grows by the minute from 1.25 to 3.0: small generators by the extractors, fusions from 4 minutes and 15 metal a second, a Singularity from 12 minutes and 45;
+7. a radar behind the front from 3 minutes, and a second once there's a silo;
+8. a pylon joining an extractor or turret to the base's grid (overdrive is capped per grid; Cerberus and Lucifer fire only on a grid making 50);
+9. help the factory.
+
+* **Big projects.**  Cerberus or Lucifer, and the silo, from `BIG_FROM` = 16 minutes and 55 metal a second (the user raised it from 8 minutes and 40), when map control is stalled: neither side's extractor count has changed, net, by more than max(2, 10% of the map's spots) over the last two minutes.  At most 3 turrets, one silo.  The Trinity from `NUKE_FROM` = 18 minutes and 60 metal a second, by a 30% chance drawn once.
+* **Constructors** come from the factory (`policy_mix.constructor_quota`): the larger of a schedule by the minute and one per `INCOME_PER_CONSTRUCTOR` = 3 metal a second of income, at most 20.  The army script's factory change waits out the PRODUCE commit lock, as the policy's must (`policy_army._produce`): otherwise its first constructor order, 3 s after the opening's PRODUCE, couldn't be said, and half the factory labels in the first decisions were lost.
+* **Stuck constructors**: one that hasn't got 50 elmos nearer its goal in 30 s is given something else, and the place is avoided for 3 minutes.
+* **A sim fix** (`sim/src/economy.cpp`, ASSIST): help given to a factory still being built went to what it would make, so the factory was never finished.  Help to an unfinished factory now builds the factory.
+
+**Measured,** 32 games on the five training maps, army script against itself.  Metal lost at the storage cap, as a share of income:
+
+| Minutes | 0-4 | 4-8 | 8-12 | 12-16 | 16-20 |
+|---|---|---|---|---|---|
+| Lost at the cap | 2% | 11% | 12% | 6% | 5% |
+
+Before the spend step and the income-scaled constructors, 62% of income was lost at the cap from 6 minutes on.  Median metal income: 26, 34, 58 and 45 metal a second at 4, 8, 12 and 18 minutes.  Silos are finished and make missiles.
+
+**Missiles and the Trinity are the policy's** (`tables.py`).  `missile` is the silo's missiles (`empmissile`, `missileslow`, `napalmmissile`, `seismic`, `tacnuke`) and `launcher` the Trinity (`staticnuke`, manual fire and not mobile); both are in `acts_in_place`.  A missile can ATTACK_UNIT any enemy token on the ground within its range, and the Trinity MANUAL_FIRE any within its manual range (`featurize._masks`).  Enemy tokens are what's in sight or on radar, so that's what they can aim at; remembered buildings aren't tokens.  `policy_eco.Aimer` aims them for the army script, so its aims are labels: each missile at the most valuable building in reach that is seen, the Trinity at the building with the most enemy value within its blast.  What the silo makes is the army script's PRODUCE (`ScriptData.best_missile`).
+
+**Action tokens** (`tools/policy_latent.py`).  Each frame is now its `T` latent tokens followed by `ACTION_TOKENS` = 4 tokens saying what the policy did at that frame.
+
+* Each own unit told something other than keep becomes a vector: the kind's embedding, the unit's raw embedding, the key of the enemy or region it was pointed at, the fine option, and the type a factory was told to make.  4 learned queries, given the log count of units that acted, read those and a learned "nothing", so a frame where everything kept has action tokens too, which say so.
+* Attention: a frame's latent tokens don't see its own action tokens; its action tokens see its latent tokens and everything before.  So a decision never sees its own choice and the next one does.  Each head has a learned bias for action keys (`act_key`) beside the bias by age.  The window and reach are as before.
+* What a seat keeps between decisions is each frame's latents and action tokens, flat.  `decide` leaves the newest frame's empty; `acted` fills it once actions are sampled (`policy_train.Player._forward`).  Training builds a segment's action tokens from the stored actions (`segment_actions`).
+* They're the policy's choices only.  The economy script's and the opening's orders show only in the frames, as each unit's order.
+
+**The cloning trainer,** `tools/policy_clone_train.py`.
+
+* Reads recorded games (`policy_clone_data.py`), featurizes a stretch of `--length` decisions plus the actor's reach before it, and turns the script's orders into the policy's choices for every frame: those are the action tokens, and the ones where the script looked (every `SCRIPT_EVERY`th decision) are the labels.
+* Loss: negative log-likelihood of the script's choice for every unit that can say it, with keep weighted by `--keep-weight` (0.1).  The saved actor adds -log w to keep's logit, so that it plays at the true odds of keep.  Units whose label is keep while they're idle can't say it (keep is illegal for an idle mobile unit), and are left out: they're the factory's new units, mostly.
+* Workers featurize ahead of the GPU into a bounded queue.  Only the map bundles are loaded, not the map pool (which is 7.5 GB a copy, and thrashed memory with a recorder running).  50 files by name hash are held out for checks.
+* `--blind` gives the actor zeros for action tokens, to measure what they're worth.
+
+**`army-3`,** `/mnt/d/zk-learned/clone/army-3` (`DATA_VERSION` 3): the army script against itself with this economy, on the map pool, 12 workers.
+
+* 3,233 games, 11.5M decisions, 13 GB: 913 bytes a decision, twice army-2's, from more units.  13 minutes at 15,200 decisions a second.
+* Endings: 1,939 on a lead, 1,179 at the time limit, 115 by elimination.
+* Labels from 60 files at every fifth decision: keep 96.5%, fight 2.7%, PRODUCE 0.69%, move 0.09%.  0.8% of orders couldn't be said.
+
+**Cloning, with and without action tokens,** army-3, 3,000 steps of 16 stretches of 48 decisions, keep weight 0.1, checked on 96 held-out stretches:
+
+| Step | Actor | NLL of acts | Act's kind right | Fight right | PRODUCE right | Move right | NLL of keeps |
+|---|---|---|---|---|---|---|---|
+| 1,500 | action tokens | 3.584 | 0.313 | 0.365 | 0.146 | 0.000 | 1.088 |
+| 1,500 | blind | 3.587 | 0.217 | 0.269 | 0.036 | 0.018 | 1.119 |
+| 2,000 | action tokens | 3.570 | 0.294 | 0.319 | 0.224 | 0.101 | 1.045 |
+| 2,000 | blind | 3.565 | 0.210 | 0.229 | 0.156 | 0.064 | 1.072 |
+| 3,000 | action tokens | 3.506 | 0.240 | 0.263 | 0.165 | 0.128 | 1.028 |
+| 3,000 | blind | 3.494 | 0.225 | 0.225 | 0.249 | 0.083 | 1.050 |
+
+Runs `/mnt/d/zk-learned/runs/clone-act` and `clone-blind`.  The checks hold 3,649 acts (2,849 fight, 691 PRODUCE, 109 move) and 9,720 keeps.  "Right" is the actor's most likely choice matching the script's; NLL is per unit.
+
+* **Action tokens made no measurable difference at this length.**  The likelihood of the script's acts, the measure trained on, is within 0.015 at every check, and slightly better blind at the end.  The tokens run picked the right kind of act 9 points more often at 1,500 and 2,000 steps, but by 3,000 the gap is 1.5 points: fight better with tokens, PRODUCE better blind.  With 109 move and 691 PRODUCE labels, a check moves by 5 to 10 points on those from one to the next, so only the NLL and the fight column mean much.
+* **Neither has learned much.**  An act's kind is right a quarter of the time and its NLL is still falling slowly when the learning rate reaches zero.  So this says the tokens don't help an actor this undertrained, not that they wouldn't help one that has learned the script.
+* The tokens cost 19%: 133 decisions a second against 164.
+
+**Not checked:** a Trinity firing in a sim game; whether Cerberus and Lucifer are powered when finished; the economy on the map pool rather than the training maps; the cloned actor playing.
+
+**Tests:** `sim/tests` and `tests/policy`, 637 passed.  New: `test_eco.py` (the economy script and the aimer); in `test_policy_actions.py`, missiles and the Trinity are the policy's to aim; in `test_latent_actor.py`, a frame reads what was done before it but not its own choice, action tokens reach no further than frames, the newest frame's are blank when it decides, keeping everything reads alike, and what a unit was told and where reaches the tokens.  `test_frame_vae.py`'s two-part fit takes 250 steps, from 150: the sim's games are busier and it reached 0.708 against the 0.7 bar.
+
+### 11.10 The trim (2026-11-08)
+
+At the user's request, what the learned policy no longer uses is gone, kept at the local git tag `rules-bot-final` (00-overview.md has the note).
+
+* **The rules bot.**  Every behaviour module of `bots/zkbot` (`brain.py` and the 32 around it), `bots/probe`, `bots/observer`, ML stages 1 to 4 (`fightnet`, the value net, the observer dataset, `tune.py`), `prun.py`, its reports and `tools/run.sh`, with their tests and `docs/ARCHITECTURE.md` and `docs/ML.md`.  What's left of `bots/zkbot` is the policy's host: `main.py` drives `host.py`, which keeps what `rawframe.from_host` reads (units, the commander, remembered enemy buildings, blip speeds, who holds each spot) and sends no commands.  `hazards.py` builds the live terrain and nothing else, `mapdata.py` reads the map's spots and liquid, `params.py` is the flags, and `units.py` lost the rules' hand tables (`FACTORY_UNITS`, `role_of`).  No unit is `RESERVED` now: that kept the rules' Gremlins and Phantoms from the policy.  Engine A/B baselines against the rules bot can't be run without checking out the tag.
+* **The first actor** (`policy_model.Actor`, recurrent over every token with pair biases), its numpy forward (`bots/zkbot/policy/net.py`), shadow mode (`policyshadow`), `tools/policy_parity.py` and `tools/policy_export.py`.  The featurizer no longer makes pair buckets (its biggest array, N x N), and batches carry no gates, since nothing reads them.  `policy_model.py` keeps batches, sampling and scoring, and the critic, which no longer reads an actor's memory.  `actions.Decision` replaces `net.Decision` and the trainer's copy.  `FEATURE_VERSION` is in `featurize.py`, the embedding sizes in `policy_model.py`; neither changed, so saved encoders and actors still load.
+* **The trainer** trains the actor on latents only: no `toy`/`sim` argument, `--latent-encoder` defaults to `policy_latent.ENCODER`, concurrent collection is on by default, and the step-by-step loss and its sampled pair gradient are gone.  A segment stores `history` and `seen`, what the actor keeps, in place of the first actor's memory.
+* **The toy** (`policy_toy.py`, `policy_toy_env.py`).  Tests that played it read frames of a script game in the sim instead (`conftest.sim_frames`), and share a small untrained frame encoder (`conftest.encoder_path`).
+* **The JEPA frame model** (`frame_jepa.py`: LeJEPA's loss, views and training, and the probe ceiling).  What the VAE shares with it, the encoder, batches, shards and probes, is `frame_model.py`; `EncoderConfig` keeps its unused projector fields so saved configs load.
+* **A fix:** `policy_train.DataWorkers` without worker processes kept its bundles in a module global, so a second learner in the same process replaced the first's (a test's learner failed only in the full suite).  Each now keeps its own.
+* **The raider-only fight script** is out of the sim's scripts (`make_script` has "army" only) and lives in `frame_world.py` as `FrameFight`'s base, which the frame data still uses.  `policy_script.py` is the scripts' shared data.  The opening's income test now runs beside the army script.
+
+**Not checked:** an engine game with the host (it imports on Windows and its tests pass offline); `--check-repro` and `--check-kill`, which now run on the sim.
+
+**Tests:** `sim/tests` and `tests/policy`, 599 passed; `tests/test_host.py`, `test_hazards.py`, `test_terrain.py` with `tests/policy/test_policy.py`, 88 passed.  Tests of what's gone went with it; tests that played the toy now play the sim (`test_labels.py` reads frames from 4 minutes in, where there's an army to order; the opening's income test plays 40 games, as the army script's raids leave fewer to check).  `tests/test_hazards.py` is rewritten for what `hazards.py` still does.

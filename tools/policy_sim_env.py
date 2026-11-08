@@ -24,6 +24,7 @@ import zksim  # noqa: E402
 from zkbot import catalog as bot_catalog  # noqa: E402
 from zkbot.policy import bundle as bd, rawframe as rf, tables  # noqa: E402
 from policy_army import ArmyScript, make_script  # noqa: E402
+from policy_eco import ECO_EVERY, Aimer, EcoData, Economy  # noqa: E402
 from policy_opening import Ground, Opening, Seat, is_buildable, modelled  # noqa: E402
 from policy_script import ScriptData  # noqa: E402
 
@@ -212,10 +213,11 @@ class SimEnv:
     eval_opponents = ("fight",)
 
     def __init__(self, games: int, seed: int, modes: list[str], units: int | None = None, threads: int = 16, decide_every: int = 1, maps: list | None = None,
-                 weights: np.ndarray | None = None, scripts: tuple[str, str] = ("army", "army")):
+                 weights: np.ndarray | None = None, scripts: tuple[str, str] = ("army", "army"), economy: bool = True):
         """maps: as `pool` or `load_pool` give, and weights how likely each is, if not evenly.  scripts: the kind of script each side
         plays, as policy_army.make_script names them.  When the two differ, each game gives them to the sides at random, so that
-        the games compare the two whichever side has which."""
+        the games compare the two whichever side has which.  economy: whether constructors and big buildings are run for every
+        side (policy_eco.py); without it, a side's economy is its opening, as before 2026-11-08."""
         self.count, self.modes, self.units = games, modes, units
         self.maps = pool() if maps is None else maps
         self.grounds = {id(b): Ground(b, f) for _, b, f in self.maps}
@@ -239,6 +241,9 @@ class SimEnv:
         self.batch = zksim.Batch(catalog(), games, threads=threads)
         self.table = tables.table()
         self.script_data = ScriptData(self.table, catalog())
+        self.eco_data = EcoData(self.table, catalog())
+        self.economies: list[tuple[Economy, Economy] | None] = [None] * games     # constructors and big buildings, for every side: policy_eco.py
+        self.economy = economy
         self.seat_count = games * 2
         self.max_regions = max(b.regions for _, b, _ in self.maps)
         self.mode = [modes[0]] * games
@@ -312,8 +317,12 @@ class SimEnv:
         kinds, seats = self.script_kinds[g], self.seats[g]
         self.scripts[g] = tuple(
             make_script(kinds[side], self.script_data, seats[side].plan.rally, (x1, z1) if side == 0 else (x0, z0),
-                        self.script_data.row_of_index(seats[side].raider_type))
+                        self.script_data.row_of_index(seats[side].raider_type), Aimer(self.eco_data))
             for side in (0, 1))
+        if self.economy:
+            self.economies[g] = tuple(
+                Economy(self.eco_data, ground, side, base, enemy, np.random.default_rng(int(self.rng.integers(1 << 62))))
+                for side, base, enemy in ((0, (x0, z0), (x1, z1)), (1, (x1, z1), (x0, z0))))
 
     def _opening_orders(self, g: int, side: int) -> np.ndarray | None:
         """The commander's next step, if it has finished this one or run out of time on it."""
@@ -329,6 +338,22 @@ class SimEnv:
             return None
         orders = seat.advance(units, int(self.decisions[g]))
         return np.array(orders, zksim.ORDER_DTYPE) if orders else None
+
+    def _economy_orders(self, g: int, side: int) -> np.ndarray | None:
+        """Constructors' and big buildings' orders, for either kind of side.  Not the policy's, so not recorded as the script's."""
+        economies = self.economies[g]
+        if economies is None or self.decisions[g] % ECO_EVERY:
+            return None
+        mine = self.batch.frame(g, side)
+        units, theirs = mine.units, self.batch.frame(g, 1 - side).units
+        seconds = float(self.decisions[g]) * self.ticks * zksim.TICK_FRAMES / zksim.FRAMES_PER_SECOND
+        seats = self.seats[g]
+        busy = side if seats is not None and not seats[side].done else -1      # the commander, while the opening has it
+        glob = mine.glob
+        out = economies[side].orders(units[units["player"] == side], theirs[theirs["player"] == 1 - side],
+                                     float(glob[rf.G["metal_income"]]), seconds, busy, float(glob[rf.G["metal"]]), float(glob[rf.G["metal_storage"]]),
+                                     float(glob[rf.G["energy"]]), float(glob[rf.G["energy_storage"]]))
+        return out if len(out) else None
 
     def _is_policy(self, seat: int) -> bool:
         mode = self.mode[seat // 2]
@@ -352,9 +377,16 @@ class SimEnv:
     def script_orders(self, g: int, side: int) -> np.ndarray:
         if self.decisions[g] % self.script_every:
             return np.zeros(0, zksim.ORDER_DTYPE)
-        own, enemy = self.batch.frame(g, side).units, self.batch.frame(g, 1 - side).units
+        mine = self.batch.frame(g, side)
+        own, enemy = mine.units, self.batch.frame(g, 1 - side).units
         seconds = float(self.decisions[g]) * self.ticks * zksim.TICK_FRAMES / zksim.FRAMES_PER_SECOND
-        return self.scripts[g][side].orders(own[own["player"] == side], enemy[enemy["player"] == 1 - side], seconds)
+        script = self.scripts[g][side]
+        if isinstance(script, ArmyScript):
+            theirs = own["player"] != side
+            seen = own["uid"][theirs & np.isin(own["knowledge"], (rf.KNOW_LOS, rf.KNOW_RADAR))]
+            return script.orders(own[own["player"] == side], enemy[enemy["player"] == 1 - side], seconds, float(mine.glob[rf.G["metal_income"]]),
+                                 seen)
+        return script.orders(own[own["player"] == side], enemy[enemy["player"] == 1 - side], seconds)
 
     def step_scripted_only(self) -> None:
         self.step(0.0)
@@ -387,10 +419,10 @@ class SimEnv:
                 if part is not None:
                     parts.append(part)
                     total += len(part)
-                opening = self._opening_orders(g, side)
-                if opening is not None:
-                    parts.append(opening)
-                    total += len(opening)
+                for extra in (self._opening_orders(g, side), self._economy_orders(g, side)):
+                    if extra is not None:
+                        parts.append(extra)
+                        total += len(extra)
             offsets.append(offsets[-1] + total)
         all_orders = np.concatenate(parts) if parts else np.zeros(0, zksim.ORDER_DTYPE)
         self.batch.step(all_orders, np.array(offsets, np.int32), ticks=self.ticks)

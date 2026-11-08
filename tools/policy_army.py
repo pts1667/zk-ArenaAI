@@ -1,7 +1,7 @@
 """How a side's fighters fight, when the policy doesn't control them: the army script.
 
-It's the default for script-controlled sides ("army" in `SimEnv`).  `FightScript` in policy_script.py is the raider-only script it
-replaced, and stays as "fight", for comparisons.  Each fighter fights by its catalog role.
+It plays every script-controlled side ("army" in `SimEnv`).  It replaced a raider-only fight script, which is now only the frame
+data's (frame_world.py `FightScript`).  Each fighter fights by its catalog role.
 
   raid     in squads of three, which go for the enemy's extractors first and then its other buildings, one target at a time.  A
            target is taken only when the squad's metal is at least the metal of what covers it.  Defences and units that outrange the
@@ -21,7 +21,9 @@ Orders are only given when they're needed.  A unit still moving to a goal that h
 visibly stop each time they're re-ordered.  It's given one when it's idle away from its goal, when the goal moves, or when its job changes.
 
 Production is in policy_mix.py.  Each change of what a factory builds is a PRODUCE order on its uid, in the orders returned and in
-`productions`, so that a recorder can read every choice per decision.
+`productions`, so that a recorder can read every choice per decision.  A silo makes the missile that hurts most
+(`ScriptData.best_missile`).  Missiles and the Trinity are aimed by `policy_eco.Aimer`, when the script is given one: they're the
+policy's units, so the script's aims are labels.  Constructors and buildings are the economy script's (policy_eco.py).
 """
 from __future__ import annotations
 
@@ -36,11 +38,12 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "sim" / "py"))
 sys.path.insert(0, str(ROOT / "bots"))
 import zksim  # noqa: E402
+from zkbot.policy import featurize as fz  # noqa: E402
 from zkbot.policy import rawframe as rf  # noqa: E402
 
 from policy_mix import Mix  # noqa: E402
 from policy_script import (  # noqa: E402
-    ARRIVED, GROUPS_FROM, LONGEST_WAIT, NEW, RECOVERED, RETREAT_BELOW, RETREATING, SENT, WAITING, FightScript, ScriptData, group_metal,
+    ARRIVED, GROUPS_FROM, LONGEST_WAIT, NEW, RECOVERED, RETREAT_BELOW, RETREATING, SENT, WAITING, ScriptData, group_metal,
 )
 
 FIRST_STRAIGHT = 3          # the first raiders go straight for the enemy: only later ones patrol
@@ -152,8 +155,10 @@ def _waypoints(rally: tuple[float, float], enemy_start: tuple[float, float]) -> 
 class ArmyScript:
     """One side of one game.  `orders` takes the side's own records and the enemy's, as `FightScript` does."""
 
-    def __init__(self, data: ScriptData, rally: tuple[float, float], enemy_start: tuple[float, float], opening_row: int | None = None):
+    def __init__(self, data: ScriptData, rally: tuple[float, float], enemy_start: tuple[float, float], opening_row: int | None = None,
+                 aimer=None):
         self.data = data
+        self.aimer = aimer                      # policy_eco.Aimer: where missiles and the Trinity go
         self.rally = rally
         self.enemy_start = enemy_start
         self.opening_row = opening_row          # the type the factory is on when the opening hands over, if it has one
@@ -176,8 +181,11 @@ class ArmyScript:
 
     # Orders.
 
-    def orders(self, own: np.ndarray, enemies: np.ndarray, seconds: float) -> np.ndarray:
-        """Orders for this side, given all of its own records and all of the enemy's.  Production orders come first."""
+    def orders(self, own: np.ndarray, enemies: np.ndarray, seconds: float, metal_income: float = 0.0,
+               seen: np.ndarray | None = None) -> np.ndarray:
+        """Orders for this side, given all of its own records and all of the enemy's.  Production orders come first.  metal_income
+        sets how many constructors the side wants, as well as the time.  seen: the enemy uids in sight or on radar, for aiming
+        missiles and the Trinity."""
         data = self.data
         rows = data.table.rows(own["def_id"])
         built = (own["flags"] & rf.BEING_BUILT) == 0
@@ -188,10 +196,12 @@ class ArmyScript:
         self.productions = []
         self._births(own[fights], rows[fights])
         self._forget(set(own["uid"].tolist()))
-        out = self._produce(own, rows, built, seconds)
+        out = self._produce(own, rows, built, seconds, metal_income)
         extractors = list(zip(own["x"][extracting].astype(float).tolist(), own["z"][extracting].astype(float).tolist()))
         if fighting.any():
             out += self._fight(own[fighting], rows[fighting], view_of(data, enemies), extractors, seconds)
+        if self.aimer is not None and seen is not None:
+            out += self.aimer.orders(own, enemies, seen, seconds)
         return np.array(out, zksim.ORDER_DTYPE) if out else np.zeros(0, zksim.ORDER_DTYPE)
 
     def _births(self, own: np.ndarray, rows: np.ndarray) -> None:
@@ -211,16 +221,34 @@ class ArmyScript:
             del self.squads[sid]
             self.since.pop(sid, None)
 
-    def _produce(self, own: np.ndarray, rows: np.ndarray, built: np.ndarray, seconds: float) -> list[tuple]:
+    def _produce(self, own: np.ndarray, rows: np.ndarray, built: np.ndarray, seconds: float, metal_income: float = 0.0) -> list[tuple]:
         """A PRODUCE on each finished factory whose next unit is due to change.  Nothing is ordered for a factory that's on what it should be."""
         out = []
-        is_factory = built & self.data.table.factory[rows]
-        for uid, row in zip(own["uid"][is_factory].tolist(), rows[is_factory].tolist()):
-            on = self.current.get(uid, self.opening_row)
-            due = self.mix.choose(row, seconds)
-            if due is None or due == on:
+        t = self.data.table
+        is_factory = built & t.factory[rows]
+        constructors = sum(1 for r in rows.tolist() if self.data.role_of[r] == "builder" and t.mobile[r])
+        # What a factory is on, if we haven't told it: what the frame says it's making (the opening's choice, for the first), or
+        # nothing, for one just built, which then has to be told.
+        making = np.where(own["ord_kind"] == rf.PRODUCE, t.rows(own["ord_target"].astype(np.int64)), -1)
+        # A PRODUCE given in the last few decisions holds, as it does for the policy (featurize's commit lock), so that every change
+        # the script makes is one the policy could have made.
+        held = ((own["ord_kind"] == rf.PRODUCE) & (own["ord_age"] < fz.COMMIT_DECISIONS * fz.DECISION_FRAMES)
+                & ((own["flags"] & (rf.DAMAGED | rf.IDLE)) == 0)).tolist()
+        for k in np.flatnonzero(is_factory).tolist():
+            uid, row, frame_on = int(own["uid"][k]), int(rows[k]), int(making[k])
+            on = self.current.get(uid, frame_on if frame_on >= 0 and frame_on != t.unknown else None)
+            due = self.mix.choose(row, seconds, constructors, metal_income)
+            if due is None or due == on or held[k]:
                 if on is not None:
                     self.current[uid] = on
+                continue
+            self.current[uid] = due
+            self.productions.append((uid, due))
+            out.append((uid, rf.PRODUCE, 0.0, 0.0, int(self.data.catalog_row[due])))
+        for i in np.flatnonzero(built & ~t.factory[rows]):
+            due = self.data.best_missile.get(int(rows[i]))
+            uid = int(own["uid"][i])
+            if due is None or self.current.get(uid) == due or held[i]:
                 continue
             self.current[uid] = due
             self.productions.append((uid, due))
@@ -514,10 +542,9 @@ class ArmyScript:
         return out
 
 
-def make_script(kind: str, data: ScriptData, rally: tuple[float, float], enemy_start: tuple[float, float], opening_row: int | None = None):
-    """The script of a kind: "army", this module's, or "fight", the raider-only script it replaced."""
+def make_script(kind: str, data: ScriptData, rally: tuple[float, float], enemy_start: tuple[float, float], opening_row: int | None = None,
+                aimer=None):
+    """The script of a kind: "army", this module's, the only one now."""
     if kind == "army":
-        return ArmyScript(data, rally, enemy_start, opening_row)
-    if kind == "fight":
-        return FightScript(data, rally, enemy_start)
+        return ArmyScript(data, rally, enemy_start, opening_row, aimer)
     raise ValueError(f"no script called {kind!r}")

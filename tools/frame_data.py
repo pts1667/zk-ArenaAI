@@ -1,4 +1,4 @@
-"""Frames for the frame model of frame_jepa.py: what a seat saw, from two sources, on all the training maps.
+"""Frames for the frame encoder (frame_model.py, trained by frame_vae.py): what a seat saw, from two sources, on all the training maps.
 
 Script games are real games: both sides play the opening, a script for factories and builders, and the fight script, with every factory there is, on the map's own terms.
 Scenarios are built at random but could have happened, so they reach what script games don't: other unit types, big armies, a fight in someone's base, a base that's been fought over.
@@ -26,7 +26,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 import policy_sim_env as se  # noqa: E402
 from frame_world import BaseOrders, BaseScript, EXTRACTOR_REACH as SPOT_REACH, FrameFight, FrameGames, Ground, Roster, extractors, fight_data, held_out_maps, pool_weights  # noqa: E402
 import zksim  # noqa: E402
-from zkbot.policy import bundle as bd, featurize as fz, net as npnet, rawframe as rf, tables  # noqa: E402
+from zkbot.policy import bundle as bd, featurize as fz, rawframe as rf, tables  # noqa: E402
 
 SOURCES = ("script", "scenario")
 PROBES = ("own_value", "enemy_value", "own_fighters", "enemy_fighters", "enemy_known", "own_x", "own_z", "enemy_x", "enemy_z", "commander_hp", "metal", "seconds",
@@ -174,8 +174,8 @@ class ShardWriter:
         columns["unit_kind"] = np.concatenate([t.tok_kind[:len(t.unit_x)] for t in tensors]).astype(np.int8)
         columns["glob_x"] = np.stack([t.glob_x for t in tensors]).astype(np.float16)
         columns["probes"] = np.stack([p for _, _, p in self.items])
-        for field in ("map", "source", "game", "seat", "decision"):
-            columns[field] = np.array([getattr(m, field) for _, m, _ in self.items], np.int32)
+        for name in ("map", "source", "game", "seat", "decision"):
+            columns[name] = np.array([getattr(m, name) for _, m, _ in self.items], np.int32)
         columns["later"] = np.array(self.later, np.int32)
         np.savez(self.out / f"{self.prefix}-{self.shards:05d}.npz", **columns)
         self.shards += 1
@@ -257,7 +257,6 @@ def _structure_place(rng: np.random.Generator, ground: Ground, roster: Roster, r
 
 def _place_structures(rng: np.random.Generator, ground: Ground, roster: Roster, rows: np.ndarray, own: tuple[float, float], enemy: tuple[float, float]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Extractors on the nearest free spots, the rest where their data allows, none on top of another.  What finds nowhere is left out."""
-    table = roster.table
     kept, xs, zs = [], [], []
     spots = ground.bundle.spot_list[np.argsort(np.hypot(ground.bundle.spot_list[:, 0] - own[0], ground.bundle.spot_list[:, 1] - own[1]))]
     taken = np.column_stack((spots[:, 0], spots[:, 1], np.full(len(spots), roster.footing[roster.extractor].radius))).astype(np.float32)
@@ -575,7 +574,7 @@ def collect(out: pathlib.Path, script_frames: int, scenario_frames: int, games: 
         taken = max(sum(r[3] for r in results), 1)
         shares[source] = {name: float(n) / taken for name, n in zip(PROBES, sum(r[2] for r in results))}
     facts = {"maps": [f.name for _, _, f in maps], "kinds": [f.kind for _, _, f in maps], "water": [f.water for _, _, f in maps], "weights": pool_weights(maps).tolist(), "held_out": held_out_maps(maps),
-             "probes": PROBES, "sources": SOURCES, "frames_per_second": rates, "seen_in": shares, "seed": seed, "feature_version": npnet.FEATURE_VERSION}
+             "probes": PROBES, "sources": SOURCES, "frames_per_second": rates, "seen_in": shares, "seed": seed, "feature_version": fz.FEATURE_VERSION}
     write_manifest(out, outcomes, facts)
     return facts
 

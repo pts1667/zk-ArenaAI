@@ -4,7 +4,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from zkbot.policy import featurize as fz, net, rawframe as rf
+from zkbot.policy import featurize as fz, rawframe as rf
 
 from conftest import BLIP, ENEMY, make_frame, make_units
 
@@ -54,19 +54,6 @@ def test_relative_ids_stay_apart_and_unknown_ones_share_a_row():
     ids = np.array([0, 1, 2, 3, -1, 40])
     assert fz.relative_id(ids, 2, 16).tolist() == [1, 2, 0, 3, 16, 16]
     assert fz.relative_id(ids, 0, 16).tolist() == [0, 1, 2, 3, 16, 16]
-
-
-def test_a_pair_knows_if_it_shares_a_player_an_alliance_or_neither(small_map, table):
-    t = fz.featurize(make_frame(teams()), small_map, table)
-    near = lambda a, b: int(t.pair_bucket[token(t, a), token(t, b)] - fz._UU) // 12  # noqa: E731
-    assert near(1, 2) == 2 and near(20, 21) == 1 and near(1, 10) == 1
-    assert near(1, 20) == 0 and near(20, 30) == 0
-
-
-def test_units_of_unknown_players_are_not_taken_to_share_one(small_map, table):
-    units = make_units({"uid": 1}, {"uid": 2, "side": ENEMY, "player": -1, "ally_team": 1, "x": 800.0}, {"uid": 3, "side": ENEMY, "player": -1, "ally_team": 1, "x": 820.0})
-    t = fz.featurize(make_frame(units), small_map, table)
-    assert (t.pair_bucket[token(t, 2), token(t, 3)] - fz._UU) // 12 == 1
 
 
 def test_an_allys_guns_count_as_friendly_and_another_alliances_as_hostile(small_map, table):
@@ -136,21 +123,10 @@ def test_a_target_on_radar_has_a_direction_but_is_not_in_sight(small_map, table)
     assert t.unit_x[0, fz._O + 17] > 0.0 and t.unit_x[0, fz._O + 21] == 0.0
 
 
-def test_a_target_gone_has_no_direction_and_no_pair(small_map, table):
+def test_a_target_gone_has_no_direction(small_map, table):
     t = fz.featurize(make_frame(aiming(7, {"uid": 8, "side": ENEMY, "x": 800.0}, ord_x=900.0, ord_z=900.0)), small_map, table)
     assert (t.unit_x[0, fz._O + 17:fz._O + 20] == 0.0).all()
     assert t.unit_x[0, fz._O + 20] == 1.0 and t.unit_x[0, fz._O + 21] == 0.0
-    assert not (t.pair_bucket == fz._AIMS_AT).any() and not (t.pair_bucket == fz._AIMED_AT_BY).any()
-
-
-def test_a_target_is_marked_on_the_pair_each_way_and_nowhere_else(small_map, table):
-    units = aiming(7, {"uid": 2, "x": 520.0, "ord_kind": rf.ATTACK_UNIT, "ord_target": 7}, {"uid": 3, "x": 540.0, "ord_kind": rf.MOVE, "ord_x": 900.0},
-                   {"uid": 7, "side": ENEMY, "x": 800.0}, {"uid": 8, "side": ENEMY, "x": 820.0})
-    t = fz.featurize(make_frame(units), small_map, table)
-    aims = {(int(t.uids[a]), int(t.uids[b])) for a, b in zip(*np.nonzero(t.pair_bucket == fz._AIMS_AT))}
-    aimed = {(int(t.uids[a]), int(t.uids[b])) for a, b in zip(*np.nonzero(t.pair_bucket == fz._AIMED_AT_BY))}
-    assert aims == {(1, 7), (2, 7)}
-    assert aimed == {(7, 1), (7, 2)}
 
 
 def test_a_target_past_the_pool_still_has_a_direction(small_map, table):
@@ -161,7 +137,6 @@ def test_a_target_past_the_pool_still_has_a_direction(small_map, table):
     t = fz.featurize(make_frame(make_units(*rows)), small_map, table)
     assert 5000 not in t.uids.tolist()
     assert t.unit_x[0, fz._O + 19] > 0.0 and t.unit_x[0, fz._O + 21] == 1.0
-    assert not (t.pair_bucket == fz._AIMS_AT).any()
 
 
 def test_there_are_never_too_many_summaries(small_map, table):
@@ -179,31 +154,46 @@ def test_the_hidden_say_whose_they_are_to_the_critic_alone(small_map, table):
 
 
 @pytest.fixture(scope="module")
-def policy(table):
-    return net.Policy(net.random_weights(len(table.names) + 1, seed=5))
+def actor(table, encoder_path):
+    """The actor on latents, untrained."""
+    torch = pytest.importorskip("torch")
+    import policy_latent as pl
+
+    torch.manual_seed(5)
+    return pl.make(len(table.names) + 1, encoder_path).eval()
 
 
-def test_the_net_decides_on_a_frame_with_three_alliances(small_map, table, policy):
+def _kinds(actor, t: fz.Tensors) -> np.ndarray:
+    """Each controllable unit's kind probabilities, with nothing before this frame."""
+    import torch
+
+    import policy_model as pm
+
+    b = pm.collate([t]).to("cpu")
+    with torch.no_grad():
+        units, reg_h, *_ = actor.decide(b, *actor.initial_state(1, 0, "cpu"))
+        return torch.softmax(actor.heads(b, units, reg_h)[0], -1)[0, :t.controllable].numpy()
+
+
+def test_the_actor_decides_on_a_frame_with_three_alliances(small_map, table, actor):
     t = fz.featurize(make_frame(teams()), small_map, table)
-    d = policy.decide(t, net.State.initial(small_map.regions), np.random.default_rng(0))
-    assert len(d.kind) == 2 and t.kind_mask[np.arange(2), d.kind].all()
+    kinds = _kinds(actor, t)
+    assert kinds.shape == (2, rf.KIND_COUNT) and (kinds[~t.kind_mask] < 1e-6).all()
 
 
-def test_which_enemy_a_unit_aims_at_reaches_the_net(small_map, table, policy):
-    state = net.State.initial(small_map.regions)
-    enemies = ({"uid": 7, "side": ENEMY, "x": 800.0}, {"uid": 8, "side": ENEMY, "x": 800.0, "z": 520.0})
-    decisions = []
+def test_which_enemy_a_unit_aims_at_reaches_the_actor(small_map, table, actor):
+    enemies = ({"uid": 7, "side": ENEMY, "x": 800.0}, {"uid": 8, "side": ENEMY, "x": 300.0, "z": 1400.0})
+    kinds = []
     for target in (7, 8):
         units = aiming(target, *enemies)
         units["ord_age"] = 1000.0       # past the commit lock, or KEEP is all it may do
-        decisions.append(policy.decide(fz.featurize(make_frame(units), small_map, table), state))
-    assert not np.allclose(decisions[0].kinds, decisions[1].kinds)
+        kinds.append(_kinds(actor, fz.featurize(make_frame(units), small_map, table)))
+    assert not np.allclose(kinds[0], kinds[1])
 
 
-def test_who_owns_a_unit_reaches_the_net(small_map, table, policy):
-    state = net.State.initial(small_map.regions)
-    base = policy.decide(fz.featurize(make_frame(teams()), small_map, table), state)
+def test_who_owns_a_unit_reaches_the_actor(small_map, table, actor):
+    base = _kinds(actor, fz.featurize(make_frame(teams()), small_map, table))
     swapped = teams()
     swapped["ally_team"][swapped["uid"] == 30] = 3
-    other = policy.decide(fz.featurize(make_frame(swapped), small_map, table), state)
-    assert not np.allclose(base.kinds, other.kinds)
+    other = _kinds(actor, fz.featurize(make_frame(swapped), small_map, table))
+    assert not np.allclose(base, other)

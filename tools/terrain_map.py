@@ -400,7 +400,6 @@ def main(argv: list[str]) -> int:
     rows = []
     failed = 0
     for name, path in find_maps([] if a.all else a.maps):
-        t0 = time.time()
         try:
             mf = load_map(path, name)
             t1 = time.time()

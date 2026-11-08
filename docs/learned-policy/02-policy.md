@@ -5,6 +5,13 @@
 Status: P-M0 to P-M2 built, behind flags `rawframe` and `policyshadow`, and no commands are sent yet (section 13).  Shared decisions are in
 [00-overview.md](00-overview.md); this file follows them and lists objections separately.
 
+**2026-11-08: what's left of this design.**  The raw frame (section 2.2), the featurizer and its masks (2.3 to 4), and action
+decoding stand, and the bot still records frames with the flag `rawframe`.  The network of section 3, recurrent over every token
+with pair biases, is gone with its numpy forward (`policy/net.py`), shadow mode, `tools/policy_parity.py` and
+`tools/policy_export.py`, and the featurizer no longer makes pair buckets.  The actor now reads a frozen frame encoder's latents
+in order (`tools/policy_latent.py`, 03-training.md 11.6 on), and its numpy forward for the bot isn't built yet.  The rules bot this
+file integrates with (`brain.py`, `from_brain`) is gone too; the host is `bots/zkbot/host.py` and the live reader `rawframe.from_host`.
+
 Citations are repo-relative (`bots/zkbot/...`) unless prefixed `ControllerAI/`, `Zero-K/` or
 `RecoilEngine/` (siblings under `C:\Users\Thoma\Documents\sources`).  Numbers marked
 **measured** come from throwaway scripts in `C:\Users\Thoma\.claude\jobs\9ba24cc0\tmp\policy_bench\`

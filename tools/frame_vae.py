@@ -1,7 +1,7 @@
 """A frame VAE: compresses what a seat sees into a few small latent tokens, for the actor to read in place of its tokens.
 
-LeJEPA (tools/frame_jepa.py) asks a frame's latent to match the same frame with units dropped, so it's taught to leave out which units are where.  This asks it to give
-that back instead, through a small decoder:
+It asks the latent to give back what's where, through a small decoder (LeJEPA, which asked a frame's latent to match the same frame with units dropped, taught it
+to leave that out, and was removed on 2026-11-08: 03-training.md 11.2 to 11.4):
 
     python tools/frame_vae.py train --data /mnt/d/zk-learned/frames/NAME --run /mnt/d/zk-learned/runs/NAME
 
@@ -26,7 +26,7 @@ in a description needn't be kept to answer the first, which is why the second as
 
 With `--muon-lr`, Muon trains the hidden layers (`Optimisers`).
 
-Data: tools/frame_data.py.  Encoder, shards and probes: tools/frame_jepa.py.
+Data: tools/frame_data.py.  Encoder, shards and probes: tools/frame_model.py.
 """
 from __future__ import annotations
 
@@ -46,9 +46,10 @@ import torch.nn.functional as F
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT / "bots"))
-from frame_jepa import (CrossBlock, EncoderConfig, FrameBatch, FrameEncoder, Shards, TrainConfig, _collection, _learning_rate, _save_state, collapse_report, collate_frames,  # noqa: E402
-                        encode_shards, nearest_region, probe_report)
-from zkbot.policy import bundle as bd, featurize as fz, net as npnet, tables  # noqa: E402
+from frame_model import (CrossBlock, EncoderConfig, FrameBatch, FrameEncoder, Shards, TrainConfig, collapse_report, collate_frames, collection, encode_shards,  # noqa: E402
+                         learning_rate, nearest_region, probe_report, save_state)
+from policy_model import ID_DIM, NAME_DIM  # noqa: E402
+from zkbot.policy import bundle as bd, featurize as fz, tables  # noqa: E402
 
 # reg_x's columns: to this one the map's, from it what's there now (featurize._regions).
 REGION_STATIC = 27
@@ -235,7 +236,7 @@ class Optimisers:
 
 
 def _encoder_config() -> EncoderConfig:
-    """As the LeJEPA run's, but its queries are the output."""
+    """A FrameEncoder whose queries are the output: the latent tokens."""
     return EncoderConfig(z=0)
 
 
@@ -261,10 +262,10 @@ class FrameVae(nn.Module):
         self.region_out = nn.Linear(d, len(REGION_TARGETS) * (2 if cfg.two_part else 1))
         self.global_out = nn.Linear(d, fz.GLOBAL_DIM)
         if cfg.questions:
-            self.name_in = nn.Embedding(vocabulary, npnet.NAME_DIM)
-            self.side_in = nn.Embedding(len(SIDES), npnet.ID_DIM)
-            self.kind_in = nn.Embedding(fz.TOKEN_KINDS, npnet.ID_DIM)
-            self.unit_in = nn.Linear(npnet.NAME_DIM + 2 * npnet.ID_DIM + UNIT_STATE[1] - UNIT_STATE[0], d)
+            self.name_in = nn.Embedding(vocabulary, NAME_DIM)
+            self.side_in = nn.Embedding(len(SIDES), ID_DIM)
+            self.kind_in = nn.Embedding(fz.TOKEN_KINDS, ID_DIM)
+            self.unit_in = nn.Linear(NAME_DIM + 2 * ID_DIM + UNIT_STATE[1] - UNIT_STATE[0], d)
             self.wreck_in = nn.Linear(1, d)
             self.at_in = nn.Linear(2 + 4 * encoder_cfg.position_bands, d)
             self.where_out = nn.Linear(d, 4 * cfg.places)
@@ -570,13 +571,13 @@ def question_report(model: FrameVae, paths: list[pathlib.Path], held_out, device
 
 
 def save_vae(path: pathlib.Path, model: FrameVae, step: int) -> None:
-    torch.save({"cfg": asdict(model.cfg), "encoder_cfg": asdict(model.encoder_cfg), "model": model.state_dict(), "step": step, "feature_version": npnet.FEATURE_VERSION}, path)
+    torch.save({"cfg": asdict(model.cfg), "encoder_cfg": asdict(model.encoder_cfg), "model": model.state_dict(), "step": step, "feature_version": fz.FEATURE_VERSION}, path)
 
 
 def load_vae(path: pathlib.Path, device: str = "cpu") -> FrameVae:
     saved = torch.load(path, map_location=device, weights_only=True)
-    if saved["feature_version"] != npnet.FEATURE_VERSION:
-        raise ValueError(f"{path}: feature version {saved['feature_version']}, this code uses {npnet.FEATURE_VERSION}")
+    if saved["feature_version"] != fz.FEATURE_VERSION:
+        raise ValueError(f"{path}: feature version {saved['feature_version']}, this code uses {fz.FEATURE_VERSION}")
     model = FrameVae(VaeConfig(**saved["cfg"]), EncoderConfig(**saved["encoder_cfg"]), tables.table())
     model.load_state_dict(saved["model"])
     return model.to(device).eval()
@@ -591,7 +592,7 @@ def train(data: pathlib.Path, run: pathlib.Path, cfg: TrainConfig = TrainConfig(
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     encoder_cfg = encoder_cfg or _encoder_config()
     run.mkdir(parents=True, exist_ok=True)
-    manifest, paths, held_out, groups, outcomes = _collection(data)
+    manifest, paths, held_out, groups, outcomes = collection(data)
     rng = np.random.default_rng(cfg.seed)
     torch.manual_seed(cfg.seed)
     shards = Shards(paths, rng, maps=tuple(m for m in range(len(manifest["maps"])) if m not in held_out))
@@ -610,7 +611,7 @@ def train(data: pathlib.Path, run: pathlib.Path, cfg: TrainConfig = TrainConfig(
     step = first - 1
     with open(run / "metrics.jsonl", "a", encoding="utf8") as log:
         for step in range(first, cfg.steps):
-            optimiser.set_rate(_learning_rate(cfg, step))
+            optimiser.set_rate(learning_rate(cfg, step))
             frames, _ = shards.sample_probes(cfg.batch)
             frames = frames.to(device)
             loss, parts, mean = vae_loss(model, frames, beta_at(vae_cfg, step))
@@ -636,9 +637,9 @@ def train(data: pathlib.Path, run: pathlib.Path, cfg: TrainConfig = TrainConfig(
                     break
             if step and step % cfg.checkpoint_every == 0:
                 save_vae(run / f"vae-{step:07d}.pt", model, step)
-                _save_state(run / "state.pt", model, optimiser, step)
+                save_state(run / "state.pt", model, optimiser, step)
     save_vae(run / "vae-last.pt", model, step)
-    _save_state(run / "state.pt", model, optimiser, step)
+    save_state(run / "state.pt", model, optimiser, step)
     return model
 
 

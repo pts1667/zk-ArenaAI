@@ -9,9 +9,9 @@ import numpy as np
 import pytest
 
 from zkbot import catalog, units
-from zkbot.policy import actions, featurize as fz, net, rawframe as rf
+from zkbot.policy import actions, featurize as fz, rawframe as rf
 
-from conftest import ENEMY, make_frame, make_units
+from conftest import BLIP, ENEMY, MEMORY, make_frame, make_units
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT / "sim" / "py"), str(ROOT / "tools")]
@@ -34,7 +34,7 @@ def legal(t, i=0):
 def test_order_memory_keeps_its_width_when_the_policy_gains_kinds():
     """Frames on disk and encoders trained on them have 16 slots."""
     assert rf.ORDER_SLOTS == 16 and rf.KIND_COUNT > rf.ORDER_SLOTS
-    assert fz.UNIT_DIM == 127 and net.FEATURE_VERSION == 5
+    assert fz.UNIT_DIM == 127 and fz.FEATURE_VERSION == 5
 
 
 def test_the_facts_come_from_the_generated_data(table):
@@ -64,6 +64,19 @@ def test_a_factory_chooses_what_to_build_among_its_roster_but_not_what_it_builds
     assert t.unit_x[0, fz._O + 20] == 0.0
     unfinished = run(make_units({"uid": 1, "name": "factorycloak", "x": x, "z": z, "flags": PLAIN | rf.BEING_BUILT}), small_map, table)
     assert unfinished.controllable == 0
+
+
+def test_missiles_and_the_trinity_are_the_policys_to_aim(small_map, table):
+    """At what's on the ground in sight or on radar, not what's only remembered, which isn't a token."""
+    x, z = (float(v) for v in small_map.centre[0])
+    assert table.missile[table.names.index("tacnuke")] and table.launcher[table.names.index("staticnuke")]
+    others = ({"uid": 10, "name": "staticmex", "side": BLIP, "x": x + 800.0, "z": z},
+              {"uid": 11, "name": "energyfusion", "side": MEMORY, "x": x + 900.0, "z": z})
+    aims = lambda t, k: {int(t.uids[t.enemy_tokens[j]]) for j in np.flatnonzero(t.ptr_enemy[k, 0])}  # noqa: E731
+    missile = run(make_units({"uid": 1, "name": "tacnuke", "x": x, "z": z}, *others), small_map, table)
+    assert missile.controllable == 1 and legal(missile) == {rf.KEEP, rf.ATTACK_UNIT} and aims(missile, 0) == {10}
+    nuke = run(make_units({"uid": 1, "name": "staticnuke", "x": x, "z": z}, *others), small_map, table)
+    assert nuke.controllable == 1 and legal(nuke) == {rf.KEEP, rf.MANUAL_FIRE} and aims(nuke, 2) == {10}
 
 
 def test_a_throw_needs_a_ready_thrower_with_someone_beside_it(small_map, table):
@@ -194,40 +207,48 @@ def test_a_throw_past_its_reach_goes_as_far_as_it_can_the_same_way(small_map, ta
     assert abs((order.x - ux[i]) * to[1] - (order.z - uz[i]) * to[0]) < 1.0 * float(np.hypot(*to))     # the same line, to an elmo
 
 
-def test_the_net_chooses_from_what_is_legal_and_says_what_to_produce(small_map, table):
-    x, z = (float(v) for v in small_map.centre[0])
-    u = make_units({"uid": 1, "name": "staticmissilesilo", "x": x, "z": z}, {"uid": 2, "name": "amphlaunch", "x": x + 40.0, "z": z, "flags": READY}, {"uid": 3, "x": x + 60.0, "z": z})
-    t = run(u, small_map, table)
-    weights = net.random_weights(len(table.names) + 1, 3)
-    weights["head_kind.bias"][rf.KEEP] = -20.0
-    policy = net.Policy(weights)
-    rng = np.random.default_rng(1)
-    seen = set()
-    for _ in range(60):
-        d = policy.decide(t, net.State.initial(small_map.regions), rng)
-        seen |= {int(k) for k in d.kind}
-        for i, k in enumerate(d.kind):
-            assert t.kind_mask[i, k]
-            assert (d.produce[i] >= 0) == (k == rf.PRODUCE)
-            assert (d.region[i] >= 0) == (k in fz.KINDS_WITH_REGION)
-            assert (d.fine[i] >= 0) == (k in fz.KINDS_WITH_FINE)
-            if k == rf.THROW:
-                assert t.ptr_jump[i, d.region[i]]
-    assert {rf.PRODUCE, rf.THROW} <= seen
-
-
-def test_weights_from_before_these_kinds_are_refused(tmp_path, table):
-    weights = net.random_weights(len(table.names) + 1)
-    path = tmp_path / "old.npz"
-    np.savez(path, **weights, meta_feature_version=net.FEATURE_VERSION, meta_catalog_hash=table.hash)
-    with pytest.raises(ValueError, match="action version"):
-        net.load(path)
-
-
 # Torch ---------------------------------------------------------------------------------------------------------------------------------------------------
 
 
-def test_sampling_and_evaluating_agree_on_the_new_head(small_map, table):
+def _actor(table, encoder_path):
+    """An untrained actor that never keeps, so every other kind gets chosen."""
+    torch = pytest.importorskip("torch")
+    import policy_latent as pl
+
+    torch.manual_seed(0)
+    actor = pl.make(len(table.names) + 1, encoder_path).eval()
+    with torch.no_grad():
+        actor.head_kind.bias[rf.KEEP] = -20.0
+    return actor
+
+
+def test_the_actor_chooses_from_what_is_legal_and_says_what_to_produce(small_map, table, encoder_path):
+    torch = pytest.importorskip("torch")
+    import policy_model as pm
+
+    x, z = (float(v) for v in small_map.centre[0])
+    u = make_units({"uid": 1, "name": "staticmissilesilo", "x": x, "z": z}, {"uid": 2, "name": "amphlaunch", "x": x + 40.0, "z": z, "flags": READY}, {"uid": 3, "x": x + 60.0, "z": z})
+    t = run(u, small_map, table)
+    actor = _actor(table, encoder_path)
+    b = pm.collate([t] * 60).to("cpu")
+    with torch.no_grad():
+        units, reg_h, *_ = actor.decide(b, *actor.initial_state(60, 0, "cpu"))
+        a = pm.sample_actions(actor, b, units, reg_h)
+    seen = set()
+    for row in range(60):
+        kind, produce, region, fine = (v[row, :t.controllable].numpy() for v in (a.kind, a.produce, a.region, a.fine))
+        seen |= {int(k) for k in kind}
+        for i, k in enumerate(kind):
+            assert t.kind_mask[i, k]
+            assert (produce[i] >= 0) == (k == rf.PRODUCE)
+            assert (region[i] >= 0) == (k in fz.KINDS_WITH_REGION)
+            assert (fine[i] >= 0) == (k in fz.KINDS_WITH_FINE)
+            if k == rf.THROW:
+                assert t.ptr_jump[i, region[i]]
+    assert {rf.PRODUCE, rf.THROW} <= seen
+
+
+def test_sampling_and_evaluating_agree_on_the_new_head(small_map, table, encoder_path):
     torch = pytest.importorskip("torch")
     import policy_model as pm
 
@@ -236,29 +257,16 @@ def test_sampling_and_evaluating_agree_on_the_new_head(small_map, table):
     u = make_units({"uid": 1, "name": "staticmissilesilo", "x": x, "z": z}, {"uid": 2, "name": "amphlaunch", "x": x + 40.0, "z": z, "flags": READY}, {"uid": 3, "x": x + 60.0, "z": z},
                    {"uid": 4, "name": "amphtele", "x": x + 20.0, "z": z}, {"uid": 5, "name": "tele_beacon", "x": bx, "z": bz}, {"uid": 6, "name": "jumpsumo", "x": x, "z": z + 20.0})
     t = run(u, small_map, table)
-    torch.manual_seed(0)
-    actor = pm.Actor(len(table.names) + 1).eval()
-    with torch.no_grad():
-        actor.head_kind.bias[rf.KEEP] = -20.0
+    actor = _actor(table, encoder_path)
     b = pm.collate([t] * 8).to("cpu")
-    glob, regions = pm.initial_state(8, small_map.regions, "cpu")
     with torch.no_grad():
-        _, units, reg_h, _, _ = actor.encode(b, glob, regions)
+        units, reg_h, *_ = actor.decide(b, *actor.initial_state(8, 0, "cpu"))
         a = pm.sample_actions(actor, b, units, reg_h)
         logp, entropy = pm.evaluate_actions(actor, b, units, reg_h, a)
     assert torch.allclose(a.logp, logp, atol=1e-3)
     uses = a.kind == rf.PRODUCE
     assert uses.any() and ((a.produce >= 0) == uses).all() and "produce" in entropy
     assert torch.isin(a.kind, torch.tensor(fz.KINDS_WITH_REGION))[a.region >= 0].all()
-
-
-def test_a_trained_actor_exports_what_the_numpy_net_reads(table):
-    pytest.importorskip("torch")
-    import policy_model as pm
-
-    state = pm.Actor(len(table.names) + 1).state_dict()
-    assert set(state) == set(net.weight_shapes(len(table.names) + 1))
-    assert all(tuple(state[k].shape) == s for k, s in net.weight_shapes(len(table.names) + 1).items())
 
 
 # In the sim ----------------------------------------------------------------------------------------------------------------------------------------------

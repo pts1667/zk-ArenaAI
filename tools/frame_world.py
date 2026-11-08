@@ -2,6 +2,8 @@
 
 Roster      what can be on the board: factories and their units, and what builders can build
 BaseScript  a side's factories and builders: changing what's produced, taking spots, building energy, turrets and factories, reclaiming, helping
+FightScript the first fight script, raider-only: fighters attack-move to the enemy's start, in groups by metal from 3:00, and retreat to
+            regenerate.  It knows where the enemy's buildings are without scouting: it's a training opponent, there to finish games.
 FrameFight  the fight script, for units that can't all go to the same places: a ship's target is the nearest water to it
 FrameGames  whole games on any map, with every factory: on the ground, in the air, on the sea
 """
@@ -17,8 +19,8 @@ import numpy as np
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 import policy_sim_env as se  # noqa: E402
-from policy_opening import Footing, Ground, Opening, Seat  # noqa: E402
-from policy_script import FightScript, ScriptData  # noqa: E402
+from policy_opening import Footing, Ground, Opening  # noqa: E402
+from policy_script import ARRIVED, GROUPS_FROM, LONGEST_WAIT, NEW, RECOVERED, RETREAT_BELOW, RETREATING, SENT, WAITING, ScriptData, group_metal  # noqa: E402
 import zksim  # noqa: E402
 from zkbot import catalog as bot_catalog, units as bot_units  # noqa: E402
 from zkbot.policy import bundle as bd, rawframe as rf, tables  # noqa: E402
@@ -108,6 +110,79 @@ def extractors(table: tables.TypeTable) -> np.ndarray:
     for r, name in enumerate(table.names):
         out[r] = bool(bot_units.is_mex(bot_units.by_name(name)))
     return out
+
+
+def _nearest(x: np.ndarray, z: np.ndarray, others: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """For each point, where the nearest of the others is."""
+    i = np.hypot(others["x"][None, :] - x[:, None], others["z"][None, :] - z[:, None]).argmin(axis=1)
+    return others["x"][i], others["z"][i]
+
+
+@dataclass
+class FightScript:
+    """One side of one game.  A fighter is sent (to the enemy's start, then its nearest building once any has got there), waiting at
+    the rally until those waiting are worth a group, or retreating to the rally to regenerate."""
+    data: ScriptData
+    rally: tuple[float, float]
+    enemy_start: tuple[float, float]
+    state: np.ndarray = field(default_factory=lambda: np.zeros(256, np.int8))     # by uid
+    waiting_since: float | None = None      # when the first of those waiting began to
+    reached_start: bool = False
+
+    def _rejoining(self, seconds: float) -> int:
+        return WAITING if seconds >= GROUPS_FROM else SENT
+
+    def _release_group(self, states: np.ndarray, costs: np.ndarray, seconds: float) -> None:
+        waiting = states == WAITING
+        if not waiting.any():
+            self.waiting_since = None
+            return
+        if self.waiting_since is None:
+            self.waiting_since = seconds
+        if costs[waiting].sum() >= group_metal(seconds) or seconds - self.waiting_since >= LONGEST_WAIT:
+            states[waiting] = SENT
+            self.waiting_since = None
+
+    def _targets(self, fighters: np.ndarray, states: np.ndarray, enemies: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Where each fighter that's been sent should be heading."""
+        x, z = fighters["x"], fighters["z"]
+        tx, tz = np.full(len(x), self.enemy_start[0], np.float32), np.full(len(x), self.enemy_start[1], np.float32)
+        sent = states == SENT
+        if not self.reached_start:
+            self.reached_start = bool((np.hypot(x[sent] - tx[sent], z[sent] - tz[sent]) < ARRIVED).any())
+        if self.reached_start and sent.any() and len(enemies):
+            buildings = enemies[~self.data.table.mobile[self.data.table.rows(enemies["def_id"])]]
+            tx[sent], tz[sent] = _nearest(x[sent], z[sent], buildings if len(buildings) else enemies)
+        return tx, tz
+
+    def orders(self, own: np.ndarray, enemies: np.ndarray, seconds: float) -> np.ndarray:
+        """Orders for this side's fighters, given all of its own records and all of the enemy's."""
+        rows = self.data.table.rows(own["def_id"])
+        finished = self.data.fights[rows] & ((own["flags"] & rf.BEING_BUILT) == 0)
+        fighters, rows = own[finished], rows[finished]
+        out = np.zeros(len(fighters), zksim.ORDER_DTYPE)
+        if not len(fighters):
+            self.waiting_since = None
+            return out
+        uids = fighters["uid"]
+        if uids.max() >= len(self.state):
+            self.state = np.resize(self.state, 2 * int(uids.max()) + 2)
+            self.state[len(self.state) // 2:] = NEW
+        states = self.state[uids]
+        rejoining = self._rejoining(seconds)
+        states[states == NEW] = rejoining
+        hurt = fighters["hp_frac"]
+        states[self.data.regenerates[rows] & (hurt < RETREAT_BELOW)] = RETREATING
+        states[(states == RETREATING) & (hurt >= RECOVERED)] = rejoining
+        self._release_group(states, self.data.table.cost[rows], seconds)
+        tx, tz = self._targets(fighters, states, enemies)
+        at_rally = states != SENT
+        tx[at_rally], tz[at_rally] = self.rally
+        self.state[uids] = states
+        out["unit"], out["target"] = uids, -1
+        out["kind"] = np.where(states == RETREATING, rf.MOVE, rf.FIGHT)
+        out["x"], out["z"] = tx, tz
+        return out
 
 
 @dataclass

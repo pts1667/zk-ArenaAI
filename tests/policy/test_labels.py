@@ -1,31 +1,26 @@
 """Orders someone else gave, read back as the policy's choices: what supervised training learns from."""
 from __future__ import annotations
 
-import pathlib
-import sys
-
 import numpy as np
 import pytest
 
 from zkbot.policy import actions, featurize as fz, rawframe as rf, tables
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent.parent / "tools"))
+from conftest import sim_frames
+
 try:
-    import policy_toy as toy
+    import policy_sim_env  # noqa: F401
 except OSError:
     pytest.skip("needs the built sim library", allow_module_level=True)
 
 TABLE = tables.table()
 
 
-def _frames(count: int, seed: int):
-    bundle = toy.plain()
-    rng = np.random.default_rng(seed)
-    game = toy.ToyGame(rng)
-    for _ in range(count):
-        yield fz.featurize(game.frame_for(0), bundle, TABLE, enabled_kinds=fz.STAGE2_KINDS, privileged=True), bundle
-        game.apply(1, toy.script_focus(game, 1, rng))
-        game.step()
+def _frames(count: int, seed: int, start: int = 120):
+    """A script game's frames, two seconds apart, from `start` decisions in."""
+    frames, bundle = sim_frames(4 * count, seed, start)
+    for frame in frames[::4]:
+        yield fz.featurize(frame, bundle, TABLE, enabled_kinds=fz.STAGE2_KINDS, privileged=True), bundle
 
 
 def _random_choice(t: fz.Tensors, rng: np.random.Generator) -> actions.Decision:
@@ -44,7 +39,7 @@ def _random_choice(t: fz.Tensors, rng: np.random.Generator) -> actions.Decision:
             fine[i] = int(rng.integers(fz.FINE_OPTIONS))
         if k == rf.PRODUCE:
             produce[i] = int(rng.choice(np.flatnonzero(t.ptr_produce[i])))
-    return actions.Decision(kind, enemy, region, fine, produce, np.zeros(c, np.float32))
+    return actions.Decision(kind, enemy, region, fine, produce)
 
 
 def test_fine_points_are_where_decoding_sends_a_unit():
@@ -58,7 +53,7 @@ def test_fine_points_are_where_decoding_sends_a_unit():
 def test_what_decoding_makes_reads_back_as_the_same_choices():
     rng = np.random.default_rng(1)
     checked = 0
-    for t, bundle in _frames(12, 4):
+    for t, bundle in _frames(12, 4, start=480):        # 4 minutes in, when there's an army to order about
         chosen = _random_choice(t, rng)
         x, z = actions.world_positions(t, bundle)
         back, missed = actions.encode(actions.decode(chosen, t, bundle, x, z), t, bundle, x, z)

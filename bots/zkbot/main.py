@@ -1,19 +1,21 @@
-"""Entry point: python bots/zkbot/main.py <team-id>."""
+"""Entry point: python bots/zkbot/main.py <team-id>.  Connects to ControllerAI and drives the policy host (host.py)."""
 from __future__ import annotations
 
 import os
 import pathlib
 import sys
+import threading
 import time
 import traceback
 
-# Running this file directly puts bots/zkbot on sys.path, but the brain uses
-# package-relative imports.  Add the package parent and import the package.
-_HERE = pathlib.Path(__file__).resolve()
-sys.path.insert(0, str(_HERE.parent.parent))
+# Running this file directly puts bots/zkbot on sys.path, but the host uses package-relative imports.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
-from zkbot.brain import Brain  # noqa: E402
 from zkbot.client import Client  # noqa: E402
+from zkbot.host import Host  # noqa: E402
+
+BOOTSTRAP = {"game_info", "spawn_boxes", "metadata", "map_features", "heightmap", "settings"}
+PROFILE_EVERY = 60.0        # wall seconds
 
 
 def main() -> int:
@@ -25,44 +27,25 @@ def main() -> int:
     master = os.environ.get("CONTROLLERAI_MASTER", "http://127.0.0.1:3017")
     out_dir = pathlib.Path(os.environ.get("ZK_ARENA_OUT", "."))
     out_dir.mkdir(parents=True, exist_ok=True)
-    log_path = out_dir / f"zkbot-team{team_id}.log"
-    log_file = log_path.open("a", encoding="utf8", buffering=1)
-
-    lock = __import__("threading").Lock()
-
-    brain_ref: list = []
+    log_file = (out_dir / f"zkbot-team{team_id}.log").open("a", encoding="utf8", buffering=1)
+    lock = threading.Lock()
+    hosts: list[Host] = []
 
     def log(message: str) -> None:
-        # Wall clock plus game time (frames / 30), so events can be lined up
-        # with metrics and replays at any game speed.
-        frame = getattr(brain_ref[0], "frame", 0) if brain_ref else 0
-        gs = int(frame or 0) // 30
-        line = f"[{time.strftime('%H:%M:%S')} g{gs // 60:02d}:{gs % 60:02d}] {message}"
+        # Wall clock and game time, so that events line up with replays at any game speed.
+        seconds = max(0, hosts[0].frame if hosts else 0) // 30
+        line = f"[{time.strftime('%H:%M:%S')} g{seconds // 60:02d}:{seconds % 60:02d}] {message}"
         with lock:
             log_file.write(line + "\n")
             print(line, flush=True)
 
     log(f"start team={team_id} master={master}")
     client = Client(master, team_id, log)
-    brain = Brain(client, team_id, log)
-    brain_ref.append(brain)
-
-    # Keep ControllerAI's defaults (sync mode, one observation per frame).  In
-    # sync mode the bot sees every frame, which makes the task state simple and
-    # avoids losing commands around settings changes.
-    bootstrap_types = {
-        "game_info",
-        "spawn_boxes",
-        "metadata",
-        "map_features",
-        "heightmap",
-        "settings",
-    }
-    last_heartbeat = time.time()
-    # Wall-time profile: engine (waiting for the next observation), brain
-    # compute (excluding queries) and synchronous query round trips.
-    prof = {"wait": 0.0, "brain": 0.0, "frames": 0, "t0": time.time(), "f0": None}
-    t_wait = time.time()
+    host = Host(client, team_id, log)
+    hosts.append(host)
+    # Wall time waiting for the engine, and in the host (queries included).
+    prof = {"wait": 0.0, "host": 0.0, "frames": 0, "t0": time.time(), "f0": None}
+    last_heartbeat = t_wait = time.time()
     try:
         client.connect()
         log("connected")
@@ -80,68 +63,42 @@ def main() -> int:
                     last_heartbeat = time.time()
                     log("waiting for observation")
                 continue
-            mtype = msg.get("type")
-            data = msg.get("data")
-            if mtype in bootstrap_types:
-                brain.on_bootstrap(mtype, data)
-                continue
-            if mtype == "observation":
+            mtype, data = msg.get("type"), msg.get("data")
+            if mtype in BOOTSTRAP:
+                host.on_bootstrap(mtype, data)
+            elif mtype == "observation":
                 frame = (data or {}).get("frame")
                 if frame is not None and int(frame) < 0:
                     try:
-                        brain.on_startup(data)
+                        host.on_startup(data)
                     except Exception:
                         log("startup error:\n" + traceback.format_exc())
-                        try:
-                            client.send({"type": "finish_frame"})
-                        except Exception:
-                            pass
+                        client.send({"type": "finish_frame"})
                     continue
                 t_start = time.time()
                 prof["wait"] += t_start - t_wait
                 try:
-                    brain.on_frame(data)
+                    host.on_frame(data)
                 except Exception:
                     log("frame error:\n" + traceback.format_exc())
                 try:
-                    client.send_commands(brain.take_commands())
+                    client.send_commands(host.take_commands())
                 finally:
                     client.finish_frame()
                 t_wait = time.time()
-                prof["brain"] += t_wait - t_start
+                prof["host"] += t_wait - t_start
                 prof["frames"] += 1
                 if prof["f0"] is None and frame is not None:
                     prof["f0"] = int(frame)
                 span = t_wait - prof["t0"]
-                if span >= 60.0 and frame is not None:
-                    q = client.query_time
-                    games = (int(frame) - (prof["f0"] or 0)) / 30.0
-                    top = sorted(client.query_counts.items(), key=lambda kv: -kv[1][1])[:6]
-                    log(
-                        f"profile wall={span:.0f}s game={games:.0f}s speed={games / span:.2f}x "
-                        f"obs={prof['frames']} engine={prof['wait']:.1f}s "
-                        f"brain={prof['brain'] - q:.1f}s queries={q:.1f}s "
-                        f"units={len(brain.units)} block={brain.block_frames} cache_hits={client.cache_hits} q_top="
-                        + " ".join(f"{k}:{n}/{t:.1f}s" for k, (n, t) in top)
-                    )
-                    prof.update(wait=0.0, brain=0.0, frames=0, t0=t_wait, f0=int(frame))
+                if span >= PROFILE_EVERY and frame is not None:
+                    game = (int(frame) - prof["f0"]) / 30.0
+                    log(f"profile wall={span:.0f}s game={game:.0f}s speed={game / span:.2f}x obs={prof['frames']} engine={prof['wait']:.1f}s "
+                        f"host={prof['host'] - client.query_time:.1f}s queries={client.query_time:.1f}s units={len(host.units)}")
+                    prof.update(wait=0.0, host=0.0, frames=0, t0=t_wait, f0=int(frame))
                     client.query_time = 0.0
-                    client.query_counts = {}
-                    client.cache_hits = 0
-                continue
-            if mtype in ("error", "command_error", "query_error", "settings_error"):
+            elif mtype in ("error", "command_error", "query_error", "settings_error", "settings_result", "pause"):
                 log(f"{mtype}: {data}")
-                continue
-            if mtype == "settings_result":
-                log(f"settings result: {data}")
-                continue
-            if mtype == "pause":
-                log(f"pause state: {data}")
-                continue
-            # query_result / settings / etc. that weren't consumed synchronously
-            if mtype == "query_result":
-                brain.debug_queries += 1
-                continue
     except KeyboardInterrupt:
         log("interrupted")
     except Exception:
@@ -153,10 +110,7 @@ def main() -> int:
         except Exception:
             pass
         log("exit")
-        try:
-            log_file.close()
-        except Exception:
-            pass
+        log_file.close()
     return 0
 
 

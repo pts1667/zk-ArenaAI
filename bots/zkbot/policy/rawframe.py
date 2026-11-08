@@ -5,7 +5,7 @@ of the schema.  sim/include/zksim/rawframe.hpp is generated from it (`python too
 compares the two.  It holds only what the live bot can really supply: no facing, weapon reload or pending shots.
 
 Three additions to docs/learned-policy/02-policy.md section 2.2, all because a stateless featurizer needs them: the
-flags DAMAGED (for the commit lock) and RESERVED (units the rules keep), and `ord_age` on a remembered structure, which
+flags DAMAGED (for the commit lock) and RESERVED (units kept from the policy: none since the rules bot went), and `ord_age` on a remembered structure, which
 says how long ago it was seen.  Later, the flag JUMP_READY: an own unit's jump is charged, as its rules param says.
 For a PRODUCE, `ord_target` is the def id of what the factory or silo makes, not a unit.
 
@@ -91,13 +91,6 @@ class LiveMemory:
             if isinstance(ev, dict) and ev.get("topic") == 7 and ev.get("unitId") is not None:
                 self.idle[int(ev["unitId"])] = frame
 
-    @staticmethod
-    def reserved(brain: Any) -> set[int]:
-        """Units the rules keep even in policy mode: Gremlin scouts and the volley-firing Phantoms."""
-        keep = set(getattr(brain, "gremlin_scouts", None) or ())
-        keep.update(uid for uid, u in brain.units.items() if u.name == "cloaksnipe")
-        return keep
-
 
 def _hostile_owner(uid: int, raw: dict[str, Any], memory: LiveMemory) -> tuple[int, int]:
     """Every unit in the observation has its ally team.  ControllerAI doesn't send the player yet, so the alliance stands for it:
@@ -131,33 +124,32 @@ def _record(rec: np.void, uid: int, knowledge: int, owner: tuple[int, int], raw:
     rec["flags"] = flags
 
 
-def _jump_charged(brain: Any, uid: int, raw: dict[str, Any]) -> bool:
-    """unit_jumpjets.lua's reload, in a rules param only its team can read.  A brain with no game behind it has never jumped.
+def _jump_charged(host: Any, uid: int, raw: dict[str, Any]) -> bool:
+    """unit_jumpjets.lua's reload, in a rules param only its team can read.  A host with no game behind it has never jumped.
     A thrower's reload is a weapon's, which ControllerAI doesn't show, so it counts as ready: the game makes it wait to fire."""
     d = units.BY_ID.get(int(raw.get("defId") or 0))
     if d and d["name"] in catalog.SPECIALS["throwers"]:
         return True
     if not d or not d.get("isMobile") or "jump" not in catalog.tags(d["name"]):
         return False
-    client = getattr(brain, "client", None)
+    client = getattr(host, "client", None)
     if client is None:
         return True
     answer = client.query({"type": "unit_rules_param", "unitId": uid, "key": "jumpReload", "defaultFloat": 1.0})
     return float((answer or {}).get("floatValue", 1.0)) >= 1.0
 
 
-def from_brain(brain: Any, obs: dict[str, Any], memory: LiveMemory, region_of: Any = None) -> Frame:
-    """Reads the observation and the Brain, and changes neither.  `memory` holds what one frame can't: which units went
+def from_host(host: Any, obs: dict[str, Any], memory: LiveMemory, region_of: Any = None) -> Frame:
+    """Reads the observation and the host (bots/zkbot/host.py), and changes neither.  `memory` holds what one frame can't: which units went
     idle, and each unit's health at the last decision."""
     frame = int(obs.get("frame") or 0)
     own, enemies, blips = obs.get("units") or {}, obs.get("enemies") or {}, obs.get("radarBlips") or {}
-    me = int(obs.get("teamId", brain.team_id)), int(obs.get("allyTeamId", brain.ally_team_id))
-    ghosts = {uid: entry for uid, entry in (getattr(brain, "enemy_structures", None) or {}).items()
+    me = int(obs.get("teamId", host.team_id)), int(obs.get("allyTeamId", host.ally_team_id))
+    ghosts = {uid: entry for uid, entry in (getattr(host, "enemy_structures", None) or {}).items()
               if str(uid) not in enemies and str(uid) not in blips}
     units = np.zeros(len(own) + len(enemies) + len(blips) + len(ghosts), UNIT_DTYPE)
     i = 0
-    reserved = memory.reserved(brain)
-    orders = brain.unit_order
+    orders = host.unit_order
     healths: dict[int, float] = {}
     idle_builders = 0
     for uid_s, raw in own.items():
@@ -167,15 +159,13 @@ def from_brain(brain: Any, obs: dict[str, Any], memory: LiveMemory, region_of: A
         flags = IN_LOS
         if uid in memory.idle and (order is None or order[4] <= memory.idle[uid]):
             flags |= IDLE
-            known = brain.units.get(uid)
+            known = host.units.get(uid)
             idle_builders += 1 if known is not None and known.is_builder else 0
-        if uid in reserved:
-            flags |= RESERVED
         health = float(raw.get("health") or 0.0)
         healths[uid] = health
         if health < memory.health.get(uid, health):
             flags |= DAMAGED
-        if _jump_charged(brain, uid, raw):
+        if _jump_charged(host, uid, raw):
             flags |= JUMP_READY
         _record(rec, uid, KNOW_LOS, (int(raw.get("team", me[0])), int(raw.get("allyTeam", me[1]))), raw, flags)
         if order is not None:
@@ -188,7 +178,7 @@ def from_brain(brain: Any, obs: dict[str, Any], memory: LiveMemory, region_of: A
     for uid_s, raw in enemies.items():
         _record(units[i], int(uid_s), KNOW_LOS, _hostile_owner(int(uid_s), raw, memory), raw, IN_LOS)
         i += 1
-    tracks = getattr(brain, "blip_tracks", None) or {}
+    tracks = getattr(host, "blip_tracks", None) or {}
     for uid_s, raw in blips.items():
         uid = int(uid_s)
         _record(units[i], uid, KNOW_RADAR, _hostile_owner(uid, raw, memory), raw, 0)
@@ -208,22 +198,22 @@ def from_brain(brain: Any, obs: dict[str, Any], memory: LiveMemory, region_of: A
         rec["ord_age"] = frame - int(seen)
         i += 1
     features = _features(obs)
-    spots = brain.map.spots
+    spots = host.map.spots
     sites = np.zeros(len(spots), SITE_DTYPE)
     for k, s in enumerate(spots):
         sites[k]["site_id"], sites[k]["x"], sites[k]["z"], sites[k]["income"] = k, s.x, s.z, s.income
         sites[k]["status"] = _SITE_STATUS.get(getattr(s, "status", "free"), SITE_FREE)
         sites[k]["region_id"] = -1 if region_of is None else int(region_of(s.x, s.z))
-    commander = brain.units.get(brain.commander_id) if brain.commander_id else None
+    commander = host.units.get(host.commander_id) if host.commander_id else None
     glob = np.zeros(len(GLOBAL_FIELDS), np.float32)
     values = {
         "frame": frame,
-        "metal": brain.metal_current(), "metal_income": brain.metal_income(), "metal_storage": brain.effective_storage(brain.metal()),
-        "energy": brain.energy_current(), "energy_income": brain.energy_income(), "energy_storage": brain.effective_storage(brain.energy()),
+        "metal": host.metal_current(), "metal_income": host.metal_income(), "metal_storage": host.effective_storage(host.metal()),
+        "energy": host.energy_current(), "energy_income": host.energy_income(), "energy_storage": host.effective_storage(host.energy()),
         "commander_hp": commander.alive_frac if commander else 0.0, "commander_uid": commander.uid if commander else -1,
-        "base_x": brain.base_pos[0], "base_z": brain.base_pos[1], "map_w": brain.map.width, "map_h": brain.map.height,
-        "frames_since_contact": max(0, frame - int(getattr(brain, "last_enemy_seen_frame", 0) or 0)),
-        "unfinished_structures": sum(1 for u in brain.units.values() if not u.is_mobile and not u.is_finished),
+        "base_x": host.base_pos[0], "base_z": host.base_pos[1], "map_w": host.map.width, "map_h": host.map.height,
+        "frames_since_contact": max(0, frame - int(getattr(host, "last_enemy_seen_frame", 0) or 0)),
+        "unfinished_structures": sum(1 for u in host.units.values() if not u.is_mobile and not u.is_finished),
         "idle_builders": idle_builders, "player": me[0], "ally_team": me[1],
     }
     for name, value in values.items():

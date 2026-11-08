@@ -42,7 +42,7 @@ class Bundle:
     gate_x: np.ndarray          # E x GATE_DIM: 6 widths, 6 walking lengths, tags
     walk: np.ndarray            # 6 x R x R: walking elmos between regions, inf if there's no way
     hops: np.ndarray            # R x R int8: gates between regions over all classes, up to MAX_HOP
-    spot_list: np.ndarray       # S x 3: x, z, income; the sim's sites come from here, the live bot's from the Brain
+    spot_list: np.ndarray       # S x 3: x, z, income; the sim's sites come from here, the live bot's from the host's map
 
     @property
     def regions(self) -> int:

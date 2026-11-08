@@ -28,9 +28,11 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 import policy_sim_env as se  # noqa: E402
 import zksim  # noqa: E402
-from zkbot.policy import actions, bundle as bd, featurize as fz, net as npnet, rawframe as rf, tables  # noqa: E402
+from zkbot.policy import actions, bundle as bd, featurize as fz, rawframe as rf, tables  # noqa: E402
 
-DATA_VERSION = 1
+DATA_VERSION = 3      # 1: the army script with the opening's economy only.  2: with the economy script (policy_eco.py), 2026-11-08.
+                      # 3: the army script aims missiles and the Trinity (labels now), the economy spends what it makes, and in the sim
+                      # help for a factory still being built builds it, 2026-11-08
 
 
 def _copy(frame: rf.Frame) -> rf.Frame:
@@ -105,7 +107,7 @@ def load(path: pathlib.Path) -> tuple[list[rf.Frame], list[np.ndarray], dict]:
     return frames, orders, info
 
 
-def labels(frame: rf.Frame, orders: np.ndarray, bundle: bd.Bundle, table: tables.TypeTable, **featurize) -> tuple[fz.Tensors, npnet.Decision, int]:
+def labels(frame: rf.Frame, orders: np.ndarray, bundle: bd.Bundle, table: tables.TypeTable, **featurize) -> tuple[fz.Tensors, actions.Decision, int]:
     """A decision as the policy would read it, and what the script did as the policy's choices: the label.  Also how many orders it couldn't say."""
     t = fz.featurize(frame, bundle, table, **featurize)
     x, z = actions.world_positions(t, bundle)

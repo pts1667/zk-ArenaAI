@@ -1,6 +1,7 @@
-"""Shared pieces: a small real map, and frames made by hand."""
+"""Shared pieces: a small real map, frames made by hand, frames from a script game in the sim, and a small frame encoder."""
 from __future__ import annotations
 
+import functools
 import pathlib
 import sys
 
@@ -8,6 +9,7 @@ import numpy as np
 import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent.parent / "bots"))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent.parent / "tools"))
 
 from zkbot.policy import bundle as bd, rawframe as rf, tables  # noqa: E402
 from zkbot import terrain, units  # noqa: E402
@@ -63,3 +65,36 @@ def make_frame(units_array, frame=900, bundle=None):
     glob[rf.G["frame"]] = frame
     glob[rf.G["map_w"]], glob[rf.G["map_h"]] = 2560.0, 2560.0
     return rf.Frame(units_array, np.zeros(0, rf.SITE_DTYPE), glob)
+
+
+@functools.lru_cache(maxsize=None)
+def sim_frames(count: int, seed: int = 5, start: int = 120) -> tuple[tuple[rf.Frame, ...], bd.Bundle]:
+    """Seat 0's frames at `count` decisions in a row of a script game in the sim, from `start` decisions in, and its map.  The same
+    every time for the same arguments.  Needs the built sim library: a test module that calls it skips without one."""
+    import policy_sim_env as se
+
+    env = se.SimEnv(1, seed, ["scripts"], threads=2)
+    env.begin()
+    for _ in range(start):
+        env.step(0.0)
+    frames = []
+    for _ in range(count):
+        f = env.frame(0)
+        frames.append(rf.Frame(f.units.copy(), f.sites.copy(), f.glob.copy(), f.features.copy()))
+        env.step(0.0)
+    return tuple(frames), env.bundle_of(0)
+
+
+@pytest.fixture(scope="session")
+def encoder_path(tmp_path_factory) -> pathlib.Path:
+    """A small frame encoder, untrained, saved as tools/frame_vae.py saves one, for an actor to read."""
+    import torch
+
+    import frame_model as fm
+    import frame_vae as fv
+
+    torch.manual_seed(1)
+    path = tmp_path_factory.mktemp("encoder") / "vae.pt"
+    cfg = fv.VaeConfig(latent=8, decoder_d=32, decoder_heads=2, decoder_rounds=1, variational=False, two_part=True, questions=True)
+    fv.save_vae(path, fv.FrameVae(cfg, fm.EncoderConfig(d=32, heads=2, queries=4, rounds=1, z=0, region_pool=6), tables.table()), 1)
+    return path

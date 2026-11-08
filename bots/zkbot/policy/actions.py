@@ -8,11 +8,20 @@ import numpy as np
 from . import featurize as fz
 from . import rawframe as rf
 from .bundle import Bundle
-from .net import Decision
 from .tables import table
 
 GROUND_FINE_RADIUS = 200.0
 THROW_SHORT = 0.98      # of its reach at most, or it'd walk off to get in range and leave behind those it meant to throw
+
+
+@dataclass
+class Decision:
+    """What the network chose for each controllable unit, in token order."""
+    kind: np.ndarray              # C: the kind each unit chose
+    enemy: np.ndarray             # C: index into enemy_tokens, or -1
+    region: np.ndarray            # C: region index, or -1
+    fine: np.ndarray              # C: fine option, or -1
+    produce: np.ndarray           # C: place in table.producible, or -1
 
 
 @dataclass(frozen=True)
@@ -151,7 +160,7 @@ def encode(orders: list[Order], t: fz.Tensors, bundle: Bundle, unit_x: np.ndarra
                 continue
             produce[i] = p
         kind[i] = k
-    return Decision(kind, enemy, region, fine, produce, np.zeros(c, np.float32)), missed
+    return Decision(kind, enemy, region, fine, produce), missed
 
 
 def world_positions(t: fz.Tensors, bundle: Bundle) -> tuple[np.ndarray, np.ndarray]:

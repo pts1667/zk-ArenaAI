@@ -20,6 +20,8 @@ from . import rawframe as rf
 from .bundle import PASS_CELL, Bundle
 from .tables import TYPE_DIM, TypeTable
 
+FEATURE_VERSION = 5          # what a saved encoder or actor was trained to read: raise it with any change to the tensors' meaning
+
 CAP_CONTROLLABLE, CAP_UNITS, CAP_HIDDEN = 256, 592, 64
 CAP_SITES = 24
 CAP_FEATURES = 32           # wrecks and the like in sight.  Past that, a region's metal says what's left out.
@@ -32,6 +34,8 @@ LEAST_COST = 100.0
 MAX_ALLY_TEAMS, MAX_PLAYERS = 16, 32
 
 # Token kinds.
+# TK_MEMORY_STATE is the last token of a collated batch (tools/policy_model.py), which the actors read as nothing in particular;
+# the embeddings keep its row so saved encoders and actors load.
 TK_SEEN, TK_BLIP, TK_MEMORY, TK_SUMMARY, TK_REGION, TK_SITE, TK_GLOBAL, TK_FEATURE, TK_HIDDEN, TK_MEMORY_STATE = range(10)
 TOKEN_KINDS = 10
 _KIND_OF_KNOWLEDGE = np.array((TK_SEEN, TK_BLIP, TK_MEMORY, TK_HIDDEN), np.int8)      # by rf.KNOW_*
@@ -64,19 +68,6 @@ SITE_DIM = 2 + 1 + 4 + 1 + 1
 FEATURE_DIM = 2 + 1 + 1 + 1
 GLOBAL_DIM = len(rf.GLOBAL_FIELDS) - 2     # the last two say who the viewer is, and aren't inputs
 
-# Pair buckets.  Unit-unit: log2 distance (12) x hostile, same alliance or same player (3), then a unit and what it's ordered to shoot, each way.
-# Unit-region: same region or hops 1-6+, or unknown (8).  Region-region: hops 0-6+ (7).  Unit-feature: log2 distance (12).  All else: one per pair of token groups.
-_UU = 0
-_AIMS_AT = 36
-_AIMED_AT_BY = 37
-_UR = 38
-_RR = 46
-_UF = 53
-_OTHER = 65
-_GROUPS = 6   # unit, summary, region, site, feature, global
-NUM_BUCKETS = _OTHER + _GROUPS * _GROUPS + 1   # the last is the memory state's, with anything
-MEMORY_BUCKET = NUM_BUCKETS - 1
-
 RAY_CELLS = 12            # 32-elmo steps, to 400 elmos
 RAY_STEP = 32.0
 RAY_MAX = RAY_CELLS * RAY_STEP
@@ -95,7 +86,6 @@ class Tensors:
     site_x: np.ndarray            # S x SITE_DIM
     glob_x: np.ndarray            # GLOBAL_DIM
     tok_kind: np.ndarray          # N
-    pair_bucket: np.ndarray       # N x N
     controllable: int             # C: the first C unit tokens get an action
     kind_mask: np.ndarray         # C x KIND_COUNT
     ptr_enemy: np.ndarray         # len(ENEMY_POINTER_KINDS) x C x E: legal targets per kind
@@ -283,55 +273,6 @@ def _ray_dps(x: np.ndarray, z: np.ndarray, ally: np.ndarray, dps: np.ndarray, ou
     out[:, _R + 16:_R + 24] = np.log1p(own_sum) / 8.0
 
 
-def _aim_pairs(units: np.ndarray, is_own: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Unit tokens with a target among the unit tokens, and the token of that target."""
-    aiming = np.flatnonzero(is_own & (units["ord_kind"] >= 0) & (units["ord_kind"] != rf.PRODUCE) & (units["ord_target"] >= 0))
-    found, at = _find(units["ord_target"][aiming], units["uid"])
-    return aiming[found], at[found]
-
-
-def _distance_bucket(dist: np.ndarray) -> np.ndarray:
-    """Log2 distance: under 16 elmos is bucket 0, each doubling one more, 12 in all."""
-    return np.clip(np.frexp(np.maximum(dist, 1.0) / 8.0)[1] - 1, 0, 11)
-
-
-def _pair_buckets(units: np.ndarray, is_own: np.ndarray, unit_region: np.ndarray, summaries: int, bundle: Bundle, sites: int, features: np.ndarray) -> np.ndarray:
-    x, z, players, allies = units["x"], units["z"], units["player"], units["ally_team"]
-    u = len(units)                    # units, without summaries
-    r = bundle.regions
-    f = len(features)
-    n = u + summaries + r + sites + f + 1
-    out = np.empty((n, n), np.int8)
-    groups = np.concatenate((np.zeros(u, np.int8), np.full(summaries, 1, np.int8), np.full(r, 2, np.int8), np.full(sites, 3, np.int8), np.full(f, 4, np.int8), np.array([5], np.int8)))
-    out[:] = _OTHER + groups[:, None] * _GROUPS + groups[None, :]
-    if u and f:
-        block = _UF + _distance_bucket(np.hypot(features["x"][None, :] - x[:, None], features["z"][None, :] - z[:, None]))
-        first = u + summaries + r + sites
-        out[:u, first:first + f] = block
-        out[first:first + f, :u] = block.T
-    if u:
-        dx = x[None, :] - x[:, None]
-        dz = z[None, :] - z[:, None]
-        dist = np.sqrt(dx * dx + dz * dz)
-        buckets = _distance_bucket(dist)
-        same_ally = allies[:, None] == allies[None, :]
-        # Two units whose player isn't known aren't known to share one.
-        same_player = (players[:, None] == players[None, :]) & (players[:, None] >= 0)
-        out[:u, :u] = _UU + buckets + 12 * (same_ally.astype(np.int8) + (same_ally & same_player))
-        shooter, target = _aim_pairs(units, is_own)
-        out[shooter, target] = _AIMS_AT
-        out[target, shooter] = _AIMED_AT_BY
-    if u and r:
-        known = unit_region >= 0
-        hops = np.where(known[:, None], bundle.hops[np.maximum(unit_region, 0)], 7).astype(np.int8)
-        block = _UR + np.minimum(hops, 7)
-        out[:u, u + summaries:u + summaries + r] = block
-        out[u + summaries:u + summaries + r, :u] = block.T
-    if r:
-        out[u + summaries:u + summaries + r, u + summaries:u + summaries + r] = _RR + bundle.hops
-    return out
-
-
 def _summaries(units: np.ndarray, left: np.ndarray, rows: np.ndarray, bundle: Bundle, table: TypeTable, player: int,
                ally: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """One token per (whose, what's known of it, coarse role) for what the caps left out: count, hp sum, dps sum, centroid.  The
@@ -436,7 +377,6 @@ def featurize(frame: rf.Frame, bundle: Bundle, table: TypeTable, commit_decision
     # Token kinds.
     tok_kind = np.concatenate((_KIND_OF_KNOWLEDGE[knowledge], np.full(s, TK_SUMMARY, np.int8), np.full(bundle.regions, TK_REGION, np.int8),
                                np.full(len(sites), TK_SITE, np.int8), np.full(len(features), TK_FEATURE, np.int8), np.array([TK_GLOBAL], np.int8)))
-    pair_bucket = _pair_buckets(units, is_own, unit_region, s, bundle, len(sites), features)
 
     # Actions.
     enemy_tokens = np.flatnonzero(hostile & ((knowledge == rf.KNOW_LOS) | (knowledge == rf.KNOW_RADAR)))
@@ -453,7 +393,7 @@ def featurize(frame: rf.Frame, bundle: Bundle, table: TypeTable, commit_decision
     gate_x[:, :6] = np.log1p(gate_x[:, :6]) / 8.0
     gate_x[:, 6:12] = gate_x[:, 6:12] / 2000.0
     out = Tensors(
-        unit_x=unit_x, unit_name=unit_name, reg_x=reg_x, site_x=site_x, glob_x=glob_x, tok_kind=tok_kind, pair_bucket=pair_bucket,
+        unit_x=unit_x, unit_name=unit_name, reg_x=reg_x, site_x=site_x, glob_x=glob_x, tok_kind=tok_kind,
         controllable=c, kind_mask=legal.kind, ptr_enemy=legal.enemy, ptr_region=legal.region, ptr_jump=legal.jump, ptr_wait=legal.wait,
         ptr_produce=legal.produce, route_bias=legal.route, own_beacons=own_beacons, beacon_regions=unit_region[own_beacons],
         gate_a=bundle.edge_a, gate_b=bundle.edge_b, gate_x=gate_x,
@@ -607,6 +547,14 @@ def _masks(tokens: _Tokens, locked: np.ndarray, c: int, bundle: Bundle, table: T
         ptr_enemy[0] = hits & in_los[None, :]
         ptr_enemy[1] = armed[:, None] & (dist <= (table.range[me] * 1.5 + 300.0)[:, None])
         ptr_enemy[2] = table.manualfire[me][:, None] & in_los[None, :] & (dist <= table.manual_range[me][:, None])
+        # Missiles and the Trinity (tables.missile, tables.launcher): at what's on the ground in reach, in sight or on radar, as
+        # every enemy token is.  The Trinity needs no sight in the game, but what's only remembered isn't a token.
+        ground = ~air_target[None, :]
+        missile, launcher = table.missile[me], table.launcher[me]
+        if missile.any():
+            ptr_enemy[0][missile] = ground & (dist[missile] <= table.range[me[missile]][:, None])
+        if launcher.any():
+            ptr_enemy[2][launcher] = ground & (dist[launcher] <= table.manual_range[me[launcher]][:, None])
 
     kind[:, rf.KEEP] = ~idle | ~mobile
     kind[:, rf.MOVE] = free & mobile & can_go

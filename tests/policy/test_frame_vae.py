@@ -13,13 +13,13 @@ torch = pytest.importorskip("torch")
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent.parent / "tools"))
 try:
     import frame_data as fd
-    import frame_jepa as fj
+    import frame_model as fm
     import frame_vae as fv
     from zkbot.policy import featurize as fz, tables
 except OSError:
     pytest.skip("needs the built sim library", allow_module_level=True)
 
-ENCODER = fj.EncoderConfig(d=32, heads=2, queries=4, rounds=1, z=0)
+ENCODER = fm.EncoderConfig(d=32, heads=2, queries=4, rounds=1, z=0)
 VAE = fv.VaeConfig(latent=8, decoder_d=32, decoder_heads=2, decoder_rounds=1, beta_warmup=0)
 TABLE = tables.table()
 
@@ -38,11 +38,11 @@ def data(tmp_path_factory):
 
 @pytest.fixture(scope="module")
 def frames(data):
-    s = fj.Shards._read(sorted(data.glob("*-*.npz"))[0])
-    return [fj.Shards.frame(s, i) for i in range(32)]
+    s = fm.Shards._read(sorted(data.glob("*-*.npz"))[0])
+    return [fm.Shards.frame(s, i) for i in range(32)]
 
 
-def _hand_made(units: list[tuple[str, float, float, int, float]]) -> fj.FrameBatch:
+def _hand_made(units: list[tuple[str, float, float, int, float]]) -> fm.FrameBatch:
     """Two regions, at x = -0.5 and 0.5.  units: name, x, z, alliance from the viewer, health."""
     reg = np.zeros((2, fz.REGION_DIM), np.float32)
     reg[:, 0] = (-0.5, 0.5)
@@ -52,7 +52,7 @@ def _hand_made(units: list[tuple[str, float, float, int, float]]) -> fj.FrameBat
         x[i, fz._I:fz._I + 2] = ux, uz
         x[i, fz._I + 6] = hp
     names = np.array([TABLE.names.index(u[0]) for u in units], np.int32)
-    return fj.collate_frames([{"unit_x": x, "unit_name": names, "unit_ally": np.array([u[3] for u in units], np.int32), "unit_player": np.zeros(len(units), np.int32),
+    return fm.collate_frames([{"unit_x": x, "unit_name": names, "unit_ally": np.array([u[3] for u in units], np.int32), "unit_player": np.zeros(len(units), np.int32),
                                "tok_kind": np.zeros(len(units), np.int32), "reg_x": reg, "site_x": np.zeros((0, fz.SITE_DIM), np.float32), "feat_x": np.zeros((0, fz.FEATURE_DIM), np.float32),
                                "glob_x": np.zeros(fz.GLOBAL_DIM, np.float32)}])
 
@@ -106,24 +106,24 @@ def test_what_a_region_is_asked_does_not_carry_what_it_has_to_answer():
 
 
 def test_latents_come_as_tokens_of_the_configured_size(frames):
-    assert _model().latent_tokens(fj.collate_frames(frames[:3])).shape == (3, ENCODER.queries, VAE.latent)
+    assert _model().latent_tokens(fm.collate_frames(frames[:3])).shape == (3, ENCODER.queries, VAE.latent)
 
 
 def test_latents_do_not_depend_on_token_order_or_padding(frames):
     model = _model()
-    alone = model.latent_tokens(fj.collate_frames(frames[:1]))
-    padded = model.latent_tokens(fj.collate_frames(frames[:4]))[:1]
+    alone = model.latent_tokens(fm.collate_frames(frames[:1]))
+    padded = model.latent_tokens(fm.collate_frames(frames[:4]))[:1]
     assert torch.allclose(alone, padded, atol=1e-4)
     f = dict(frames[0])
     order = np.random.default_rng(1).permutation(len(f["unit_x"]))
     for name in ("unit_x", "unit_name", "unit_ally", "unit_player", "tok_kind"):
         f[name] = f[name][order]
-    assert torch.allclose(alone, model.latent_tokens(fj.collate_frames([f])), atol=1e-4)
+    assert torch.allclose(alone, model.latent_tokens(fm.collate_frames([f])), atol=1e-4)
 
 
 def test_noise_only_when_sampling(frames):
     model = _model()
-    b = fj.collate_frames(frames[:4])
+    b = fm.collate_frames(frames[:4])
     a, c = model(b, sample=False)[0], model(b, sample=False)[0]
     assert torch.equal(a, c)
     assert not torch.equal(model(b, sample=True)[0], a)
@@ -131,8 +131,8 @@ def test_noise_only_when_sampling(frames):
 
 def test_padded_regions_change_no_answer(frames):
     model = _model()
-    alone = model(fj.collate_frames(frames[:1]), sample=False)
-    together = model(fj.collate_frames(frames[:4]), sample=False)
+    alone = model(fm.collate_frames(frames[:1]), sample=False)
+    together = model(fm.collate_frames(frames[:4]), sample=False)
     count = len(frames[0]["reg_x"])
     assert torch.allclose(alone[0][0, :count], together[0][0, :count], atol=1e-3)
     assert torch.allclose(alone[1][0], together[1][0], atol=1e-3)
@@ -147,11 +147,11 @@ def test_kl_is_the_formula():
 
 def test_loss_does_not_grow_with_padding(frames):
     model = _model()
-    b = fj.collate_frames(frames[:8])
+    b = fm.collate_frames(frames[:8])
     model.fit_scales([b])
     torch.manual_seed(3)
     plain = fv.vae_loss(model, b, 0.0)[1]["recon"]
-    wider = fj.FrameBatch(**{**b.__dict__, "reg_x": torch.cat((b.reg_x, torch.zeros(8, 5, fz.REGION_DIM)), 1), "reg_mask": torch.cat((b.reg_mask, torch.zeros(8, 5, dtype=torch.bool)), 1)})
+    wider = fm.FrameBatch(**{**b.__dict__, "reg_x": torch.cat((b.reg_x, torch.zeros(8, 5, fz.REGION_DIM)), 1), "reg_mask": torch.cat((b.reg_mask, torch.zeros(8, 5, dtype=torch.bool)), 1)})
     torch.manual_seed(3)
     assert fv.vae_loss(model, wider, 0.0)[1]["recon"] == pytest.approx(plain, rel=2e-2)
 
@@ -166,7 +166,7 @@ def test_beta_rises_from_nothing_over_its_warmup():
 
 def _fit(frames, beta: float, steps: int = 150) -> dict:
     model = _model(cfg=replace(VAE, beta=beta)).train()
-    b = fj.collate_frames(frames)
+    b = fm.collate_frames(frames)
     model.fit_scales([b])
     optimiser = torch.optim.Adam(model.parameters(), lr=2e-3)
     parts = {}
@@ -187,14 +187,14 @@ def test_it_learns_to_give_frames_back_and_a_heavy_beta_buys_silence(frames):
 
 def test_a_run_trains_reports_saves_and_goes_on(data, tmp_path):
     run = tmp_path / "run"
-    cfg = fj.TrainConfig(batch=8, steps=4, report_every=1, probe_every=3, probe_frames=64, warmup=1, checkpoint_every=100)
+    cfg = fm.TrainConfig(batch=8, steps=4, report_every=1, probe_every=3, probe_frames=64, warmup=1, checkpoint_every=100)
     model = fv.train(data, run, cfg, VAE, ENCODER, device="cpu")
     rows = [json.loads(line) for line in (run / "metrics.jsonl").read_text().splitlines()]
     assert [r["step"] for r in rows] == [0, 1, 2, 3]
     assert all(r["kl_nats"] >= 0.0 for r in rows)
     assert (model.region_std != 1.0).any()
     loaded = fv.load_vae(run / "vae-last.pt")
-    frames = fj.collate_frames([fj.Shards.frame(fj.Shards._read(sorted(data.glob("*-*.npz"))[0]), 0)])
+    frames = fm.collate_frames([fm.Shards.frame(fm.Shards._read(sorted(data.glob("*-*.npz"))[0]), 0)])
     assert torch.allclose(loaded.latent_tokens(frames), model.cpu().eval().latent_tokens(frames))
     assert (loaded.region_std == model.region_std).all()
     fv.train(data, run, replace(cfg, steps=6), VAE, ENCODER, device="cpu")
@@ -220,7 +220,7 @@ AUTO = replace(VAE, variational=False)
 
 def test_an_autoencoder_has_no_noise_and_no_kl(frames):
     model = _model(cfg=AUTO)
-    b = fj.collate_frames(frames[:8])
+    b = fm.collate_frames(frames[:8])
     assert not hasattr(model, "to_log_var")
     assert torch.equal(model(b, sample=True)[0], model(b, sample=False)[0])
     model.fit_scales([b])
@@ -231,7 +231,7 @@ def test_an_autoencoder_has_no_noise_and_no_kl(frames):
 
 def test_an_autoencoders_latents_keep_to_one_scale(frames):
     model = _model(cfg=AUTO)
-    z = model.latent_tokens(fj.collate_frames(frames[:8]))
+    z = model.latent_tokens(fm.collate_frames(frames[:8]))
     assert z.shape == (8, ENCODER.queries, AUTO.latent)
     assert float(z.mean(-1).abs().max()) < 1e-4 and float((z.std(-1, unbiased=False) - 1.0).abs().max()) < 1e-2
 
@@ -239,7 +239,7 @@ def test_an_autoencoders_latents_keep_to_one_scale(frames):
 def test_an_autoencoder_learns_and_comes_back_from_a_checkpoint(frames, tmp_path):
     torch.manual_seed(1)
     model = fv.FrameVae(AUTO, ENCODER, TABLE)
-    b = fj.collate_frames(frames[:16])
+    b = fm.collate_frames(frames[:16])
     model.fit_scales([b])
     optimiser = torch.optim.Adam(model.parameters(), lr=3e-3)
     first = None
@@ -269,7 +269,7 @@ def test_a_checkpoint_from_before_this_is_still_variational(frames, tmp_path):
 # Summing units into regions -----------------------------------------------------------------------------------------------------------------------
 
 
-POOLED = fj.EncoderConfig(d=32, heads=2, queries=4, rounds=1, z=0, region_pool=6)
+POOLED = fm.EncoderConfig(d=32, heads=2, queries=4, rounds=1, z=0, region_pool=6)
 
 
 def _pooled_model(seed: int = 1, cfg: fv.VaeConfig = VAE) -> fv.FrameVae:
@@ -292,23 +292,23 @@ def test_pooling_adds_up_each_regions_units_and_leaves_the_others_alone():
 
 def test_pooling_sends_a_unit_to_the_region_its_targets_count_it_for():
     b = _hand_made([("cloakraid", -0.4, 0.0, 0, 1.0), ("cloakraid", 0.6, 0.0, 1, 1.0)])
-    assert fj.nearest_region(b).tolist() == [[0, 1]]
+    assert fm.nearest_region(b).tolist() == [[0, 1]]
 
 
 def test_pooling_ignores_padded_units_regions_and_order(frames):
     model = _pooled_model()
-    alone = model.latent_tokens(fj.collate_frames(frames[:1]))
-    assert torch.allclose(alone, model.latent_tokens(fj.collate_frames(frames[:4]))[:1], atol=1e-3)
+    alone = model.latent_tokens(fm.collate_frames(frames[:1]))
+    assert torch.allclose(alone, model.latent_tokens(fm.collate_frames(frames[:4]))[:1], atol=1e-3)
     f = dict(frames[0])
     order = np.random.default_rng(1).permutation(len(f["unit_x"]))
     for name in ("unit_x", "unit_name", "unit_ally", "unit_player", "tok_kind"):
         f[name] = f[name][order]
-    assert torch.allclose(alone, model.latent_tokens(fj.collate_frames([f])), atol=1e-3)
+    assert torch.allclose(alone, model.latent_tokens(fm.collate_frames([f])), atol=1e-3)
 
 
 def test_pooling_passes_gradients_and_a_checkpoint_keeps_it(frames, tmp_path):
     model = _pooled_model()
-    b = fj.collate_frames(frames[:4])
+    b = fm.collate_frames(frames[:4])
     model.fit_scales([b])
     fv.vae_loss(model, b, 0.0)[0].backward()
     assert float(model.encoder.pool_in[0].weight.grad.abs().sum()) > 0.0
@@ -329,9 +329,9 @@ def test_an_encoder_without_pooling_has_no_new_weights():
 TWO = replace(VAE, two_part=True)
 
 
-def _scaled_model(frames, cfg: fv.VaeConfig = TWO) -> tuple[fv.FrameVae, fj.FrameBatch]:
+def _scaled_model(frames, cfg: fv.VaeConfig = TWO) -> tuple[fv.FrameVae, fm.FrameBatch]:
     model = _model(cfg=cfg)
-    b = fj.collate_frames(frames[:8])
+    b = fm.collate_frames(frames[:8])
     model.fit_scales([b])
     return model, b
 
@@ -377,17 +377,17 @@ def test_two_part_does_not_pay_for_size_on_empty_cells(frames):
 
 def test_two_part_learns_and_reports_comparably(data, frames, tmp_path):
     model = _model(cfg=replace(TWO, beta=0.01)).train()
-    b = fj.collate_frames(frames)
+    b = fm.collate_frames(frames)
     model.fit_scales([b])
     optimiser = torch.optim.Adam(model.parameters(), lr=2e-3)
-    for _ in range(150):
+    for _ in range(250):        # 150 was enough for the sim's games before their economies grew (0.708 after)
         loss, parts, _ = fv.vae_loss(model, b, 0.01)
         optimiser.zero_grad()
         loss.backward()
         optimiser.step()
     assert parts["recon"] < 0.7
     run = tmp_path / "run"
-    cfg = fj.TrainConfig(batch=8, steps=2, report_every=1, probe_every=1, probe_frames=64, warmup=1, checkpoint_every=100)
+    cfg = fm.TrainConfig(batch=8, steps=2, report_every=1, probe_every=1, probe_frames=64, warmup=1, checkpoint_every=100)
     trained = fv.train(data, run, cfg, TWO, POOLED, device="cpu")
     last = json.loads((run / "metrics.jsonl").read_text().splitlines()[-1])
     assert "recon_r2" in last
@@ -423,10 +423,10 @@ def test_a_description_gives_no_place_away():
 
 def test_asking_where_does_not_depend_on_the_columns_that_would_tell(frames):
     model = _asking_model()
-    b = fj.collate_frames(frames[:4])
+    b = fm.collate_frames(frames[:4])
     torch.manual_seed(5)
     q = fv.draw_questions(b)
-    moved = fj.FrameBatch(**b.__dict__)
+    moved = fm.FrameBatch(**b.__dict__)
     moved.unit_x = b.unit_x.clone()
     moved.unit_x[..., fz._I:fz._I + 3] += 0.25
     moved.unit_x[..., fz._O:] += 0.25
@@ -463,7 +463,7 @@ def test_what_is_at_a_place_comes_from_what_is_nearest_it():
 
 
 def test_places_beside_a_unit_start_just_outside_its_radius(frames):
-    b = fj.collate_frames(frames[:16])
+    b = fm.collate_frames(frames[:16])
     q = fv.draw_questions(b)
     start = fv.ASK_AT_UNITS + fv.ASK_AT_WRECKS
     beside = q.at[:, start:start + fv.ASK_BESIDE]
@@ -516,7 +516,7 @@ def test_a_right_what_answer_costs_less_than_a_wrong_one():
 
 def test_answers_have_the_shapes_and_spreads_they_should(frames):
     model = _asking_model()
-    b = fj.collate_frames(frames[:4])
+    b = fm.collate_frames(frames[:4])
     q = fv.draw_questions(b)
     a = model.answer_questions(model.latent_tokens(b), q)
     asked = fv.ASK_WHERE_UNITS + fv.ASK_WHERE_WRECKS
@@ -527,7 +527,7 @@ def test_answers_have_the_shapes_and_spreads_they_should(frames):
 
 def test_questions_reach_the_encoder_and_recon_leaves_them_out(frames):
     model = _asking_model()
-    b = fj.collate_frames(frames[:8])
+    b = fm.collate_frames(frames[:8])
     model.fit_scales([b])
     torch.manual_seed(2)
     loss, parts, _ = fv.vae_loss(model, b, 0.0)
@@ -542,7 +542,7 @@ def test_questions_reach_the_encoder_and_recon_leaves_them_out(frames):
 def test_asking_learns_and_the_answers_get_better(frames):
     torch.manual_seed(1)
     model = fv.FrameVae(ASKING, ENCODER, TABLE)
-    b = fj.collate_frames(frames[:16])
+    b = fm.collate_frames(frames[:16])
     model.fit_scales([b])
     optimiser = torch.optim.Adam(model.parameters(), lr=2e-3)
     first = None
@@ -556,9 +556,9 @@ def test_asking_learns_and_the_answers_get_better(frames):
 
 
 def test_the_report_marks_questions_on_held_out_maps(data):
-    manifest, paths, held_out, _, _ = fj._collection(data)
+    manifest, paths, held_out, _, _ = fm.collection(data)
     model = _asking_model()
-    model.fit_scales([fj.collate_frames([fj.Shards.frame(fj.Shards._read(paths[0]), i) for i in range(8)])])
+    model.fit_scales([fm.collate_frames([fm.Shards.frame(fm.Shards._read(paths[0]), i) for i in range(8)])])
     out = fv.question_report(model, paths, held_out, "cpu", 64)
     assert "where_unit_nats" in out and "where_any_0.05" in out and "what_unit_found" in out
     assert 0.0 <= out["where_top_0.05"] <= out["where_any_0.05"] <= 1.0
@@ -568,7 +568,7 @@ def test_the_report_marks_questions_on_held_out_maps(data):
 # The optimiser -------------------------------------------------------------------------------------------------------------------------------------
 
 
-MUON = fj.TrainConfig(batch=8, steps=3, report_every=1, probe_every=2, probe_frames=64, warmup=1, checkpoint_every=100, muon_lr=1e-3)
+MUON = fm.TrainConfig(batch=8, steps=3, report_every=1, probe_every=2, probe_frames=64, warmup=1, checkpoint_every=100, muon_lr=1e-3)
 
 
 def test_muon_takes_only_hidden_layers_weights():
@@ -583,7 +583,7 @@ def test_muon_takes_only_hidden_layers_weights():
 
 
 def test_without_a_muon_rate_it_is_plain_adamw():
-    both = fv.Optimisers(_asking_model(), fj.TrainConfig())
+    both = fv.Optimisers(_asking_model(), fm.TrainConfig())
     assert list(both.parts) == ["adam"]
 
 
@@ -609,9 +609,9 @@ def test_a_muon_run_with_questions_trains_reports_and_goes_on(data, tmp_path):
 def test_muon_learns(frames):
     torch.manual_seed(1)
     model = fv.FrameVae(ASKING, ENCODER, TABLE)
-    b = fj.collate_frames(frames[:16])
+    b = fm.collate_frames(frames[:16])
     model.fit_scales([b])
-    both = fv.Optimisers(model, fj.TrainConfig(muon_lr=2e-3, lr=2e-3))
+    both = fv.Optimisers(model, fm.TrainConfig(muon_lr=2e-3, lr=2e-3))
     first = None
     for _ in range(60):
         loss = fv.vae_loss(model, b, 0.0)[0]

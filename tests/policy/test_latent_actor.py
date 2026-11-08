@@ -1,4 +1,4 @@
-"""The actor on latents: what it reads, what stays fixed, and that the trainer can run it as it runs the first actor."""
+"""The actor on latents: what it reads, what stays fixed, and that the trainer runs it as it plays."""
 from __future__ import annotations
 
 import json
@@ -13,28 +13,19 @@ torch = pytest.importorskip("torch")
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent.parent / "tools"))
 try:
-    import frame_jepa as fj
     import frame_vae as fv
     import policy_latent as pl
     import policy_model as pm
-    import policy_toy as toy
+    import policy_sim_env  # noqa: F401
     import policy_train as pt
-    from zkbot.policy import featurize as fz, net as npnet, rawframe as rf, tables
+    from zkbot.policy import featurize as fz, rawframe as rf, tables
 except OSError:
     pytest.skip("needs the built sim library", allow_module_level=True)
 
-ENCODER = fj.EncoderConfig(d=32, heads=2, queries=4, rounds=1, z=0, region_pool=6)
-VAE = fv.VaeConfig(latent=8, decoder_d=32, decoder_heads=2, decoder_rounds=1, variational=False, two_part=True, questions=True)
+from conftest import sim_frames  # noqa: E402
+
 TABLE = tables.table()
 VOCABULARY = len(TABLE.names) + 1
-
-
-@pytest.fixture(scope="module")
-def encoder_path(tmp_path_factory) -> pathlib.Path:
-    torch.manual_seed(1)
-    path = tmp_path_factory.mktemp("encoder") / "vae.pt"
-    fv.save_vae(path, fv.FrameVae(VAE, ENCODER, TABLE), 1)
-    return path
 
 
 @pytest.fixture()
@@ -44,23 +35,16 @@ def actor(encoder_path) -> pl.LatentActor:
 
 
 def _items(count: int = 3, seed: int = 5) -> list[fz.Tensors]:
-    bundle = toy.plain()
-    rng = np.random.default_rng(seed)
-    game = toy.ToyGame(rng)
-    out = []
-    for _ in range(count):
-        out.append(fz.featurize(game.frame_for(0), bundle, TABLE, enabled_kinds=fz.STAGE2_KINDS, privileged=True))
-        game.apply(1, toy.script_focus(game, 1, rng))
-        game.step()
-    return out
+    frames, bundle = sim_frames(count, seed)
+    return [fz.featurize(f, bundle, TABLE, enabled_kinds=fz.STAGE2_KINDS, privileged=True) for f in frames]
 
 
 def _batch(items: list[fz.Tensors]) -> pm.Batch:
-    return pm.collate(items, regions=toy.plain().regions, pairs=False).to("cpu")
+    return pm.collate(items).to("cpu")
 
 
 def _state(actor, count: int) -> tuple[torch.Tensor, torch.Tensor]:
-    return actor.initial_state(count, toy.plain().regions, "cpu")
+    return actor.initial_state(count, 0, "cpu")
 
 
 def _decided(actor, b, count: int):
@@ -147,54 +131,85 @@ def _frames(actor, count: int, seed: int = 0) -> torch.Tensor:
     return torch.randn(1, count, actor.encoder.tokens, actor.encoder.latent, generator=torch.Generator().manual_seed(seed))
 
 
+def _acts(count: int, seed: int = 1) -> torch.Tensor:
+    return torch.randn(1, count, pl.ACTION_TOKENS, pl.D, generator=torch.Generator().manual_seed(seed))
+
+
 def test_each_layer_looks_back_eight_seconds_at_any_decision_rate(actor):
     assert pl.window_frames(1) == 17 and pl.window_frames(2) == 9
     assert actor.reach == 2 * 16
 
 
 def test_a_frame_reads_nothing_after_it(actor):
-    frames, present = _frames(actor, 8), torch.ones(1, 8, dtype=torch.bool)
+    frames, present, acts = _frames(actor, 8), torch.ones(1, 8, dtype=torch.bool), _acts(8)
     changed = frames.clone()
     changed[:, 5:] += 1.0
-    first, second = actor.sequence(frames, present), actor.sequence(changed, present)
+    first, second = actor.sequence(frames, present, acts), actor.sequence(changed, present, acts)
     assert torch.allclose(first[:, :5], second[:, :5], atol=1e-5)
     assert not torch.allclose(first[:, 5:], second[:, 5:], atol=1e-3)
 
 
+def test_a_frame_reads_what_was_done_before_it_but_not_what_it_chose(actor):
+    """[frame t] [what was done at t] [frame t + 1] ...: a decision never sees its own choice, and the next one does."""
+    frames, present, acts = _frames(actor, 8), torch.ones(1, 8, dtype=torch.bool), _acts(8)
+    changed = acts.clone()
+    changed[:, 5] = _acts(1, seed=9)[:, 0]          # not a constant shift, which layer norm doesn't see
+    first, second = actor.sequence(frames, present, acts), actor.sequence(frames, present, changed)
+    assert torch.allclose(first[:, :6], second[:, :6], atol=1e-5)
+    assert not torch.allclose(first[:, 6], second[:, 6], atol=1e-3)
+
+
 def test_a_frame_reads_back_as_far_as_its_reach_and_no_further(actor):
     count = actor.reach + 3
-    frames, present = _frames(actor, count), torch.ones(1, count, dtype=torch.bool)
-    newest = actor.sequence(frames, present)[:, -1]
+    frames, present, acts = _frames(actor, count), torch.ones(1, count, dtype=torch.bool), _acts(count)
+    newest = actor.sequence(frames, present, acts)[:, -1]
     for back, matters in ((count - 1 - actor.reach, True), (count - 2 - actor.reach, False), (0, False), (count - 2, True)):
         changed = frames.clone()
         changed[:, back] += 1.0
-        same = torch.allclose(newest, actor.sequence(changed, present)[:, -1], atol=1e-5)
+        same = torch.allclose(newest, actor.sequence(changed, present, acts)[:, -1], atol=1e-5)
         assert same != matters, back
+    # What was done reaches no further.
+    changed = acts.clone()
+    changed[:, count - 2 - actor.reach] = _acts(1, seed=9)[:, 0]
+    assert torch.allclose(newest, actor.sequence(frames, present, changed)[:, -1], atol=1e-5)
+    changed = acts.clone()
+    changed[:, count - 2] = _acts(1, seed=9)[:, 0]
+    assert not torch.allclose(newest, actor.sequence(frames, present, changed)[:, -1], atol=1e-5)
 
 
 def test_frames_from_before_the_game_read_alike_whatever_they_hold(actor):
-    frames = _frames(actor, 6)
+    frames, acts = _frames(actor, 6), _acts(6)
     present = torch.tensor([[False, False, True, True, True, True]])
-    changed = frames.clone()
+    changed, done = frames.clone(), acts.clone()
     changed[:, :2] = 7.0
-    assert torch.allclose(actor.sequence(frames, present), actor.sequence(changed, present), atol=1e-5)
+    done[:, :2] = 7.0
+    assert torch.allclose(actor.sequence(frames, present, acts), actor.sequence(changed, present, done), atol=1e-5)
 
 
 def test_the_newest_frame_alone_reads_as_in_the_whole_sequence(actor):
-    frames, present = _frames(actor, 10), torch.ones(1, 10, dtype=torch.bool)
-    assert torch.allclose(actor.sequence(frames, present)[:, -1], actor.sequence(frames, present, newest_only=True)[:, -1], atol=1e-5)
+    frames, present, acts = _frames(actor, 10), torch.ones(1, 10, dtype=torch.bool), _acts(10)
+    whole = actor.sequence(frames, present, acts)[:, -1]
+    assert torch.allclose(whole, actor.sequence(frames, present, acts, newest_only=True)[:, -1], atol=1e-5)
+    blank = acts.clone()
+    blank[:, -1] = 0.0          # what's done at the newest isn't known yet when it decides
+    assert torch.allclose(whole, actor.sequence(frames, present, blank, newest_only=True)[:, -1], atol=1e-5)
 
 
 def test_the_age_bias_is_learned_and_nothing_outside_the_window_is_read(actor):
     block = actor.blocks[0]
     frame = torch.arange(20)
-    bias = block.bias(frame, frame)
+    plain = torch.zeros(20, dtype=torch.bool)
+    bias = block.bias(frame, frame, plain, plain)
     assert bias.shape == (pl.HEADS, 20, 20)
     assert torch.isinf(bias[:, 3, 4]).all() and torch.isinf(bias[:, 19, 19 - actor.window]).all()
     assert torch.isfinite(bias[:, 19, 19 - actor.window + 1]).all()
+    # A frame's own action tokens: its latent tokens don't see them, they see its latent tokens.
+    two, act = torch.tensor([5, 5]), torch.tensor([False, True])
+    own = block.bias(two, two, act, act)
+    assert torch.isinf(own[:, 0, 1]).all() and torch.isfinite(own[:, 1, 0]).all()
     frames, present = _frames(actor, 4), torch.ones(1, 4, dtype=torch.bool)
-    actor.sequence(frames, present)[:, -1].sum().backward()
-    assert float(block.age.grad.abs().sum()) > 0.0
+    actor.sequence(frames, present, _acts(4))[:, -1].sum().backward()
+    assert float(block.age.grad.abs().sum()) > 0.0 and float(block.act_key.grad.abs().sum()) > 0.0
 
 
 def test_a_seat_keeps_its_frames_newest_first_and_forgets_the_oldest(actor):
@@ -205,8 +220,49 @@ def test_a_seat_keeps_its_frames_newest_first_and_forgets_the_oldest(actor):
     for _ in range(actor.reach + 5):
         _, _, history, seen, keep = actor.decide(b, history, seen)
     assert keep["latents"].shape == (1, actor.encoder.tokens, actor.encoder.latent)
-    assert [float(history[0, k, 0, 0]) for k in (0, 1, actor.reach - 1)] == [actor.reach + 5.0, actor.reach + 4.0, 6.0]
+    assert history.shape == (1, actor.reach, actor.record)
+    assert [float(history[0, k, 0]) for k in (0, 1, actor.reach - 1)] == [actor.reach + 5.0, actor.reach + 4.0, 6.0]
     assert float(seen.sum()) == actor.reach
+
+
+def test_what_it_did_is_kept_as_the_newest_frames_action_tokens(actor):
+    b = _batch(_items(1))
+    units, reg_h, history, seen, _ = _decided(actor, b, 1)
+    cut = actor.encoder.tokens * actor.encoder.latent
+    assert float(history[0, 0, cut:].abs().sum()) == 0.0
+    a = pm.sample_actions(actor, b, units, reg_h)
+    done = actor.acted(b, a, history)
+    assert torch.allclose(done[0, 0, cut:], actor.action_tokens(b, a)[0].flatten(), atol=1e-6)
+    assert torch.equal(done[0, 0, :cut], history[0, 0, :cut]) and torch.equal(done[:, 1:], history[:, 1:])
+
+
+def _keep_all(b) -> pm.Actions:
+    shape = b.ctrl_mask.shape
+    none = torch.full(shape, -1, dtype=torch.long)
+    return pm.Actions(torch.full(shape, rf.KEEP, dtype=torch.long), none, none, none, none, torch.zeros(shape))
+
+
+def test_keeping_everything_reads_alike_whoever_kept(actor):
+    """Keep is nothing done: the action tokens say only that."""
+    b = _batch(_items(3))
+    tokens = actor.action_tokens(b, _keep_all(b))
+    assert tokens.shape == (3, pl.ACTION_TOKENS, pl.D)
+    assert torch.allclose(tokens[0], tokens[1], atol=1e-5) and torch.allclose(tokens[0], tokens[2], atol=1e-5)
+
+
+def test_what_a_unit_was_told_and_where_reaches_the_action_tokens(actor):
+    b = _batch(_items(1))
+    kept = _keep_all(b)
+    u = int(torch.nonzero(b.ctrl_mask[0] & b.kind_mask[0, :, rf.MOVE]).flatten()[0])
+    regions = torch.nonzero(b.ptr_region[0, u]).flatten()
+    moves = []
+    for r in regions[:2]:
+        kind, region = kept.kind.clone(), kept.region.clone()
+        kind[0, u], region[0, u] = rf.MOVE, int(r)
+        moves.append(actor.action_tokens(b, pm.Actions(kind, kept.enemy, region, kept.fine, kept.produce, kept.logp)))
+    assert not torch.allclose(moves[0], actor.action_tokens(b, kept), atol=1e-4)
+    if len(moves) == 2:
+        assert not torch.allclose(moves[0], moves[1], atol=1e-5)
 
 
 # Pointers ------------------------------------------------------------------------------------------------------------------------------------------
@@ -235,7 +291,7 @@ def test_a_pointer_score_from_place_is_highest_on_its_own_place(actor):
 def test_a_target_a_little_further_gets_another_score_whatever_the_latents_say(actor):
     items = _items(1)
     b = _batch(items)
-    now = actor.sequence(actor.encoder(b).float()[:, None], torch.ones(1, 1, dtype=torch.bool))[:, -1]
+    now = actor.sequence(actor.encoder(b).float()[:, None], torch.ones(1, 1, dtype=torch.bool), torch.zeros(1, 1, pl.ACTION_TOKENS, pl.D))[:, -1]
     assert len(items[0].enemy_tokens) > 0
     units, reg_h = actor.read(b, now)
     enemy = actor.heads(b, units, reg_h)[2]
@@ -286,31 +342,13 @@ def test_a_choice_scores_the_same_when_it_is_evaluated(actor):
     assert set(entropy) == {"kind", "region", "enemy", "fine", "produce"}
 
 
-def test_the_first_actor_keeps_its_memory_and_chooses_as_it_did():
-    torch.manual_seed(2)
-    first = pm.Actor(VOCABULARY)
-    b = pm.collate(_items(2), regions=toy.plain().regions).to("cpu")
-    glob, regions = first.initial_state(2, toy.plain().regions, "cpu")
-    units, reg_h, new_glob, new_regions, keep = first.decide(b, glob, regions)
-    a = pm.sample_actions(first, b, units, reg_h)
-    logp, _ = pm.evaluate_actions(first, b, units, reg_h, a)
-    assert torch.allclose(logp, a.logp, atol=1e-3)
-    assert first.recurrent and first.uses_pairs and b.bucket is not None and keep == {}
-    assert new_glob.shape == glob.shape and new_regions.shape == regions.shape
-
-
-def test_without_pairs_no_bucket_is_built():
-    assert pm.collate(_items(1), regions=toy.plain().regions, pairs=False).bucket is None
-
-
 # The size ------------------------------------------------------------------------------------------------------------------------------------------
 
 
-def test_the_parts_add_up_and_it_is_smaller_than_the_first_actor(actor):
+def test_the_parts_add_up(actor):
     report = pl.parameter_report(actor)
     assert report["total"] == sum(p.numel() for p in actor.parameters())
-    assert report["trained"] < sum(p.numel() for p in pm.Actor(VOCABULARY).parameters()) / 2
-    assert not any(name.startswith(("gru", "mem_in", "reg_mem", "read_region")) for name, _ in actor.named_parameters())
+    assert report["trained"] == sum(p.numel() for p in actor.parameters() if p.requires_grad)
 
 
 # The trainer ---------------------------------------------------------------------------------------------------------------------------------------
@@ -324,7 +362,7 @@ def _config(encoder_path, **kw) -> pt.Config:
 @pytest.mark.parametrize("concurrent", (False, True))
 def test_a_short_run_trains_leaves_the_encoder_alone_and_goes_on(tmp_path, encoder_path, concurrent):
     cfg = _config(encoder_path, concurrent=concurrent)
-    pt.train(cfg, tmp_path, pt.make_toy, device="cpu")
+    pt.train(cfg, tmp_path, pt.make_sim, device="cpu")
     rows = [json.loads(line) for line in (tmp_path / "metrics.jsonl").read_text().splitlines()]
     assert len(rows) >= 2 and all(r["masked_out"] == 0 for r in rows)
     marker = json.loads((tmp_path / "latest.json").read_text())
@@ -332,13 +370,13 @@ def test_a_short_run_trains_leaves_the_encoder_alone_and_goes_on(tmp_path, encod
     original = torch.load(encoder_path, weights_only=True)["model"]
     assert torch.equal(saved["actor"]["encoder.encoder.queries"], original["encoder.queries"])
     assert not torch.equal(saved["actor"]["latent_in.weight"], pl.make(VOCABULARY, encoder_path).state_dict()["latent_in.weight"])
-    pt.train(replace(cfg, decisions=180), tmp_path, pt.make_toy, device="cpu")
+    pt.train(replace(cfg, decisions=180), tmp_path, pt.make_sim, device="cpu")
     assert len((tmp_path / "metrics.jsonl").read_text().splitlines()) > len(rows)
 
 
 def test_the_optimiser_holds_only_what_trains(tmp_path, encoder_path):
     cfg = _config(encoder_path)
-    learner = pt.Learner(cfg, tmp_path, pt.DataWorkers(0, [toy.plain()], cfg.enabled_kinds, False), "cpu")
+    learner = pt.Learner(cfg, tmp_path, pt.DataWorkers(0, [sim_frames(1)[1]], cfg.enabled_kinds), "cpu")
     held = {id(p) for group in learner.optimizer.param_groups for p in group["params"]}
     assert not held & {id(p) for p in learner.actor.encoder.parameters()}
     assert id(learner.actor.latent_in.weight) in held and id(learner.critic.value.weight) in held
@@ -346,10 +384,10 @@ def test_the_optimiser_holds_only_what_trains(tmp_path, encoder_path):
 
 def test_a_frozen_player_copies_the_actor_and_its_encoder(tmp_path, encoder_path):
     cfg = _config(encoder_path)
-    workers = pt.DataWorkers(0, [toy.plain()], cfg.enabled_kinds, False)
+    workers = pt.DataWorkers(0, [sim_frames(1)[1]], cfg.enabled_kinds)
     learner = pt.Learner(cfg, tmp_path, workers, "cpu")
     player = learner.frozen_player(workers)
-    assert player.actor is not learner.actor and player.actor.uses_pairs is False
+    assert player.actor is not learner.actor
     with torch.no_grad():
         learner.actor.latent_in.weight.add_(1.0)
     assert not torch.equal(player.actor.latent_in.weight, learner.actor.latent_in.weight)
@@ -361,27 +399,23 @@ def test_segments_score_in_training_as_their_decisions_did_in_play(tmp_path, enc
     """All of it: played through the trainer's own path and cut into segments, mid-game ones starting from the frames the seat had kept, then
     featurized again and read, every segment in one forward pass."""
     cfg = _config(encoder_path)
-    learner = pt.Learner(cfg, tmp_path, pt.DataWorkers(0, [toy.plain()], cfg.enabled_kinds, False), "cpu")
-    bundle = toy.plain()
+    actor = pl.make(VOCABULARY, encoder_path)
+    frames, bundle = sim_frames(actor.reach + 12)
+    learner = pt.Learner(cfg, tmp_path, pt.DataWorkers(0, [bundle], cfg.enabled_kinds), "cpu")
     names = np.arange(VOCABULARY, dtype=np.int32)
-    rng = np.random.default_rng(5)
-    game = toy.ToyGame(rng)
-    seats = pt.Seats(1, bundle.regions, "cpu", learner.actor)
+    seats = pt.Seats(1, "cpu", learner.actor)
     tr = pt.Trajectory(bundle, names)
-    tr.glob, tr.regions = pt._kept(seats.glob[0], seats.regions[0], bundle, False)
+    tr.history, tr.seen = pt._kept(seats.history[0], seats.seen[0])
     segments = []
-    for t in range(learner.actor.reach + 12):
-        frame = game.frame_for(0)
-        items, acts, value, seats.glob, seats.regions = learner.act([(frame, bundle, names)], seats.glob, seats.regions)
+    for t, frame in enumerate(frames):
+        items, acts, value, seats.history, seats.seen = learner.act([(frame, bundle, names)], seats.history, seats.seen)
         c = items[0].controllable
         tr.steps.append(pt.Step(frame, *(acts[h][0, :c] for h in ("kind", "enemy", "region", "fine", "produce", "logp")), float(value[0]), latents=acts["latents"][0]))
         if t in (6, learner.actor.reach + 4):
-            pt._cut(tr, segments, seats.glob[0], seats.regions[0], False)
-        game.apply(1, toy.script_focus(game, 1, rng))
-        game.step()
+            pt._cut(tr, segments, seats.history[0], seats.seen[0])
     pt._close(tr, segments)
     assert [len(s.steps) for s in segments] == [7, learner.actor.reach - 2, 7]
-    assert float(segments[2].regions.sum()) == learner.actor.reach and float(segments[0].regions.sum()) == 0.0
+    assert float(segments[2].seen.sum()) == learner.actor.reach and float(segments[0].seen.sum()) == 0.0
     batch = segments[::-1]
     steps = [s for seg in batch for s in seg.steps]
     chunks = [[(s.frame, bundle, names) for s in steps]]
@@ -390,19 +424,21 @@ def test_segments_score_in_training_as_their_decisions_did_in_play(tmp_path, enc
     latents = torch.zeros(len(batch), max(lengths), *steps[0].latents.shape)
     for i, seg in enumerate(batch):
         latents[i, :len(seg.steps)] = torch.as_tensor(np.stack([s.latents for s in seg.steps]))
-    history = torch.as_tensor(np.stack([seg.glob for seg in batch]))
-    seen = torch.as_tensor(np.stack([seg.regions for seg in batch]))
+    history = torch.as_tensor(np.stack([seg.history for seg in batch]))
+    seen = torch.as_tensor(np.stack([seg.seen for seg in batch]))
     with torch.no_grad():
-        units, reg_h = learner.actor.read(whole, learner.actor.segments(history, seen, latents, lengths))
-        logp, _ = pm.evaluate_actions(learner.actor, whole, units, reg_h, pt._stored_actions(steps, whole, "cpu"))
+        a = pt._stored_actions(steps, whole, "cpu")
+        acted = learner.actor.segment_actions(whole, a, lengths)
+        units, reg_h = learner.actor.read(whole, learner.actor.segments(history, seen, latents, lengths, acted))
+        logp, _ = pm.evaluate_actions(learner.actor, whole, units, reg_h, a)
     for k, s in enumerate(steps):
         assert np.allclose(logp[k, :len(s.logp)].numpy(), s.logp, atol=2e-3), k
 
 
 def test_a_game_that_ends_forgets_its_frames(encoder_path):
     actor = pl.make(VOCABULARY, encoder_path)
-    seats = pt.Seats(2, toy.plain().regions, "cpu", actor)
-    seats.glob += 1.0
-    seats.regions += 1.0
+    seats = pt.Seats(2, "cpu", actor)
+    seats.history += 1.0
+    seats.seen += 1.0
     seats.clear(0)
-    assert float(seats.glob[0].abs().sum()) == 0.0 and float(seats.regions[0].sum()) == 0.0 and float(seats.regions[1].sum()) > 0.0
+    assert float(seats.history[0].abs().sum()) == 0.0 and float(seats.seen[0].sum()) == 0.0 and float(seats.seen[1].sum()) > 0.0

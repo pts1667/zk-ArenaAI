@@ -1,4 +1,4 @@
-"""The fight script, on records made by hand."""
+"""The first fight script, now the frame data's base (tools/frame_world.py `FightScript`), on records made by hand."""
 from __future__ import annotations
 
 import pathlib
@@ -9,6 +9,7 @@ import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent.parent / "tools"))
 try:
+    import frame_world as fw
     import policy_sim_env as se
     import policy_script as ps
     from zkbot.policy import rawframe as rf
@@ -37,8 +38,8 @@ def _units(*specs) -> np.ndarray:
     return out
 
 
-def _script(data) -> ps.FightScript:
-    return ps.FightScript(data, RALLY, ENEMY_START)
+def _script(data) -> fw.FightScript:
+    return fw.FightScript(data, RALLY, ENEMY_START)
 
 
 def _no_enemies() -> np.ndarray:
@@ -154,16 +155,3 @@ def test_a_uid_past_the_end_of_the_table_is_new(data):
     script = _script(data)
     assert _goals(script.orders(_units((1000, "cloakraid", 600.0, 600.0)), _no_enemies(), 60.0))[1000][0] == rf.FIGHT
     assert script.state[1000] == ps.SENT and script.state[1500] == ps.NEW
-
-
-def test_fighters_really_do_retreat_group_and_finish_games_in_the_sim():
-    env = se.SimEnv(32, 13, ["scripts"], threads=4, scripts=("fight", "fight"))
-    env.begin()
-    kinds = set()
-    for _ in range(int(240 * 2)):
-        env.step(0.0)
-        for g in range(32):
-            for side in (0, 1):
-                kinds |= {int(s) for s in env.scripts[g][side].state[env.scripts[g][side].state > 0]}
-        env.finished_seats()
-    assert {ps.WAITING, ps.SENT, ps.RETREATING} <= kinds
