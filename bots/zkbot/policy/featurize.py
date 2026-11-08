@@ -215,7 +215,7 @@ def _order_block(units: np.ndarray, is_own: np.ndarray, bundle: Bundle, aimable:
     age = np.where(has, units["ord_age"], 0.0)
     out[:, _O + 16] = np.log1p(np.maximum(age, 0.0) / DECISION_FRAMES) / 6.0
     target = units["ord_target"]
-    has_target = has & (target >= 0)
+    has_target = has & (target >= 0) & (kind != rf.PRODUCE)     # what a factory makes is a type, not a unit
     known, at = _find(target, aimable["uid"])
     known &= has_target
     # A target's direction is where it is now, in sight or on radar.  Any other goal is where the order said.
@@ -285,7 +285,7 @@ def _ray_dps(x: np.ndarray, z: np.ndarray, ally: np.ndarray, dps: np.ndarray, ou
 
 def _aim_pairs(units: np.ndarray, is_own: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Unit tokens with a target among the unit tokens, and the token of that target."""
-    aiming = np.flatnonzero(is_own & (units["ord_kind"] >= 0) & (units["ord_target"] >= 0))
+    aiming = np.flatnonzero(is_own & (units["ord_kind"] >= 0) & (units["ord_kind"] != rf.PRODUCE) & (units["ord_target"] >= 0))
     found, at = _find(units["ord_target"][aiming], units["uid"])
     return aiming[found], at[found]
 
@@ -570,7 +570,14 @@ def _masks(tokens: _Tokens, locked: np.ndarray, c: int, bundle: Bundle, table: T
     ptr_wait = np.zeros((c, r), bool)
     route = np.zeros((c, r), np.float32)
     me = rows[:c]
-    ptr_produce = table.produces[me]
+    ptr_produce = table.produces[me].copy()
+    # Not what it's making already: a PRODUCE is a change.
+    making = np.flatnonzero((units["ord_kind"][:c] == rf.PRODUCE) & (units["ord_target"][:c] >= 0))
+    if len(making) and len(table.producible):
+        made = table.rows(units["ord_target"][making].astype(np.int64))
+        at = np.minimum(np.searchsorted(table.producible, made), len(table.producible) - 1)
+        hit = table.producible[at] == made
+        ptr_produce[making[hit], at[hit]] = False
     if not c:
         return _Legal(kind, ptr_enemy, ptr_region, ptr_jump, ptr_wait, ptr_produce, route)
     idle = (units["flags"][:c] & rf.IDLE) != 0

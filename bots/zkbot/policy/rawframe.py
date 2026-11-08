@@ -7,6 +7,7 @@ compares the two.  It holds only what the live bot can really supply: no facing,
 Three additions to docs/learned-policy/02-policy.md section 2.2, all because a stateless featurizer needs them: the
 flags DAMAGED (for the commit lock) and RESERVED (units the rules keep), and `ord_age` on a remembered structure, which
 says how long ago it was seen.  Later, the flag JUMP_READY: an own unit's jump is charged, as its rules param says.
+For a PRODUCE, `ord_target` is the def id of what the factory or silo makes, not a unit.
 
 Whose a unit is and what is known of it are separate: `player` and `ally_team` are the game's own numbers, -1 if unknown, and
 `knowledge` is how the viewer knows of it.  `player` is the engine's team, the one that holds the unit.  The viewer's own two
@@ -243,13 +244,24 @@ def _features(obs: dict[str, Any]) -> np.ndarray:
     return out
 
 
+def join(parts: list[np.ndarray], dtype: Any) -> np.ndarray:
+    """Records of one dtype end to end.  np.concatenate works out a common dtype field by field for each pair, which for a game's
+    worth of frames costs more than compressing them."""
+    out = np.empty(sum(len(p) for p in parts), dtype)
+    at = 0
+    for p in parts:
+        out[at:at + len(p)] = p
+        at += len(p)
+    return out
+
+
 def save_frames(path: Any, frames: list[Frame], **extra: Any) -> None:
     """A list of frames as one compressed file."""
     np.savez_compressed(
         path, schema_version=SCHEMA_VERSION,
-        units=np.concatenate([f.units for f in frames]) if frames else np.zeros(0, UNIT_DTYPE),
-        sites=np.concatenate([f.sites for f in frames]) if frames else np.zeros(0, SITE_DTYPE),
-        features=np.concatenate([f.features for f in frames]) if frames else np.zeros(0, FEATURE_DTYPE),
+        units=join([f.units for f in frames], UNIT_DTYPE),
+        sites=join([f.sites for f in frames], SITE_DTYPE),
+        features=join([f.features for f in frames], FEATURE_DTYPE),
         feature_counts=np.array([len(f.features) for f in frames], np.int32),
         unit_counts=np.array([len(f.units) for f in frames], np.int32),
         site_counts=np.array([len(f.sites) for f in frames], np.int32),

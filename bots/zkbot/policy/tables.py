@@ -108,12 +108,17 @@ class TypeTable:
         for name, beacon in special["teleporters"].items():
             if name in row:
                 self.teleports[row[name]], self.beacon[row[beacon]] = True, True
-        # What a PRODUCE can point at, and who can make which: silos, until factories get theirs at stage 3.
-        silos = {row[name]: [row[o] for o in options if o in row] for name, options in special["silos"].items() if name in row}
-        self.producible = np.array(sorted({o for options in silos.values() for o in options}), np.int64)
+        # What a PRODUCE can point at, and who can make which: a silo's missiles, and a factory's roster.  For a factory it says what to build from now on.
+        makers = {row[name]: [row[o] for o in options if o in row] for name, options in special["silos"].items() if name in row}
+        for name in names:
+            if self.factory[row[name]]:
+                roster = [row[o] for o in catalog.roster(name) if o in row]
+                if roster:
+                    makers[row[name]] = roster
+        self.producible = np.array(sorted({o for options in makers.values() for o in options}), np.int64)
         self.produces = np.zeros((n, len(self.producible)), bool)
-        for silo, options in silos.items():
-            self.produces[silo, np.searchsorted(self.producible, options)] = True
+        for maker, options in makers.items():
+            self.produces[maker, np.searchsorted(self.producible, options)] = True
         # Those the policy gives orders to though they aren't fighters that walk.
         self.acts_in_place = self.switches | self.produces.any(axis=1)
 

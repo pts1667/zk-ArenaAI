@@ -75,6 +75,85 @@ def decode(decision: Decision, t: fz.Tensors, bundle: Bundle, unit_x: np.ndarray
     return orders
 
 
+def fine_points(t: fz.Tensors, bundle: Bundle) -> np.ndarray:
+    """R x FINE_OPTIONS x 2: the point each region and fine option stand for, in elmos, as `fz.fine_point` gives them."""
+    angle = np.arange(fz.FINE_OPTIONS - 1) * np.pi / 4.0
+    north, east = np.asarray(t.north, np.float64), np.array((t.north[1], -t.north[0]), np.float64)
+    compass = np.cos(angle)[:, None] * north + np.sin(angle)[:, None] * east
+    centre = bundle.centre[:, :2].astype(np.float64)
+    around = centre[:, None, :] + t.region_radius[:, None, None] * compass[None]
+    return np.concatenate((centre[:, None, :], around), 1)
+
+
+def _nearest(points: np.ndarray, legal: np.ndarray, x: float, z: float) -> tuple[int, int]:
+    """The legal region, and its option, whose point is nearest.  points: R x O x 2."""
+    away = np.hypot(points[..., 0] - x, points[..., 1] - z)
+    away[~legal] = np.inf
+    r, o = np.unravel_index(int(np.argmin(away)), away.shape)
+    return int(r), int(o)
+
+
+def encode(orders: list[Order], t: fz.Tensors, bundle: Bundle, unit_x: np.ndarray, unit_z: np.ndarray) -> tuple[Decision, int]:
+    """`decode` the other way: orders someone else gave, such as a script, as the choices that would have given them.  A unit with no
+    order keeps what it has.  A place becomes the nearest region and option the unit could have chosen.  Returns the choices, and how
+    many orders couldn't be put in the policy's terms at all (a unit it doesn't control, a kind its masks rule out now, a target that
+    isn't a token), which stay KEEP."""
+    c = t.controllable
+    kind, enemy, region, fine, produce = (np.full(c, v, np.int64) for v in (rf.KEEP, -1, -1, -1, -1))
+    token_of = {int(u): k for k, u in enumerate(t.uids) if u >= 0}
+    enemy_of = {int(token): e for e, token in enumerate(t.enemy_tokens)}
+    points = fine_points(t, bundle) if c else np.zeros((0, fz.FINE_OPTIONS, 2))
+    missed = 0
+    for o in orders:
+        i = token_of.get(int(o.uid), -1)
+        if not 0 <= i < c or not t.kind_mask[i, o.kind]:
+            missed += 1
+            continue
+        k = int(o.kind)
+        if k in fz.KINDS_WITH_REGION:
+            mask = t.ptr_jump if k in (rf.JUMP, rf.THROW) else t.ptr_wait if k == rf.WAIT_AT_BEACON else t.ptr_region
+            x, z = o.x, o.z
+            if k == rf.WAIT_AT_BEACON:
+                beacon = token_of.get(int(o.target), -1)
+                if beacon < 0:
+                    missed += 1
+                    continue
+                x, z = float(unit_x[beacon]), float(unit_z[beacon])
+            options = points if k in fz.KINDS_WITH_FINE else points[:, :1]
+            legal = np.repeat(mask[i][:, None], options.shape[1], 1)
+            region[i], option = _nearest(options, legal, x, z)
+            fine[i] = option if k in fz.KINDS_WITH_FINE else -1
+        elif k in (rf.ATTACK_UNIT, rf.MANUAL_FIRE, rf.ATTACK_GROUND):
+            pointer = fz.ENEMY_POINTER_KINDS.index(k)
+            if k == rf.ATTACK_GROUND:
+                legal = t.ptr_enemy[pointer, i]
+                if not legal.any():
+                    missed += 1
+                    continue
+                around = np.array([[unit_x[e], unit_z[e]] for e in t.enemy_tokens])
+                # Option 0 is on the token, 1-8 the compass points GROUND_FINE_RADIUS from it, as `decode` places them.
+                angle = np.arange(fz.FINE_OPTIONS - 1) * np.pi / 4.0
+                north = np.asarray(t.north, np.float64)
+                compass = GROUND_FINE_RADIUS * (np.cos(angle)[:, None] * north + np.sin(angle)[:, None] * np.array((north[1], -north[0])))
+                options = np.concatenate((around[:, None, :], around[:, None, :] + compass[None]), 1)
+                enemy[i], fine[i] = _nearest(options, np.repeat(legal[:, None], options.shape[1], 1), o.x, o.z)
+            else:
+                e = enemy_of.get(token_of.get(int(o.target), -1), -1)
+                if e < 0 or not t.ptr_enemy[pointer, i, e]:
+                    missed += 1
+                    continue
+                enemy[i] = e
+        elif k == rf.PRODUCE:
+            made = table().producible
+            p = int(np.searchsorted(made, o.target))
+            if p >= len(made) or made[p] != o.target or not t.ptr_produce[i, p]:
+                missed += 1
+                continue
+            produce[i] = p
+        kind[i] = k
+    return Decision(kind, enemy, region, fine, produce, np.zeros(c, np.float32)), missed
+
+
 def world_positions(t: fz.Tensors, bundle: Bundle) -> tuple[np.ndarray, np.ndarray]:
     """Unit-token positions in elmos, undoing the featurizer's normalisation."""
     x = (t.unit_x[:, fz._I + 0] + 1.0) * 0.5 * bundle.map_w

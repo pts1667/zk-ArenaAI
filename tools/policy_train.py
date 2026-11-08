@@ -9,6 +9,8 @@ recurrent state.  Each unit gets its own clipped ratio, averaged within a decisi
 
 Only the encoder has to go step by step, because it reads the memory state.  Heads and critic run once over the whole minibatch,
 and the pair bias's gradient comes from a sample of the steps: 03-training.md section 10.3 has the measurements behind both.
+An actor that reads frames in order (policy_latent.py) takes each segment in one forward pass, from the latents kept at collection and those of
+the frames before it, which the segment stores as its starting state.
 """
 from __future__ import annotations
 
@@ -90,6 +92,7 @@ class Config:
 # side, all seen: this many tokens is where a token's pairs cost what the token itself does.
 PAIR_TOKENS = 1200
 ACT_PAIRS = 24_000_000      # batch x tokens^2 of one forward pass while playing: its pair table is about 20 bytes a pair
+FLAT_CHUNK = 64             # decisions a data worker featurizes at a time, for an actor that reads frames in order
 # Records past the caps become no tokens.
 UNIT_TOKENS = fz.CAP_UNITS + fz.CAP_HIDDEN
 # A process's GPU memory that its allocator doesn't count, such as CUDA's own.
@@ -155,13 +158,14 @@ class Step:
     reward: float = 0.0
     advantage: float = 0.0
     ret: float = 0.0
+    latents: np.ndarray | None = None   # tokens x latent, for an actor that reads frames in order: this frame's
 
 
 @dataclass
 class Segment:
     steps: list[Step]
-    glob: np.ndarray
-    regions: np.ndarray
+    glob: np.ndarray | None
+    regions: np.ndarray | None
     bundle: bd.Bundle
     names: np.ndarray
 
@@ -242,10 +246,11 @@ class DataWorkers:
 
 
 def _act_slices(items: list[fz.Tensors], regions: int) -> list[slice]:
+    # regions: what the batch pads to at least.
     """Seats in order, cut where the next would take a forward pass's padded pairs over the limit."""
     out, start, most = [], 0, 0
     for i, t in enumerate(items):
-        tokens = len(t.unit_x) + regions + len(t.site_x) + len(t.feat_x) + 2
+        tokens = len(t.unit_x) + max(regions, len(t.reg_x)) + len(t.site_x) + len(t.feat_x) + 2
         if i > start and (i - start + 1) * max(most, tokens) ** 2 > ACT_PAIRS:
             out.append(slice(start, i))
             start, most = i, 0
@@ -256,7 +261,7 @@ def _act_slices(items: list[fz.Tensors], regions: int) -> list[slice]:
 
 def _stack_padded(parts: list[np.ndarray]) -> np.ndarray:
     """Per-unit arrays of forward passes that padded to different widths.  A reader takes only each seat's own units."""
-    out = np.zeros((sum(len(p) for p in parts), max(p.shape[1] for p in parts)), parts[0].dtype)
+    out = np.zeros((sum(len(p) for p in parts), max(p.shape[1] for p in parts), *parts[0].shape[2:]), parts[0].dtype)
     at = 0
     for p in parts:
         out[at:at + len(p), :p.shape[1]] = p
@@ -279,20 +284,25 @@ class Player:
             _drop_names(t, names)
         return out
 
+    def _padded_regions(self, regions: torch.Tensor) -> int:
+        """A region's memory fixes how many there are to pad to.  With no memory there's nothing to fit."""
+        return regions.shape[1] if self.actor.recurrent else 0
+
     @torch.no_grad()
     def _forward(self, items: list[fz.Tensors], glob: torch.Tensor, regions: torch.Tensor):
-        b = pm.collate(items, regions=regions.shape[1], pairs=self.actor.uses_pairs).to(self.device)
+        b = pm.collate(items, regions=self._padded_regions(regions), pairs=self.actor.uses_pairs).to(self.device)
         with self.autocast:
-            _, units, reg_h, new_glob, new_regions = self.actor.encode(b, glob, regions)
+            units, reg_h, new_glob, new_regions, keep = self.actor.decide(b, glob, regions)
             a = pm.sample_actions(self.actor, b, units, reg_h)
-            value = self.critic(b, glob)
+            value = self.critic(b, glob if self.actor.recurrent else None)
         out = {k: getattr(a, k).cpu().numpy() for k in ("kind", "enemy", "region", "fine", "produce", "logp")}
+        out.update({k: v.cpu().numpy() for k, v in keep.items()})
         return out, value.float().cpu().numpy(), new_glob.float(), new_regions.float()
 
     def act(self, frames: list[tuple[rf.Frame, bd.Bundle, np.ndarray]], glob: torch.Tensor, regions: torch.Tensor):
         """Forward passes for many games, as few as fit the memory.  Returns tensors, numpy actions, values and the new state."""
         items = self._features(frames)
-        parts = [self._forward(items[s], glob[s], regions[s]) for s in _act_slices(items, regions.shape[1])]
+        parts = [self._forward(items[s], glob[s], regions[s]) for s in _act_slices(items, self._padded_regions(regions))]
         if len(parts) == 1:
             return (items, *parts[0])
         out = {k: _stack_padded([p[0][k] for p in parts]) for k in parts[0][0]}
@@ -305,8 +315,8 @@ class Learner:
         torch.manual_seed(cfg.seed)
         self.table = tables.table()
         self.vocabulary = len(self.table.names) + 1
-        self.actor = (policy_latent.make(self.vocabulary, cfg.latent_encoder) if cfg.latent_encoder else pm.Actor(self.vocabulary)).to(device)
-        self.critic = pm.Critic(self.vocabulary).to(device)
+        self.actor = (policy_latent.make(self.vocabulary, cfg.latent_encoder, cfg.decide_every) if cfg.latent_encoder else pm.Actor(self.vocabulary)).to(device)
+        self.critic = (pm.Critic(self.vocabulary) if self.actor.recurrent else pm.Critic(self.vocabulary, 0)).to(device)
         self.trained = [p for p in list(self.actor.parameters()) + list(self.critic.parameters()) if p.requires_grad]
         self.optimizer = torch.optim.Adam(self.trained, lr=cfg.lr_start, eps=cfg.adam_eps)
         self.decisions = 0
@@ -396,6 +406,31 @@ class Learner:
             a = _stored_actions(steps, whole, device)
             logp, entropy = pm.evaluate_actions(self.actor, whole, units, torch.cat(reg_h), a)
             value = self.critic(whole, torch.cat(states))
+        return self._ppo_loss(steps, whole, logp, entropy, value, clip, note)
+
+    def _loss_window(self, batch: list[Segment], clip: float, note, rng: np.random.Generator, trained: np.ndarray | None = None) -> torch.Tensor:
+        """Frames in order: every decision of each segment in one forward pass, from the latents it was played with."""
+        device = self.device
+        steps = [step for seg in batch for step in seg.steps]
+        work = [(step.frame, seg.bundle, seg.names) for seg in batch for step in seg.steps]
+        chunks = [work[i:i + FLAT_CHUNK] for i in range(0, len(work), FLAT_CHUNK)]
+        whole = pm.join(list(self.workers.batches(chunks, max(seg.bundle.regions for seg in batch)))).to(device)
+        lengths = [len(seg.steps) for seg in batch]
+        latents = np.zeros((len(batch), max(lengths), *steps[0].latents.shape), np.float32)
+        for i, seg in enumerate(batch):
+            latents[i, :len(seg.steps)] = [s.latents for s in seg.steps]
+        history = torch.as_tensor(np.stack([seg.glob for seg in batch]), device=device)
+        seen = torch.as_tensor(np.stack([seg.regions for seg in batch]), device=device)
+        with self.autocast:
+            now = self.actor.segments(history, seen, torch.as_tensor(latents, device=device), lengths)
+            units, reg_h = self.actor.read(whole, now)
+            a = _stored_actions(steps, whole, device)
+            logp, entropy = pm.evaluate_actions(self.actor, whole, units, reg_h, a)
+            value = self.critic(whole, None)
+        return self._ppo_loss(steps, whole, logp, entropy, value, clip, note)
+
+    def _ppo_loss(self, steps: list[Step], whole: pm.Batch, logp: torch.Tensor, entropy: dict, value: torch.Tensor, clip: float, note) -> torch.Tensor:
+        cfg, device = self.cfg, self.device
         decisions = len(steps)
         advantages = np.array([s.advantage for s in steps], np.float32)
         adv = torch.as_tensor((advantages - advantages.mean()) / (float(advantages.std()) + 1e-6), device=device)
@@ -440,10 +475,11 @@ class Learner:
             totals[name] = totals.get(name, 0.0) + value * weight
             counts[name] = counts.get(name, 0.0) + weight
 
+        loss_of = self._loss if self.actor.recurrent else self._loss_window
         for _ in range(cfg.passes):
             for batch in self._minibatches(segments, rng):
                 self.optimizer.zero_grad(set_to_none=True)
-                self._loss(batch, clip, note, rng).backward()
+                loss_of(batch, clip, note, rng).backward()
                 grad = torch.nn.utils.clip_grad_norm_(self.trained, cfg.grad_clip)
                 self.optimizer.step()
                 note("grad_norm", float(grad))
@@ -536,8 +572,8 @@ def finish(trajectories: list[Trajectory], gae: float) -> tuple[list[Segment], l
 class Seats:
     """The recurrent state of every seat being played, on the GPU."""
 
-    def __init__(self, seats: int, regions: int, device: str):
-        self.glob, self.regions = pm.initial_state(seats, regions, device)
+    def __init__(self, seats: int, regions: int, device: str, actor: torch.nn.Module | None = None):
+        self.glob, self.regions = (actor.initial_state(seats, regions, device) if actor is not None else pm.initial_state(seats, regions, device))
 
     def clear(self, seat: int) -> None:
         self.glob[seat] = 0.0
@@ -552,7 +588,7 @@ class Collector:
         self.learner, self.env, self.rng = learner, env, rng
         self.player = learner.player
         env.begin()
-        self.seats = Seats(env.seat_count, env.max_regions, learner.device)
+        self.seats = Seats(env.seat_count, env.max_regions, learner.device, learner.actor)
         self.current: dict[int, Trajectory] = {}
         for seat in env.policy_seats():
             self._open(seat)
@@ -562,15 +598,13 @@ class Collector:
         bundle = self.env.bundle_of(seat)
         self.seats.clear(seat)
         tr = Trajectory(bundle, name_map(self.rng, self.learner.vocabulary))
-        tr.glob = np.zeros(self.seats.glob.shape[1], np.float16)
-        tr.regions = np.zeros((bundle.regions, self.seats.regions.shape[2]), np.float16)
+        tr.glob, tr.regions = _kept(self.seats.glob[seat], self.seats.regions[seat], bundle, self.learner.actor.recurrent)
         self.current[seat] = tr
 
     def _carry_on(self, seat: int) -> None:
         old = self.current[seat]
         tr = Trajectory(old.bundle, old.names)
-        tr.glob = self.seats.glob[seat].cpu().numpy().astype(np.float16)
-        tr.regions = self.seats.regions[seat, :old.bundle.regions].cpu().numpy().astype(np.float16)
+        tr.glob, tr.regions = _kept(self.seats.glob[seat], self.seats.regions[seat], old.bundle, self.learner.actor.recurrent)
         self.current[seat] = tr
 
     def collect(self, want: int) -> tuple[list[Segment], dict[str, float]]:
@@ -605,6 +639,8 @@ class Collector:
                 raw = frames[k][0]
                 step = Step(rf.Frame(raw.units.copy(), raw.sites.copy(), raw.glob.copy(), raw.features.copy()), kind, out["enemy"][k, :c].copy(),
                             out["region"][k, :c].copy(), out["fine"][k, :c].copy(), out["produce"][k, :c].copy(), out["logp"][k, :c].copy(), float(value[k]))
+                if "latents" in out:
+                    step.latents = out["latents"][k].copy()
                 tr = current[seat]
                 tr.steps.append(step)
                 stored += 1
@@ -612,7 +648,7 @@ class Collector:
                 env.give_orders(seat, act.decode(_Decision(step.kind, step.enemy, step.region, step.fine, step.produce), t, tr.bundle, x, z))
                 # A segment ends here: the next step's stored state is what the net has now.
                 if len(tr.steps) - tr.segment_start == cfg.segment:
-                    _cut(tr, segments, new_glob[k], new_regions[k])
+                    _cut(tr, segments, new_glob[k], new_regions[k], learner.actor.recurrent)
             seats.glob[index] = new_glob
             seats.regions[index] = new_regions
             env.step(progress)
@@ -659,12 +695,18 @@ class _Decision:
     produce: np.ndarray
 
 
-def _cut(tr: Trajectory, segments: list[Segment], glob: torch.Tensor, regions: torch.Tensor) -> None:
+def _kept(glob: torch.Tensor, regions: torch.Tensor, bundle: bd.Bundle, recurrent: bool) -> tuple[np.ndarray, np.ndarray]:
+    """A seat's state as a segment starting now stores it.  Memory in half precision; the latents of frames before, as they were read."""
+    if recurrent:
+        return glob.cpu().numpy().astype(np.float16), regions[:bundle.regions].cpu().numpy().astype(np.float16)
+    return glob.cpu().numpy().copy(), regions.cpu().numpy().copy()
+
+
+def _cut(tr: Trajectory, segments: list[Segment], glob: torch.Tensor, regions: torch.Tensor, recurrent: bool = True) -> None:
     steps = tr.steps[tr.segment_start:]
     segments.append(Segment(steps, tr.glob, tr.regions, tr.bundle, tr.names))
     tr.segment_start = len(tr.steps)
-    tr.glob = glob.cpu().numpy().astype(np.float16)
-    tr.regions = regions[:tr.bundle.regions].cpu().numpy().astype(np.float16)
+    tr.glob, tr.regions = _kept(glob, regions, tr.bundle, recurrent)
 
 
 def _close(tr: Trajectory, segments: list[Segment]) -> None:
@@ -679,7 +721,7 @@ def evaluate(learner: Learner, make_env, opponent: str, games: int, seed: int) -
     end soonest would otherwise count most, and those are not a fair sample."""
     env = make_env(games, seed, modes=[opponent])
     env.begin()
-    seats = Seats(env.seat_count, env.max_regions, learner.device)
+    seats = Seats(env.seat_count, env.max_regions, learner.device, learner.actor)
     names = np.arange(learner.vocabulary, dtype=np.int32)
     results: dict[int, float] = {}
     records: dict[int, dict] = {}

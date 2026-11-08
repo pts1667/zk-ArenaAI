@@ -213,7 +213,8 @@ def bundle_spot_income(bundle: bd.Bundle, x: float, z: float) -> float:
 
 
 def test_the_commander_finishes_on_the_factory_and_income_shows_the_plan():
-    env = se.SimEnv(16, 7, ["scripts"], threads=4)
+    # The old script: the army's raids take extractors early, and this test is about the opening's income, not the raids.
+    env = se.SimEnv(16, 7, ["scripts"], threads=4, scripts=("fight", "fight"))
     env.begin()
     for _ in range(420):                                # 3.5 minutes, early enough that few games have ended
         env.step(0.0)
@@ -251,16 +252,16 @@ def test_the_script_sends_raiders_and_leaves_the_commander_to_build():
             rows = env.table.rows(own["def_id"])
             fighters = own[env.table.combat[rows] & ((own["flags"] & rf.BEING_BUILT) == 0)]
             raiders += len(fighters)
-            assert np.all(np.isin(fighters["ord_kind"], (rf.FIGHT, rf.MOVE, -1)))
+            assert np.all(np.isin(fighters["ord_kind"], (rf.FIGHT, rf.MOVE, rf.ATTACK_UNIT, -1)))
             builders = own[env.table.builder[rows] & env.table.mobile[rows]]
             assert np.all(builders["ord_kind"] != rf.FIGHT)
     assert raiders > 0
 
 
-def test_the_policy_is_given_only_the_raiders():
+def test_the_policy_is_given_its_fighters_and_factories_but_no_constructors():
     env = se.SimEnv(2, 11, ["mirror"], threads=2)
     _play(env, 80)
-    seen = 0
+    seen = factories = 0
     for g in range(2):
         for s in (0, 1):
             units = env.batch.records[g, s, :env.batch.counts[g, s]]
@@ -269,8 +270,10 @@ def test_the_policy_is_given_only_the_raiders():
             seen += controllable
             assert np.all(own["player"] == s) and np.all((own["flags"] & rf.BEING_BUILT) == 0)
             rows = env.table.rows(own["def_id"])
-            assert np.all(env.table.mobile[rows]) and not np.any(env.table.builder[rows])
-    assert seen > 0
+            factory = env.table.factory[rows]
+            assert np.all(env.table.mobile[rows] & ~env.table.builder[rows] | factory)
+            factories += int(factory.sum())
+    assert seen > factories > 0
 
 
 def test_a_policy_with_no_units_yet_still_has_a_frame_to_read():

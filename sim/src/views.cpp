@@ -191,7 +191,8 @@ int World::emit_view(int s, UnitRecord* out, int cap, float* glob, int commander
             r.ord_age = float(frame - mem_frame[i]);
             r.ord_x = mem_x[i];
             r.ord_z = mem_z[i];
-            r.ord_target = mem_target[i];
+            // What a factory or silo makes is a type: the frame gives it as a def id, as it gives every other type.
+            r.ord_target = mem_kind[i] == ZK_ORDER_PRODUCE && mem_target[i] >= 0 ? cat->types[size_t(mem_target[i])].def_id : mem_target[i];
         }
     }
     for (int u = 0; u < n && w < cap; ++u)

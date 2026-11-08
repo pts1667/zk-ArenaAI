@@ -229,6 +229,7 @@ class Block(nn.Module):
 
 class Actor(nn.Module):
     encoder_fields = ENCODER_FIELDS
+    recurrent = True
     uses_pairs = True
 
     def __init__(self, vocabulary: int):
@@ -306,6 +307,14 @@ class Actor(nn.Module):
         new_regions = self.gru_r(h[:, u:u + r], regions)
         return h, h[:, :u], h[:, u:u + r], new_glob, new_regions
 
+    def initial_state(self, seats: int, regions: int, device: str) -> tuple[torch.Tensor, torch.Tensor]:
+        return initial_state(seats, regions, device)
+
+    def decide(self, b: Batch, glob: torch.Tensor, regions: torch.Tensor):
+        """A decision while playing: what the heads read, what to keep for next time, and anything training will need of this decision."""
+        _, units, reg_h, new_glob, new_regions = self.encode(b, glob, regions)
+        return units, reg_h, new_glob, new_regions, {}
+
     def heads(self, b: Batch, units: torch.Tensor, reg_h: torch.Tensor):
         """Float32 logits with the illegal choices taken out: kind, enemy per pointer kind, and what to produce.  Which regions are legal depends on the kind: region_legal."""
         c = b.kind_mask.shape[1]
@@ -351,7 +360,8 @@ class Critic(nn.Module):
     D = 128
     LAYERS = 2
 
-    def __init__(self, vocabulary: int):
+    def __init__(self, vocabulary: int, actor_state: int = npnet.GLOBAL_STATE):
+        """actor_state: the size of what it's told of the actor's memory, 0 for an actor with none."""
         super().__init__()
         d = self.D
         self.name_embed = nn.Embedding(vocabulary, 8)
@@ -362,20 +372,20 @@ class Critic(nn.Module):
         self.reg_in = nn.Linear(fz.REGION_DIM, d)
         self.site_in = nn.Linear(fz.SITE_DIM, d)
         self.feat_in = nn.Linear(fz.FEATURE_DIM, d)
-        self.glob_in = nn.Linear(fz.GLOBAL_DIM + npnet.GLOBAL_STATE, d)
+        self.glob_in = nn.Linear(fz.GLOBAL_DIM + actor_state, d)
         self.blocks = nn.ModuleList(Block(d, 4) for _ in range(self.LAYERS))
         self.lnf = nn.LayerNorm(d)
         self.value = nn.Linear(d, 1)
         nn.init.zeros_(self.value.weight)
         nn.init.zeros_(self.value.bias)
 
-    def forward(self, b: Batch, actor_state: torch.Tensor) -> torch.Tensor:
+    def forward(self, b: Batch, actor_state: torch.Tensor | None) -> torch.Tensor:
         hu = self.unit_in(torch.cat((b.unit_x, self.name_embed(b.unit_name), self.ally_embed(b.unit_ally), self.player_embed(b.unit_player)), -1))
         hh = self.unit_in(torch.cat((b.hidden_x, self.name_embed(b.hidden_name), self.ally_embed(b.hidden_ally), self.player_embed(b.hidden_player)), -1)) + self.kind_embed.weight[fz.TK_HIDDEN]
         hr = self.reg_in(b.reg_x) + self.kind_embed.weight[fz.TK_REGION]
         hs = self.site_in(b.site_x) + self.kind_embed.weight[fz.TK_SITE]
         hf = self.feat_in(b.feat_x) + self.kind_embed.weight[fz.TK_FEATURE]
-        hg = self.glob_in(torch.cat((b.glob_x, actor_state.detach()), -1))[:, None]
+        hg = self.glob_in(b.glob_x if actor_state is None else torch.cat((b.glob_x, actor_state.detach()), -1))[:, None]
         hu = hu + self.kind_embed(b.tok_kind[:, :hu.shape[1]])
         h = torch.cat((hg, hu, hh, hr, hs, hf), 1)
         mask = torch.cat((torch.ones_like(b.unit_mask[:, :1]), b.unit_mask, b.hidden_mask, b.reg_mask, b.site_mask, b.feat_mask), 1)

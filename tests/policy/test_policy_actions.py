@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from zkbot import catalog, units
 from zkbot.policy import actions, featurize as fz, net, rawframe as rf
 
 from conftest import ENEMY, make_frame, make_units
@@ -41,9 +42,28 @@ def test_the_facts_come_from_the_generated_data(table):
     assert table.throw_radius[row("amphlaunch")] == 160.0 and table.throw_reach[row("amphlaunch")] == 620.0
     assert table.switches[row("jumpsumo")] and table.switches[row("turretimpulse")] and not table.switches[row("cloakraid")]
     assert table.teleports[row("amphtele")] and table.beacon[row("tele_beacon")] and not table.beacon[row("amphtele")]
-    assert [table.names[r] for r in table.producible] == sorted(["tacnuke", "seismic", "empmissile", "napalmmissile", "missileslow"])
-    assert table.produces[row("staticmissilesilo")].all() and not table.produces[row("factorycloak")].any()
+    made = lambda maker: {table.names[r] for r in table.producible[table.produces[row(maker)]]}  # noqa: E731
+    assert made("staticmissilesilo") == {"tacnuke", "seismic", "empmissile", "napalmmissile", "missileslow"}
+    assert made("factorycloak") == set(catalog.roster("factorycloak")) and "cloakraid" in made("factorycloak")
+    assert "cloakraid" not in made("factoryshield") and table.acts_in_place[row("factorycloak")]
     assert table.acts_in_place[row("turretimpulse")] and table.acts_in_place[row("staticmissilesilo")] and not table.acts_in_place[row("turretriot")]
+
+
+def test_a_factory_chooses_what_to_build_among_its_roster_but_not_what_it_builds_already(small_map, table):
+    x, z = (float(v) for v in small_map.centre[0])
+    roster = set(catalog.roster("factorycloak"))
+    t = run(make_units({"uid": 1, "name": "factorycloak", "x": x, "z": z}), small_map, table)
+    assert t.controllable == 1 and legal(t) == {rf.KEEP, rf.PRODUCE}
+    assert {table.names[r] for r in table.producible[t.ptr_produce[0]]} == roster
+    making = run(make_units({"uid": 1, "name": "factorycloak", "x": x, "z": z, "ord_kind": rf.PRODUCE, "ord_target": units.id_of("cloakraid"), "ord_age": 900.0}), small_map, table)
+    assert {table.names[r] for r in table.producible[making.ptr_produce[0]]} == roster - {"cloakraid"}
+    # What it makes is a type, not a unit it aims at, even when a uid happens to have that number.
+    aimed = make_units({"uid": 1, "name": "factorycloak", "x": x, "z": z, "ord_kind": rf.PRODUCE, "ord_target": units.id_of("cloakraid"), "ord_age": 900.0},
+                       {"uid": units.id_of("cloakraid"), "side": ENEMY, "x": x + 100.0, "z": z})
+    t = run(aimed, small_map, table)
+    assert t.unit_x[0, fz._O + 20] == 0.0
+    unfinished = run(make_units({"uid": 1, "name": "factorycloak", "x": x, "z": z, "flags": PLAIN | rf.BEING_BUILT}), small_map, table)
+    assert unfinished.controllable == 0
 
 
 def test_a_throw_needs_a_ready_thrower_with_someone_beside_it(small_map, table):
@@ -69,7 +89,7 @@ def test_something_that_cannot_walk_is_given_orders_only_for_what_it_can_do(smal
     t = run(make_units({"uid": 1, "name": "turretimpulse", "x": x, "z": z}), small_map, table)
     assert t.controllable == 1 and legal(t) == {rf.KEEP, rf.STOP, rf.PULL}
     t = run(make_units({"uid": 1, "name": "staticmissilesilo", "x": x, "z": z}), small_map, table)
-    assert t.controllable == 1 and legal(t) == {rf.KEEP, rf.PRODUCE} and t.ptr_produce[0].all()
+    assert t.controllable == 1 and legal(t) == {rf.KEEP, rf.PRODUCE} and t.ptr_produce[0].sum() == 5
     t = run(make_units({"uid": 1, "name": "turretriot", "x": x, "z": z}), small_map, table)
     assert t.controllable == 0
 
@@ -416,6 +436,21 @@ def test_the_sim_makes_the_missile_the_policy_chose(sim, land, table):
     game.wait(125)
     made = game.of("tacnuke")
     assert len(made) >= 1 and not len(game.of("seismic"))
+
+
+def test_the_sim_builds_what_the_policy_chose_and_the_frame_says_so(sim, land, table):
+    _, se = sim
+    game = Game(se, land, ["factorycloak"], table)
+    which = int(np.flatnonzero(np.array(table.names)[table.producible] == "cloakskirm")[0])
+    t, orders = game.tell({"factorycloak": (rf.PRODUCE, None, which)})
+    assert [o.kind for o in orders] == [rf.PRODUCE]
+    game.wait(200)
+    assert len(game.of("cloakskirm")) >= 1 and not len(game.of("cloakraid"))
+    factory = game.of("factorycloak")[0]
+    assert factory["ord_kind"] == rf.PRODUCE and factory["ord_target"] == units.id_of("cloakskirm")
+    after = game.tensors()
+    i = next(i for i in range(after.controllable) if table.names[after.unit_name[i]] == "factorycloak")
+    assert not after.ptr_produce[i, which] and after.ptr_produce[i].any()
 
 
 def test_every_kind_the_policy_has_is_one_the_sim_obeys(sim):

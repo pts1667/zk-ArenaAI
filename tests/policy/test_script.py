@@ -157,7 +157,7 @@ def test_a_uid_past_the_end_of_the_table_is_new(data):
 
 
 def test_fighters_really_do_retreat_group_and_finish_games_in_the_sim():
-    env = se.SimEnv(32, 13, ["scripts"], threads=4)
+    env = se.SimEnv(32, 13, ["scripts"], threads=4, scripts=("fight", "fight"))
     env.begin()
     kinds = set()
     for _ in range(int(240 * 2)):

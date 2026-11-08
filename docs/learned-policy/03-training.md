@@ -1369,27 +1369,55 @@ Nearest place, median, by named units in a frame: 0.003 up to 30, 0.017 for 31 t
 
 ### 11.6 The actor on latents (2026-11-07)
 
-`tools/policy_latent.py`, `tests/policy/test_latent_actor.py`, `policy_train.py --latent-encoder`.  It reads a frozen encoder's latent tokens in place of every token: built to the user's design, and **not yet shown to learn**.
+`tools/policy_latent.py`, `tests/policy/test_latent_actor.py`, `policy_train.py --latent-encoder`.  It reads a frozen encoder's latent tokens in place of every token: built to the user's design.  It went through three versions, each at the user's request: with memory (a GRU), then with no memory and two past frames, and now **a transformer over time, causal and windowed, so that training sees a whole stretch of a game in one forward pass,** as a GPT does.  In 2M decisions against the raider script both later versions went from about 13 to 15% test wins to about 21 to 23%.
 
-* **A small transformer reads only the latents** and a token of the memory state: 2 blocks, d=128, 4 heads, with no pair bias and no gate layer.  The encoder isn't trained further, and reads true names whatever names this game has dropped for the actor.
+**The windowed actor (current).**
+
+* **Each frame's 24 latent tokens attend to every frame in the 8 s before** (`WINDOW_SECONDS`; W = 17 frames at `--decide-every 1`), their own included, in each of 2 pre-LN blocks (`TimeBlock`, d=128, 4 heads).  A learned bias per head and age is added to the scores; frames later than the query or older than the window are masked out.  So the second layer reaches 32 frames, 16 s, back (`reach = LAYERS x (W - 1)`).  Frames from before the game read a learned `before` embedding.
+* **Play keeps the raw latents of the last 32 frames per seat**, plus whether each was seen, and recomputes the window over them at each decision, which is exactly what the model would compute over the whole game.  **Training runs each segment from the latents stored at its start, in one forward pass** (`LatentActor.segments`, `Learner._loss_window`): the segment's frames attend causally to each other and to the stored history, so no step is unrolled.  `test_segments_score_in_training_as_their_decisions_did_in_play` checks that stored decisions score within 2e-3 in log-probability of what they did in play.
+* Units, pointers, the critic and PPO are as in the no-memory version below.  Units cross-attend to their own frame's final tokens only.  The critic has no actor state.  `Actor.recurrent` picks the trainer's path: the first actor is `True` and trains as before.
+* Parameters: 0.80M trained and 0.92M frozen.
+
+**The no-memory version** (`/mnt/d/zk-learned/runs/latent-1/code.patch`):
+
+* **A small transformer reads only the latents** of this frame and of those 2 s and 8 s before (4 and 16 decisions at `--decide-every 1`; `policy_latent.PAST_SECONDS`): 72 tokens, each with a learned embedding of which latent token it is and one of its frame's age, with frames from before the game's start masked out.  2 blocks, d=128, 4 heads, with no pair bias and no gate layer.  The encoder isn't trained further, and reads true names whatever names this game has dropped for the actor.
 * **Each own unit reads what that made,** one cross-attention, with a query of its own raw features and sine codes of its place.  Its decision comes from that.
 * **Pointers score against embeddings of the raw features** of what they point at.  The user chose sine codes of position in those embeddings, since the dot product of two sine codes depends on the difference of the positions, which a linear embedding of raw coordinates can't give.  So a key ends in a code of its place, and a query in the unit's own code, each band scaled by a gain the unit chooses, which makes that part of the score a sum over bands of gain x cos(band x difference).
-* **Memory is kept:** the global GRU, and one per region, whose query reads the transformer's output.  A region's key is from its raw features and memory, not what it read.
-* The critic is unchanged and reads every privileged token.  Rollouts, masks, decoding and PPO are unchanged; `pm.collate(pairs=False)` skips pair buckets.
+* **No memory.**  A region's key is from its raw features alone.  A seat keeps the latents of its last 16 decisions, which is all a decision needs; the trainer stores each decision's 3 frames of latents (9 KB) with it.  So training is a plain transformer's: decisions are shuffled singly into minibatches and each minibatch is one forward pass, with nothing unrolled and the encoder not run, since its latents are stored (`Learner._loss_flat`).  Stored decisions score the same in training as in play, in any order (`test_a_stored_decision_scores_in_training_as_it_did_in_play`).
+* The critic reads every privileged token, and with no memory isn't given the actor's state (`pm.Critic(vocabulary, 0)`).  Masks, decoding and PPO are unchanged; `pm.collate(pairs=False)` skips pair buckets.  The first actor has `recurrent = True` and trains as before.
+* The version with memory (a global GRU and one per region) is in git at `bcea3be`.  It ran at 933 decisions a second, used 1.65M trained parameters, and was never trained for long.
 
-Parameters: 1.65M trained and 0.92M frozen, against the first actor's 2.99M.  Of the 1.65M, 0.59M is the global GRU, kept at 384 for the trainer and critic.
+No-memory parameters: 0.80M trained and 0.92M frozen, against the first actor's 2.99M.  The critic is 0.43M.
 
 **Speed,** 256 games, one pass, 57,344 decisions on the sim, CPU and GPU otherwise idle, iterations from the third on:
 
-| | First actor | On latents |
-|---|---|---|
-| Decisions a second, overall | 950 | 933 |
-| Training, per pass | 1,009 | 1,013 |
-| Collecting | 1,108 | 1,137 |
-| Peak GPU memory | 8.8 GB | **5.1 GB** |
-| GPU busy, mean | 21% | 17% |
+| | First actor | On latents, memory | No memory | **Windowed** |
+|---|---|---|---|---|
+| Decisions a second, overall | 950 | 933 | 1,424 | **1,156** |
+| Training, per pass | 1,009 | 1,013 | 2,140 | 1,678 |
+| Collecting | 1,108 | 1,137 | 1,567 | 1,320 |
+| Peak GPU memory | 8.8 GB | 5.1 GB | 5.7 GB | 6.1 GB |
+| GPU busy, mean | 21% | 17% | 17% | 33% |
 
-So it saves memory and no time.  0 chosen actions were outside their mask.
+The last two columns are 102,400 decisions, otherwise the same.  The windowed actor is about a fifth slower than the no-memory one, and keeps the GPU twice as busy; the CPU still sets the rate.  Without memory, training per pass doubled, not more, and the GPU is still mostly idle, so the CPU still sets the rate.  Why isn't measured.  The likely reasons are featurizing each decision again in training, and collecting and training sharing one Python thread.  0 chosen actions were outside their mask.
+
+**Learning,** `/mnt/d/zk-learned/runs/latent-1`: no memory, 256 games, one pass, 2.0M decisions against the script only (self-play never started), 64 test games every 20 iterations.  It ran in 30 minutes, 1,140 decisions a second counting the tests.
+
+| Iteration | 20 | 40 | 60 | 80 | 100 | 120 | 140 | 160 | 180 | 200 | 220 | 240 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| Test wins | 12.5% | 12.5% | 12.5% | 28% | 31% | 16% | 31% | 23% | 25% | 16% | 20% | 16% |
+| Draws | 19% | 12.5% | 16% | 19% | 9% | 9% | 5% | 8% | 9% | 11% | 9% | 14% |
+
+The first three tests won 24 games of 192, the last nine 132 of 576 (23%).  With 64 games a test is ±5 points or so, so the rise is likely real, and the last three (17%) are within noise of the middle.  Wins in its training games against the script went from 0 to about 25%.  The value head's explained variance rose from 0.02 to 0.96.  KL fell from 0.002 to 0.0006 a pass and clip fraction from 0.05 to 0.005, while entropy rose (kinds 0.96 to 1.23, enemy 0.72 to 1.68).  So by the end it was barely changing the policy, and becoming more random.  That and the flat late tests suggest it was stalling, not still climbing.  Not checked: a longer run, two passes or a higher learning rate, self-play, and how the first actor does over the same 2M with these settings.
+
+**Learning, windowed,** `/mnt/d/zk-learned/runs/latent-2`: the same settings, 2.0M decisions, against the raider script (`fight`).  974 decisions a second counting the tests, with the CPU shared with other work for part of it.
+
+| Iteration | 20 | 40 | 60 | 80 | 100 | 120 | 140 | 160 | 180 | 200 | 220 | 240 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| Test wins | 19% | 14% | 12% | 28% | 23% | 19% | 30% | 16% | 22% | 14% | 16% | 22% |
+| Draws | 19% | 17% | 19% | 19% | 14% | 9% | 11% | 19% | 12% | 11% | 16% | 9% |
+
+The first three tests won 15%, the last nine 21%: the same rise as the no-memory version, within noise of it.  Explained variance ended at 0.94 to 0.96; KL 0.0003 to 0.0007 and clip fraction 0.002 to 0.005, so like that version it had nearly stopped changing.  So 2M decisions of RL from scratch don't show the window helping or hurting; the point of it is that the same model can learn from whole recorded games first (11.8).
 
 **Why the GPU is so idle,** measured on the latent actor, collecting and training in turn over 40,960 decisions, with the GPU waited for around each part.  **One thread issuing small calls sets the rate, not the GPU or featurizing.**
 
@@ -1404,4 +1432,81 @@ The main process used about one core, the workers 2 to 2.5 of their 6, and the m
 
 Pair buckets aren't the cause: 9.5% of featurizing at 1.01 ms a frame, so about 2% of the iteration.  Featurizing waits 67 ms a call, against 41 ms if six workers took 1 ms a frame with nothing else to pay, so sending frames between processes is likely the rest.  Collecting during training ran 933 a second, against 803 for these two phases in turn, though they alone would go at 1,929 and 1,377; sharing one thread's lock is the likely reason, not measured.
 
-**Not built:** the numpy forward, export and parity for the bot, so this actor can't run in `bots/zkbot/policy/net.py` yet.  Muon isn't used for PPO.  Not checked: whether it learns; the token budget, which still allows for pair memory it doesn't use.
+**Not built:** the numpy forward, export and parity for the bot, so this actor can't run in `bots/zkbot/policy/net.py` yet.  Muon isn't used for PPO.  Not checked: the token budget, which still allows for pair memory it doesn't use (819 decisions a minibatch in the run).
+
+### 11.7 The army script, now the default for script-controlled sides (2026-11-07)
+
+`tools/policy_army.py` (fighting), `tools/policy_mix.py` (production), `tests/policy/test_army.py`.  `SimEnv` now gives script-controlled sides the army script by default.  The raider-only script of 10.2 is still there as `"fight"`, and the script-against-script numbers from 10.2 onward were measured with it.
+
+* **What a factory builds** (`policy_mix.py`).  Each unit is the cheapest modelled unit of its catalog role on the factory's roster, so nothing is picked by name.  A role is started when its share lags furthest behind its target share of the units its side has started.  Raiders are 100% of the mix to 4 minutes, then 50% at 10, 40% at 20, 35% from 60.  Riots are 30% from 10 minutes; assaults 25% from 12 (none before 6); artillery 10% from 18.  Skirmishers take 25% once a riot or assault has been seen, AA 12% once air has been seen, snipers 10% from 8 minutes once a slow heavy has been seen.  Scouts: one from 2 minutes, a second from 10.
+* **PRODUCE orders** go on the factory's uid, and only when its next type differs from the one it's on, so each order is a real change.  `SimEnv.script_production(seat)` lists them for each decision.  No queue is involved: a switch only affects the next unit, as the sim does it.
+* **Raiders** (`policy_army.py`).  Squads of three.  A squad goes for extractors first, then other buildings, one target at a time, and takes a target only when its metal is at least the cover on it: defences and armed units count, outranging ones four times over, and a riot heavy within 800 elmos rules a target out.  A squad with no target probes towards the enemy's start, stops before ground it can't cover, and holds if none is clear.  Probing squads within 900 elmos merge, up to six.  Past the first three raiders a quarter patrol their own extractors, and from 1:30 at least two do; a patroller answers a threat within 900 elmos of its extractor and no other.  A squad gives up on a target that takes it longer than 60 s plus distance/20 s, or 300 s more once it's there, and nobody goes at that target for 300 s.
+* **The rest of the army.**  Assaults lead, to the enemy's start and then the nearest building.  Riots and the others hold 150 elmos behind the assaults' middle, or behind the goal when there are no assaults.  Skirmishers back off 250 elmos at once from an armed unit within 0.6 of their range.  Artillery stands at 0.75 of its range from the building nearest the goal.  AA follows the army's centre.  Snipers go for the nearest slow heavy.  Scouts move between four waypoints.  A unit is given an order only when it's new, its job has changed, its goal has moved more than 200 elmos, or it's idle more than 150 from its goal.
+* **A bug found in testing and fixed.**  With no assaults, the other roles held behind the middle of the army itself, so the army walked back to the rally.  They now hold behind the goal.  `test_riots_hold_behind_the_goal_when_no_assault_leads` covers it.
+
+**Tests.**  `test_army.py` has 29, all passing: the mix by role and time, skirmishers and AA only after the enemy has shown the right unit, scouts from 2 minutes, one PRODUCE per type change, per-role orders, probing that stops at defences, patience, merging and re-orders.  One sim check runs 8 games for 400 decisions and asserts that each PRODUCE is on the seat's factory and changes the type; another runs 8 games for 60 decisions on 1 and on 4 threads and asserts the same records.  `test_script.py` and `test_sim_env.py` pin the tests of the raider script to `("fight", "fight")`, where they check that script's own state.  Full suite: 613 passed, 9 failed.  Eight of the failures also happen with the committed `tools` files, so they come from uncommitted changes in `bots/` (`tables.py` and others): `test_golden`, `test_policy_actions`, and `test_the_policy_is_given_only_the_raiders`.  The ninth, `test_frame_vae::test_two_part_learns_and_reports_comparably`, passes when run alone and was not looked into.
+
+**Measured,** 64 games, one per slot, each run to its own end, army against fight with sides drawn at random (`SimEnv(64, 2026, ["scripts"], threads=4, scripts=("army","fight"))`).  The harness is a script in the job's scratch folder, not committed.
+
+| Army against fight | Won | Drew | Lost |
+|---|---|---|---|
+| 64 games | **57 (89%)** | 0 | 7 (11%) |
+
+* Endings: 49 eliminated, 15 by the early end (2.5 times the value and 10,000 metal ahead).  None reached the time limit, so draws were impossible here.  Length: mean 648 s, median 645 s, range 224 to 1,084 s.
+* **Unit mix by role per factory** (units the army side started; the fight side records no mix and builds its opening's raider type only).
+
+| Factory | Started | Raid | Riot | Assault | Skirm | Scout | Arty |
+|---|---|---|---|---|---|---|---|
+| Shield | 932 | 50% | 23% | 17% | 5% | 3% | 2% |
+| Cloak | 668 | 64% | 17% | 12% | 6% | | 1% |
+| Hover | 518 | 65% | 20% | 11% | 4% | | |
+| Veh | 482 | 57% | 22% | 16% | | 4% | 2% |
+| Amph | 385 | 76% | 12% | 3% | 9% | | |
+| Spider | 193 | 65% | 15% | 5% | 11% | 5% | |
+| Tank | 189 | 72% | 17% | 11% | | | |
+| Jump | 161 | 72% | | 18% | 4% | 6% | |
+
+  No AA was started in any factory.  The fight script never fields air, so the enemy never showed any, and the AA rule never fired in this batch.  No snipers were started either; I didn't check why.
+* **The drawn factory decides the result.**  Each factory's score is wins plus half draws over all its sides in the 64 games.  Of 64 games, 49 had different factories and a decided result, and the better factory's side won 31 of them (63%).  Five more were between the same factory, and ten had tied scores, so neither is counted.  The earlier figure of 91% (HANDOFF 6g: Spider 0.92, Veh 0.21) was on fight against fight, with draws and a different score pool.  This batch is lower, and the score here includes these same games, so it isn't a clean test.
+
+**Not checked:** other seeds; a fight-against-fight run on this seed, to compare with the 46/8/46 in HANDOFF 6g; the army's results against the real engine; how much of the lead comes from production and how much from fighting, since the two weren't separated; whether the factory score is the right test when the two sides run different scripts; why no snipers were started.
+
+### 11.8 Factories for the policy, labels from the script, and a dataset of script games (2026-11-07)
+
+The user's plan: learn from whole recorded games before RL, which the windowed actor (11.6) allows, from the army script (11.7) playing itself, with the script's production labelled as well as its fighting.
+
+**Factories are the policy's.**
+
+* In the sim, a PRODUCE on a factory sets the type it keeps building, and is remembered as the factory's order like any other (`world.cpp` `order_unit`).  In the frame a PRODUCE's `ord_target` is the def id of what it makes, not a unit (`views.cpp`, `rawframe.py`).
+* `tables.py`: the makers are the silos and the factories, each with its catalog roster; `producible` is the 127 types they make, sorted.  The PRODUCE mask leaves out the type a factory is already making, so a PRODUCE is always a change.  A PRODUCE's target isn't a unit, so it gets no target pair (`featurize.py`).
+* Factories are controllable (`acts_in_place`), so the policy is given its fighters and its factories, still not its constructors.  The goldens were regenerated with `tools/policy_golden.py sim`; only factory rows differ from before.  `test_a_factory_chooses_what_to_build_among_its_roster_but_not_what_it_builds_already`, `test_the_sim_builds_what_the_policy_chose_and_the_frame_says_so`.
+
+**Labels.**  `actions.encode` is the inverse of `actions.decode`: given orders, it finds the kind, the enemy by uid, the nearest legal region and the nearest of its fine options, and a factory's row in `producible`.  It also counts the orders it can't say.  `policy_sim_env.policy_orders` is the inverse of `sim_orders`, so the script's orders, as the sim took them, become the policy's.  `tests/policy/test_labels.py`: decode then encode gives back the decision, places go to the nearest legal option, and what can't be said is counted.
+
+**The recorder,** `tools/policy_clone_data.py`, `tests/policy/test_clone_data.py`.
+
+* `record` runs the army script against itself in batches of games in the sim.  `--workers` processes each run a batch with their own seed and share the sim threads.  The map pool is loaded once before they fork, so they share it: 12 to 14 GB at 8 to 12 workers, where loading it in each (7.5 GB a copy) ran WSL out of memory at 8.
+* One file per side of a game: its frames (`rf.save_frames`), the orders its script gave at each decision, how the game ended for it, the map and the script.  Frames and orders are raw, not features or choices, so the data outlives featurizer changes: `labels` turns them into the policy's choices when read.  The commander's opening isn't the policy's, so it isn't labelled.
+* **Whole games only.**  When the budget is reached, no new games are recorded and those running are played out.  Dropping them, as the first version did, kept only games that ended early: 0 of 63 had reached the time limit in a short run.
+* `check` reports label kind shares, how many orders couldn't be said, and bytes a decision.
+* About 340 bytes a decision compressed (12.7x).  `rf.join` replaced `np.concatenate` for records, which had cost more than the compression.
+
+**Speed,** 32 games a worker, the five training maps, written to WSL's disk, decisions recorded a second.  Results don't depend on the thread count.
+
+| Workers, sim threads | 1, 16 | 8, 8 | 8, 16 | 14, 14 | 8, 8, written to D: |
+|---|---|---|---|---|---|
+| Decisions a second | 7,490 | 30,922 | 33,700 | 38,309 | 28,997 |
+
+Profiled at one worker before `rf.join`: the script was 41% of the time, writing 30%, the sim 12%.  Not profiled since.
+
+**The first dataset,** `/mnt/d/zk-learned/clone/army-1`: the army script against itself on the map pool, held-out maps excluded, seed 1, 12 workers.
+
+* 3,097 games, 11.56M decisions (both sides), 4.9 GB, about 400 bytes a decision.  5.3 minutes in all: 34 s loading maps, then 40,800 decisions a second.
+* Endings: 1,136 by elimination, 885 by the early end on a lead, 1,076 at the time limit (35%, drawn).
+* Labels, read from 60 files at every fifth decision (22,274 decisions): of controllable units' choices, keep 97.4%, fight 2.25%, PRODUCE 0.2%, move 0.15%, attack a unit 0.01%.  The script gave 0.32 orders a decision, and 2.5% of them couldn't be said in the policy's actions.
+
+**What that means for cloning.**  Nearly every label is keep, since the script looks only every 6 decisions and then re-orders only what has changed, mostly with attack-moves, so a plain loss would teach keep.  The loss will need weighting by kind, or a split between whether to act and what to do.  The draws are a third of the games, which matters if results are used to weight games.
+
+**Not checked:** which orders couldn't be said; how the script's games compare with the engine; whether labels for a unit should count only decisions where its script looked at it (the script looks every 6 decisions, `SCRIPT_EVERY`, so in 5 of 6 keep is a default, not a judgement).  **Not built:** the cloning trainer.
+
+**Tests:** `sim/tests` and `tests/policy`, 624 passed.  The whole `tests` folder also has 2 failures that need `requests`, which isn't installed in `~/zkml`; they're in the rules bot, untouched here.

@@ -22,7 +22,13 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "sim" / "py"))
 sys.path.insert(0, str(ROOT / "bots"))
 import zksim  # noqa: E402
+from zkbot import catalog as bot_catalog, units  # noqa: E402
 from zkbot.policy import rawframe as rf, tables  # noqa: E402
+from policy_opening import modelled  # noqa: E402
+
+HEAVY_COST = 500.0          # elmos a second: slow heavies are what snipers go for
+HEAVY_RIOT_COST = 1000.0    # riot heavies (Sumo, Dante, Crab): raiders never go near these
+SLOW_SPEED = 60.0
 
 RETREAT_BELOW = 0.4         # of health.  The rules bot's are 0.30 for cheap units and 0.45 for others.
 RECOVERED = 0.9
@@ -44,15 +50,44 @@ def group_metal(seconds: float) -> float:
 
 
 class ScriptData:
-    """What the data says about each kind of unit.  Shared by all the scripts of an environment."""
+    """What the data says about each kind of unit.  Shared by all the scripts of an environment.  Arrays are one longer than the
+    table, with the unknown type at the end, which is all False."""
 
     def __init__(self, table: tables.TypeTable, cat: zksim.Catalog):
         self.table = table
         self.fights = table.combat & table.mobile
-        self.regenerates = np.zeros(len(table.combat), bool)
+        n = len(table.combat)
+        self.regenerates = np.zeros(n, bool)
+        self.modelled = np.zeros(n, bool)           # the sim does everything the unit does
+        self.catalog_row = np.full(n, -1, np.int32)  # its index in the sim's catalog, which orders are given by
+        self.extractor = np.zeros(n, bool)
+        self.defence = np.zeros(n, bool)
+        self.kitable = np.zeros(n, bool)            # a riot or an assault: slow, and can be kited
+        self.heavy_riot = np.zeros(n, bool)
+        self.slow_heavy = np.zeros(n, bool)
+        self.row_of_name = {name: row for row, name in enumerate(table.names)}
+        self.role_of = [bot_catalog.role(name) for name in table.names] + ["other"]
         for row, name in enumerate(table.names):
+            d = units.by_name(name) or {}
+            roles = bot_catalog.roles(name)
             if name in cat.index:
-                self.regenerates[row] = cat.units[cat.index[name]]["idle_regen"] > 0.0
+                i = cat.index[name]
+                self.regenerates[row] = cat.units[i]["idle_regen"] > 0.0
+                self.catalog_row[row] = i
+                self.modelled[row] = modelled(cat, name)
+            self.extractor[row] = units.is_mex(d)
+            self.defence[row] = units.is_defense(d) and bool(table.armed[row])
+            self.kitable[row] = bool({"riot", "assault"} & set(roles))
+            self.heavy_riot[row] = "riot" in roles and float(table.cost[row]) >= HEAVY_RIOT_COST
+            self.slow_heavy[row] = float(table.cost[row]) >= HEAVY_COST and float(table.speed[row]) < SLOW_SPEED
+        mobile = table.mobile & table.combat
+        self.kitable &= mobile
+        self.heavy_riot &= mobile
+        self.slow_heavy &= mobile
+
+    def row_of_index(self, catalog_index: int) -> int:
+        """The table row of a sim catalog index."""
+        return int(np.flatnonzero(self.catalog_row == catalog_index)[0])
 
 
 def _nearest(x: np.ndarray, z: np.ndarray, others: np.ndarray) -> tuple[np.ndarray, np.ndarray]:

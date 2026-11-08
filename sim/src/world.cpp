@@ -162,7 +162,15 @@ void World::order_unit(int u, int kind, float gx, float gz, int target) {
     if (kind == ZK_ORDER_MANUAL_FIRE && manual_mount(u) < 0) return;
     const auto& d = type_of(u);
     if (kind == ZK_ORDER_PRODUCE) {
-        if (d.flags & ZK_U_FACTORY) produces[size_t(u)] = target;
+        if (d.flags & ZK_U_FACTORY) {
+            produces[size_t(u)] = target;
+            // As the net sees it: what it's making, since when.  The frame turns the type into a def id.
+            mem_kind[size_t(u)] = kind;
+            mem_frame[size_t(u)] = frame;
+            mem_target[size_t(u)] = target;
+            mem_x[size_t(u)] = x[size_t(u)];
+            mem_z[size_t(u)] = z[size_t(u)];
+        }
         return;
     }
     if (kind == ZK_ORDER_MOVE_STATE) {
