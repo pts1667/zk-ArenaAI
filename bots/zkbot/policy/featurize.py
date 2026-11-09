@@ -1,6 +1,7 @@
 """Raw frame to tensors and masks.  The one featurizer: the live bot, the sim's training loop and the tests all use it.
 
-Numpy only.  Normalisation is fixed, not learned, so it can't drift with training.  Tokens come in a fixed order:
+Numpy, with the per-unit loops in featurize_kernels (numba when it's installed).  Normalisation is fixed, not learned, so it can't
+drift with training.  Tokens come in a fixed order:
 
     controllable units | every other unit, most important first | summaries | regions | sites | features | global
 
@@ -13,9 +14,13 @@ never saw vary is one the live game could only mislead.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import lru_cache
+from operator import attrgetter, is_
+from typing import NamedTuple
 
 import numpy as np
 
+from . import featurize_kernels as kernels
 from . import rawframe as rf
 from .bundle import PASS_CELL, Bundle
 from .tables import TYPE_DIM, TypeTable
@@ -31,7 +36,9 @@ CAP_FEATURES = 32           # wrecks and the like in sight.  Past that, a region
 CAP_SUMMARIES = 12
 # How the rest of the pool is chosen: what can be aimed at comes first, what's in sight before what's on radar, whichever way the
 # armies stand.  Within each, value over distance from our army.  A blip's type may be unknown, so nothing counts for less than the floor.
-LEAST_COST = 100.0
+LEAST_COST = kernels.LEAST_COST
+if kernels.PASS_CELL != PASS_CELL:
+    raise ImportError("bundle.PASS_CELL changed: update featurize_kernels' copy")
 
 # Rows of the id embeddings, as well as one for an unknown id.
 MAX_ALLY_TEAMS, MAX_PLAYERS = 16, 32
@@ -63,13 +70,13 @@ KINDS_WITH_FINE = (rf.MOVE, rf.FIGHT, rf.JUMP, rf.ATTACK_GROUND, rf.THROW, rf.PL
 PLACE_RINGS = (64.0, 128.0, 256.0)
 PLACE_OFFSETS = 1 + 8 * len(PLACE_RINGS)
 
-# unit_x layout.
-_INSTANCE = 19
-_ORDER = rf.ORDER_SLOTS + 7
-_RAYS = 24
+# unit_x layout: type stats, instance, order memory, rays, summary.  The kernels fill all but the last.
+_INSTANCE = kernels.INSTANCE_COLS
+_ORDER = kernels.ORDER_COLS
+_RAYS = kernels.RAY_COLS
 _SUMMARY = 3
 UNIT_DIM = TYPE_DIM + _INSTANCE + _ORDER + _RAYS + _SUMMARY
-ALTITUDE_DEAD_ZONE = 40.0
+ALTITUDE_DEAD_ZONE = kernels.ALTITUDE_DEAD_ZONE
 _I = TYPE_DIM
 _O = _I + _INSTANCE
 _R = _O + _ORDER
@@ -80,14 +87,7 @@ SITE_DIM = 2 + 1 + 4 + 1 + 1
 FEATURE_DIM = 2 + 1 + 1 + 1
 GLOBAL_DIM = len(rf.GLOBAL_FIELDS) - 2     # the last two say who the viewer is, and aren't inputs
 
-RAY_CELLS = 12            # 32-elmo steps, to 400 elmos
-RAY_STEP = 32.0
-RAY_MAX = RAY_CELLS * RAY_STEP
-RAY_DPS_RADIUS = 600.0
-_RAY_ANGLES = np.arange(8) * (np.pi / 4.0)
-_RAY_DX = np.sin(_RAY_ANGLES).astype(np.float32)
-_RAY_DZ = np.cos(_RAY_ANGLES).astype(np.float32)
-_RAY_T = (np.arange(1, RAY_CELLS + 1) * RAY_STEP).astype(np.float32)
+RAY_CELLS, RAY_STEP, RAY_DPS_RADIUS = kernels.RAY_CELLS, kernels.RAY_STEP, kernels.RAY_DPS_RADIUS
 
 
 @dataclass
@@ -130,10 +130,6 @@ class Tensors:
     feat_pos: np.ndarray = field(default_factory=lambda: np.zeros((0, 2), np.float32))  # F x 2: each feature token's x, z in elmos
 
 
-def _centroid(x: np.ndarray, z: np.ndarray, fallback: tuple[float, float]) -> np.ndarray:
-    return np.array([x.mean(), z.mean()], np.float32) if len(x) else np.array(fallback, np.float32)
-
-
 def relative_id(ids: np.ndarray, own: int, count: int) -> np.ndarray:
     """A game's numbers as the viewer's: its own is 0, and the others count from 1, skipping it.  So no seat is special, both seats of
     a 1v1 see the other as 1, and a number stays the same all game.  Unknown ids, and any past `count`, take the last row."""
@@ -144,149 +140,105 @@ def relative_id(ids: np.ndarray, own: int, count: int) -> np.ndarray:
     return out.astype(np.int32)
 
 
+# What each pack is made from.  A pack is kept on its table or bundle, and made again if any of these is no longer the object it was
+# made from: a copy (copy.copy) carries the pack, and may have been given arrays of its own.
+_TABLE_SOURCES = attrgetter("row_of_def", "cost", "speed", "range", "dps_ground", "dps_air", "manual_range", "manual_reload", "jump_range",
+                            "throw_radius", "throw_reach", "mobile", "air", "armed", "can_hit_ground", "can_hit_air", "builder", "factory",
+                            "combat", "manualfire", "jump", "cloak", "switches", "teleports", "beacon", "missile", "launcher",
+                            "acts_in_place", "move_class", "stats", "produces", "builds", "producible")
+_BUNDLE_SOURCES = attrgetter("cell", "map_w", "map_h", "passable", "centre", "area", "region_height", "sea", "tags", "access", "shares",
+                             "spots", "gate_counts", "gate_x")
+
+
+def _current(owner: object, sources: attrgetter) -> NamedTuple | None:
+    pack = owner.__dict__.get("_kernel_pack")
+    return pack if pack is not None and all(map(is_, sources(owner), pack.sources)) else None
+
+
+class _TablePack(NamedTuple):
+    """The table as the kernels read it: few arrays, so that a call unpacks few (featurize_kernels' T_ and B_ columns)."""
+    row_of_def: np.ndarray
+    f: np.ndarray
+    b: np.ndarray
+    move_class: np.ndarray
+    stats: np.ndarray
+    produces: np.ndarray
+    builds: np.ndarray
+    producible: np.ndarray
+    sources: tuple
+
+
+def _table_pack(table: TypeTable) -> _TablePack:
+    pack = _current(table, _TABLE_SOURCES)
+    if pack is None:
+        t = table
+        f = np.stack((t.cost, t.speed, t.range, t.dps_ground, t.dps_air, t.manual_range, t.manual_reload, t.jump_range, t.throw_radius,
+                      t.throw_reach), 1).astype(np.float32)
+        b = np.stack((t.mobile, t.air, t.armed, t.can_hit_ground, t.can_hit_air, t.builder, t.factory, t.combat, t.manualfire, t.jump,
+                      t.cloak, t.switches, t.teleports, t.beacon, t.missile, t.launcher, t.acts_in_place, t.constructor,
+                      t.produces.any(axis=1), t.builds.any(axis=1)), 1)
+        c = np.ascontiguousarray
+        pack = _TablePack(c(t.row_of_def), c(f), c(b), c(t.move_class), c(t.stats, np.float32), c(t.produces), c(t.builds),
+                          c(t.producible, np.int64), _TABLE_SOURCES(t))
+        table._kernel_pack = pack
+    return pack
+
+
+class _BundlePack(NamedTuple):
+    """What featurize makes of a map's bundle alone, and its sizes as the float32 numpy would make of them."""
+    cell: np.float32
+    map_w: np.float32
+    map_h: np.float32
+    map_max: np.float32
+    region_radius: np.ndarray       # R: half the equivalent radius, how far a fine position is off the centre
+    region_cells: np.ndarray        # R: the passable bits at each region's centre
+    reg_x: np.ndarray               # R x REGION_DIM: the columns that don't change
+    gate_x: np.ndarray              # G x GATE_DIM, normalised
+    sources: tuple
+
+
+def _bundle_pack(bundle: Bundle) -> _BundlePack:
+    pack = _current(bundle, _BUNDLE_SOURCES)
+    if pack is None:
+        rows, cols = bundle.passable.shape
+        cells = bundle.passable[np.clip((bundle.centre[:, 1] / PASS_CELL).astype(np.int64), 0, rows - 1),
+                                np.clip((bundle.centre[:, 0] / PASS_CELL).astype(np.int64), 0, cols - 1)]
+        reg_x = np.zeros((bundle.regions, REGION_DIM), np.float32)
+        reg_x[:, 0] = bundle.centre[:, 0] / bundle.map_w * 2.0 - 1.0
+        reg_x[:, 1] = bundle.centre[:, 1] / bundle.map_h * 2.0 - 1.0
+        reg_x[:, 2] = np.log1p(bundle.area) / 16.0
+        reg_x[:, 3:5] = bundle.region_height / 300.0
+        reg_x[:, 5] = bundle.sea
+        reg_x[:, 6:15] = bundle.tags
+        reg_x[:, 15:21] = bundle.access
+        reg_x[:, 21:23] = bundle.shares
+        reg_x[:, 23] = bundle.spots[:, 0] / 5.0
+        reg_x[:, 24] = bundle.spots[:, 1] / 10.0
+        reg_x[:, 25:27] = bundle.gate_counts / 4.0
+        gate_x = bundle.gate_x.copy()
+        gate_x[:, :6] = np.log1p(gate_x[:, :6]) / 8.0
+        gate_x[:, 6:12] = gate_x[:, 6:12] / 2000.0
+        pack = _BundlePack(np.float32(bundle.cell), np.float32(bundle.map_w), np.float32(bundle.map_h),
+                           np.float32(max(bundle.map_w, bundle.map_h)), (np.sqrt(bundle.area / np.pi) * 0.5).astype(np.float32),
+                           np.ascontiguousarray(cells), reg_x, gate_x, _BUNDLE_SOURCES(bundle))
+        bundle._kernel_pack = pack
+    return pack
+
+
+@lru_cache(maxsize=None)
+def _enabled(kinds: tuple[int, ...]) -> np.ndarray:
+    on = np.zeros(rf.KIND_COUNT, bool)
+    on[list(kinds)] = True
+    return on
+
+
 def _select(units: np.ndarray, table: TypeTable, player: int, ally: int) -> tuple[np.ndarray, int, np.ndarray, np.ndarray, np.ndarray | None]:
-    """Applies the caps.  Returns the indices kept, how many of them are controllable, those left over, and army and enemy centroids."""
-    rows = table.rows(units["def_id"])
-    cost = table.cost[rows]
-    finished = (units["flags"] & rf.BEING_BUILT) == 0
-    own = units["player"] == player
-    hostile = units["ally_team"] != ally
-    knowledge = units["knowledge"]
-    fights = table.combat[rows] & table.mobile[rows]
-    can = own & finished & (fights | table.acts_in_place[rows] | table.constructor[rows]) & ~table.air[rows] & ((units["flags"] & rf.RESERVED) == 0)
-    x, z = units["x"], units["z"]
-
-    def near(idx: np.ndarray, centre: np.ndarray) -> np.ndarray:
-        return np.hypot(x[idx] - centre[0], z[idx] - centre[1])
-
-    cand = np.flatnonzero(can)
-    goes = np.flatnonzero(can & table.mobile[rows])      # a turret isn't where the army is
-    army = _centroid(x[goes], z[goes], (float(x[own].mean()), float(z[own].mean())) if own.any() else (0.0, 0.0))
-    # Most expensive first; among equals, nearest the army.  uid breaks ties so that record order can't matter.
-    keep_c = cand[np.lexsort((units["uid"][cand], near(cand, army), -cost[cand]))] if len(cand) else cand
-    control = keep_c[:CAP_CONTROLLABLE]
-    taken = np.zeros(len(units), bool)
-    taken[control] = True
-    rest = np.flatnonzero((knowledge != rf.KNOW_HIDDEN) & ~taken)
-    score = np.maximum(cost[rest], LEAST_COST) / (near(rest, army) + 200.0)
-    rank = np.select((hostile[rest] & (knowledge[rest] == rf.KNOW_LOS), hostile[rest] & (knowledge[rest] == rf.KNOW_RADAR)), (0, 1), 2)
-    rest = rest[np.lexsort((units["uid"][rest], -score, rank))]
-    room = CAP_UNITS - len(control)
-    seen = np.flatnonzero(hostile & ((knowledge == rf.KNOW_LOS) | (knowledge == rf.KNOW_RADAR)))
-    foe = _centroid(x[seen], z[seen], (0.0, 0.0)) if len(seen) else None
-    return np.concatenate((control, rest[:room])), len(control), rest[room:], army, foe
-
-
-def _instance(units: np.ndarray, rows: np.ndarray, bundle: Bundle, table: TypeTable, out: np.ndarray) -> None:
-    x, z = units["x"], units["z"]
-    out[:, _I + 0] = x / bundle.map_w * 2.0 - 1.0
-    out[:, _I + 1] = z / bundle.map_h * 2.0 - 1.0
-    # Live, a unit's y is its middle, up to 35 elmos above the ground by type; the sim says the ground.  Past that, it flies.
-    above = units["y"] - bundle.ground_at(x, z)
-    out[:, _I + 2] = np.clip(np.sign(above) * np.maximum(np.abs(above) - ALTITUDE_DEAD_ZONE, 0.0) / 200.0, -1.0, 4.0)
-    top = np.maximum(table.speed[rows], 30.0) / 30.0        # elmos per frame, as vel is
-    vx, vz = np.clip(units["vx"] / top, -2.0, 2.0), np.clip(units["vz"] / top, -2.0, 2.0)
-    out[:, _I + 3], out[:, _I + 4] = vx, vz
-    out[:, _I + 5] = np.minimum(np.hypot(vx, vz), 2.0)
-    hp = units["hp_frac"]
-    missing = np.isnan(hp)
-    out[:, _I + 6] = np.where(missing, 0.0, np.clip(hp, 0.0, 1.0))
-    out[:, _I + 7] = missing
-    out[:, _I + 8] = np.clip(units["build_frac"], 0.0, 1.0)
-    flags = units["flags"]
-    for k, bit in enumerate((rf.BEING_BUILT, rf.CLOAKED, rf.PARALYZED, rf.IN_LOS, rf.IDLE, rf.TYPE_KNOWN, rf.DAMAGED)):
-        out[:, _I + 9 + k] = (flags & bit) != 0
-    out[:, _I + 16] = units["blip_top_speed"] / 150.0
-    # A remembered structure's ord_age says how long ago it was seen.
-    is_memory = units["knowledge"] == rf.KNOW_MEMORY
-    out[:, _I + 17] = np.where(is_memory, np.log1p(np.maximum(units["ord_age"], 0.0) / 30.0) / 6.0, 0.0)
-    out[:, _I + 18] = (flags & rf.JUMP_READY) != 0
-
-
-def _find(wanted: np.ndarray, uids: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Where each wanted uid is among `uids`: whether it's there, and its index, which means nothing where it isn't."""
-    if not len(uids):
-        return np.zeros(len(wanted), bool), np.zeros(len(wanted), np.int64)
-    order = np.argsort(uids)
-    at = order[np.minimum(np.searchsorted(uids, wanted, sorter=order), len(uids) - 1)]
-    return uids[at] == wanted, at
-
-
-def _order_block(units: np.ndarray, is_own: np.ndarray, bundle: Bundle, aimable: np.ndarray, commit_decisions: int, out: np.ndarray) -> np.ndarray:
-    """Fills the order-memory columns, and returns who is commit-locked.  `aimable` is every record that can be aimed at, kept or not."""
-    kind = units["ord_kind"].astype(np.int64)
-    has = (kind >= 0) & is_own
-    idx = np.flatnonzero(has)
-    out[idx, _O + kind[idx]] = 1.0
-    age = np.where(has, units["ord_age"], 0.0)
-    out[:, _O + 16] = np.log1p(np.maximum(age, 0.0) / DECISION_FRAMES) / 6.0
-    target = units["ord_target"]
-    has_target = has & (target >= 0) & (kind != rf.PRODUCE)     # what a factory makes is a type, not a unit
-    known, at = _find(target, aimable["uid"])
-    known &= has_target
-    # A target's direction is where it is now, in sight or on radar.  Any other goal is where the order said.
-    goal_x, goal_z = units["ord_x"], units["ord_z"]
-    if len(aimable):
-        goal_x, goal_z = np.where(known, aimable["x"][at], goal_x), np.where(known, aimable["z"][at], goal_z)
-    goes = known | (has & (kind != rf.ATTACK_UNIT) & (kind != rf.STOP))
-    dx, dz = np.where(goes, goal_x - units["x"], 0.0), np.where(goes, goal_z - units["z"], 0.0)
-    out[:, _O + 17] = dx / bundle.map_w
-    out[:, _O + 18] = dz / bundle.map_h
-    out[:, _O + 19] = np.hypot(dx, dz) / max(bundle.map_w, bundle.map_h)
-    alive = known & (aimable["knowledge"][at] == rf.KNOW_LOS) if len(aimable) else known
-    out[:, _O + 20] = has_target
-    out[:, _O + 21] = has_target & alive
-    fresh = has & (age < commit_decisions * DECISION_FRAMES)
-    flags = units["flags"]
-    out[:, _O + rf.RESERVED_KIND] = is_own & ((flags & rf.PULLING) != 0)       # no order has this kind, and the frames so far hold 0 here
-    released = ((flags & (rf.DAMAGED | rf.IDLE)) != 0) | (has_target & ~alive)
-    locked = fresh & ~released
-    out[:, _O + 22] = locked
-    return locked
-
-
-def _rays(x: np.ndarray, z: np.ndarray, classes: np.ndarray, bundle: Bundle, out: np.ndarray) -> None:
-    """Free distance in eight directions, by this unit's own move class; air units see nothing in the way."""
-    n = len(x)
-    if not n:
-        return
-    px = x[:, None, None] + _RAY_DX[None, :, None] * _RAY_T[None, None, :]
-    pz = z[:, None, None] + _RAY_DZ[None, :, None] * _RAY_T[None, None, :]
-    rows, cols = bundle.passable.shape
-    i = np.floor(pz / PASS_CELL).astype(np.int32)
-    j = np.floor(px / PASS_CELL).astype(np.int32)
-    inside = (i >= 0) & (i < rows) & (j >= 0) & (j < cols)
-    cells = bundle.passable[np.clip(i, 0, rows - 1), np.clip(j, 0, cols - 1)]
-    flying = classes < 0
-    bits = np.where(flying, 0, classes).astype(np.uint8)[:, None, None]
-    free = inside & (((cells >> bits) & 1) != 0)
-    free[flying] = True
-    # The first blocked step along each ray; a ray with none runs the full length.
-    blocked = ~free
-    first = np.where(blocked.any(axis=2), blocked.argmax(axis=2), RAY_CELLS)
-    out[:, _R:_R + 8] = first / RAY_CELLS
-
-
-def _ray_dps(x: np.ndarray, z: np.ndarray, ally: np.ndarray, dps: np.ndarray, out: np.ndarray) -> None:
-    """Hostile and friendly DPS within RAY_DPS_RADIUS per 45-degree sector, from each token's own point of view."""
-    n = len(x)
-    if not n:
-        return
-    dx = x[None, :] - x[:, None]
-    dz = z[None, :] - z[:, None]
-    near = (dx * dx + dz * dz) <= RAY_DPS_RADIUS * RAY_DPS_RADIUS
-    np.fill_diagonal(near, False)
-    a, b = np.nonzero(near)
-    if not len(a):
-        return
-    # Sector 0 is around +z, as the rays are: the angle is measured from z towards x.
-    sector = ((np.arctan2(dx[a, b], dz[a, b]) + np.pi / 8.0) / (np.pi / 4.0)).astype(np.int32) % 8
-    friendly = ally[a] == ally[b]
-    weights = dps[b]
-    enemy_sum = np.bincount(a[~friendly] * 8 + sector[~friendly], weights=weights[~friendly], minlength=n * 8).reshape(n, 8)
-    own_sum = np.bincount(a[friendly] * 8 + sector[friendly], weights=weights[friendly], minlength=n * 8).reshape(n, 8)
-    out[:, _R + 8:_R + 16] = np.log1p(enemy_sum) / 8.0
-    out[:, _R + 16:_R + 24] = np.log1p(own_sum) / 8.0
+    """Applies the caps.  Returns the indices kept, how many of them are controllable, those left over, and army and enemy centroids.
+    Controllable: most expensive first, then nearest the army.  The rest: what can be aimed at first, in sight before on radar,
+    whichever way the armies stand; within each, value over distance from our army.  uid breaks ties."""
+    t = _table_pack(table)
+    _, picked, c, left, army, foe, seen = kernels.select(units, t.row_of_def, t.f, t.b, player, ally, CAP_CONTROLLABLE, CAP_UNITS)
+    return picked, c, left, army, foe if seen else None
 
 
 def _summaries(units: np.ndarray, left: np.ndarray, rows: np.ndarray, bundle: Bundle, table: TypeTable, player: int,
@@ -330,36 +282,24 @@ def featurize(frame: rf.Frame, bundle: Bundle, table: TypeTable, commit_decision
     input the training never saw vary could only mislead it in a real game."""
     all_units = frame.units
     player, ally = int(frame.glob[rf.G["player"]]), int(frame.glob[rf.G["ally_team"]])
-    picked, c, left, army, foe = _select(all_units, table, player, ally)
+    t, b = _table_pack(table), _bundle_pack(bundle)
+    all_rows, picked, c, left, army, foe, seen = kernels.select(all_units, t.row_of_def, t.f, t.b, player, ally, CAP_CONTROLLABLE, CAP_UNITS)
     units = all_units[picked]
-    rows = table.rows(units["def_id"])
+    rows = all_rows[picked]
     u = len(units)
-    x, z = units["x"], units["z"]
-    is_own = units["player"] == player
-    hostile = units["ally_team"] != ally
-    knowledge = units["knowledge"]
-    unit_region = bundle.region_at(x, z).astype(np.int32)
-
-    all_rows = table.rows(all_units["def_id"])
     summary_x, summary_name, summary_ally, summary_player = _summaries(all_units, left, all_rows, bundle, table, player, ally)
     s = len(summary_x)
 
     # Unit tokens.
     unit_x = np.zeros((u + s, UNIT_DIM), np.float32)
-    head = unit_x[:u]
-    head[:, :TYPE_DIM] = table.stats[rows]
-    _instance(units, rows, bundle, table, head)
-    aimable = all_units[(all_units["ally_team"] != ally) & ((all_units["knowledge"] == rf.KNOW_LOS) | (all_units["knowledge"] == rf.KNOW_RADAR))]
-    locked = _order_block(units, is_own, bundle, aimable, commit_decisions, head)
-    classes = np.where(table.air[rows], -1, table.move_class[rows])
-    _rays(x, z, classes, bundle, head)
-    dps = table.dps_ground[rows] + table.dps_air[rows]
-    _ray_dps(x, z, units["ally_team"], dps, head)
+    locked, unit_region, unit_ally, unit_player, enemy_tokens, foes, own_beacons, own_tokens = kernels.unit_block(
+        units, rows, all_units, t.stats, t.f, t.b, t.move_class, bundle.label, bundle.height, bundle.passable, b.cell, b.map_w, b.map_h,
+        b.map_max, player, ally, np.float32(commit_decisions * DECISION_FRAMES), MAX_ALLY_TEAMS, MAX_PLAYERS, unit_x)
     if s:
         unit_x[u:] = summary_x
     unit_name = np.concatenate((rows.astype(np.int32), summary_name))
-    unit_ally = np.concatenate((relative_id(units["ally_team"], ally, MAX_ALLY_TEAMS), summary_ally))
-    unit_player = np.concatenate((relative_id(units["player"], player, MAX_PLAYERS), summary_player))
+    unit_ally = np.concatenate((unit_ally, summary_ally))
+    unit_player = np.concatenate((unit_player, summary_player))
 
     # Sites: nearest the base first.
     base = frame.glob[[rf.G["base_x"], rf.G["base_z"]]]
@@ -391,34 +331,29 @@ def featurize(frame: rf.Frame, bundle: Bundle, table: TypeTable, commit_decision
     glob_x = _global(frame, bundle, economy)
 
     # Token kinds.
-    tok_kind = np.concatenate((_KIND_OF_KNOWLEDGE[knowledge], np.full(s, TK_SUMMARY, np.int8), np.full(bundle.regions, TK_REGION, np.int8),
+    tok_kind = np.concatenate((_KIND_OF_KNOWLEDGE[units["knowledge"]], np.full(s, TK_SUMMARY, np.int8), np.full(bundle.regions, TK_REGION, np.int8),
                                np.full(len(sites), TK_SITE, np.int8), np.full(len(features), TK_FEATURE, np.int8), np.array([TK_GLOBAL], np.int8)))
 
     # Actions.
-    helped = is_own & (((units["flags"] & rf.BEING_BUILT) != 0) | table.factory[rows])
-    enemy_tokens = np.flatnonzero((hostile & ((knowledge == rf.KNOW_LOS) | (knowledge == rf.KNOW_RADAR))) | helped)
-    own_beacons = np.flatnonzero(is_own & table.beacon[rows] & ((units["flags"] & rf.BEING_BUILT) == 0))
-    legal = _masks(_Tokens(units, rows, unit_region, enemy_tokens, own_beacons, hostile[enemy_tokens], len(features)), locked, c, bundle, table,
-                   enabled_kinds)
+    kind, ptr_enemy, ptr_region, ptr_jump, ptr_wait, ptr_produce, route = kernels.masks(
+        units, rows, unit_region, enemy_tokens, foes, own_beacons, len(features), locked, c, t.f, t.b, t.move_class, t.produces, t.builds,
+        t.producible, t.row_of_def, bundle.walk, b.region_cells, bundle.centre, b.region_radius, _enabled(tuple(enabled_kinds)))
 
-    if foe is None:
+    if not seen:
         foe = np.array((bundle.map_w * 0.5, bundle.map_h * 0.5), np.float32)
     north = foe - army
     norm = float(np.hypot(north[0], north[1]))
     north = north / norm if norm > 1.0 else np.array((0.0, 1.0), np.float32)
 
-    gate_x = bundle.gate_x.copy()
-    gate_x[:, :6] = np.log1p(gate_x[:, :6]) / 8.0
-    gate_x[:, 6:12] = gate_x[:, 6:12] / 2000.0
     out = Tensors(
         unit_x=unit_x, unit_name=unit_name, reg_x=reg_x, site_x=site_x, glob_x=glob_x, tok_kind=tok_kind,
-        controllable=c, kind_mask=legal.kind, ptr_enemy=legal.enemy, ptr_region=legal.region, ptr_jump=legal.jump, ptr_wait=legal.wait,
-        ptr_produce=legal.produce, route_bias=legal.route, own_beacons=own_beacons, beacon_regions=unit_region[own_beacons],
-        gate_a=bundle.edge_a, gate_b=bundle.edge_b, gate_x=gate_x,
+        controllable=c, kind_mask=kind, ptr_enemy=ptr_enemy, ptr_region=ptr_region, ptr_jump=ptr_jump, ptr_wait=ptr_wait,
+        ptr_produce=ptr_produce, route_bias=route, own_beacons=own_beacons, beacon_regions=unit_region[own_beacons],
+        gate_a=bundle.edge_a, gate_b=bundle.edge_b, gate_x=b.gate_x.copy(),
         uids=np.concatenate((units["uid"], np.full(s, -1, np.int64))), enemy_tokens=enemy_tokens, north=north,
-        region_radius=(np.sqrt(bundle.area / np.pi) * 0.5).astype(np.float32), unit_ally=unit_ally, unit_player=unit_player,
+        region_radius=b.region_radius.copy(), unit_ally=unit_ally, unit_player=unit_player,
         feat_x=feat_x, feat_ids=features["feat_id"].astype(np.int64),
-        place_tokens=np.flatnonzero(is_own), site_pos=np.stack((sites["x"], sites["z"]), 1).astype(np.float32),
+        place_tokens=own_tokens, site_pos=np.stack((sites["x"], sites["z"]), 1).astype(np.float32),
         feat_pos=np.stack((features["x"], features["z"]), 1).astype(np.float32),
     )
     if privileged:
@@ -435,38 +370,8 @@ def _pick_features(features: np.ndarray, army: np.ndarray) -> np.ndarray:
 
 
 def _regions(units: np.ndarray, rows: np.ndarray, bundle: Bundle, table: TypeTable, ally: int, features: np.ndarray) -> np.ndarray:
-    r = bundle.regions
-    out = np.zeros((r, REGION_DIM), np.float32)
-    if len(features):
-        at = bundle.region_at(features["x"], features["z"]).astype(np.int64)
-        # All of what's in sight, kept as a token or not.  A point off every region counts for none.
-        on = at >= 0
-        out[:, 33] = np.log1p(np.bincount(at[on], weights=features["metal"][on], minlength=r)) / 10.0
-    out[:, 0] = bundle.centre[:, 0] / bundle.map_w * 2.0 - 1.0
-    out[:, 1] = bundle.centre[:, 1] / bundle.map_h * 2.0 - 1.0
-    out[:, 2] = np.log1p(bundle.area) / 16.0
-    out[:, 3:5] = bundle.region_height / 300.0
-    out[:, 5] = bundle.sea
-    out[:, 6:15] = bundle.tags
-    out[:, 15:21] = bundle.access
-    out[:, 21:23] = bundle.shares
-    out[:, 23] = bundle.spots[:, 0] / 5.0
-    out[:, 24] = bundle.spots[:, 1] / 10.0
-    out[:, 25:27] = bundle.gate_counts / 4.0
-    if len(units):
-        at = bundle.region_at(units["x"], units["z"]).astype(np.int64)
-        hp = np.nan_to_num(units["hp_frac"], nan=1.0)
-        value = table.cost[rows] * np.clip(hp, 0.0, 1.0)
-        dps = table.dps_ground[rows]
-        hostile = units["ally_team"] != ally
-        knowledge = units["knowledge"]
-        friends = ~hostile
-        foes = hostile & (knowledge == rf.KNOW_LOS)
-        for k, members in enumerate((friends, foes, hostile & (knowledge == rf.KNOW_RADAR))):
-            out[:, 27 + k] = np.log1p(np.bincount(at[members], weights=value[members], minlength=r)) / 10.0
-        out[:, 30] = np.log1p(np.bincount(at[friends], weights=dps[friends], minlength=r)) / 8.0
-        out[:, 31] = np.log1p(np.bincount(at[foes], weights=dps[foes], minlength=r)) / 8.0
-        out[:, 32] = np.log1p(np.bincount(at[hostile & (knowledge == rf.KNOW_MEMORY)], minlength=r)) / 3.0
+    out = _bundle_pack(bundle).reg_x.copy()
+    kernels.region_block(units, rows, features, _table_pack(table).f, bundle.label, _bundle_pack(bundle).cell, ally, out)
     return out
 
 
@@ -490,147 +395,6 @@ def _global(frame: rf.Frame, bundle: Bundle, economy: bool) -> np.ndarray:
     return out
 
 
-@dataclass
-class _Tokens:
-    """The unit tokens, and which of them an order can be about."""
-    units: np.ndarray
-    rows: np.ndarray
-    regions: np.ndarray
-    enemies: np.ndarray
-    beacons: np.ndarray
-    foes: np.ndarray        # per enemy token: whether it's another alliance's (else one of ours to help)
-    features: int = 0       # feature tokens: what there is to reclaim
-
-
-@dataclass
-class _Legal:
-    kind: np.ndarray
-    enemy: np.ndarray
-    region: np.ndarray
-    jump: np.ndarray
-    wait: np.ndarray
-    produce: np.ndarray
-    route: np.ndarray
-
-
-def _throw_targets(tokens: _Tokens, i: int, centres_near: np.ndarray, table: TypeTable) -> np.ndarray:
-    """Where a thrower can aim, if there's anyone beside it to throw (CheckOverlobPrevention): whoever walks, and is ours or in sight."""
-    units, rows = tokens.units, tokens.rows
-    around = table.mobile[rows] & ~table.air[rows] & (units["knowledge"] == rf.KNOW_LOS) & ((units["flags"] & rf.BEING_BUILT) == 0) & (units["uid"] != units["uid"][i])
-    near = np.hypot(units["x"][around] - units["x"][i], units["z"][around] - units["z"][i]) <= table.throw_radius[rows[i]]
-    return centres_near if near.any() else np.zeros_like(centres_near)
-
-
-def _masks(tokens: _Tokens, locked: np.ndarray, c: int, bundle: Bundle, table: TypeTable, enabled: tuple[int, ...]) -> _Legal:
-    units, rows, unit_region, enemy_tokens = tokens.units, tokens.rows, tokens.regions, tokens.enemies
-    r = bundle.regions
-    e = len(enemy_tokens)
-    kind = np.zeros((c, rf.KIND_COUNT), bool)
-    ptr_enemy = np.zeros((len(ENEMY_POINTER_KINDS), c, e), bool)
-    ptr_region = np.zeros((c, r), bool)
-    ptr_jump = np.zeros((c, r), bool)
-    ptr_wait = np.zeros((c, r), bool)
-    route = np.zeros((c, r), np.float32)
-    me = rows[:c]
-    # A factory's or silo's PRODUCE and a constructor's BUILD both choose a type of `producible`; a type is one or the other.
-    ptr_produce = table.produces[me] | table.builds[me]
-    # Not what it's making already: a PRODUCE is a change.
-    making = np.flatnonzero((units["ord_kind"][:c] == rf.PRODUCE) & (units["ord_target"][:c] >= 0))
-    if len(making) and len(table.producible):
-        made = table.rows(units["ord_target"][making].astype(np.int64))
-        at = np.minimum(np.searchsorted(table.producible, made), len(table.producible) - 1)
-        hit = table.producible[at] == made
-        ptr_produce[making[hit], at[hit]] = False
-    if not c:
-        return _Legal(kind, ptr_enemy, ptr_region, ptr_jump, ptr_wait, ptr_produce, route)
-    idle = (units["flags"][:c] & rf.IDLE) != 0
-    free = ~locked[:c]
-    mobile, armed = table.mobile[me], table.armed[me]
-    classes = table.move_class[me]
-    here = unit_region[:c]
-    # Regions a unit can walk to, by its class; its own always counts, so a unit always has a legal MOVE.  All of them at once: a
-    # loop over units was a quarter of a cloning worker's featurize (2026-11-09).
-    walks = np.flatnonzero((classes >= 0) & (here >= 0))
-    if len(walks):
-        walk = bundle.walk[classes[walks], here[walks]]
-        finite = np.isfinite(walk)
-        ptr_region[walks] = finite
-        route[walks] = np.where(finite, walk, 0.0) / np.maximum(table.speed[me[walks]], 1.0)[:, None]
-    on_map = np.flatnonzero(here >= 0)
-    ptr_region[on_map, here[on_map]] = True
-    can_go = ptr_region.any(axis=1)
-
-    if e:
-        targets = rows[enemy_tokens]
-        in_los = units["knowledge"][enemy_tokens] == rf.KNOW_LOS
-        dx = units["x"][:c, None] - units["x"][enemy_tokens][None, :]
-        dz = units["z"][:c, None] - units["z"][enemy_tokens][None, :]
-        dist = np.hypot(dx, dz)
-        air_target = table.air[targets]
-        foes = tokens.foes[None, :]
-        hits = (table.can_hit_ground[me][:, None] & ~air_target[None, :]) | (table.can_hit_air[me][:, None] & air_target[None, :])
-        ptr_enemy[0] = hits & in_los[None, :] & foes
-        ptr_enemy[1] = armed[:, None] & (dist <= (table.range[me] * 1.5 + 300.0)[:, None]) & foes
-        ptr_enemy[2] = table.manualfire[me][:, None] & in_los[None, :] & (dist <= table.manual_range[me][:, None]) & foes
-        # Missiles and the Trinity (tables.missile, tables.launcher): at what's on the ground in reach, in sight or on radar, as
-        # every enemy token is.  The Trinity needs no sight in the game, but what's only remembered isn't a token.
-        ground = ~air_target[None, :] & foes
-        missile, launcher = table.missile[me], table.launcher[me]
-        if missile.any():
-            ptr_enemy[0][missile] = ground & (dist[missile] <= table.range[me[missile]][:, None])
-        if launcher.any():
-            ptr_enemy[2][launcher] = ground & (dist[launcher] <= table.manual_range[me[launcher]][:, None])
-        # ASSIST: a constructor helps build one of ours anywhere (it walks there), or helps a factory with what it makes.
-        ptr_enemy[3] = table.constructor[me][:, None] & ~foes & (enemy_tokens[None, :] != np.arange(c)[:, None])
-
-    kind[:, rf.KEEP] = ~idle | ~mobile
-    kind[:, rf.MOVE] = free & mobile & can_go
-    kind[:, rf.FIGHT] = free & mobile & armed & can_go
-    kind[:, rf.ATTACK_UNIT] = free & ptr_enemy[0].any(axis=1)
-    kind[:, rf.ATTACK_GROUND] = free & table.can_hit_ground[me] & ptr_enemy[1].any(axis=1)
-    kind[:, rf.STOP] = free & (mobile | armed)
-    fired = (units["ord_kind"][:c] == rf.MANUAL_FIRE) & (units["ord_age"][:c] < table.manual_reload[me])
-    kind[:, rf.MANUAL_FIRE] = free & ptr_enemy[2].any(axis=1) & ~fired
-    # Where it's told to is a region's centre or near it: one it could walk to, or one a jump from here would reach (fine positions are this
-    # far off the centre), so that it can cross what it can't walk.  Not where it couldn't land, which the game refuses.
-    ready = (classes >= 0) & (here >= 0) & ((units["flags"][:c] & rf.JUMP_READY) != 0)
-    charged, throws = table.jump[me] & ready, (table.throw_radius[me] > 0.0) & ready
-    if (charged | throws).any():
-        cells = bundle.passable[np.clip((bundle.centre[:, 1] / PASS_CELL).astype(np.int64), 0, bundle.passable.shape[0] - 1),
-                                np.clip((bundle.centre[:, 0] / PASS_CELL).astype(np.int64), 0, bundle.passable.shape[1] - 1)]
-        off_centre = np.sqrt(bundle.area / np.pi) * 0.5
-        for i in np.flatnonzero(charged | throws):
-            away = np.hypot(bundle.centre[:, 0] - units["x"][i], bundle.centre[:, 1] - units["z"][i])
-            lands = ((cells >> classes[i]) & 1).astype(bool)
-            if charged[i]:
-                ptr_jump[i] = (ptr_region[i] | (away <= table.jump_range[me[i]] + off_centre)) & lands
-            else:
-                ptr_jump[i] = _throw_targets(tokens, i, (away <= table.throw_reach[me[i]] + off_centre) & lands, table)
-    can_land = ptr_jump.any(axis=1)
-    kind[:, rf.JUMP] = free & charged & can_land
-    kind[:, rf.THROW] = free & throws & can_land
-    cloaked = (units["flags"][:c] & rf.CLOAKED) != 0
-    kind[:, rf.CLOAK_ON] = free & table.cloak[me] & ~cloaked
-    kind[:, rf.CLOAK_OFF] = free & table.cloak[me] & cloaked
-    pulling = (units["flags"][:c] & rf.PULLING) != 0
-    kind[:, rf.PUSH] = free & table.switches[me] & pulling
-    kind[:, rf.PULL] = free & table.switches[me] & ~pulling
-    teleports = table.teleports[me]
-    kind[:, rf.PLACE_BEACON] = free & teleports & mobile & can_go
-    with_beacon = np.zeros(r, bool)
-    with_beacon[unit_region[tokens.beacons][unit_region[tokens.beacons] >= 0]] = True
-    ptr_wait = ptr_region & with_beacon[None, :] & (mobile & ~teleports)[:, None]
-    kind[:, rf.WAIT_AT_BEACON] = free & ptr_wait.any(axis=1)
-    kind[:, rf.PRODUCE] = free & table.produces[me].any(axis=1) & ptr_produce.any(axis=1)
-    kind[:, rf.BUILD] = free & table.builds[me].any(axis=1)        # there's always a place: beside itself
-    kind[:, rf.ASSIST] = free & ptr_enemy[3].any(axis=1)
-    kind[:, rf.RECLAIM] = free & table.constructor[me] & (tokens.features > 0)     # any feature token: it walks there
-    off = np.ones(rf.KIND_COUNT, bool)
-    off[list(enabled)] = False
-    kind[:, off] = False
-    return _Legal(kind, ptr_enemy, ptr_region, ptr_jump, ptr_wait, ptr_produce, route)
-
-
 def _hidden(units: np.ndarray, rows: np.ndarray, army: np.ndarray, bundle: Bundle, table: TypeTable, player: int,
             ally: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Enemies the player can't see, for the critic alone.  The actor's tensors never hold these."""
@@ -641,9 +405,8 @@ def _hidden(units: np.ndarray, rows: np.ndarray, army: np.ndarray, bundle: Bundl
     hidden = units[idx]
     row = rows[idx]
     out = np.zeros((len(idx), UNIT_DIM), np.float32)
-    out[:, :TYPE_DIM] = table.stats[row]
-    if len(idx):
-        _instance(hidden, row, bundle, table, out)
+    t, b = _table_pack(table), _bundle_pack(bundle)
+    kernels.instance_block(hidden, row, t.stats, t.f, bundle.height, b.cell, b.map_w, b.map_h, out)
     return out, row.astype(np.int32), relative_id(hidden["ally_team"], ally, MAX_ALLY_TEAMS), relative_id(hidden["player"], player, MAX_PLAYERS)
 
 

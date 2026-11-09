@@ -535,3 +535,14 @@ def test_a_game_that_ends_forgets_its_frames(encoder_path):
     seats.seen += 1.0
     seats.clear(0)
     assert float(seats.history[0].abs().sum()) == 0.0 and float(seats.seen[0].sum()) == 0.0 and float(seats.seen[1].sum()) > 0.0
+
+
+def test_z_reads_as_nothing_until_it_is_learned_and_then_as_the_strategy(actor):
+    """z_in starts at zero, so a checkpoint from before z plays as it did; once trained, z changes what every frame holds."""
+    frames, present, acts = _frames(actor, 6), torch.ones(1, 6, dtype=torch.bool), _acts(6)
+    z = torch.randn(1, pl.Z_DIM, generator=torch.Generator().manual_seed(3))
+    assert torch.equal(actor.sequence(frames, present, acts), actor.sequence(frames, present, acts, z=z))
+    with torch.no_grad():
+        actor.z_in.weight.normal_()
+    assert not torch.allclose(actor.sequence(frames, present, acts), actor.sequence(frames, present, acts, z=z), atol=1e-3)
+    assert pl.answers("z_in", actor.z_in)        # AdamW's, not Muon's, which would move a zero matrix by a whole step at once

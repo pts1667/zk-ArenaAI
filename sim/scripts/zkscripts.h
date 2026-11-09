@@ -19,7 +19,7 @@
 extern "C" {
 #endif
 
-#define ZKS_ABI_VERSION 6
+#define ZKS_ABI_VERSION 7
 #define ZKS_MOVE_CLASSES 6
 #define ZKS_ROLE_KNOBS 7             /* raid, riot, assault, skirm, arty, aa, snipe: the roles ROLE_ORDER of policy_mix.py has */
 #define ZKS_GROUP_RADII 10           /* zkbot.policy.groups.GROUP_RADII */
@@ -130,7 +130,10 @@ void zks_reset(zks_runner* runner, int game, int map, const double* starts, cons
                uint64_t seed0, uint64_t seed1, const zks_style* styles);
 
 enum {
-    ZKS_SEAT_ARMY = 1   /* the army script plays this seat */
+    ZKS_SEAT_ARMY = 1,          /* the army script plays this seat */
+    ZKS_SEAT_ARMY_LABEL = 2,    /* the army script runs for this seat, but only advises: its orders go to `army` (the labels),
+                                   not to `out`, and it gives no group orders.  For the policy's seat, to learn from (DAgger) */
+    ZKS_SEAT_ECO_LABEL = 4      /* the economy script only advises: its orders are only in zks_eco_orders, not in `out` */
 };
 
 typedef struct {

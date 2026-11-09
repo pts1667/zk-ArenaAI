@@ -29,7 +29,8 @@ A Zero-K AI that beats CircuitAI, now pursued as a Pluto-style learned policy: a
   each picks a unit, the anchor, and an order for it, which may go as a group order.  A unit no action picks keeps.
 * **Cloning** (`tools/policy_clone_train.py`) learns the army script's choices from recorded games
   (`tools/policy_clone_data.py`), its orders as actions in a random order, each anchor scored as any unit still to be told.
-  `clone-6` on `army-5` was the run (`03-training.md` 11.20), stopped at step 2,000 for the economy (section 6).
+  The army and economy scripts both, on `army-6`: `clone-7` is the baseline, `clone-8` adds a strategy z and weights the
+  economy (`03-training.md` 11.21, 11.22).  `tools/policy_clone_eval.py` plays a clone against the script in the sim.
 * **PPO's reward** has Pluto's diversity bonus as well (11.19): zero-sum, for finished units of types the policy rarely makes.
 * **Recording** is C++ (`sim/record/`, `libzkrecord.so`, through `sim/py/zkrecord.py`): straight from the batch's arrays, a
   `.zkr` file a game, both sides, narrowed and compressed (192 bytes a decision against the npz's 516).  Data version 5 (group
@@ -48,7 +49,8 @@ A Zero-K AI that beats CircuitAI, now pursued as a Pluto-style learned policy: a
 
 * Zero-K portable `C:/Users/Thoma/Downloads/zero-k-portable`; engine 2026.07.04; Zero-K v1.14.10.3; ControllerAI 0.3.
 * Read-only sources: `../RecoilEngine` (CircuitAI under `AI/Skirmish/CircuitAI`), `../Zero-K`, `../ControllerAI`.
-* Windows Python 3.13 runs the bot (`pip install requests websockets orjson numpy`).
+* Windows Python 3.13 runs the bot (`pip install requests websockets orjson numpy numba`).  Without numba, featurize's kernels
+  run in plain Python, right but ~50x slower (18 ms a frame of 45 units, more with more), and say so on import.
 * WSL (Ubuntu) runs the sim and training: `~/zkml/bin/python` (PyTorch, RTX 4070), pytest in `~/zksim/pt`
   (`~/zkml/bin/python -m pip install -q --target ~/zksim/pt pytest`), so `PYTHONPATH=$HOME/zksim/pt:bots`.
 * The sim library: `cmake -S sim -B ~/zksim/build && cmake --build ~/zksim/build -j8` gives `~/zksim/build/libzksim.so`,
@@ -80,7 +82,8 @@ A Zero-K AI that beats CircuitAI, now pursued as a Pluto-style learned policy: a
   * `main.py` connects to ControllerAI and drives `host.py`, which keeps what a raw frame is read from and runs
     `policy/runtime.py` once a decision.
   * `policy/`: the raw frame schema (`rawframe.py`, also generating `sim/include/zksim/rawframe.hpp` via
-    `tools/policy_schema.py`), the map bundle, type tables, featurizer, action encode and decode.
+    `tools/policy_schema.py`), the map bundle, type tables, featurizer (`featurize.py`, its loops in `featurize_kernels.py`),
+    action encode and decode.
   * Unit data: `units.py`, `catalog.py`, `data/*.json` (rebuilt by `tools/extract_weapons.py`, `tools/extract_abilities.py`,
     `tools/dump_defs.py`).  Terrain: `terrain.py`, `hazards.py`, `mapdata.py`.  `params.py`: `ZKBOT_FLAGS`.
 * `sim/`: the C++ simulator (`src/`), the economy and army scripts (`scripts/`), the recorder (`record/`), their ctypes
@@ -94,7 +97,8 @@ A Zero-K AI that beats CircuitAI, now pursued as a Pluto-style learned policy: a
   * Frames and encoders: `frame_world.py` (games for frames, with the first fight script), `frame_data.py`, `frame_model.py`
     (the encoder, batches, shards, probes), `frame_vae.py` (its training).
   * The policy: `policy_model.py` (batches, heads' sampling, the critic), `policy_latent.py` (the actor), `policy_train.py` (PPO),
-    `policy_clone_data.py`, `policy_clone_train.py`, `policy_golden.py`.
+    `policy_clone_data.py` (recording, `check`, `zindex`), `policy_clone_train.py`, `policy_clone_eval.py` (a clone against
+    the script in the sim; DAgger's recording), `policy_golden.py`.
 * `tests/policy/`, `tests/test_*.py`, `sim/tests/`: offline tests; nothing needs the engine.
 * `zk-startup.ps1`, `zk-maps.ps1`, `maps.md`, `README.md`: the workspace template for running engine games.
 
@@ -108,7 +112,11 @@ In WSL, from the repo (`cd /mnt/c/Users/Thoma/Documents/sources/zk-ArenaAI`), wi
     ~/zkml/bin/python tools/policy_clone_data.py check --data /mnt/d/zk-learned/clone/NAME --maps /mnt/d/zk-learned/maps
     ~/zkml/bin/python tools/policy_clone_train.py --data /mnt/d/zk-learned/clone/army-5 --maps /mnt/d/zk-learned/maps \
         --run /mnt/d/zk-learned/runs/NAME --steps 20000 --workers 8    # --decide-every 6 by default; --blind: no action tokens
+    ~/zkml/bin/python tools/policy_clone_data.py zindex --data /mnt/d/zk-learned/clone/army-6 --workers 15   # z.npz, for --z
+    ~/zkml/bin/python tools/policy_clone_eval.py --actor /mnt/d/zk-learned/runs/clone-7/actor.pt --maps /mnt/d/zk-learned/maps \
+        --games 64 --workers 12 --out RESULT.json     # against the script; --record DIR keeps its games for DAgger
     ~/zkml/bin/python tools/policy_train.py --run /mnt/d/zk-learned/runs/NAME        # the encoder is policy_latent.ENCODER
+        # from a clone: --init RUN/actor.pt --fine-sim --decide-every 6, and 11.22's flags (KL, cloning loss, critic)
 
 To stop a PPO run, create a file named `stop` in its directory; the same command resumes from its last checkpoint.
 
@@ -120,6 +128,13 @@ README.md has the template's rules for engine games (headless, max speed; window
 
 Latest first; each item's numbers are in the section named.
 
+* **P3-P8, C1 and C4-C8 against `clone-7`** (`03-training.md` 11.22, 2026-11-09): `clone-8` (z, economy weight 2.5, the last
+  10% of steps on winners) is even with `clone-7` held out: builds and reclaims better, fights and done worse; z is worth 0.03
+  nats.  The small actor (`clone-7s`) is worse on every measure.  Blind (no action tokens) is worse everywhere, so no action
+  dropout.  In closed loop (six evals of 64 games against the army script) every clone wins 2-5% and loses 77-80%, at
+  temperature 1.0 or 0.8, with z or without: it keeps up for 3 minutes, then stops expanding (5-6 extractors at minute 10 to
+  the script's 15-18), so the next step is DAgger, not tuning.  The sim must step every slot with the actor deciding every 6th, as the data was recorded (`--fine-sim` for PPO).
+  DAgger and PPO-from-a-clone are built; PPO is smoke-tested only.  C1 doesn't apply (no queue in the sim).
 * **Cloning 18x faster** (`03-training.md` 11.20): 52 to about 950 of the script's decisions a second, by deciding every 3 s
   (the user's choice), decoding only what a sample needs, indexing the age bias by frame (its backward was 77% of the GPU's
   time) and one encoder call a step.  `clone-6` ran at about 1,050 a second once started; stopped at step 2,000 (for the
@@ -194,16 +209,33 @@ Latest first; each item's numbers are in the section named.
 * **Cloning is limited by making samples**, not the GPU (`05-literature.md` S1b): 791 decisions a second at first, 1,462 now with
   15 workers, against the GPU's 2,450.  The trainer no longer takes a whole step's samples before its first forward; a worker cuts
   4 stretches one after another from each game it decodes, each frame featurized once; `featurize._masks` lost its loop over units.
-  What's left is featurize itself (~1.7 ms a frame, ~1,500 small numpy calls: a C++ featurize would be the real fix), the main
-  process sharing the 8 cores (Ryzen 7 5800X3D, 16 threads) with the workers, and `/mnt/d` (~15% slower than WSL's own disk).
-* **The `clone-7` baseline is running** (started 2026-11-09), which P3-P8, C1 and C4-C8 are measured against, each run the same:
+  What's left is the main process sharing the 8 cores (Ryzen 7 5800X3D, 16 threads) with the workers, `/mnt/d` (~15% slower than
+  WSL's own disk), and decoding (0.67 ms a decision).
+* **featurize's per-unit loops are numba kernels** (`featurize_kernels.py`, 2026-11-09): selection, the unit rows (instance,
+  order memory, rays, DPS around), the regions' live columns and the masks; what a table or bundle gives is packed once and kept
+  on it.  The same tensors to the bit as the numpy before (47,000 army-6 frames, 2,500 of them tiled past the caps, all fields,
+  dtypes and shapes; golden tests pass): float32 stays float32 through float32 constants, means are numpy's pairwise sum, and
+  bincount's float64 sums keep their order.  1.6 ms a frame to 0.4; a cloning worker's whole decision 2.85 ms to 1.54.
+  Compiling takes 13 s once; numba's cache (`__pycache__`) loads in 0.4 s.  That cache knows only the kernel file, so it holds
+  rawframe's numbers as literals, checked on import.  Cloning's decisions a second with it: not yet measured.
+* **The `clone-7` baseline is done** (2026-11-09, 44 minutes; `03-training.md` 11.21 has its curve): at step 1,000 held out,
+  anchor right 0.856, kind right 0.938, done right 0.958, NLL of actions 2.84, ordered BCE 0.148 against 0.331 guessing.
+  Builds are the weak part (NLL 7.8, kind right 0.81) and reclaim's kind (0.57).  Still improving at the end.  P3-P8, C1 and
+  C4-C8 were each measured against it with the same command and a run name of its own (section 5).  It was:
   `policy_clone_train.py --data /mnt/d/zk-learned/clone/army-6 --maps /mnt/d/zk-learned/maps --run /mnt/d/zk-learned/runs/clone-7
   --decide-every 6 --samples 8 --accumulate 8 --lr 6e-4 --muon-lr 0.008 --workers 15 --steps 1000 --check-every 250` (the user:
   1,000 steps is enough for the baseline; a whole cosine schedule of them, not a longer run cut short), about 40 minutes; output
-  in `runs/clone-7/train.out`, rows in `log.jsonl` (appended to: clear it before rerunning a run).  Its start lists 83,820
-  files over /mnt/d: about 3 minutes.
-* Whether cloning plateaus, and the cloned actor playing the scripts in the sim.
-* PPO from the cloned actor: `policy_train.py` doesn't load a cloning checkpoint yet, and must run at `--decide-every 6`.
+  in `runs/clone-7/train.out`, rows in `log.jsonl` (appended to: clear it before rerunning a run).  Its start read 83,820
+  files' headers over /mnt/d, about 3 minutes; now 7 s, from the dataset's `sides.npz`.
+* **DAgger, a round** (P3): the better of `clone-7` and `clone-8` plays 256 games recorded with the scripts' advice
+  (`policy_clone_eval.py --record /mnt/d/zk-learned/clone/dagger-1`), then 500 steps of fine-tuning on half those and half
+  `army-6` (`--mix --mix-share 0.5 --init`), then the same eval.  On the current encoder.
+* **The encoder retrained from scratch** (the user, later; ~1 hour last time), for the unit allyteam and team fields, its id
+  embeddings sized for FFA: 64 players and 8 allyteams (`featurize.MAX_PLAYERS` 32 and `MAX_ALLY_TEAMS` 16 now).  The actor's
+  embeddings are sized from the same constants, so every clone is redone on it.
+* **PPO from the clone** waits for that: `policy_train.py --init` takes the clone stage's last output (after DAgger), not the
+  base clone.  The smoke run's settings are in 11.22.
+* Cloning's decisions a second with the numba featurize (not measured yet), and where the closed-loop actor's economy stalls.
 * The user's open questions on the actor:
   * one token per action between frames too, in place of the 4 summary tokens (within a decision the actions are such tokens now);
   * full attention over all past frames, through summary tokens, in place of the 9 s window.

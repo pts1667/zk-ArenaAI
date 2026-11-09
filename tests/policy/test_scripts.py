@@ -258,3 +258,26 @@ def test_frame_games_play_their_own_scripts_not_the_cpp_ones():
         fights += sum(int((o["kind"] == zksim.ORDER_FIGHT).sum()) for o in env.script_record.values())
         env.finished_seats()
     assert fights > 0
+
+
+def test_advice_is_only_labels_and_the_economy_script_only_advises_where_the_policy_runs_its_economy():
+    """In advise mode the army script runs for the policy's seats but none of its orders are carried out; with every game the
+    policy's economy, nor are the economy script's.  What's carried out is the policy's and the opening's alone."""
+    env = se.SimEnv(2, 5, ["fight"], threads=2)
+    env.advise, env.policy_economy_share, env.group_orders = True, 1.0, False
+    env.begin()
+    sent = {}
+    real_step = env.batch.step
+    env.batch.step = lambda orders, offsets, **kw: (sent.update(offsets=offsets.copy()), real_step(orders, offsets, **kw))[1]
+    advised = np.zeros(env.seat_count, np.int64)
+    for _ in range(300):
+        env.step(0.0)
+        assert set(env.script_record) == {1, 3}
+        counts = env.cpp.seat_counts(env.count)
+        _, army_offsets = env.army_orders
+        advised += np.diff(army_offsets) + counts[:, 3]
+        for g in range(env.count):
+            policy, script = counts[2 * g], counts[2 * g + 1]
+            assert sent["offsets"][g + 1] - sent["offsets"][g] == policy[0] + policy[2] + script.sum()
+        env.finished_seats()
+    assert advised[[0, 2]].all() and advised[[1, 3]].all()

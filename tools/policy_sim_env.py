@@ -37,6 +37,7 @@ BUILD_TRIES = 8
 TICKS_PER_DECISION = 3
 TIME_LIMIT_DECISIONS = 2400         # 20 minutes
 VALUE_CONSTANT = 1000.0
+INCOME_CONSTANT = 5.0               # metal a second: the income balance's, as VALUE_CONSTANT is the value balance's
 DIVERSITY_DECAY = 0.999     # a decision, of the counts of what the policy's sides have made: their half-life is 700 decisions of the batch
 SCRIPT_EVERY = 6                    # decisions: as often as the policy's commit lock lets it re-order
 SPREAD = 220.0
@@ -278,6 +279,20 @@ class SimEnv:
         self.grounds = shared[1] if shared else {id(b): Ground(b, f) for _, b, f in self.maps}
         self.weights = weights
         self.self_play_share = 0.0      # of games starting from now on, whatever `modes` says
+        # The policy decides every this many of the sim's decisions, which step in between: at decide_every 1 and act_every 6, the
+        # sim plays as the cloning data was recorded and the policy decides when the scripts look (policy_clone_eval).
+        self.act_every = 1
+        # The army script runs for the policy's seats too, only advising: its orders are labels (`army_orders`) and aren't carried out.
+        # For learning from what it would have done in the policy's games (DAgger, PPO's cloning loss; 05-literature.md P3, P7).
+        self.advise = False
+        # Of games starting from now on, the share where the policy's seats run their own economy: the economy script only advises
+        # them (its orders in `eco_orders` alone).  In the rest it builds for them as before, after the policy's orders.
+        self.policy_economy_share = 0.0
+        self.policy_economy = np.zeros(games, bool)
+        # A small zero-sum reward for income (metal, as `_raw` is for value), on top of the value balance: 05-literature.md C7.
+        self.income_weight = 0.0
+        self.last_income = np.zeros(games)
+        self.income_delta = np.zeros(games)
         self.ended: dict[int, dict] = {}    # a seat's last finished game, for a test to note
         self.script_kinds: list[tuple[str, str]] = [("army", "army")] * games
         self.variants_on = variants
@@ -351,6 +366,7 @@ class SimEnv:
             self._reset(g)
         self.batch.step(ticks=0)
         self.last_raw[:] = self._raw()
+        self.last_income[:] = self._income()
 
     def _draw_map(self) -> tuple[zksim.Map, bd.Bundle, MapFacts]:
         if self.weights is None:
@@ -363,6 +379,8 @@ class SimEnv:
         self.mode[g] = self.modes[int(self.rng.integers(len(self.modes)))]
         if self.rng.random() < self.self_play_share:
             self.mode[g] = "mirror"
+        # Drawn only when it's on, so that the generator's draws, and so the games, are as before when it isn't.
+        self.policy_economy[g] = self.policy_economy_share > 0.0 and self.rng.random() < self.policy_economy_share
         # As Zero-K's "allshuffle": who gets which box is by chance, and on a map with more boxes than sides some stay empty.
         own, other = self.rng.choice(len(boxes), 2, replace=False)
         x0, z0 = boxes[own].pick(self.rng, bundle)
@@ -433,7 +451,8 @@ class SimEnv:
         return list(range(self.seat_count))
 
     def policy_seats_to_act(self) -> list[int]:
-        return [s for s in range(self.seat_count) if self._is_policy(s)]
+        """The policy's seats that decide now: every `act_every` decisions of their game."""
+        return [s for s in range(self.seat_count) if self._is_policy(s) and self.decisions[s // 2] % self.act_every == 0]
 
     def bundle_of(self, seat: int) -> bd.Bundle:
         return self.bundle[seat // 2]
@@ -512,6 +531,11 @@ class SimEnv:
         a, b = self.batch.stats[:, 0, 0], self.batch.stats[:, 1, 0]
         return (a - b) / (a + b + VALUE_CONSTANT)
 
+    def _income(self) -> np.ndarray:
+        """Side 0's metal income against side 1's, -1 to 1, as `_raw` is for value."""
+        a, b = self.batch.globs[:, 0, rf.G["metal_income"]], self.batch.globs[:, 1, rf.G["metal_income"]]
+        return (a - b) / (a + b + INCOME_CONSTANT)
+
     def script_production(self, seat: int) -> list[tuple[int, str]]:
         """This decision's production choices by a script-controlled seat: (factory uid, unit name) for each PRODUCE it gave."""
         names = catalog().units
@@ -538,6 +562,8 @@ class SimEnv:
                     policy_groups[g].append(grouped)
                 elif not self._is_policy(seat):
                     flags[seat] = 1         # policy_scripts_cpp.SEAT_ARMY
+                if self._is_policy(seat):
+                    flags[seat] |= (2 if self.advise else 0) | (4 if self.policy_economy[g] else 0)    # SEAT_ARMY_LABEL, SEAT_ECO_LABEL
                 opening = self._opening_orders(g, side)
                 if opening is not None:
                     post.append(opening)
@@ -549,7 +575,7 @@ class SimEnv:
         orders, offsets, army, army_offsets, groups, group_offsets = self.cpp.step(
             self.batch, self.decisions, flags, busy, self.ticks, self.script_every, self.eco_every, pre=join(pre, pre_counts) if pre else None,
             post=join(post, post_counts) if post else None, group_orders=self.group_orders)
-        self.script_record = {int(s): army[army_offsets[s]:army_offsets[s + 1]] for s in np.flatnonzero(flags)}
+        self.script_record = {int(s): army[army_offsets[s]:army_offsets[s + 1]] for s in np.flatnonzero(flags & 1)}
         self.army_orders = (army, army_offsets)
         self.eco_orders = self.cpp.eco_orders(self.count)
         if any(len(p) for parts in policy_groups for p in parts):      # the policy's group orders join the scripts'
@@ -637,6 +663,10 @@ class SimEnv:
         raw = self._raw()
         self.delta = raw - self.last_raw
         self.last_raw = raw
+        if self.income_weight:
+            income = self._income()
+            self.income_delta = income - self.last_income
+            self.last_income = income
         self._diversity()
         self.done, self._replace = [], []
         self.result[:] = 0.0
@@ -679,7 +709,7 @@ class SimEnv:
         side 1's is the opposite."""
         g = seat // 2
         sign = 1.0 if seat % 2 == 0 else -1.0
-        shaped = self.delta[g] + self.bonus[g, 0] - self.bonus[g, 1]
+        shaped = self.delta[g] + self.bonus[g, 0] - self.bonus[g, 1] + self.income_weight * self.income_delta[g]
         return float(sign * ((1.0 - beta) * shaped + beta * self.result[g]))
 
     def finished_seats(self) -> list[tuple[int, str, float]]:
@@ -689,5 +719,6 @@ class SimEnv:
             self._reset(g)
             self.batch.refresh(g)
             self.last_raw[g] = self._raw()[g]
+            self.last_income[g] = self._income()[g]
         self._replace, self.done = [], []
         return out

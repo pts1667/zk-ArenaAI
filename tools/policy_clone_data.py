@@ -2,6 +2,7 @@
 
     ~/zkml/bin/python tools/policy_clone_data.py record --out /mnt/d/zk-learned/clone/NAME --games 64 --decisions 2000000 --workers 4 [--maps /mnt/d/zk-learned/maps]
     ~/zkml/bin/python tools/policy_clone_data.py check --data /mnt/d/zk-learned/clone/NAME
+    ~/zkml/bin/python tools/policy_clone_data.py zindex --data /mnt/d/zk-learned/clone/NAME --workers 15
 
 Games run as a batch in the sim, which steps them on its threads, and the scripts on theirs; `--workers` runs that many batches in
 processes of their own, each with its own seed.  `--variants` gives each side's army script its own knobs at each game's start
@@ -88,7 +89,8 @@ class Recorder:
         parts = [env.script_record.get(seat, self._empty) for seat in range(env.seat_count)]
         return rf.join(parts, zksim.ORDER_DTYPE), np.concatenate(([0], np.cumsum([len(p) for p in parts]))).astype(np.int32)
 
-    def step(self) -> None:
+    def step(self) -> list[tuple[int, str, float]]:
+        """Records a step of the environment, and returns its finished seats (`SimEnv.finished_seats`)."""
         env = self.env
         listed = np.array(sorted(self.kept), np.int32)
         self.writer.frames(env.batch, listed)
@@ -103,12 +105,13 @@ class Recorder:
             self._write(g)
             if self.closing:
                 self.kept.discard(g)
-        env.finished_seats()        # which starts them afresh
+        finished = env.finished_seats()        # which starts them afresh
         for g in ended:
             if g in self.kept:
                 self._begin(g)
         if ended and self.closed:
             self.writer.wait()      # so that every file is on disk once `closed` says so
+        return finished
 
     def _write(self, g: int) -> None:
         env = self.env
@@ -160,12 +163,29 @@ def load(path: pathlib.Path, side: int = 0) -> Side:
 def sides(data: pathlib.Path) -> list[tuple[str, int, int]]:
     """Every side of every finished game in a dataset: (path, side in `read_game`, frames)."""
     out = []
-    for path in sorted(data.glob("game-*.zkr")):
-        try:
-            n = zkrecord.frame_count(path)
-        except (OSError, ValueError):
-            continue
+    paths = sorted(data.glob("game-*.zkr"))
+    # Each file's length is in its header, but reading 84k headers over /mnt/d took 3 to 10 minutes a run: kept in sides.npz,
+    # good while the files listed are the same ones.
+    cache = data / "sides.npz"
+    known: dict[str, int] = {}
+    if cache.exists():
+        with np.load(cache) as c:
+            known = dict(zip(c["names"].tolist(), c["frames"].tolist()))
+    counted = {}
+    for path in paths:
+        n = known.get(path.name)
+        if n is None:
+            try:
+                n = zkrecord.frame_count(path)
+            except (OSError, ValueError):
+                continue
+        counted[path.name] = n
         out += [(str(path), 0, n), (str(path), 1, n)]
+    if counted.keys() != known.keys():
+        try:
+            np.savez(cache, names=np.array(list(counted)), frames=np.array(list(counted.values()), np.int64))
+        except OSError:
+            pass
     for path in sorted(data.glob("game-*.npz")):
         try:
             with np.load(path) as d:
@@ -174,6 +194,104 @@ def sides(data: pathlib.Path) -> list[tuple[str, int, int]]:
             continue
         out.append((str(path), 0, n))
     return [s for s in out if s[2]]
+
+
+# A side's strategy, z (05-literature.md P8, C5): what the actor is told it's playing, as AlphaStar's statistic.  Z_DIM numbers:
+# whether the knobs are known, whether the counts are, the army script's knobs (policy_variants.py: the role weights and commit,
+# gather and patience in log, patrol_share and retreat_below about the standard's), its preset (rush, turtle, skirmish; none is the
+# standard), and how many of each of Z_CATEGORIES the side had finished at Z_MINUTES, log1p / 3.  A game over before a minute
+# counts as it ended.  Unknown parts are zeros, with their flag 0.
+Z_MINUTES = (3, 6, 10)
+Z_CATEGORIES = ("extractor", "energy", "factory", "defence", "army")
+Z_PRESETS = ("rush", "turtle", "skirmish")
+Z_KNOWN, Z_COUNTED = 0, 1
+Z_KNOBS = slice(2, 2 + 7 + 5)
+Z_PRESET = slice(14, 17)
+Z_COUNTS = slice(17, 17 + len(Z_MINUTES) * len(Z_CATEGORIES))
+Z_DIM = 32
+FRAMES_A_MINUTE = 120           # recorded at 2 a second
+
+
+def variant_z(variant: dict | None) -> np.ndarray:
+    """The knobs' part of z (and its flag), from a recording's variant (Variant.as_dict) or the variant itself; zeros for None."""
+    import policy_variants as pv
+    z = np.zeros(Z_DIM, np.float32)
+    if variant is None:
+        return z
+    if isinstance(variant, pv.Variant):
+        variant = variant.as_dict()
+    std = pv.STANDARD
+    z[Z_KNOWN] = 1.0
+    roles = [np.log(variant["role_weight"][r]) for r in pv.ROLES]
+    z[Z_KNOBS] = roles + [np.log(variant["commit"]), np.log(variant["gather"]), np.log(variant["patience"]),
+                          (variant["patrol_share"] - std.patrol_share) * 5.0, (variant["retreat_below"] - std.retreat_below) * 5.0]
+    if variant["name"] in Z_PRESETS:
+        z[Z_PRESET.start + Z_PRESETS.index(variant["name"])] = 1.0
+    return z
+
+
+def _category_rows(table: tables.TypeTable) -> np.ndarray:
+    """categories x rows: which type-table rows count as each of Z_CATEGORIES."""
+    from policy_eco import EcoData
+    eco = EcoData(table, se.catalog())
+    mobile, armed = np.asarray(table.mobile), np.asarray(table.armed)
+    out = np.zeros((len(Z_CATEGORIES), len(mobile)), bool)
+    out[0] = eco.extractor
+    out[1] = (eco.energy > 0) & ~eco.extractor & ~eco.commander & ~mobile
+    out[2] = np.asarray(table.factory)
+    out[3] = ~mobile & armed & ~out[2] & ~eco.commander
+    out[4] = mobile & np.asarray(table.combat) & ~np.asarray(table.builder) & ~eco.commander
+    return out
+
+
+def counts_z(frames: list[rf.Frame], player: int, table: tables.TypeTable, rows_of: np.ndarray) -> np.ndarray:
+    """The counts' part of z (and its flag), from a side's frames from the start."""
+    z = np.zeros(Z_DIM, np.float32)
+    z[Z_COUNTED] = 1.0
+    out = []
+    for m in Z_MINUTES:
+        f = frames[min(m * FRAMES_A_MINUTE, len(frames) - 1)]
+        u = f.units[(f.units["player"] == player) & ((f.units["flags"] & rf.BEING_BUILT) == 0)]
+        rows = table.rows(u["def_id"])
+        out += [float(np.log1p(rows_of[c, rows].sum()) / 3.0) for c in range(len(Z_CATEGORIES))]
+    z[Z_COUNTS] = out
+    return z
+
+
+_Z: dict = {}
+
+
+def _zindex_game(path: str) -> tuple[str, np.ndarray, np.ndarray]:
+    if not _Z:
+        _Z["table"] = tables.table()
+        _Z["rows"] = _category_rows(_Z["table"])
+    meta, both = zkrecord.read(pathlib.Path(path), until=max(Z_MINUTES) * FRAMES_A_MINUTE + 1)
+    z = np.zeros((2, Z_DIM), np.float32)
+    for side, (frames, _) in enumerate(both):
+        variant = meta["variants"][side] if "variants" in meta else None
+        z[side] = variant_z(variant) + counts_z(frames, side, _Z["table"], _Z["rows"])
+    return pathlib.Path(path).name, z, np.array(meta["result"], np.float32)
+
+
+def zindex(args: argparse.Namespace) -> None:
+    """z.npz in the dataset: each game's sides' z and results, by file name, for the cloning trainer (--z, --finish-winners)."""
+    data = pathlib.Path(args.data)
+    paths = sorted(str(p) for p in data.glob("game-*.zkr"))
+    began = time.perf_counter()
+    with multiprocessing.get_context("fork").Pool(args.workers) as pool:
+        out = list(pool.imap(_zindex_game, paths, chunksize=8))
+    names = np.array([o[0] for o in out])
+    np.savez(data / "z.npz", names=names, z=np.stack([o[1] for o in out]), result=np.stack([o[2] for o in out]))
+    print(json.dumps({"games": len(out), "seconds": round(time.perf_counter() - began, 1)}))
+
+
+def load_z(data: pathlib.Path) -> dict[tuple[str, int], tuple[np.ndarray, float]]:
+    """(file name, side) -> (z, result), from `zindex`'s z.npz."""
+    # Each d[key] decompresses the whole array afresh, and a row of it keeps that copy alive: indexing d in the loop held 167k
+    # copies of 21 MB and filled the machine's memory (2026-11-09).  Read once; copy the rows.
+    with np.load(pathlib.Path(data) / "z.npz") as d:
+        names, z, result = d["names"], d["z"], d["result"]
+    return {(str(n), s): (z[i, s].copy(), float(result[i, s])) for i, n in enumerate(names) for s in (0, 1)}
 
 
 def labels(frame: rf.Frame, orders: np.ndarray, bundle: bd.Bundle, table: tables.TypeTable, **featurize) -> tuple[fz.Tensors, actions.Decision, int]:
@@ -301,8 +419,11 @@ def main() -> None:
     c.add_argument("--maps")
     c.add_argument("--files", type=int, default=20, help="sides read")
     c.add_argument("--every", type=int, default=5, help="read every this many decisions")
+    zi = sub.add_parser("zindex")
+    zi.add_argument("--data", required=True)
+    zi.add_argument("--workers", type=int, default=15)
     args = ap.parse_args()
-    {"record": record, "check": check}[args.command](args)
+    {"record": record, "check": check, "zindex": zindex}[args.command](args)
 
 
 if __name__ == "__main__":

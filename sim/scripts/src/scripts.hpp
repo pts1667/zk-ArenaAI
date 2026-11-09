@@ -156,6 +156,7 @@ struct Seat {
     const Ground* ground = nullptr;
     int side = 0;
     bool active = false, economy = false, aimer = false;
+    int flags = 0;     // this step's ZKS_SEAT_*
     zks_style style{};                  // the army script's knobs (standard_style unless the game gave its own)
     P2 base{}, enemy_base{}, rally{};
     P2 waypoints[4];

@@ -49,11 +49,14 @@ flowchart LR
 | Reach | 12 frames: each of the 4 layers reaches 3 further back, so a decision depends on the 12 before it (36 s) |
 | Actions a decision | up to 16 (`actions.SLOTS`), then done |
 | Parameters | 10,537,808 trained, 1,650,624 frozen (the encoder).  At `SMALL`, 1,924,568 trained: 1,550,374 before the economy, of which 435,737 choose the actions in turn; 101,029 for a build's place and offset, the site keys and their action-token terms; 57,996 for reclaim's wreck pointer, the feature keys and its action-token term; 215,169 for the units' reading before the anchor is picked, their anchor keys and whether each is told anything |
-| Critic (PPO) | width 256, 4 layers of 8 heads: 3,221,769 parameters (was 128, 2 of 4: 430,473) |
+| Critic (PPO) | width 256, 4 layers of 8 heads: 3,221,769 parameters (was 128, 2 of 4: 430,473); with `--critic-bins`, its value is a distribution trained by HL-Gauss |
+| Strategy z | 32 numbers a side, optional (`--z` in cloning; `Z_DIM`): see section 4 |
 
 ## 2. What it reads: the featurizer
 
-`featurize.featurize(frame, bundle, table)` turns a raw frame into fixed-normalisation numpy tensors.  Tokens come in a fixed order:
+`featurize.featurize(frame, bundle, table)` turns a raw frame into fixed-normalisation numpy tensors.  Its per-unit loops
+(selection, the unit rows, the regions' live columns, the masks) are numba kernels in `featurize_kernels.py`, the same to the bit
+as numpy, 0.4 ms a frame; without numba they run in plain Python, ~50x slower.  Tokens come in a fixed order:
 
     controllable units | every other unit, most important first | summaries | regions | sites | features | global
 
@@ -129,6 +132,10 @@ flowchart LR
 * A latent token's input is `latent_in(latents) + slots[i]` (which of the 40 it is).  An action token's is the frame's action
   summary + `act_slots[j]`.
 * Frames from before the game began are learned embeddings (`before`, `act_before`), so every decision sees a full reach.
+* **A strategy, z** (optional; `05-literature.md` P8): 32 numbers for the side, added through `z_in` to every token of every frame.
+  Two flags say what's known; then the army script's role weights and knobs, its preset, and in hindsight the side's extractors,
+  energy, factories, defences and army at minutes 3, 6 and 10 (`policy_clone_data.Z_*`).  `z_in` starts at zero, so a z changes
+  nothing until it's learned, and an unknown z (zeros) is trained for by dropping it in a share of samples (`--z-dropout`).
 
 ### Who attends to whom
 
@@ -390,7 +397,9 @@ causal by frame, every decision in the stretch sees exactly what it would have s
   something and no action before it picked (`evaluate_actions`' `labelled`).  A step's samples go through the encoder and into
   action tokens together, one call each; a worker decodes only the side and the part of a game its sample needs.
 * **PPO** (`policy_train.py`): segments of 32 decisions from the sim, each started from the state kept at collection.  It must run
-  at the actor's rate, `--decide-every 6`; its default is still 1, and it doesn't yet start from a cloned actor.  Each action
+  at the actor's rate, `--decide-every 6`, with `--fine-sim` (the sim steps every slot, as the data was recorded); `--init` starts
+  it from a cloning checkpoint, with a frozen copy for an annealed KL to it and a cloning loss on the scripts' advice (`03-training.md`
+  11.22).  Each action
   gets its own clipped ratio, averaged within a decision (done included), with one advantage per decision.  The **critic** is a separate network,
   never in the bot.  It is a 2-layer self-attention encoder over the privileged frame, including the enemy units the seat can't
   see, and reads the value off its global token.
@@ -408,11 +417,16 @@ flowchart LR
     end
     E --> CT
     E --> PPO
-    CT -- "--init-actor" --> PPO
+    CT -- "--init" --> PPO
 ```
 
 ## 8. Where it stands
 
+* Cloning with the economy, on `army-6` (`03-training.md` 11.21, 11.22): `clone-7`, 1,000 steps, held out anchor right 0.856,
+  kind right 0.938, NLL of actions 2.84.  In the sim against the army script (`policy_clone_eval.py`, 64 games) it wins 3% and
+  draws 17%: it keeps up for 3 minutes, then stops expanding (a third of the script's extractors at minute 10).  `clone-8` (z,
+  economy weight 2.5, finishing on winners) is even with it held out; the small actor is worse on every measure held out.  In
+  play all of them, at temperature 1.0 or 0.8 and with z or without, win 2-5% and stall the same way.
 * Cloning with actions in turn on `army-5` (`03-training.md` 11.20): at a decision every slot (`clone-5`, stopped at 11,500 of
   20,000 steps), the first unit picked was one the script told 68% of the time and the order's kind was right 99% of the time.
   `clone-6`, at a decision every 3 s, cloned about 1,050 of the script's decisions a second where `clone-5` cloned 52, and reached

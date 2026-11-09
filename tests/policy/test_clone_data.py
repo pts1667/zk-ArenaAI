@@ -172,3 +172,51 @@ def test_the_scripts_orders_read_back_as_labels(tmp_path):
                 missed_all += missed
     assert rec.games == 6 and orders_seen > 0
     assert missed_all <= orders_seen // 4
+
+
+def test_z_is_the_knobs_and_the_counts_each_with_its_flag():
+    import policy_variants as pv
+    assert cd.Z_COUNTS.stop == cd.Z_DIM
+    standard, rush = cd.variant_z(pv.STANDARD), cd.variant_z(pv.PRESETS[0])
+    assert standard[cd.Z_KNOWN] == 1.0 and not standard[cd.Z_KNOBS].any() and not standard[cd.Z_PRESET].any()
+    assert rush[cd.Z_PRESET].tolist() == [1.0, 0.0, 0.0] and rush[cd.Z_KNOBS].any()
+    assert not cd.variant_z(None).any()
+    assert np.allclose(cd.variant_z(pv.PRESETS[1]), cd.variant_z(pv.PRESETS[1].as_dict()))
+
+
+def test_z_dropout_forgets_all_of_z_or_only_its_counts():
+    import torch
+    import policy_clone_train as ct
+    z = np.ones(cd.Z_DIM, np.float32)
+    out = ct.z_tensor([{"z": z} for _ in range(4000)] + [{"z": None}], "cpu", np.random.default_rng(0), 0.2).numpy()
+    assert not out[-1].any()
+    out = out[:-1]
+    gone = ~out.any(1)
+    counts_gone = out[:, cd.Z_KNOWN].astype(bool) & ~out[:, cd.Z_COUNTED].astype(bool)
+    assert abs(gone.mean() - 0.2) < 0.03 and abs(counts_gone.mean() - 0.2) < 0.03
+    assert not out[counts_gone][:, cd.Z_COUNTS].any() and out[counts_gone][:, cd.Z_KNOBS].all()
+    assert torch.equal(ct.z_tensor([{"z": z}], "cpu")[0], torch.as_tensor(z))
+
+
+def test_economy_actions_weigh_more_and_done_does_not():
+    import torch
+    import policy_clone_train as ct
+    import policy_model as pm
+    kind = torch.tensor([[rf.BUILD, rf.FIGHT, rf.ASSIST, 0]])
+    anchor = torch.tensor([[0, 1, 2, -1]])
+    a = pm.Actions(anchor, kind, *(torch.full_like(anchor, -1) for _ in range(8)), logp=torch.zeros(1, 4))
+    assert ct.action_weights(a, 2.5).tolist() == [[2.5, 1.0, 2.5, 1.0]]
+    assert ct.action_weights(a, 1.0).tolist() == [[1.0, 1.0, 1.0, 1.0]]
+
+
+def test_hl_gauss_targets_centre_on_the_return_and_a_new_critic_values_zero():
+    import torch
+    import policy_model as pm
+    critic = pm.Critic(tables.table().names.__len__() + 1, d=16, layers=1, heads=2, bins=51)
+    target = torch.tensor([-1.0, 0.0, 0.7])
+    loss = critic.hl_gauss(torch.zeros(3, 51), target)
+    assert torch.allclose(loss, loss[0].expand(3), atol=1e-4)         # uniform logits: the same for any target inside
+    best = torch.log(torch.special.ndtr((torch.linspace(-3, 3, 51) + 0.06 - 0.7) / 0.09) - torch.special.ndtr((torch.linspace(-3, 3, 51) - 0.06 - 0.7) / 0.09) + 1e-12)
+    assert critic.hl_gauss(best[None], target[2:]) < critic.hl_gauss(best[None], target[:1])
+    mean = (best.softmax(-1) * critic.centres).sum()
+    assert abs(float(mean) - 0.7) < 0.02

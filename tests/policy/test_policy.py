@@ -436,3 +436,21 @@ def test_from_host_reads_everything_the_schema_asks_for():
     assert g[rf.G["frames_since_contact"]] == 20 and g[rf.G["idle_builders"]] == 1 and g[rf.G["commander_uid"]] == -1
     assert f.sites["status"].tolist() == [rf.SITE_OURS] and f.sites["region_id"].tolist() == [4]
     assert f.idle_uids.tolist() == [3]
+
+
+def test_the_kernels_mean_is_numpys_to_the_bit():
+    """The army's centroid orders the units kept, so it must be numpy's own pairwise sum, past 128 values where it halves too."""
+    from zkbot.policy import featurize_kernels as kernels
+
+    rng = np.random.default_rng(1)
+    for n in (*range(1, 140), 255, 256, 257, 1000, 3001):
+        a = (rng.normal(size=n) * 3000).astype(np.float32) + np.float32(rng.uniform(0, 6000))
+        assert kernels._mean(a) == a.mean(), n
+
+
+def test_a_copied_bundle_with_new_arrays_is_packed_anew(small_map, table):
+    u = make_units({"uid": 1, "name": "jumpraid", "x": 100.0, "z": 100.0, "flags": rf.IN_LOS | rf.TYPE_KNOWN})
+    run(u, small_map, table)
+    moved = copy.copy(small_map)
+    moved.centre = small_map.centre + np.float32(64.0)
+    assert np.array_equal(run(u, moved, table).reg_x[:, 0], moved.centre[:, 0] / moved.map_w * np.float32(2.0) - np.float32(1.0))

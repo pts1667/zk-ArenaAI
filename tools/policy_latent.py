@@ -65,6 +65,7 @@ SITE_PLACE = (0, 2)         # a site's x, z, as -1..1 of the map (featurize)
 FEAT_PLACE = (0, 2)         # a feature token's x, z, the same
 WINDOW_SECONDS = 8.0        # how far back a frame's tokens attend, in each layer
 ACTION_TOKENS = 4           # what the policy did at a frame, as tokens after that frame's
+Z_DIM = 32                  # a side's strategy (`LatentActor.z_in`, policy_clone_data.side_z): known, then the knobs and counts
 DECISIONS_A_SECOND = 2.0    # at decide_every 1
 
 
@@ -266,6 +267,13 @@ class LatentActor(nn.Module):
         self.latent_in = nn.Linear(encoder.latent, self.d)
         self.slots = nn.Parameter(torch.randn(encoder.tokens, self.d) / math.sqrt(self.d))     # which latent token this is
         self.before = nn.Parameter(torch.randn(encoder.tokens, self.d) / math.sqrt(self.d))    # a frame from before the game began
+        # The strategy the side plays (05-literature.md P8, C5; `policy_clone_data.side_z`), added to every frame's latent tokens.
+        # Zero at first, and an unknown z is all zeros: so an actor trained without it plays as it did.
+        # Made without drawing from the generator, so that every other weight is drawn as before it was added.
+        with torch.random.fork_rng(devices=[]):
+            self.z_in = nn.Linear(Z_DIM, self.d)
+        nn.init.zeros_(self.z_in.weight)
+        nn.init.zeros_(self.z_in.bias)
         self.blocks = nn.ModuleList(TimeBlock(self.d, size.heads, window) for _ in range(size.layers))
         self.act_slots = nn.Parameter(torch.randn(ACTION_TOKENS, self.d) / math.sqrt(self.d))      # which action token this is
         self.act_before = nn.Parameter(torch.randn(ACTION_TOKENS, self.d) / math.sqrt(self.d))     # what was done before the game began: nothing
@@ -357,12 +365,16 @@ class LatentActor(nn.Module):
 
     # Frames in order ---------------------------------------------------------------------------------------------------------------------------------
 
-    def sequence(self, frames: torch.Tensor, present: torch.Tensor, acted: torch.Tensor, newest_only: bool = False) -> torch.Tensor:
+    def sequence(self, frames: torch.Tensor, present: torch.Tensor, acted: torch.Tensor, newest_only: bool = False,
+                 z: torch.Tensor | None = None) -> torch.Tensor:
         """frames: B x F x tokens x latent, oldest first.  present: B x F, false for frames from before the game.  acted: B x F x
-        ACTION_TOKENS x D, what was done at each frame (`action_tokens`); the newest's isn't read with newest_only.
+        ACTION_TOKENS x D, what was done at each frame (`action_tokens`); the newest's isn't read with newest_only.  z: B x Z_DIM,
+        the side's strategy, or None for unknown.
         Returns B x F x tokens x D, what each frame's latent tokens hold after reading those before; with newest_only, B x 1 x tokens x D."""
         count, tokens, acts = frames.shape[1], frames.shape[2], acted.shape[2]
         state = torch.where(present[..., None, None], self.latent_in(frames) + self.slots, self.before.to(frames.dtype))
+        if z is not None:
+            state = state + self.z_in(z.to(self.z_in.weight.dtype))[:, None, None, :].to(state.dtype)
         done = torch.where(present[..., None, None], acted.to(state.dtype) + self.act_slots, self.act_before.to(state.dtype))
         per = tokens + acts
         h = torch.cat((state, done), 2).flatten(1, 2)
@@ -401,15 +413,15 @@ class LatentActor(nn.Module):
         """What a seat keeps between decisions, newest first: the `reach` frames before (`record`), and which of them there have been."""
         return torch.zeros(seats, self.reach, self.record, device=device), torch.zeros(seats, self.reach, device=device)
 
-    def decide(self, b, history: torch.Tensor, seen: torch.Tensor):
+    def decide(self, b, history: torch.Tensor, seen: torch.Tensor, z: torch.Tensor | None = None):
         """A decision while playing.  Returns what its actions read (`Context`), what to keep for next time, and what training will need
-        of this decision.  The newest frame's action tokens in what's kept are empty until `acted`."""
+        of this decision.  The newest frame's action tokens in what's kept are empty until `acted`.  z: B x Z_DIM, or None (unknown)."""
         now = self.encoder(b).float()
         latents, acted = self._unpack(history)
         frames = torch.cat((latents.flip(1), now[:, None]), 1)
         acts = torch.cat((acted.flip(1), torch.zeros_like(acted[:, :1])), 1)
         present = torch.cat((seen.flip(1), torch.ones_like(seen[:, :1])), 1) > 0.5
-        ctx = self.context(b, self.sequence(frames, present, acts, newest_only=True)[:, -1])
+        ctx = self.context(b, self.sequence(frames, present, acts, newest_only=True, z=z)[:, -1])
         newest = torch.cat((now.flatten(1), torch.zeros(len(now), ACTION_TOKENS * self.d, device=now.device)), 1)
         kept = torch.cat((newest[:, None], history[:, :-1]), 1), torch.cat((torch.ones_like(seen[:, :1]), seen[:, :-1]), 1)
         return ctx, *kept, {"latents": now}
@@ -420,7 +432,8 @@ class LatentActor(nn.Module):
         out[:, 0, self.encoder.tokens * self.encoder.latent:] = self.action_tokens(b, a).float().flatten(1)
         return out
 
-    def segments(self, history: torch.Tensor, seen: torch.Tensor, latents: torch.Tensor, lengths: list[int], acted: torch.Tensor) -> torch.Tensor:
+    def segments(self, history: torch.Tensor, seen: torch.Tensor, latents: torch.Tensor, lengths: list[int], acted: torch.Tensor,
+                 z: torch.Tensor | None = None) -> torch.Tensor:
         """Training's: segments of decisions, each from the state kept at its start, in one forward pass.
         history, seen: B x reach (x ...), as `decide` keeps them.  latents: B x T x tokens x latent, each decision's own, padded at the end.
         acted: B x T x ACTION_TOKENS x D, what was done at each (`action_tokens`, from the actions taken).
@@ -429,7 +442,7 @@ class LatentActor(nn.Module):
         frames = torch.cat((before.flip(1), latents), 1)
         acts = torch.cat((before_acted.flip(1).to(acted.dtype), acted), 1)
         present = torch.cat((seen.flip(1) > 0.5, torch.ones(latents.shape[:2], dtype=torch.bool, device=latents.device)), 1)
-        out = self.sequence(frames, present, acts)[:, self.reach:]
+        out = self.sequence(frames, present, acts, z=z)[:, self.reach:]
         return torch.cat([out[i, :n] for i, n in enumerate(lengths)])
 
     def segment_actions(self, b, a: pm.Actions, lengths: list[int]) -> torch.Tensor:
@@ -599,7 +612,7 @@ def compile_for_cloning(actor: LatentActor, mode: str, flex: bool = True) -> Non
         actor.sequence = torch.compile(actor.sequence, mode=mode, dynamic=False)
 
 
-ANSWERS = ("head_kind", "head_done", "head_ordered", "fine1", "offset1", "group1", "roles1")
+ANSWERS = ("head_kind", "head_done", "head_ordered", "fine1", "offset1", "group1", "roles1", "z_in")   # z_in: zero at first, Muon would jump it
 
 
 def answers(name: str, layer: nn.Linear) -> bool:

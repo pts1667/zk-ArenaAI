@@ -86,6 +86,24 @@ class Config:
     latent_encoder: str = policy_latent.ENCODER     # the trained frame encoder whose latents the actor reads
     diversity: float = 0.05         # a finished unit of a type the policy rarely makes is worth up to this (policy_sim_env._diversity;
                                     # 03-training.md 11.19): about a 300-metal unit's loss mid-game
+    # PPO from a cloned actor (05-literature.md P7, C6, C7).
+    init: str = ""                  # a cloning checkpoint (policy_clone_train's actor.pt): the actor starts as it, at its size
+    maps: str = ""                  # a map pool (tools/map_gen.py), its held-out maps left out; "" for the five training maps
+    variants: bool = False          # each side's army script draws its knobs (policy_variants.py)
+    critic_bins: int = 0            # above 0, the critic's value is a distribution over this many, trained by HL-Gauss
+    critic_span: float = 1.5        # from -span to span: the result is 1 at most, and the shaping a little on top
+    entropy_floor: float = 0.3      # ENTROPY_FLOOR: a head below this share of its maximum entropy gets more bonus.  A clone's heads
+                                    # all are, so from a clone it's 0, and the KL to the clone keeps its spread instead
+    critic_warmup: int = 0          # iterations at the start where only the critic learns: the actor stays as it was
+    kl_start: float = 0.0           # the weight of the KL to the frozen clone (`init`), at the start
+    kl_end: float = 0.0             # and at the end, linear between: annealed but kept
+    clone_weight: float = 0.0       # the cloning loss on what the scripts advise on its own frames (policy_sim_env.advise)
+    dual_clip: float = 0.0          # dual-clip PPO's c (3 in Ye et al. 2020): a bad action's loss at most c x |advantage|; 0 off
+    economy_start: float = 0.0      # the share of games where the policy runs its own economy, at the start
+    economy_end: float = 0.0        # and at the end, linear between
+    income_weight: float = 0.0      # a zero-sum income reward (policy_sim_env.reward), faded by beta as the rest of the shaping
+    fine_sim: bool = False          # the sim steps every slot and the policy decides every decide_every of them, as the cloning
+                                    # data was recorded: a clone played so had 6 extractors at 10 minutes, and 1 at decide_every 6
 
 
 # A big frame costs more memory per token than a small one.  Fitted on the first actor, whose attention was over every pair of
@@ -166,6 +184,8 @@ class Step:
     advantage: float = 0.0
     ret: float = 0.0
     latents: np.ndarray | None = None   # tokens x latent: this frame's, as the actor read it
+    label: dict | None = None           # what the scripts advised here, as slots (actions.SLOT_FIELDS), when they advise
+    labelled: np.ndarray | None = None  # which controllable units the advice told something
 
 
 @dataclass
@@ -299,21 +319,22 @@ class Player:
         return out
 
     @torch.no_grad()
-    def _forward(self, items: list[fz.Tensors], history: torch.Tensor, seen: torch.Tensor):
+    def _forward(self, items: list[fz.Tensors], history: torch.Tensor, seen: torch.Tensor, z: torch.Tensor | None = None):
         b = pm.collate(items).to(self.device)
         with self.autocast:
-            ctx, new_history, new_seen, keep = self.actor.decide(b, history, seen)
+            ctx, new_history, new_seen, keep = self.actor.decide(b, history, seen, z)
             a = pm.sample_actions(self.actor, b, ctx)
             new_history = self.actor.acted(b, a, new_history)       # what it did, for the decisions after
-            value = self.critic(b)
+            value = self.critic(b) if self.critic is not None else torch.zeros(len(items), device=self.device)
         out = {k: getattr(a, k).cpu().numpy() for k in act.SLOT_FIELDS + ("logp",)}
         out.update({k: v.cpu().numpy() for k, v in keep.items()})
         return out, value.float().cpu().numpy(), new_history.float(), new_seen.float()
 
-    def act(self, frames: list[tuple[rf.Frame, bd.Bundle, np.ndarray]], history: torch.Tensor, seen: torch.Tensor):
-        """Forward passes for many games, as few as fit the memory.  Returns tensors, numpy actions, values and the new state."""
+    def act(self, frames: list[tuple[rf.Frame, bd.Bundle, np.ndarray]], history: torch.Tensor, seen: torch.Tensor, z: torch.Tensor | None = None):
+        """Forward passes for many games, as few as fit the memory.  Returns tensors, numpy actions, values and the new state.
+        z: each seat's strategy (policy_latent.Z_DIM), or None."""
         items = self._features(frames)
-        parts = [self._forward(items[s], history[s], seen[s]) for s in _act_slices(items)]
+        parts = [self._forward(items[s], history[s], seen[s], None if z is None else z[s]) for s in _act_slices(items)]
         if len(parts) == 1:
             return (items, *parts[0])
         out = {k: _stack_padded([p[0][k] for p in parts]) for k in parts[0][0]}
@@ -326,10 +347,26 @@ class Learner:
         torch.manual_seed(cfg.seed)
         self.table = tables.table()
         self.vocabulary = len(self.table.names) + 1
-        self.actor = policy_latent.make(self.vocabulary, cfg.latent_encoder, cfg.decide_every).to(device)
-        self.critic = pm.Critic(self.vocabulary).to(device)
-        self.trained = [p for p in list(self.actor.parameters()) + list(self.critic.parameters()) if p.requires_grad]
-        self.optimizer = torch.optim.Adam(self.trained, lr=cfg.lr_start, eps=cfg.adam_eps)
+        size, state = policy_latent.SIZE, None
+        if cfg.init:
+            state = torch.load(cfg.init, map_location="cpu", weights_only=False)
+            size = policy_latent.Size(**state["size"])
+        self.actor = policy_latent.make(self.vocabulary, cfg.latent_encoder, cfg.decide_every, size).to(device)
+        self.reference = None           # the clone as it was, frozen, for the KL to it
+        if state is not None:
+            missing, unexpected = self.actor.load_state_dict(state["actor"], strict=False)
+            assert not unexpected and all(k.startswith("z_in.") for k in missing), (missing, unexpected)
+            if cfg.kl_start or cfg.kl_end:
+                self.reference = copy.deepcopy(self.actor).eval()
+                for p in self.reference.parameters():
+                    p.requires_grad_(False)
+        self.critic = pm.Critic(self.vocabulary, bins=cfg.critic_bins, span=cfg.critic_span).to(device)
+        actor_params = [p for p in self.actor.parameters() if p.requires_grad]
+        critic_params = [p for p in self.critic.parameters() if p.requires_grad]
+        self.trained = actor_params + critic_params
+        # Two groups, so that the critic can learn alone at first (critic_warmup).
+        self.optimizer = torch.optim.Adam([{"params": actor_params}, {"params": critic_params}], lr=cfg.lr_start, eps=cfg.adam_eps)
+        self.economy_share = cfg.economy_start
         self.decisions = 0
         self.iteration = 0
         self.entropy_coef = {h: ENTROPY_BASE for h in HEADS}
@@ -410,13 +447,36 @@ class Learner:
             latents[i, :len(seg.steps)] = [s.latents for s in seg.steps]
         history = torch.as_tensor(np.stack([seg.history for seg in batch]), device=device)
         seen = torch.as_tensor(np.stack([seg.seen for seg in batch]), device=device)
+        latents = torch.as_tensor(latents, device=device)
+        cfg = self.cfg
         with self.autocast:
             a = _stored_actions(steps, device)
             acted = self.actor.segment_actions(whole, a, lengths)
-            now = self.actor.segments(history, seen, torch.as_tensor(latents, device=device), lengths, acted)
-            logp, entropy = pm.evaluate_actions(self.actor, whole, self.actor.context(whole, now), a)
-            value = self.critic(whole)
-        return self._ppo_loss(steps, a, logp, entropy, value, clip, note)
+            now = self.actor.segments(history, seen, latents, lengths, acted)
+            ctx = self.actor.context(whole, now)
+            logp, entropy = pm.evaluate_actions(self.actor, whole, ctx, a)
+            value = self.critic(whole, logits=True)
+            extra = torch.zeros((), device=device)
+            if self.reference is not None:
+                # KL(policy || clone) on the actions taken, as k3 = r - 1 - log r with r = clone / policy: never below 0.
+                with torch.no_grad():
+                    ref = self.reference
+                    ref_now = ref.segments(history, seen, latents, lengths, ref.segment_actions(whole, a, lengths))
+                    ref_logp, _ = pm.evaluate_actions(ref, whole, ref.context(whole, ref_now), a)
+                w = pm.chosen(a).float()
+                log_r = (ref_logp.float() - logp).clamp(-20.0, 20.0)
+                kl = ((log_r.exp() - 1.0 - log_r) * w).sum() / w.sum().clamp_min(1.0)
+                coef = cfg.kl_start + (cfg.kl_end - cfg.kl_start) * self.progress
+                extra = extra + coef * kl
+                note("kl_clone", float(kl.detach()))
+            if cfg.clone_weight and any(s.label is not None for s in steps):
+                lab, labelled, has = _label_actions(steps, whole.ctrl_mask.shape[1], device)
+                lab_logp, _ = pm.evaluate_actions(self.actor, whole, ctx, lab, labelled)
+                w = pm.chosen(lab).float() * has[:, None]
+                clone = -(w * lab_logp).sum() / w.sum().clamp_min(1.0)
+                extra = extra + cfg.clone_weight * clone
+                note("loss_clone", float(clone.detach()))
+        return self._ppo_loss(steps, a, logp, entropy, value, clip, note) + extra
 
     def _ppo_loss(self, steps: list[Step], a: pm.Actions, logp: torch.Tensor, entropy: dict, value: torch.Tensor, clip: float, note) -> torch.Tensor:
         """Each action's own clipped ratio, averaged over the decision's actions, done included; one advantage a decision."""
@@ -429,6 +489,9 @@ class Learner:
         weights = pm.chosen(a).float()
         ratio = (logp - old).clamp(-20.0, 20.0).exp()
         per_action = -torch.min(ratio * adv[:, None], ratio.clamp(1.0 - clip, 1.0 + clip) * adv[:, None])
+        if cfg.dual_clip:
+            # Dual-clip: where the advantage is negative, a ratio far above 1 costs at most dual_clip x |advantage|.
+            per_action = torch.where(adv[:, None] < 0, torch.min(per_action, -cfg.dual_clip * adv[:, None]), per_action)
         count = weights.sum(-1)
         has = count > 0
         pg = torch.zeros((), device=device)
@@ -437,7 +500,10 @@ class Learner:
             with torch.no_grad():
                 note("kl", float(((old - logp) * weights).sum() / weights.sum()), float(weights.sum()))
                 note("clip_fraction", float((((ratio - 1.0).abs() > clip).float() * weights).sum() / weights.sum()), float(weights.sum()))
-        value_loss = (value - ret).pow(2).sum() / decisions
+        if self.critic.bins:
+            value_loss = self.critic.hl_gauss(value, ret).sum() / decisions
+        else:
+            value_loss = (value - ret).pow(2).sum() / decisions
         entropy_loss = torch.zeros((), device=device)
         for h in HEADS:
             e, mask = entropy[h]
@@ -458,6 +524,8 @@ class Learner:
         lr = cfg.lr_start + (cfg.lr_end - cfg.lr_start) * p
         for group in self.optimizer.param_groups:
             group["lr"] = lr
+        if self.iteration < cfg.critic_warmup:
+            self.optimizer.param_groups[0]["lr"] = 0.0      # the actor's
         totals: dict[str, float] = {}
         counts: dict[str, float] = {}
 
@@ -485,7 +553,7 @@ class Learner:
             e = metrics.get(f"entropy_{h}")
             if e is None:
                 continue
-            if e < ENTROPY_FLOOR * maxima[h]:
+            if e < self.cfg.entropy_floor * maxima[h]:
                 self.entropy_coef[h] = min(ENTROPY_MAX, self.entropy_coef[h] * 1.1)
             else:
                 self.entropy_coef[h] = max(ENTROPY_BASE, self.entropy_coef[h] * 0.97)
@@ -530,6 +598,36 @@ def _pad(arrays: list[np.ndarray], shape: tuple, fill: float, device: str, dtype
     for i, a in enumerate(arrays):
         out[i, :len(a)] = a
     return torch.as_tensor(out, device=device, dtype=dtype)
+
+
+def advice_label(env, seat: int, t: fz.Tensors, bundle: bd.Bundle, rng: np.random.Generator) -> tuple[dict, np.ndarray]:
+    """What the scripts advised the seat at the step just taken (policy_sim_env.advise), as slots in a random order and which
+    units it told something: as policy_clone_train labels a recorded decision."""
+    import policy_sim_env as se
+    (army, ao), (eco, eo) = env.army_orders, env.eco_orders
+    orders = np.concatenate((army[ao[seat]:ao[seat + 1]], eco[eo[seat]:eo[seat + 1]]))
+    x, z = act.world_positions(t, bundle)
+    decision, _ = act.encode(se.policy_orders(orders), t, bundle, x, z)
+    slots = act.to_slots(decision, rng.permutation(t.controllable))
+    return {f: getattr(slots, f) for f in act.SLOT_FIELDS}, decision.kind != rf.KEEP
+
+
+def _label_actions(steps: list[Step], units: int, device: str) -> tuple[pm.Actions, torch.Tensor, torch.Tensor]:
+    """The steps' advice as actions, which units it told something (B x units), and which steps have any (B)."""
+    has = np.array([s.label is not None for s in steps])
+    width = max([len(s.label["anchor"]) for s in steps if s.label is not None] + [1])
+    fields = {}
+    for f in act.SLOT_FIELDS:
+        out = np.full((len(steps), width), act.UNSET[f], np.int64)
+        for i, s in enumerate(steps):
+            if s.label is not None:
+                out[i, :len(s.label[f])] = s.label[f]
+        fields[f] = out
+    labelled = np.zeros((len(steps), units), bool)
+    for i, s in enumerate(steps):
+        if s.labelled is not None:
+            labelled[i, :len(s.labelled)] = s.labelled
+    return pm.actions_from(fields, device), torch.as_tensor(labelled, device=device), torch.as_tensor(has, device=device)
 
 
 def _stored_actions(steps: list[Step], device: str) -> pm.Actions:
@@ -606,41 +704,46 @@ class Collector:
         kind_counts = np.zeros(rf.KIND_COUNT, np.int64)
         progress = learner.progress
         while stored < want:
+            # With act_every (policy_sim_env), the sim steps between the policy's decisions: a decision's reward is all of them.
             acting = env.policy_seats_to_act()
-            if not acting:
-                env.step_scripted_only()
-                continue
-            for seat in acting:
-                # It sat out as a script, and meanwhile its game may have moved to another map.
-                if not current[seat].steps and current[seat].bundle is not env.bundle_of(seat):
-                    self._open(seat)
-            frames = [(env.frame(seat), env.bundle_of(seat), current[seat].names) for seat in acting]
-            index = torch.as_tensor(acting, device=learner.device)
-            items, out, value, new_history, new_seen = self.player.act(frames, seats.history[index], seats.seen[index])
-            for k, seat in enumerate(acting):
-                t = items[k]
-                raw = frames[k][0]
-                step = Step(rf.Frame(raw.units.copy(), raw.sites.copy(), raw.glob.copy(), raw.features.copy()),
-                            *(out[h][k].copy() for h in act.SLOT_FIELDS + ("logp",)), float(value[k]))
-                picked = step.anchor >= 0
-                masked_out += int((~t.kind_mask[step.anchor[picked], step.kind[picked]]).sum())
-                kind_counts += np.bincount(step.kind[picked], minlength=rf.KIND_COUNT)
-                actions += int(picked.sum())
-                if "latents" in out:
-                    step.latents = out["latents"][k].copy()
-                tr = current[seat]
-                tr.steps.append(step)
-                stored += 1
-                x, z = act.world_positions(t, tr.bundle)
-                env.give_orders(seat, act.decode(act.to_decision(act.Slots(*(getattr(step, h) for h in act.SLOT_FIELDS)), t.controllable), t, tr.bundle, x, z))
-                # A segment ends here: the next one starts from what the actor keeps now.
-                if len(tr.steps) - tr.segment_start == cfg.segment:
-                    _cut(tr, segments, new_history[k], new_seen[k])
-            seats.history[index] = new_history
-            seats.seen[index] = new_seen
+            if acting:
+                for seat in acting:
+                    # It sat out as a script, and meanwhile its game may have moved to another map.
+                    if not current[seat].steps and current[seat].bundle is not env.bundle_of(seat):
+                        self._open(seat)
+                frames = [(env.frame(seat), env.bundle_of(seat), current[seat].names) for seat in acting]
+                index = torch.as_tensor(acting, device=learner.device)
+                items, out, value, new_history, new_seen = self.player.act(frames, seats.history[index], seats.seen[index])
+                for k, seat in enumerate(acting):
+                    t = items[k]
+                    raw = frames[k][0]
+                    step = Step(rf.Frame(raw.units.copy(), raw.sites.copy(), raw.glob.copy(), raw.features.copy()),
+                                *(out[h][k].copy() for h in act.SLOT_FIELDS + ("logp",)), float(value[k]))
+                    picked = step.anchor >= 0
+                    masked_out += int((~t.kind_mask[step.anchor[picked], step.kind[picked]]).sum())
+                    kind_counts += np.bincount(step.kind[picked], minlength=rf.KIND_COUNT)
+                    actions += int(picked.sum())
+                    if "latents" in out:
+                        step.latents = out["latents"][k].copy()
+                    tr = current[seat]
+                    tr.steps.append(step)
+                    stored += 1
+                    x, z = act.world_positions(t, tr.bundle)
+                    env.give_orders(seat, act.decode(act.to_decision(act.Slots(*(getattr(step, h) for h in act.SLOT_FIELDS)), t.controllable), t, tr.bundle, x, z))
+                    # A segment ends here: the next one starts from what the actor keeps now.
+                    if len(tr.steps) - tr.segment_start == cfg.segment:
+                        _cut(tr, segments, new_history[k], new_seen[k])
+                seats.history[index] = new_history
+                seats.seen[index] = new_seen
             env.step(progress)
+            if getattr(env, "advise", False):
+                for k, seat in enumerate(acting):
+                    step = current[seat].steps[-1]
+                    step.label, step.labelled = advice_label(env, seat, items[k], current[seat].bundle, self.rng)
+            for seat, tr in current.items():
+                if tr.steps:
+                    tr.steps[-1].reward += env.reward(seat, beta(progress))
             for seat in acting:
-                current[seat].steps[-1].reward = env.reward(seat, beta(progress))
                 bonus += float(env.bonus[seat // 2, seat % 2])
             for seat, mode, won in env.finished_seats():
                 wins.setdefault(mode, []).append(won)
@@ -699,6 +802,7 @@ def evaluate(learner: Learner, make_env, opponent: str, games: int, seed: int) -
     slot counts its first game only: the games that end soonest would otherwise count most, and those are not a fair sample."""
     player = learner.evaluator
     env = make_env(games, seed, modes=[opponent])
+    env.policy_economy_share = learner.economy_share
     env.begin()
     seats = Seats(env.seat_count, learner.device, learner.actor)
     names = np.arange(learner.vocabulary, dtype=np.int32)
@@ -730,10 +834,29 @@ def evaluate(learner: Learner, make_env, opponent: str, games: int, seed: int) -
     return {"win_rate": float((r == 1).mean()), "draw_rate": float((r == 0.5).mean()), "loss_rate": float((r == 0).mean()), "games": len(r), "records": list(records.values())}
 
 
-def make_sim(games: int, seed: int, modes: list[str] | None = None, decide_every: int = 1):
+_MAP_POOLS: dict = {}
+
+
+def make_sim(games: int, seed: int, modes: list[str] | None = None, decide_every: int = 1, maps: str = "", variants: bool = False,
+             advise: bool = False, income_weight: float = 0.0, fine_sim: bool = False):
+    """maps: a map pool, loaded once and shared, its held-out maps left out; "" for the five training maps."""
     import policy_sim_env
 
-    return policy_sim_env.SimEnv(games, seed, modes or ["fight"], decide_every=decide_every)
+    pool = weights = None
+    if maps:
+        if maps not in _MAP_POOLS:
+            from frame_world import held_out_maps, pool_weights
+            loaded = policy_sim_env.load_pool(maps)
+            w = pool_weights(loaded)
+            w[held_out_maps(loaded)] = 0.0
+            policy_sim_env.share_maps(loaded)
+            _MAP_POOLS[maps] = (loaded, w / w.sum())
+        pool, weights = _MAP_POOLS[maps]
+    env = policy_sim_env.SimEnv(games, seed, modes or ["fight"], decide_every=1 if fine_sim else decide_every, maps=pool, weights=weights,
+                                variants=variants)
+    env.advise, env.income_weight = advise, income_weight
+    env.act_every = decide_every if fine_sim else 1
+    return env
 
 
 class Ahead:
@@ -790,6 +913,8 @@ def train(cfg: Config, run: pathlib.Path, make_env, device: str = "cuda") -> Non
     began = time.perf_counter()
     env.self_play_share = learner.self_play.share
     while learner.decisions < cfg.decisions:
+        learner.economy_share = cfg.economy_start + (cfg.economy_end - cfg.economy_start) * learner.progress
+        env.policy_economy_share = learner.economy_share
         t0 = time.perf_counter()
         if ahead is None:
             segments, metrics = collector.collect(cfg.iteration)
@@ -915,6 +1040,24 @@ def main() -> None:
     ap.add_argument("--kinds", help="action kinds to allow, such as 0,3: a test of one head with nothing else to fall back on")
     ap.add_argument("--gpu-runs", type=int, default=Config.gpu_runs, help="how many trainings share the card, this one included")
     ap.add_argument("--empty-cache", action=argparse.BooleanOptionalAction, default=Config.empty_cache, help="hand back what the allocator holds after each iteration")
+    ap.add_argument("--init", default="", help="a cloning checkpoint to start the actor from (P7)")
+    ap.add_argument("--maps", default="", help="a map pool, its held-out maps left out; without it, the five training maps")
+    ap.add_argument("--variants", action="store_true", help="each side's army script draws its knobs (policy_variants.py)")
+    ap.add_argument("--lr-start", type=float, default=Config.lr_start)
+    ap.add_argument("--lr-end", type=float, default=Config.lr_end)
+    ap.add_argument("--critic-bins", type=int, default=0, help="HL-Gauss bins for the critic (C6); 0 for one number")
+    ap.add_argument("--critic-span", type=float, default=Config.critic_span)
+    ap.add_argument("--entropy-floor", type=float, default=Config.entropy_floor, help="0 from a clone: no head's bonus rises")
+    ap.add_argument("--critic-warmup", type=int, default=0, help="iterations where only the critic learns")
+    ap.add_argument("--kl-start", type=float, default=0.0, help="the KL to the frozen clone's weight at the start")
+    ap.add_argument("--kl-end", type=float, default=0.0, help="and at the end")
+    ap.add_argument("--clone-weight", type=float, default=0.0, help="the cloning loss on the scripts' advice (they then advise)")
+    ap.add_argument("--dual-clip", type=float, default=0.0, help="dual-clip PPO's c; 0 off")
+    ap.add_argument("--economy-start", type=float, default=0.0, help="share of games where the policy runs its own economy, at the start")
+    ap.add_argument("--economy-end", type=float, default=0.0, help="and at the end")
+    ap.add_argument("--income-weight", type=float, default=0.0, help="the zero-sum income reward's weight")
+    ap.add_argument("--diversity", type=float, default=Config.diversity)
+    ap.add_argument("--fine-sim", action="store_true", help="the sim steps every slot, the policy decides every --decide-every")
     ap.add_argument("--check-repro", action="store_true")
     ap.add_argument("--check-kill", action="store_true")
     ap.add_argument("--save-forever", action="store_true", help=argparse.SUPPRESS)
@@ -924,11 +1067,16 @@ def main() -> None:
     cfg = Config(seed=args.seed, decisions=args.decisions, games=args.games, iteration=args.iteration, passes=args.passes, ema=args.ema,
                  segment=args.segment, token_budget=args.token_budget, data_workers=args.workers, concurrent=args.concurrent,
                  decide_every=args.decide_every, hours=args.hours, eval_every=args.eval_every, gpu_runs=args.gpu_runs, empty_cache=args.empty_cache,
-                 latent_encoder=args.latent_encoder, enabled_kinds=policy_sim_env.KINDS)     # what the sim obeys
+                 latent_encoder=args.latent_encoder, enabled_kinds=policy_sim_env.KINDS,     # what the sim obeys
+                 init=args.init, maps=args.maps, variants=args.variants, lr_start=args.lr_start, lr_end=args.lr_end,
+                 critic_bins=args.critic_bins, critic_span=args.critic_span, entropy_floor=args.entropy_floor, critic_warmup=args.critic_warmup, kl_start=args.kl_start, kl_end=args.kl_end,
+                 clone_weight=args.clone_weight, dual_clip=args.dual_clip, economy_start=args.economy_start, economy_end=args.economy_end,
+                 income_weight=args.income_weight, diversity=args.diversity, fine_sim=args.fine_sim)
     if args.kinds:
         cfg.enabled_kinds = tuple(int(k) for k in args.kinds.split(","))
     run = pathlib.Path(args.run)
-    make_env = functools.partial(make_sim, decide_every=cfg.decide_every)
+    make_env = functools.partial(make_sim, decide_every=cfg.decide_every, maps=cfg.maps, variants=cfg.variants, advise=cfg.clone_weight > 0,
+                                 income_weight=cfg.income_weight, fine_sim=cfg.fine_sim)
     if args.save_forever:
         _save_forever(cfg, run)
     elif args.check_kill:

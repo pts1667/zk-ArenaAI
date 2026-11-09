@@ -410,6 +410,7 @@ int zks_step(zks_runner* r, const zks_step_args* a, zk_order_rec* out, int out_c
         Seat& seat = r->seats[2 * a->games[s / 2] + s % 2];
         seat.pre.assign(a->pre ? a->pre + a->pre_offsets[s] : nullptr, a->pre ? a->pre + a->pre_offsets[s + 1] : nullptr);
         seat.post.assign(a->post ? a->post + a->post_offsets[s] : nullptr, a->post ? a->post + a->post_offsets[s + 1] : nullptr);
+        seat.flags = a->seat_flags[s];
     }
     r->pool.run(2 * n, [&](int s) {
         int g = a->games[s / 2], side = s % 2;
@@ -426,9 +427,9 @@ int zks_step(zks_runner* r, const zks_step_args* a, zk_order_rec* out, int out_c
         c.reclaim = a->stats ? a->stats[((size_t)g * 2 + side) * ZK_STATS + 2] : 0.0;
         c.busy = a->busy[s];
         c.seconds = (double)d * a->ticks * a->tick_frames / a->frames_per_second;
-        c.army_due = (a->seat_flags[s] & ZKS_SEAT_ARMY) && d % a->script_every == 0;
+        c.army_due = (a->seat_flags[s] & (ZKS_SEAT_ARMY | ZKS_SEAT_ARMY_LABEL)) && d % a->script_every == 0;
         c.eco_due = seat.economy && d % a->eco_every == 0;
-        c.groups = a->group_orders != 0;
+        c.groups = a->group_orders != 0 && !(a->seat_flags[s] & ZKS_SEAT_ARMY_LABEL);
         if (a->features) {
             c.features = (const zk::FeatureRecord*)a->features + ((size_t)g * 2 + side) * a->feature_cap;
             c.feature_n = a->feature_counts[2 * g + side];
@@ -444,7 +445,8 @@ int zks_step(zks_runner* r, const zks_step_args* a, zk_order_rec* out, int out_c
         const Seat& seat = r->seats[2 * a->games[s / 2] + s % 2];
         int alone = 0;
         for (size_t i = 0; i < seat.army_out.size(); i++) alone += !(i < seat.grouped.size() && seat.grouped[i]);
-        total += (int)(seat.pre.size() + seat.post.size() + seat.eco_out.size()) + alone;
+        const bool army_runs = !(seat.flags & ZKS_SEAT_ARMY_LABEL), eco_runs = !(seat.flags & ZKS_SEAT_ECO_LABEL);
+        total += (int)(seat.pre.size() + seat.post.size() + (eco_runs ? seat.eco_out.size() : 0)) + (army_runs ? alone : 0);
         army_total += alone + 2 * (int)seat.groups.size();
         group_total += (int)seat.groups.size();
     }
@@ -463,11 +465,14 @@ int zks_collect(zks_runner* r, zk_order_rec* out, int out_cap, int32_t* out_offs
     for (int k = 0; k < n; k++) {
         for (int side = 0; side < 2; side++) {
             const Seat& seat = r->seats[2 * r->listed[k] + side];
+            const bool army_runs = !(seat.flags & ZKS_SEAT_ARMY_LABEL), eco_runs = !(seat.flags & ZKS_SEAT_ECO_LABEL);
             for (const auto& order : seat.pre) out[o++] = order;
-            for (size_t i = 0; i < seat.army_out.size(); i++)
-                if (!(i < seat.grouped.size() && seat.grouped[i])) out[o++] = seat.army_out[i];
-            for (auto* part : {&seat.post, &seat.eco_out})
-                for (const auto& order : *part) out[o++] = order;
+            if (army_runs)
+                for (size_t i = 0; i < seat.army_out.size(); i++)
+                    if (!(i < seat.grouped.size() && seat.grouped[i])) out[o++] = seat.army_out[i];
+            for (const auto& order : seat.post) out[o++] = order;
+            if (eco_runs)
+                for (const auto& order : seat.eco_out) out[o++] = order;
             for (size_t i = 0; i < seat.army_out.size(); i++) {
                 const bool in_group = i < seat.grouped.size() && seat.grouped[i];
                 const int anchor = i < seat.anchor_of.size() ? seat.anchor_of[i] : -1;

@@ -1888,6 +1888,89 @@ The dense path's biggest cost was the time transformer scoring every pair of a s
 | History shared between a read's stretches | 1,397 |
 | 15 workers | 1,462 |
 
-The workers alone, from WSL's own disk: 1 makes 393 decisions a second, 4 make 1,431, 8 2,137, 15 2,392 (the CPU is a Ryzen 7 5800X3D, 8 cores, 16 threads).  `/mnt/d` is ~15% slower; one thread a worker changed nothing.  What's left is featurize, 1.7 ms a frame in ~1,500 small numpy calls, and the main process, which needs most of a core to issue a step's kernels and shares the cores with 15 workers.  A C++ featurize would be the real fix.
+The workers alone, from WSL's own disk: 1 makes 393 decisions a second, 4 make 1,431, 8 2,137, 15 2,392 (the CPU is a Ryzen 7 5800X3D, 8 cores, 16 threads).  `/mnt/d` is ~15% slower; one thread a worker changed nothing.  What's left is featurize, 1.7 ms a frame in ~1,500 small numpy calls, and the main process, which needs most of a core to issue a step's kernels and shares the cores with 15 workers.  A C++ featurize would be the real fix (numba did most of it: 11.22).
 
 **`clone-7`**, `/mnt/d/zk-learned/runs/clone-7`: the baseline P3-P8, C1 and C4-C8 are measured against (`05-literature.md`), each run the same: `--decide-every 6 --samples 8 --accumulate 8 --lr 6e-4 --muon-lr 0.008 --workers 15 --steps 1000 --check-every 250` on `army-6`, a whole cosine schedule of 1,000 steps (the user: 1,000 is enough for a baseline), 3.1M looks.  Starting lists the 83,820 files in 194 s.
+44 minutes in all, 1,326-1,427 decisions a second.  Its checks hold 96 held-out stretches: 14,277 actions, 4,512 dones, 142,144 units that could be told something.
+
+| Step | Loss | Anchor right | Kind right | Done right | Stops early | NLL of actions | NLL of done | Ordered BCE (base 0.331) | Ordered right |
+|---|---|---|---|---|---|---|---|---|---|
+| 250 | 5.26 | 0.779 | 0.872 | 0.981 | 0.210 | 4.06 | 0.38 | 0.193 | 0.938 |
+| 500 | 2.78 | 0.840 | 0.923 | 0.944 | 0.126 | 3.19 | 0.41 | 0.162 | 0.945 |
+| 750 | 2.40 | 0.854 | 0.937 | 0.952 | 0.114 | 2.90 | 0.36 | 0.151 | 0.948 |
+| 1,000 | 2.27 | 0.856 | 0.938 | 0.958 | 0.114 | 2.84 | 0.34 | 0.148 | 0.949 |
+
+By kind at 1,000 (right / NLL, labels): produce 1.00 / 0.55 (3,877), fight 0.99 / 4.44 (4,181), move 0.92 / 3.64 (625), assist 0.92 / 0.61 (3,364), build 0.81 / 7.81 (1,762), reclaim 0.57 / 3.80 (466), attack 0 / 3.44 (2).  "Right" is the kind given the anchor; the NLL is the whole action's, its pointers and places too.  So the economy's kinds are learned, but a build's 7.8 nats are in what it builds and where (anchor, type, place, offset; not yet split by head), and reclaim's kind is right only 57% of the time.  The curve was still falling at the end (NLL of actions 2.90 to 2.84 over the last 250 steps, at a learning rate going to 0), so this is a baseline to compare against, not where cloning ends.  The checkpoint is `runs/clone-7/actor.pt`.
+
+**Tests:** `tests/policy`, 323 passed at the 10M size.  New: flex attention against the dense bias (CUDA), a run's stretches against each read alone.
+
+### 11.22 P3-P8, C1 and C4-C8 against `clone-7`, the cloned actor in closed loop, and featurize in numba (2026-11-09)
+
+The user: implement P3-P8, C1 and C4-C8 (`05-literature.md`) in one go, then measure them against `clone-7` (11.21), each run with the baseline's command and a name of its own.
+
+| | What it became | Measured |
+|---|---|---|
+| P3 DAgger | `policy_clone_eval.py --record DIR`: the cloned actor plays its side while the scripts only advise it, and its games are recorded as the scripts' are (`game-dagger-*.zkr`, which `sides()` and `check` read as any other).  libzkscripts ABI 7: a seat flagged `SEAT_ARMY_LABEL` gets the army script's orders as labels only, never sent and never as group orders; `SEAT_ECO_LABEL` the same for the economy script, where the policy runs its own economy.  `policy_clone_train.py --mix DIR --mix-share 0.5 --init RUN/actor.pt` fine-tunes on them mixed with `army-6` | the next step (chain2), on the better of `clone-7` and `clone-8` |
+| P4 copying | `--eval-only --blind`: the held-out check with every action token zeroed; `--act-dropout p` | blind is worse on every measure (below), so the actor reads its past actions without leaning on them alone; `--act-dropout` left at 0 |
+| P5 width | `--size small`: `policy_latent.SMALL`, 1.9M | `clone-7s` |
+| P6 | `--finish-winners f`: the last f of the steps draw only the winning sides of decided games (51,651 of 164,220 sides); `--temperature` in play (`policy_model.TEMPERATURE`) | `clone-8` (f 0.1); the evals at 1.0 and 0.8 |
+| P7 | `policy_train.py --init RUN/actor.pt` starts PPO's actor as a clone, at its size, and keeps a frozen copy for a k3 KL to it, weighted from `--kl-start` to `--kl-end`; `--clone-weight`, a cloning loss on what the scripts advise on the actor's own frames (`SimEnv.advise`); `--dual-clip`; `--critic-bins` and `--critic-span`, an HL-Gauss critic (a distribution over bins from -span to span); `--critic-warmup` iterations with the actor's learning rate at 0; `--entropy-floor 0` from a clone; `--fine-sim` (below) | a smoke run (below).  Not run: the user is retraining the encoder from scratch first, and PPO will start from the clone stage's last output |
+| P8, C5 | z, 32 numbers a side (`policy_clone_data.Z_*`): whether the knobs are known, whether the counts are; the army script's 7 role weights (logs) and 5 knobs; its preset (rush, turtle, skirmish); and, in hindsight, its finished extractors, energy, factories, defences and army at minutes 3, 6 and 10 (log1p / 3).  `policy_clone_data.py zindex --data DIR` writes a dataset's (`z.npz`).  `--z` adds `z_in(z)` to every token of every frame, zero at first (`z_in` is made without drawing from the generator, so every other weight is as before); `--z-dropout 0.2`: the whole z unknown in that share of samples, the counts alone in as many again.  In play, `policy_clone_eval.py --z variant` gives the knobs and preset, the counts unknown | `clone-8`; the eval with `--z variant` |
+| C1 | Not applicable: the sim and the scripts have no queue (an order replaces the last), so a queued head would have nothing to learn.  Actions a decision were measured in 11.20 | |
+| C4 | `--economy-weight w`: BUILD, ASSIST and RECLAIM count w times in the loss, which is divided by the number of actions as before | `clone-8` (2.5) |
+| C6 | `SimEnv.policy_economy_share`: whether the policy runs its own economy is drawn for each game at its start (the economy script then only advises); `--economy-start` and `--economy-end` in PPO | the evals run it in every game |
+| C7 | `--income-weight`: a zero-sum term in the shaped reward, the change in (a - b) / (a + b + 5) of the two sides' metal income (`INCOME_CONSTANT` 5, as the value balance's) | PPO smoke only |
+| C8 | `policy_clone_eval.py`: wins, draws and losses, and each side's metal income, finished extractors and value at minutes 3, 6 and 10 of each slot's first game | the evals below |
+
+**P4**, `clone-7` at step 1,000 on its 96 held-out stretches:
+
+| | NLL of actions | Anchor right | Kind right | Stops early | NLL fight | NLL move |
+|---|---|---|---|---|---|---|
+| Normal | 2.840 | 0.856 | 0.938 | 0.114 | 4.44 | 3.64 |
+| Blind | 3.122 | 0.840 | 0.924 | 0.141 | 5.02 | 4.35 |
+
+**The runs**, each 1,000 steps on `army-6` with `clone-7`'s command (11.21), held out at the end:
+
+| | `clone-7` | `clone-8` | `clone-7s` |
+|---|---|---|---|
+| Flags beyond the baseline's | | `--z --z-dropout 0.2 --economy-weight 2.5 --finish-winners 0.1` | `--size small` |
+| Parameters | 10,537,808 | 10,546,256 (`z_in` 8,448) | 1,928,792 |
+| NLL of actions | **2.840** | 2.857 | 3.080 |
+| Anchor right | 0.856 | **0.860** | 0.843 |
+| Kind right | 0.938 | **0.942** | 0.925 |
+| Done right | **0.958** | 0.945 | 0.954 |
+| Stops early | 0.114 | **0.108** | 0.126 |
+| Ordered BCE | **0.148** | 0.149 | 0.156 |
+| NLL build / reclaim | 7.81 / 3.80 | **7.56 / 3.56** | 8.05 / 3.99 |
+| NLL fight / move | **4.44** / 3.64 | 4.67 / **3.62** | 4.89 / 4.22 |
+| Builds right / reclaims right | 0.809 / 0.567 | **0.829 / 0.588** | 0.776 / 0.509 |
+| Decisions a second | 1,326 | 1,439 | 620 |
+
+`clone-8` is even with the baseline overall: the economy's weight did what it was for (builds, reclaims, stopping early), and fights and done paid for it.  The check gives `clone-8` its z; told nothing of it, `clone-8` scores 2.886 (anchor right 0.856, kind right 0.939, done right 0.941), so the strategy is worth 0.03 nats here, and without it `clone-8` is 0.05 behind the baseline.  `clone-7s` is worse on every measure, by 0.24 nats on actions and most on moves: width matters here, as Unplugged found.  The gap widened through the run (0.17, 0.19, 0.23 and 0.24 nats at steps 250 to 1,000, the same schedule for both), and the small actor's anchor right stopped at 0.843 from step 750 while the 10M's still rose: the small one is saturating on 3.1M looks.  So its playing as well in closed loop (below) says the actor is limited by something else first there, not that width doesn't matter; as cloning and PPO feed it more data the small one will saturate (the user).  Its 620 decisions a second aren't comparable: the parity runs and tests of featurize's port shared the CPU with it.  Starting a run now takes 7 s, not 3 minutes: `sides()` keeps each file's side and frame counts in the dataset's `sides.npz`.
+
+**The cloned actor in closed loop** (`policy_clone_eval.py`): the actor plays side 0, the army script side 1, 64 games on the pool's training maps (as the data was recorded), both army scripts drawing variants, 12 workers; each slot's first game counts.  The sim has to step a slot at a time with the actor deciding every 6th, as the data was recorded.  Stepping the sim at the actor's rate (`SimEnv(decide_every=6)`) instead changes what happens between decisions, and on a 4-game smoke run `clone-7` fell from 2.75 extractors at minute 3 to 1.0 at minute 10; stepping a slot at a time, it held 4.75, 6.0 and 6.0 (the script 5.5, 12.75 and 14.5).  `policy_train.py --fine-sim` does the same for PPO.
+
+| Eval | Wins / draws / losses | Extractors at 3 / 6 / 10, actor (script) | Income at 10, actor (script) | Value at 10, actor (script) |
+|---|---|---|---|---|
+| `clone-7`, T 1.0 | 3% / 17% / 80% | 4.0 / 4.2 / 5.7 (5.0 / 9.3 / 17.3) | 24.6 (55.2) | 10,146 (15,073) |
+| `clone-8`, T 1.0 | 2% / 19% / 80% | 4.1 / 3.8 / 5.1 (5.0 / 9.8 / 18.3) | 24.2 (56.6) | 9,856 (15,730) |
+| `clone-7`, T 0.8 | 2% / 20% / 78% | 4.1 / 4.3 / 5.2 (5.1 / 9.2 / 15.4) | 24.8 (50.7) | 9,716 (14,071) |
+| `clone-8`, T 0.8 | 3% / 19% / 78% | 4.0 / 4.5 / 5.6 (4.9 / 9.4 / 17.0) | 25.3 (55.4) | 10,263 (15,172) |
+| `clone-8`, T 1.0, z from the variant | 5% / 19% / 77% | 4.0 / 4.7 / 6.2 (5.0 / 9.9 / 18.5) | 26.6 (59.4) | 11,041 (15,212) |
+| `clone-7s`, T 1.0 | 5% / 16% / 80% | 3.9 / 3.8 / 5.0 (5.0 / 9.6 / 18.0) | 22.0 (57.3) | 10,107 (15,589) |
+
+Each eval took 4.5-6 minutes for ~25,650 decisions; 41 to 46 of the 64 games reached minute 10.  No condition differs from another: 1 to 3 wins in 64, losses 77-80%, and the same economy.  The cloned actor keeps up with the script for the first 3 minutes, then stops expanding: by minute 10 it holds 5-6 extractors to the script's 15-18, and less than half its income.  Neither a lower temperature (P6), the economy's weight (C4), z from the variant (P8; the best economy of the six, within the noise) nor a fifth of the width (P5) moves it, though held out they differ by up to 0.24 nats.  So what holds the actor back in play is drift into states the script's games never show, which is what DAgger (P3) labels.
+
+**PPO from a clone, smoke run** (16 games, 3 iterations of 512 decisions, `--init` from `clone-7`, the flags of the table's P7 row): at a learning rate of 1e-4 the actor drifted from the clone too far to keep; at 1e-5 the KL to the clone went from 0.003 to 0.023, PPO's own KL per iteration stayed at 0.005-0.008, and 10% of ratios clipped.  A token budget of 165,000 a pass ran out of the card's 85%; 40,000 fits.
+
+**featurize's loops in numba** (`featurize_kernels.py`), a cheaper fix than 11.21's C++ featurize: selection and its sorts, the unit rows (instance, order memory, rays, DPS around), the regions' live columns and the masks, each one loop over units in place of numpy's many small calls.  Sites, features, summaries and the global row stay numpy.  The tensors are the same to the bit, not merely close: float32 arithmetic stays float32 (every constant a float32, since a Python float would widen numba's arithmetic to float64 where numpy's stays float32), a mean is numpy's own pairwise sum, and what numpy summed with bincount is summed in float64 in the same order.  hypot, atan2 and log1p came out equal on this CPU (no AVX-512, so numpy's float32 functions are libm's, as numba's are).  Checked on 47,000 frames of `army-6` (60 + 80 games, both sides, every 4th to 8th frame; a third of the second set tiled 4x with new uids, so 2,465 frames went past the caps and 1,068 had summaries): every field, dtype and shape equal, the critic's hidden tokens too, and the golden tests pass.  Without numba the same code runs in plain Python, equal and ~50x slower.
+
+| | numpy | numba |
+|---|---|---|
+| featurize, a frame (mean 134 units) | 1.59 ms | 0.40 ms |
+| a cloning worker's decision (decode, featurize, labels) | 2.85 ms | 1.54 ms |
+| first call | | 13 s to compile, 0.4 s from numba's cache |
+
+Both timed with a cloning run on the GPU beside them.  Decoding is now a worker's largest part (0.67 ms a decision), then labels (`actions.encode`, `to_slots`, ~0.2 ms).  numba's cache knows only the file it compiled, not the modules whose numbers it froze in, so the kernels hold rawframe's numbers as literals checked on import, and take the type stats' width from the array.  A recursive function loaded from that cache crashed (a segfault on the first call), so numpy's pairwise sum runs on a stack of its own.
+
+**Tests:** `sim/tests` and `tests`, 668 passed (3.4 minutes).  New: z reads as nothing until it's learned, and then as the strategy; the scripts only advise a label seat, and the economy script only where the policy runs its economy; z's layout and dropout; the economy's weights; HL-Gauss; the kernels' mean is numpy's to the bit; a copied bundle with new arrays is packed anew.

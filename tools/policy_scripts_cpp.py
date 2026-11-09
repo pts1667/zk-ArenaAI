@@ -28,9 +28,11 @@ import policy_eco as eco  # noqa: E402
 from policy_mix import menu as factory_menu  # noqa: E402
 from policy_variants import ROLES, Variant  # noqa: E402
 
-ABI_VERSION = 6
+ABI_VERSION = 7
 MOVE_CLASSES = 6
 SEAT_ARMY = 1
+SEAT_ARMY_LABEL = 2     # the army script only advises the seat: its orders are labels, not carried out
+SEAT_ECO_LABEL = 4      # the economy script only advises
 ROLE_NAMES = ("raid", "riot", "assault", "skirm", "arty", "aa", "snipe", "scout", "builder", "bomb")
 SPECIAL = (eco.CERBERUS, eco.LUCIFER, eco.SILO, eco.NUKE, eco.FUSION, eco.PYLON, eco.RADAR)
 SECOND_FACTORIES = ("factoryplane", "factorygunship", "striderhub")      # zks_data_desc.second_factories

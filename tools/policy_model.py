@@ -316,10 +316,14 @@ def _pick(logits: torch.Tensor, choice: torch.Tensor) -> torch.Tensor:
     return F.log_softmax(logits, -1).gather(-1, choice[..., None])[..., 0]
 
 
+TEMPERATURE = 1.0       # what sampling divides the logits by: below 1 plays surer.  Only for testing a policy (policy_clone_eval):
+                        # the log-probabilities stay the untempered ones, which PPO needs
+
+
 def _sample(logits: torch.Tensor) -> torch.Tensor:
     # Gumbel: no multinomial, whose checks dislike -1e9 under bf16 rounding.
     u = torch.rand_like(logits).clamp_min(1e-9)
-    return (logits - torch.log(-torch.log(u))).argmax(-1)
+    return (logits / TEMPERATURE - torch.log(-torch.log(u))).argmax(-1)
 
 
 class Critic(nn.Module):
@@ -329,9 +333,12 @@ class Critic(nn.Module):
     LAYERS = 4
     HEADS = 8
 
-    def __init__(self, vocabulary: int, d: int = D, layers: int = LAYERS, heads: int = HEADS):
+    def __init__(self, vocabulary: int, d: int = D, layers: int = LAYERS, heads: int = HEADS, bins: int = 0, span: float = 3.0):
+        """bins: above 0, the value is a distribution over that many values evenly from -span to span, trained by HL-Gauss
+        (`hl_gauss`; 05-literature.md C6), and the value is its mean; else one number."""
         super().__init__()
-        self.size = {"d": d, "layers": layers, "heads": heads}
+        self.size = {"d": d, "layers": layers, "heads": heads, **({"bins": bins, "span": span} if bins else {})}
+        self.bins = bins
         self.name_embed = nn.Embedding(vocabulary, 8)
         self.kind_embed = nn.Embedding(fz.TOKEN_KINDS, d)
         self.ally_embed = nn.Embedding(fz.MAX_ALLY_TEAMS + 1, 4)
@@ -343,11 +350,25 @@ class Critic(nn.Module):
         self.glob_in = nn.Linear(fz.GLOBAL_DIM, d)
         self.blocks = nn.ModuleList(Block(d, heads) for _ in range(layers))
         self.lnf = nn.LayerNorm(d)
-        self.value = nn.Linear(d, 1)
+        self.value = nn.Linear(d, bins or 1)
         nn.init.zeros_(self.value.weight)
         nn.init.zeros_(self.value.bias)
+        if bins:
+            self.register_buffer("centres", torch.linspace(-span, span, bins), persistent=False)
 
-    def forward(self, b: Batch) -> torch.Tensor:
+    def hl_gauss(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """B: the cross-entropy of the value's distribution (B x bins logits) against a Gaussian about each target, its standard
+        deviation 0.75 of a bin, as each bin holds it (Farebrother et al. 2024)."""
+        width = float(self.centres[1] - self.centres[0])
+        edges = torch.cat((self.centres - width / 2, self.centres[-1:] + width / 2))
+        t = target.float().clamp(float(edges[0]), float(edges[-1]))[:, None]
+        cdf = torch.special.ndtr((edges[None] - t) / (0.75 * width))
+        p = cdf[:, 1:] - cdf[:, :-1]
+        p = p / p.sum(-1, keepdim=True).clamp_min(1e-9)
+        return -(p * F.log_softmax(logits.float(), -1)).sum(-1)
+
+    def forward(self, b: Batch, logits: bool = False) -> torch.Tensor:
+        """B values; with logits (and bins), B x bins logits of the value's distribution."""
         hu = self.unit_in(torch.cat((b.unit_x, self.name_embed(b.unit_name), self.ally_embed(b.unit_ally), self.player_embed(b.unit_player)), -1))
         hh = self.unit_in(torch.cat((b.hidden_x, self.name_embed(b.hidden_name), self.ally_embed(b.hidden_ally), self.player_embed(b.hidden_player)), -1)) + self.kind_embed.weight[fz.TK_HIDDEN]
         hr = self.reg_in(b.reg_x) + self.kind_embed.weight[fz.TK_REGION]
@@ -359,7 +380,10 @@ class Critic(nn.Module):
         mask = torch.cat((torch.ones_like(b.unit_mask[:, :1]), b.unit_mask, b.hidden_mask, b.reg_mask, b.site_mask, b.feat_mask), 1)
         for block in self.blocks:
             h = block(h, None, mask)
-        return self.value(self.lnf(h[:, 0]))[:, 0].float()
+        out = self.value(self.lnf(h[:, 0])).float()
+        if not self.bins:
+            return out[:, 0]
+        return out if logits else (out.softmax(-1) * self.centres).sum(-1)
 
 
 @dataclass
