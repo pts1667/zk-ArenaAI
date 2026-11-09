@@ -850,8 +850,8 @@ the sim** (`tools/policy_golden.py sim`, also in `sim/tests/test_sim.py`), over 
 
 * Type, position, build, free-space rays: exactly the same features.  Health is within 1%.
 * Ground altitude matched only after a change: live `y` is a unit's middle, up to 35 elmos up by type, and the sim's is the ground.
-  The feature now has a 40-elmo dead zone, so it means "flying or not" in both.  Air units still differ, since the sim flies all
-  of them at 150 elmos.
+  The feature now has a 40-elmo dead zone, so it means "flying or not" in both.  Air units differed then, since the sim flew all
+  of them at 150 elmos; since 8.18 each flies at its own height, and lands.
 * **Sight: the sim saw 18 of the 23 enemies the live game saw, and none it didn't.**  Its fog is a little tighter.  Five frames is
   too few to tune against, so it stays.
 
@@ -1457,3 +1457,49 @@ So a unit facing the way it's pushed goes by as much as each hit (a Glaive at ab
 
 **Still unmodelled:** capture, spawned units and area impulse, on `bomberassault`, `dronecarry`, `hoverminer`, `jumpblackhole`, `veharty`, `vehcapture`, `zenith`.  They can be in frames, and stand there without their weapon doing what it does.
 
+
+### 8.18 Aircraft (ABI 16, 2026-11-08)
+
+`sim/src/air.cpp`, `sim/tests/test_air.py`.  The game side is `tools/sim_engine.py air`: 15 aircraft flown north and turned back, 6 bombers sent once at a tough target 1,500 away with a plane plant 400 behind them, and the gunships set on a still target.  Before this every aircraft flew like a gunship at a fixed 150 elmos.
+
+**Height.**  An aircraft is made on the ground, takes off when it has somewhere to be, and flies at its def's `wantedHeight`, climbing and landing at `verticalSpeed` (3 elmos a frame for planes, as measured).  Below 10 elmos it's on the ground: ground blasts reach it, and it can't fire.  Heights count for weapon reach (`in_range`), the frame's `y` and the state's `altitude`.  A plane takes 20 frames from the ground before it moves off, where the game took 8-12 for bombers and scouts and 28-34 for fighters; a gunship climbs to 0.9 of its height first (the game: 28-40 frames).
+
+**Planes** (`ZK_U_PLANE`, everything that flies but doesn't hover) can't stop in the air.  They turn at a fixed rate, slowing to `turn_speed` when more than 0.5 rad off, and turn away from a goal that's close and behind (`StrafeAirMoveType.cpp`'s near-goal test).  One attacking flies at its target and over it, and comes round.  A move is over 100 elmos from its goal.
+
+| Frames to turn half round | Game | Sim |
+|---|---|---|
+| planefighter | 72 | 70 |
+| bomberprec | 54 | 55 |
+| bomberheavy | 90 | 90 |
+| planescout | 46 | 45 |
+| bomberassault | 176 | 170 |
+
+**Landing** (`ZK_U_LANDS`, from `unit_air_plants.lua`): what a plane plant makes lands when it has nothing to do, a gunship plant's hovers.  A unit that both plants make lands, as the plane plant has it.  A plane at the end of a move stops across and comes down, as in the game.
+
+**Bombers** (`ammo`, `reammo_frames`, `pad_count`; `unit_bomber_command.lua`, `unit_refuel_pad_handler.lua`).  A salvo uses a load; with none left an attack order is over and the bomber makes for the nearest pad with room (a plane plant has 1, an airpad 4, a carrier 2), settles within 80 of it, rearms for `reammoseconds` at 10 energy a second, repairs at the pad's 2.5 build power, and sits there idle.  A fight order is kept.  Out of ammo or on the ground, it gives itself no targets.  Raven: one hit of 800, on the pad 265 frames later, rearmed in 240 (the game: 240).  Phoenix 540 (543), Likho 750 (753), Odin 900 (900).
+
+**Bombs** (`ZK_W_BOMB`, AircraftBomb) go only on what the bomber's sent at, when where it would land (from the plane's height, speed and the bomb's own gravity) is within the salvo's spread of the target, steered by at most an elmo a frame of fall.  A fake bomb (`fake_weapon`) does no damage and marks the target.  Two bombers' real weapons are their scripts':
+* **Thunderbird**: where its fake bomb would drop, `bomberdisarm.lua` fires 80 bolts of its lightning, one a frame straight down, and reloads at the end (`ZK_W_DROPPED`).  It flies straight on through the run.  A tank under the run is disarmed.
+* **Odin**: its fake bomb is always blocked, and its thermite (`weapon_noexplode_speed_damage.lua`) falls and burns where it lands for 900 frames, ramping from 0 to 1,000 dps.  Here it's a dropped bomb leaving a burning area of 40 elmos, ramping from 50 to 950 dps for the same total.  On a still target: 14,927 against the game's 14,842.  Odin still isn't on any menu: its shield cluster spawns units.
+
+**Strafing gunships** (`ZK_U_STRAFES`, `airStrafe`) circle what they shoot at at 0.8 of `combatrange`, or of range, at `min(top, sqrt(0.37 accel r))`.  A Krow doesn't strafe.
+
+| Circle, elmos | Game | Sim |
+|---|---|---|
+| gunshipraid | 199 | 197 |
+| gunshipskirm | 292 | 293 |
+| gunshipassault | 124 | 132 |
+| gunshipheavyskirm | 500 | 508 |
+
+**The strider hub** is a factory here (`isfakefactory`); in the game it's a nanotower that builds striders beside it.  Like a Cerberus it needs a grid of 50 energy, so on its own it builds nothing.
+
+**Known differences.**
+* A Krow attacking holds 306 elmos away, the game 381.  It overshoots where it can first hit.
+* Ground weapons can aim at aircraft, as in the game (fixed wing is only a bad target for most).  What hits a plane is whatever reaches its height.
+* Transports don't carry.  Drones (Funnelweb's, the Reef's) aren't made.
+* No crashing, no fighter pull-up, no `unit_vertical_swarm`.
+* After rearming, the game's bomber flies about 115 elmos and lands again; here it stays on the pad.
+
+### 8.19 Group orders (ABI 17, 2026-11-08)
+
+`World::order_group` (`sim/src/world.cpp`), `zk_group_rec` (`capi.h`), `sim/tests/test_group_orders.py`.  One order to many units, as a player gives one to a box of selected units.  It names an anchor unit: the anchor, and every other unit of its side that is alive, mobile and finished, has a role in the order's bit mask, and stands within its radius of the anchor (in float, `dx*dx + dz*dz <= r*r`), are given the order as a unit order would give it.  The anchor is told whatever its own role; a dead anchor selects nothing.  Roles are each catalog type's, set once per batch (`zk_batch_set_roles`; `policy_sim_env` sets those of `zkbot.policy.groups.roles`, the bot catalog's in sorted order); a type with none is never selected.  `zk_batch_step` takes a game's group orders beside its unit orders and applies them first, each in turn, so a later group order replaces an earlier one for a unit both select, and any unit order replaces a group's.  Nothing about a unit records that its order came in a group.

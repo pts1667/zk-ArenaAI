@@ -19,9 +19,11 @@
 extern "C" {
 #endif
 
-#define ZKS_ABI_VERSION 2
+#define ZKS_ABI_VERSION 4
 #define ZKS_MOVE_CLASSES 6
 #define ZKS_ROLE_KNOBS 7             /* raid, riot, assault, skirm, arty, aa, snipe: the roles ROLE_ORDER of policy_mix.py has */
+#define ZKS_GROUP_RADII 10           /* zkbot.policy.groups.GROUP_RADII */
+#define ZKS_GROUP_MARK 100           /* in the army script's orders as recorded, after a group's anchor's: x the radius, target the roles */
 
 /* Per type-table row bits (zks_data_desc.bits). */
 enum {
@@ -69,10 +71,14 @@ typedef struct {
     const int32_t* options;
     int n_roles;
     const int32_t* menu;            /* rows x n_roles: Mix.menu of a factory row, -1 where there's none */
-    /* Role indices, -1 where the table has none: raid, riot, assault, skirm, arty, aa, snipe, scout, builder */
-    int32_t role_ids[9];
+    /* Role indices, -1 where the table has none: raid, riot, assault, skirm, arty, aa, snipe, scout, builder, bomb */
+    int32_t role_ids[10];
     /* Special rows, -1 where absent: staticarty, turretantiheavy, staticmissilesilo, staticnuke, energyfusion, energypylon, staticradar */
     int32_t special[7];
+    /* What the second factory may be, -1 where absent: factoryplane, factorygunship, striderhub */
+    int32_t second_factories[3];
+    /* The radii a group order may have, ascending (zkbot.policy.groups.GROUP_RADII).  Role bits are `role` indices. */
+    double group_radii[ZKS_GROUP_RADII];
     double cerberus_reach;          /* EcoData.reach["staticarty"] */
     double missile_reach;           /* EcoData.missile_reach */
     float extractor_radius;         /* the radius _taken gives metal spots */
@@ -135,6 +141,7 @@ typedef struct {
     int cap;
     const int32_t* counts;          /* slots x 2 */
     const float* globs;             /* slots x 2 x G_COUNT */
+    const float* stats;             /* slots x 2 x ZK_STATS (zksim.Batch.stats), for reclaim's share of income; NULL for none */
     const int32_t* decisions;       /* slots */
     /* Indexed by listed seat, 2 k + side */
     const int32_t* seat_flags;      /* ZKS_SEAT_* */
@@ -148,19 +155,26 @@ typedef struct {
     const int32_t* pre_offsets;
     const zk_order_rec* post;
     const int32_t* post_offsets;
+    /* 1: the army script sends its fighters' plans as group orders (zk_group_rec) wherever a group order gives exactly the units
+     * it means and no others; 0: every order goes to its unit. */
+    int group_orders;
 } zks_step_args;
 
 /* Computes every listed seat's orders, then writes them as zk_batch_step takes them, if they fit:
- *   out, out_offsets (n + 1): per listed game, side 0 then side 1, each pre, army script, post, economy script;
- *   army, army_offsets (2 n + 1): the army script's orders alone, per listed seat.
- * Returns the number of orders in `out`.  If they're more than out_cap, or the army's more than army_cap, nothing is written:
- * call zks_collect with room enough (zks_last_counts says how much). */
+ *   out, out_offsets (n + 1): per listed game, side 0 then side 1, each pre, army script, post, economy script, leaving out the
+ *     army script's orders that go in a group order;
+ *   army, army_offsets (2 n + 1): the army script's orders alone, per listed seat, as the policy would give them: those that go
+ *     alone, and each group order as its anchor's order followed by a record of kind ZKS_GROUP_MARK for the same unit, whose x is
+ *     the radius and target the roles (the other units the group gives the order to have none);
+ *   groups, group_offsets (n + 1): per listed game, side 0 then side 1, the army script's group orders.
+ * Returns the number of orders in `out`.  If they're more than out_cap, the army's more than army_cap or the groups more than
+ * group_cap, nothing is written: call zks_collect with room enough (zks_last_counts says how much). */
 int zks_step(zks_runner* runner, const zks_step_args* args, zk_order_rec* out, int out_cap, int32_t* out_offsets,
-             zk_order_rec* army, int army_cap, int32_t* army_offsets);
+             zk_order_rec* army, int army_cap, int32_t* army_offsets, zk_group_rec* groups, int group_cap, int32_t* group_offsets);
 /* The last step's orders again, into buffers that fit. */
 int zks_collect(zks_runner* runner, zk_order_rec* out, int out_cap, int32_t* out_offsets, zk_order_rec* army, int army_cap,
-                int32_t* army_offsets);
-/* counts[0]: orders in all, counts[1]: the army script's. */
+                int32_t* army_offsets, zk_group_rec* groups, int group_cap, int32_t* group_offsets);
+/* counts[0]: orders in `out`, counts[1]: the army script's, counts[2]: group orders. */
 void zks_last_counts(const zks_runner* runner, int32_t* counts);
 /* The last step's orders by part: 4 per listed seat, pre, army script, post, economy script. */
 void zks_seat_counts(const zks_runner* runner, int32_t* counts);

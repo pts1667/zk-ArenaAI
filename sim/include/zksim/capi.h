@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define ZK_ABI_VERSION 15
+#define ZK_ABI_VERSION 17
 #define ZK_MAX_MOUNTS 8
 #define ZK_ARMOR_CLASSES 5
 #define ZK_ARMOR_SHIELD 4
@@ -38,7 +38,10 @@ enum {
     ZK_W_SCRIPT_BURST = 262144,     /* its salvo is the script firing shot by shot, so overkill prevention looks at each */
     ZK_W_PIERCES = 524288,          /* noExplode: flies on to the end of its range and hurts what it goes through, on every frame it's inside */
     ZK_W_ONE_HIT_EACH = 1048576,    /* ... but once per unit (weapon_single_hit.lua) */
-    ZK_W_THROWS = 2097152           /* fired by a manual-fire order, it throws what's around the unit (unit_thrower.lua) */
+    ZK_W_THROWS = 2097152,          /* fired by a manual-fire order, it throws what's around the unit (unit_thrower.lua) */
+    ZK_W_BOMB = 4194304,            /* dropped from a plane: falls from it, let go where it will land on the target (BombDropper.cpp).
+                                       One that does no damage only marks a bomber's target */
+    ZK_W_DROPPED = 8388608          /* fired by the script a shot at a time straight down, when the unit's marking bomb would drop */
 };
 
 /* Times are in frames and distances in elmos. */
@@ -70,6 +73,7 @@ typedef struct {
     float okp_damage, okp_frames, okp_full_frames, okp_hit_mod, okp_min_range, okp_fast_mult, okp_radar_mult;
     float radar_wobble_penalty, radar_dot_penalty;   /* target_priority_defs.lua: what firing at a radar dot costs a target's rating */
     float impulse;              /* what a hit pushes with, away from the shooter, or towards it if negative (weapon_impulse.lua) */
+    float gravity;              /* a bomb's fall, elmos a frame squared */
     int32_t kind, flags, shield_intercept, intercepted_by;
 } zk_weapon_rec;
 
@@ -82,6 +86,9 @@ enum { ZK_U_MOBILE = 1, ZK_U_AIR = 2, ZK_U_ARMED = 4, ZK_U_FIREPROOF = 8, ZK_U_F
        ZK_U_FLOATS = 8192,             /* stands on the water rather than the sea bed */
        ZK_U_MISSILE = 16384,           /* a silo's: gone once it has fired (cruisemissile.lua) */
        ZK_U_NEUTRAL = 32768,           /* nothing shoots at it unless told to: a teleport beacon */
+       ZK_U_PLANE = 65536,             /* flies on wings: can't stop in the air, and turns in a circle (air.cpp) */
+       ZK_U_LANDS = 131072,            /* lands when it has nothing to do: an aircraft from a plane factory (unit_air_plants.lua) */
+       ZK_U_STRAFES = 262144,          /* a gunship that circles what it attacks (airStrafe) */
        ZK_U_LEAVES_GHOST = 2048 };     /* a building: once seen, radar shows just where it is */
 
 typedef struct {
@@ -120,6 +127,13 @@ typedef struct {
     float needed_link;           /* its weapons need a grid that makes this much energy (unit_mex_overdrive.lua); 0 for none */
     float throw_radius;          /* what its throwing weapon gathers (unit_thrower.lua) */
     float teleport_rate, beacon_frames;   /* Djinn: mass per frame it brings over, and frames to make a beacon */
+    /* Aircraft (air.cpp).  cruise_height: wantedHeight.  vertical_speed: up and down, elmos a frame.  A plane's turn_rate is how
+       fast it comes round in a hard turn, slowing to turn_speed; both measured (tools/sim_engine.py air). */
+    float cruise_height, vertical_speed, turn_speed;
+    float strafe_radius, strafe_speed;    /* a strafing gunship circles at this distance and speed */
+    /* Bombers (unit_bomber_command.lua, unit_refuel_pad_handler.lua): frames to rearm on a pad, and the energy a frame that takes. */
+    float reammo_frames, reammo_energy;
+    float pad_bp;                /* a pad's repair power for what lands on it */
     int32_t move_state, fire_state;   /* to start with: hold position 0, maneuver 1, roam 2; hold fire 0, return fire 1, fire at will 2 */
     int32_t no_chase;                 /* categories it doesn't go after on its own */
     int32_t bait_level;               /* unit_bait_prevention.lua: 0 shoots at anything */
@@ -132,6 +146,8 @@ typedef struct {
     int32_t drop_weapon;         /* dropped when it dies, or -1 */
     int32_t missile_pads;        /* a silo's, which its missiles stand on and wait for */
     int32_t beacon_type;         /* what a teleporter makes */
+    int32_t ammo;                /* salvos before it goes back to rearm; 0 for no ammo */
+    int32_t pad_count;           /* planes it can rearm at once: an airpad or plane factory's */
     int32_t mount_weapon[ZK_MAX_MOUNTS];
     int32_t mount_only[ZK_MAX_MOUNTS];
     int32_t mount_bad[ZK_MAX_MOUNTS];
@@ -174,7 +190,7 @@ typedef struct {
     float x, z, vx, vz, heading, speed, hp, damage_taken, para, shield, disarm, build;
     float heat;
     float jump_charge;     /* 1 when it can jump */
-    float altitude;        /* off the ground: jumping, thrown or pushed */
+    float altitude;        /* off the ground: flying, jumping, thrown or pushed */
     int32_t alive, order, target, stock, cloaked;
     int32_t chasing;       /* the enemy its fight order or idleness has it attacking, or -1 */
     int32_t dodging;       /* the tactical AI has it stepping away */
@@ -185,6 +201,8 @@ typedef struct {
     int32_t deployed;      /* a teleporter that's ready to bring things over */
     int32_t beacon;        /* a teleporter's, or -1 */
     int32_t pulling;       /* what has both is pulling */
+    int32_t ammo;          /* salvos left, for what has ammo */
+    int32_t air_state;     /* aircraft: 0 flying, 1 landed, 2 taking off, 3 landing, 4 on a pad rearming */
 } zk_unit_state;
 
 int zk_abi_version(void);
@@ -250,7 +268,26 @@ typedef struct {
     int32_t target;
 } zk_order_rec;
 
-#define ZK_STATS 2 /* per side: tracked value, live units */
+/* A group order: one order (kind, x, z, target), as zk_order_rec gives it, to the anchor and to every other unit of its side that
+   is alive, mobile and finished, has a role in `roles` (bit r for role r, as zk_batch_set_roles or zk_world_set_roles gave them),
+   and stands within `radius` of the anchor, in float: dx * dx + dz * dz <= radius * radius.  Nothing, if the anchor is dead.  A
+   game's group orders go before its unit orders, each in turn, so a later one replaces an earlier one for a unit it selects, and a
+   unit order replaces any group's. */
+typedef struct {
+    int32_t anchor;
+    uint32_t roles;
+    float radius;
+    int32_t kind;
+    float x, z;
+    int32_t target;
+} zk_group_rec;
+
+/* Each catalog type's role, 0 to 31, or -1 for none: what group orders select by.  Until set, no type has one. */
+void zk_world_set_roles(void* world, const int32_t* role_of_type, int n_types);
+/* Returns how many units it selected. */
+int zk_world_order_group(void* world, const zk_group_rec* group);
+
+#define ZK_STATS 3 /* per side: tracked value, live units, metal a second from reclaim (part of the frame's income) */
 
 int zk_sizeof_unit_record(void);
 int zk_sizeof_site_record(void);
@@ -273,16 +310,21 @@ void zk_batch_reset(void* batch, int g, const void* map, uint64_t seed, int beha
                     const float* x, const float* z, const float* heading, const float* hp_frac, const float* build_frac,
                     const int* commander, const float* base);
 void* zk_batch_world(void* batch, int g);
+/* zk_world_set_roles for every game, now and after any reset. */
+void zk_batch_set_roles(void* batch, const int32_t* role_of_type, int n_types);
 /* Applies orders, steps `ticks`, and writes both sides' frames.  For the i-th game listed:
-     orders[order_offsets[i] .. order_offsets[i + 1]] are its orders;
+     groups[group_offsets[i] .. group_offsets[i + 1]] are its group orders, which go first (groups may be NULL for none);
+     orders[order_offsets[i] .. order_offsets[i + 1]] are its unit orders;
      records[(i * 2 + side) * cap ...], counts[i * 2 + side], globs[(i * 2 + side) * G], stats[(i * 2 + side) * ZK_STATS],
      features[(i * 2 + side) * feature_cap ...], feature_counts[i * 2 + side]. */
-void zk_batch_step(void* batch, const int* games, int n_games, const zk_order_rec* orders, const int* order_offsets, int ticks,
+void zk_batch_step(void* batch, const int* games, int n_games, const zk_order_rec* orders, const int* order_offsets,
+                   const zk_group_rec* groups, const int* group_offsets, int ticks,
                    void* records, int cap, int* counts, float* globs, float* stats, void* features, int feature_cap, int* feature_counts);
 /* zk_batch_step in two halves: begin returns at once and the batch's threads (all `threads` of them) do the step; wait returns
    when it's over.  Until then the caller mustn't touch the arrays it passed, nor the batch but to wait; a step, a free or a change
    of threads waits by itself.  The results are those of zk_batch_step. */
-void zk_batch_step_begin(void* batch, const int* games, int n_games, const zk_order_rec* orders, const int* order_offsets, int ticks,
+void zk_batch_step_begin(void* batch, const int* games, int n_games, const zk_order_rec* orders, const int* order_offsets,
+                         const zk_group_rec* groups, const int* group_offsets, int ticks,
                          void* records, int cap, int* counts, float* globs, float* stats, void* features, int feature_cap, int* feature_counts);
 void zk_batch_step_wait(void* batch);
 

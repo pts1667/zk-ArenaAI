@@ -1,17 +1,29 @@
-"""From the network's choices to orders: one way of reading them, for the live bot and the sim alike."""
+"""From the network's choices to orders: one way of reading them, for the live bot and the sim alike.
+
+The network gives a decision's orders as actions, one after another (`Slots`, at most SLOTS): each picks a unit, its anchor, and
+an order for it, which may go as a group order; then done.  `Decision` is the same as what each unit was told, which is what
+`decode` and `encode` read and write; `to_decision` and `to_slots` go between the two."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
 from . import featurize as fz
+from . import groups as gr
 from . import rawframe as rf
 from .bundle import Bundle
 from .tables import table
 
 GROUND_FINE_RADIUS = 200.0
 THROW_SHORT = 0.98      # of its reach at most, or it'd walk off to get in range and leave behind those it meant to throw
+
+
+FIELDS = ("kind", "enemy", "region", "fine", "produce", "group", "roles")
+SLOT_FIELDS = ("anchor",) + FIELDS
+SLOTS = 16              # actions a decision at most.  The army script's looks gave more than 16 in 0.3% of them, 1.1% of its
+                        # orders (03-training.md 11.18)
+UNSET = {"anchor": -1, "kind": rf.KEEP, "enemy": -1, "region": -1, "fine": -1, "produce": -1, "group": -1, "roles": 0}
 
 
 @dataclass
@@ -22,16 +34,67 @@ class Decision:
     region: np.ndarray            # C: region index, or -1
     fine: np.ndarray              # C: fine option, or -1
     produce: np.ndarray           # C: place in table.producible, or -1
+    group: np.ndarray | None = None     # C: for a kind of groups.GROUP_KINDS, index into GROUP_RADII if it goes as a group order, else -1
+    roles: np.ndarray | None = None     # C: that group's roles, as bits (groups.roles), else 0
+
+    def __post_init__(self):
+        if self.group is None:
+            self.group = np.full(len(self.kind), -1, np.int64)
+        if self.roles is None:
+            self.roles = np.zeros(len(self.kind), np.int64)
+
+
+@dataclass
+class Slots:
+    """A decision's actions in the order they were chosen: each field has one entry an action.  anchor is the controllable unit's
+    token, or -1 for done and for every slot after it; the rest are as Decision's for that unit (UNSET where there's no action)."""
+    anchor: np.ndarray
+    kind: np.ndarray
+    enemy: np.ndarray
+    region: np.ndarray
+    fine: np.ndarray
+    produce: np.ndarray
+    group: np.ndarray
+    roles: np.ndarray
+
+
+def to_decision(s: Slots, controllable: int) -> Decision:
+    """What each unit was told: its action's choices, and keep for every unit no action picked."""
+    out = {f: np.full(controllable, UNSET[f], np.int64) for f in FIELDS}
+    for k in np.flatnonzero(np.asarray(s.anchor) >= 0):
+        for f in FIELDS:
+            out[f][int(s.anchor[k])] = getattr(s, f)[k]
+    return Decision(**out)
+
+
+def to_slots(d: Decision, order: np.ndarray | None = None, slots: int | None = SLOTS) -> Slots:
+    """The units told something other than keep, as actions: in `order` (a permutation of the controllable units; token order
+    without one), at most `slots` of them (None: all), done after the last if there's room."""
+    acting = np.flatnonzero(np.asarray(d.kind) != rf.KEEP)
+    if order is not None:
+        rank = np.empty(len(d.kind), np.int64)
+        rank[np.asarray(order)] = np.arange(len(order))
+        acting = acting[np.argsort(rank[acting], kind="stable")]
+    width = len(acting) if slots is None else slots
+    acting = acting[:width]
+    out = {f: np.full(width, UNSET[f], np.int64) for f in SLOT_FIELDS}
+    out["anchor"][:len(acting)] = acting
+    for f in FIELDS:
+        out[f][:len(acting)] = np.asarray(getattr(d, f))[acting]
+    return Slots(**out)
 
 
 @dataclass(frozen=True)
 class Order:
-    """In the policy's terms: target is a uid, or for PRODUCE a row of the type table."""
+    """In the policy's terms: target is a uid, or for PRODUCE a row of the type table.  A radius makes it a group order
+    (groups.py): the unit's, and every unit of its side of `roles` within the radius of it."""
     uid: int
     kind: int
     x: float = 0.0
     z: float = 0.0
     target: int = -1
+    radius: float = 0.0
+    roles: int = 0
 
 
 def _within_throw(t: fz.Tensors, i: int, x: float, z: float, unit_x: np.ndarray, unit_z: np.ndarray) -> tuple[float, float]:
@@ -59,17 +122,17 @@ def decode(decision: Decision, t: fz.Tensors, bundle: Bundle, unit_x: np.ndarray
             continue
         uid = int(t.uids[i])
         if kind == rf.WAIT_AT_BEACON:
-            orders.append(Order(uid, kind, target=_beacon_in(t, int(decision.region[i]), float(unit_x[i]), float(unit_z[i]), unit_x, unit_z)))
+            order = Order(uid, kind, target=_beacon_in(t, int(decision.region[i]), float(unit_x[i]), float(unit_z[i]), unit_x, unit_z))
         elif kind in fz.KINDS_WITH_REGION:
             x, z = fz.fine_point(t, bundle, int(decision.region[i]), int(decision.fine[i]))
             if kind == rf.THROW:
                 x, z = _within_throw(t, i, x, z, unit_x, unit_z)
-            orders.append(Order(uid, kind, x, z))
+            order = Order(uid, kind, x, z)
         elif kind == rf.PRODUCE:
-            orders.append(Order(uid, kind, target=int(table().producible[decision.produce[i]])))
+            order = Order(uid, kind, target=int(table().producible[decision.produce[i]]))
         elif kind in (rf.ATTACK_UNIT, rf.MANUAL_FIRE):
             token = int(t.enemy_tokens[decision.enemy[i]])
-            orders.append(Order(uid, kind, float(unit_x[token]), float(unit_z[token]), int(t.uids[token])))
+            order = Order(uid, kind, float(unit_x[token]), float(unit_z[token]), int(t.uids[token]))
         elif kind == rf.ATTACK_GROUND:
             token = int(t.enemy_tokens[decision.enemy[i]])
             x, z = float(unit_x[token]), float(unit_z[token])
@@ -78,9 +141,12 @@ def decode(decision: Decision, t: fz.Tensors, bundle: Bundle, unit_x: np.ndarray
                 angle = (option - 1) * np.pi / 4.0
                 x += GROUND_FINE_RADIUS * float(np.cos(angle) * t.north[0] + np.sin(angle) * t.north[1])
                 z += GROUND_FINE_RADIUS * float(np.cos(angle) * t.north[1] - np.sin(angle) * t.north[0])
-            orders.append(Order(uid, kind, x, z))
+            order = Order(uid, kind, x, z)
         else:
-            orders.append(Order(uid, kind))
+            order = Order(uid, kind)
+        if kind in gr.GROUP_KINDS and decision.group[i] >= 0:
+            order = replace(order, radius=gr.GROUP_RADII[int(decision.group[i])], roles=int(decision.roles[i]))
+        orders.append(order)
     return orders
 
 
@@ -106,9 +172,10 @@ def encode(orders: list[Order], t: fz.Tensors, bundle: Bundle, unit_x: np.ndarra
     """`decode` the other way: orders someone else gave, such as a script, as the choices that would have given them.  A unit with no
     order keeps what it has.  A place becomes the nearest region and option the unit could have chosen.  Returns the choices, and how
     many orders couldn't be put in the policy's terms at all (a unit it doesn't control, a kind its masks rule out now, a target that
-    isn't a token), which stay KEEP."""
+    isn't a token), which stay KEEP.  A group order is its unit's choice with its radius and roles, the roles it can't choose
+    dropped (groups.choosable); the units it gives the order to keep what they have."""
     c = t.controllable
-    kind, enemy, region, fine, produce = (np.full(c, v, np.int64) for v in (rf.KEEP, -1, -1, -1, -1))
+    kind, enemy, region, fine, produce, group, roles = (np.full(c, v, np.int64) for v in (rf.KEEP, -1, -1, -1, -1, -1, 0))
     token_of = {int(u): k for k, u in enumerate(t.uids) if u >= 0}
     enemy_of = {int(token): e for e, token in enumerate(t.enemy_tokens)}
     points = fine_points(t, bundle) if c else np.zeros((0, fz.FINE_OPTIONS, 2))
@@ -160,7 +227,10 @@ def encode(orders: list[Order], t: fz.Tensors, bundle: Bundle, unit_x: np.ndarra
                 continue
             produce[i] = p
         kind[i] = k
-    return Decision(kind, enemy, region, fine, produce), missed
+        if o.radius > 0.0 and k in gr.GROUP_KINDS:
+            group[i] = gr.bucket(o.radius)
+            roles[i] = int(o.roles) & gr.choosable() if group[i] >= 0 else 0
+    return Decision(kind, enemy, region, fine, produce, group, roles), missed
 
 
 def world_positions(t: fz.Tensors, bundle: Bundle) -> tuple[np.ndarray, np.ndarray]:

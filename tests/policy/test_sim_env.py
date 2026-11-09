@@ -26,7 +26,7 @@ def _env_with_values(a: float, b: float, decide_every: int = 1) -> se.SimEnv:
 
     def step(*args, **kwargs):
         real(*args, **kwargs)
-        env.batch.stats[0] = ((a, 5.0), (b, 5.0))
+        env.batch.stats[0, :, :2] = ((a, 5.0), (b, 5.0))
     env.batch.step = step
     return env
 
@@ -37,6 +37,23 @@ def _steps_to_end(env: se.SimEnv, most: int) -> tuple[int, list]:
         if env.done:
             return n, env.done
     return most + 1, []
+
+
+def test_shared_maps_are_used_and_play_as_each_env_making_its_own():
+    """share_maps makes the maps' data once, for workers forked after to share: the same games as without."""
+    shared, own = list(se.pool()), list(se.pool())
+    se.share_maps(shared)
+    try:
+        a = se.SimEnv(4, 21, ["scripts"], threads=2, maps=shared, variants=True)
+        b = se.SimEnv(4, 21, ["scripts"], threads=2, maps=own, variants=True)
+        assert a.grounds is se._SHARED[id(shared)][1] and a.cpp_data is se._SHARED[id(shared)][2]
+        assert b.grounds is not a.grounds and b.cpp_data is not a.cpp_data
+        a.begin(), b.begin()
+        for _ in range(400):
+            a.step(0.0), b.step(0.0)
+            assert (a.batch.counts == b.batch.counts).all() and a.batch.records.tobytes() == b.batch.records.tobytes()
+    finally:
+        del se._SHARED[id(shared)]
 
 
 def test_training_plays_only_its_maps():
@@ -331,3 +348,28 @@ def test_nothing_on_either_side_is_no_lead():
     env = _env_with_values(0.0, 0.0)
     assert _steps_to_end(env, se.EARLY_END_DECISIONS + 5)[1] == []
     assert np.all(env.result == 0.0)
+
+
+def test_finished_units_of_rare_types_earn_a_zero_sum_bonus_and_the_first_units_none():
+    """policy_sim_env._diversity, after Pluto's: what a side finishes is worth more the rarer its type among what the policy makes,
+    nothing for a type it makes as often as most; the units a side starts with are none of it; and the reward stays zero-sum."""
+    env = se.SimEnv(4, 9, ["mirror"], threads=2)
+    env.diversity = 1.0
+    env.begin()
+    makeable = np.flatnonzero(env.makeable)
+    env.made[makeable[0]] = 10_000.0
+    assert env.rarity(makeable[:1])[0] == 0.0 and env.rarity(makeable[1:2])[0] > 0.8
+    env.made[:] = 0.0
+    env.step(0.0)
+    assert not env.bonus.any()          # the commanders, and nothing finished yet
+    earned = 0.0
+    for _ in range(300):
+        for seat in env.policy_seats_to_act():
+            env.give_orders(seat, [])
+        env.step(0.0)
+        for seat in range(0, env.seat_count, 2):
+            assert env.reward(seat, 0.3) == pytest.approx(-env.reward(seat + 1, 0.3))
+        earned += float(env.bonus.sum())
+        env.finished_seats()
+    assert earned > 0.0 and env.made.sum() > 0.0
+    assert env.bonus.max() <= env.diversity * 50

@@ -22,16 +22,18 @@ sys.path.insert(0, str(ROOT / "sim" / "py"))
 sys.path.insert(0, str(ROOT / "bots"))
 import zksim  # noqa: E402
 from zkbot.policy import bundle as bd  # noqa: E402
+from zkbot.policy import groups  # noqa: E402
 
 import policy_eco as eco  # noqa: E402
 from policy_mix import menu as factory_menu  # noqa: E402
 from policy_variants import ROLES, Variant  # noqa: E402
 
-ABI_VERSION = 2
+ABI_VERSION = 4
 MOVE_CLASSES = 6
 SEAT_ARMY = 1
-ROLE_NAMES = ("raid", "riot", "assault", "skirm", "arty", "aa", "snipe", "scout", "builder")
+ROLE_NAMES = ("raid", "riot", "assault", "skirm", "arty", "aa", "snipe", "scout", "builder", "bomb")
 SPECIAL = (eco.CERBERUS, eco.LUCIFER, eco.SILO, eco.NUKE, eco.FUSION, eco.PYLON, eco.RADAR)
+SECOND_FACTORIES = ("factoryplane", "factorygunship", "striderhub")      # zks_data_desc.second_factories
 FINISHED = (eco.CERBERUS, eco.LUCIFER, eco.SILO, eco.NUKE, eco.FUSION, "singularity", "missile")   # zks_eco_stats, after checks
 LOG_WHAT = ("start", "missile at", "nuke at")
 (MOBILE, AIR, ARMED, BUILDER, FACTORY, FIGHTS, REGENERATES, EXTRACTOR, DEFENCE, KITABLE, HEAVY_RIOT, SLOW_HEAVY, MISSILE, COMMANDER,
@@ -47,7 +49,8 @@ class DataDesc(ct.Structure):
                 ("move_class", c_i8p), ("catalog_row", c_i32p), ("role", c_i32p), ("energy", c_f32p), ("pylon", c_f32p),
                 ("needs_link", c_f32p), ("radius", c_f32p), ("footing", c_i32p), ("footing_radius", c_f64p), ("best_missile", c_i32p),
                 ("generators", c_i32p), ("option_offsets", c_i32p), ("options", c_i32p), ("n_roles", ct.c_int), ("menu", c_i32p),
-                ("role_ids", ct.c_int32 * 9), ("special", ct.c_int32 * 7), ("cerberus_reach", ct.c_double),
+                ("role_ids", ct.c_int32 * 10), ("special", ct.c_int32 * 7), ("second_factories", ct.c_int32 * 3),
+                ("group_radii", ct.c_double * len(groups.GROUP_RADII)), ("cerberus_reach", ct.c_double),
                 ("missile_reach", ct.c_double), ("extractor_radius", ct.c_float), ("n_footings", ct.c_int)]
 
 
@@ -59,9 +62,9 @@ class MapDesc(ct.Structure):
 
 class StepArgs(ct.Structure):
     _fields_ = [("n", ct.c_int), ("games", c_i32p), ("records", ct.c_void_p), ("cap", ct.c_int), ("counts", c_i32p), ("globs", c_f32p),
-                ("decisions", c_i32p), ("seat_flags", c_i32p), ("busy", c_i32p), ("ticks", ct.c_int), ("tick_frames", ct.c_int),
+                ("stats", c_f32p), ("decisions", c_i32p), ("seat_flags", c_i32p), ("busy", c_i32p), ("ticks", ct.c_int), ("tick_frames", ct.c_int),
                 ("frames_per_second", ct.c_int), ("script_every", ct.c_int), ("eco_every", ct.c_int), ("pre", ct.c_void_p),
-                ("pre_offsets", c_i32p), ("post", ct.c_void_p), ("post_offsets", c_i32p)]
+                ("pre_offsets", c_i32p), ("post", ct.c_void_p), ("post_offsets", c_i32p), ("group_orders", ct.c_int)]
 
 
 class Style(ct.Structure):
@@ -104,9 +107,9 @@ def lib() -> ct.CDLL:
         L.zks_runner_free.argtypes = [vp]
         L.zks_reset.argtypes = [vp, ct.c_int, ct.c_int, c_f64p, c_f64p, ct.c_int, ct.c_int, ct.c_uint64, ct.c_uint64, P(Style)]
         L.zks_step.restype = ct.c_int
-        L.zks_step.argtypes = [vp, P(StepArgs), vp, ct.c_int, c_i32p, vp, ct.c_int, c_i32p]
+        L.zks_step.argtypes = [vp, P(StepArgs), vp, ct.c_int, c_i32p, vp, ct.c_int, c_i32p, vp, ct.c_int, c_i32p]
         L.zks_collect.restype = ct.c_int
-        L.zks_collect.argtypes = [vp, vp, ct.c_int, c_i32p, vp, ct.c_int, c_i32p]
+        L.zks_collect.argtypes = [vp, vp, ct.c_int, c_i32p, vp, ct.c_int, c_i32p, vp, ct.c_int, c_i32p]
         L.zks_last_counts.argtypes = [vp, c_i32p]
         L.zks_seat_counts.argtypes = [vp, c_i32p]
         L.zks_made.restype = ct.c_int
@@ -179,6 +182,7 @@ class ScriptsData:
             footing=footing, footing_radius=footing_radius, best_missile=best, generators=generators,
             option_offsets=np.array(offsets, np.int32), options=np.array(options + [0], np.int32), menu=menu)
         a = self._arrays
+        assert tuple(self.roles) == groups.roles()[0], "the policy's group roles are numbered as the scripts' are"
         desc = DataDesc(rows=n, n_def=len(a["row_of_def"]), row_of_def=_ptr(a["row_of_def"], c_i32p), bits=_ptr(bits, c_u32p),
                         cost=_ptr(a["cost"], c_f32p), range=_ptr(a["range"], c_f32p), move_class=_ptr(a["move_class"], c_i8p),
                         catalog_row=_ptr(a["catalog_row"], c_i32p), role=_ptr(a["role"], c_i32p), energy=_ptr(a["energy"], c_f32p),
@@ -190,6 +194,8 @@ class ScriptsData:
                         extractor_radius=float(ed.radius[ext[0]]) if len(ext) else 24.0, n_footings=len(self.footings))
         desc.role_ids[:] = [role_index.get(r, -1) for r in ROLE_NAMES]
         desc.special[:] = [ed.row.get(name, -1) for name in SPECIAL]
+        desc.second_factories[:] = [t.names.index(name) if name in t.names else -1 for name in SECOND_FACTORIES]
+        desc.group_radii[:] = groups.GROUP_RADII
         self.lib = lib()
         self.handle = self.lib.zks_data_new(ct.byref(desc))
         self._maps: dict[int, int] = {}         # id(Ground) -> index
@@ -228,6 +234,7 @@ class Scripts:
         self.handle = self.lib.zks_runner_new(data.handle, games, threads)
         self._out = np.zeros(4096, zksim.ORDER_DTYPE)
         self._army = np.zeros(1024, zksim.ORDER_DTYPE)
+        self._groups = np.zeros(256, zksim.GROUP_DTYPE)
         self._empty = np.zeros(1, zksim.ORDER_DTYPE)
 
     def __del__(self):
@@ -246,20 +253,22 @@ class Scripts:
 
     def step(self, batch: zksim.Batch, decisions: np.ndarray, seat_flags: np.ndarray, busy: np.ndarray, ticks: int, script_every: int,
              eco_every: int, games: np.ndarray | None = None, pre: tuple[np.ndarray, np.ndarray] | None = None,
-             post: tuple[np.ndarray, np.ndarray] | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Every listed game's orders, as `batch.step` takes them, and the army script's alone by listed seat:
-        (orders, offsets, army, army_offsets).  The orders are a view, valid until the next step; the army's are a copy.
-        seat_flags, busy: by listed seat.  pre, post: (orders, offsets by listed seat) to put before the scripts' and after the
-        army script's."""
+             post: tuple[np.ndarray, np.ndarray] | None = None, group_orders: bool = True) -> tuple[np.ndarray, ...]:
+        """Every listed game's orders as `batch.step` takes them, the army script's alone by listed seat, and the group orders:
+        (orders, offsets, army, army_offsets, groups, group_offsets).  The orders and groups are views, valid until the next step;
+        the army's are a copy, as the policy would give them: alone, or a group order as its anchor's followed by a
+        groups.GROUP_MARK record (x the radius, target the roles).  seat_flags, busy: by listed seat.
+        pre, post: (orders, offsets by listed seat) to put before the scripts' and after the army script's.  group_orders: whether
+        the army script sends what it can as group orders, which the batch then needs the roles of (policy_sim_env sets them)."""
         listed = np.arange(self.games, dtype=np.int32) if games is None else np.ascontiguousarray(games, np.int32)
         n = len(listed)
         flags = np.ascontiguousarray(seat_flags, np.int32)
         busy = np.ascontiguousarray(busy, np.int32)
         decisions = np.ascontiguousarray(decisions, np.int32)
         args = StepArgs(n=n, games=_ptr(listed, c_i32p), records=batch.records.ctypes.data, cap=batch.cap, counts=_ptr(batch.counts, c_i32p),
-                        globs=_ptr(batch.globs, c_f32p), decisions=_ptr(decisions, c_i32p), seat_flags=_ptr(flags, c_i32p),
+                        globs=_ptr(batch.globs, c_f32p), stats=_ptr(batch.stats, c_f32p), decisions=_ptr(decisions, c_i32p), seat_flags=_ptr(flags, c_i32p),
                         busy=_ptr(busy, c_i32p), ticks=ticks, tick_frames=zksim.TICK_FRAMES, frames_per_second=zksim.FRAMES_PER_SECOND,
-                        script_every=script_every, eco_every=eco_every)
+                        script_every=script_every, eco_every=eco_every, group_orders=int(group_orders))
         keep = []
         for name, part in (("pre", pre), ("post", post)):
             if part is not None:
@@ -270,16 +279,18 @@ class Scripts:
                 setattr(args, f"{name}_offsets", _ptr(offsets, c_i32p))
         offsets = np.zeros(n + 1, np.int32)
         army_offsets = np.zeros(2 * n + 1, np.int32)
-        total = self.lib.zks_step(self.handle, ct.byref(args), self._out.ctypes.data, len(self._out), _ptr(offsets, c_i32p),
-                                  self._army.ctypes.data, len(self._army), _ptr(army_offsets, c_i32p))
-        counts = np.zeros(2, np.int32)
+        group_offsets = np.zeros(n + 1, np.int32)
+        buffers = lambda: (self._out.ctypes.data, len(self._out), _ptr(offsets, c_i32p), self._army.ctypes.data, len(self._army),  # noqa: E731
+                           _ptr(army_offsets, c_i32p), self._groups.ctypes.data, len(self._groups), _ptr(group_offsets, c_i32p))
+        total = self.lib.zks_step(self.handle, ct.byref(args), *buffers())
+        counts = np.zeros(3, np.int32)
         self.lib.zks_last_counts(self.handle, _ptr(counts, c_i32p))
-        if counts[0] > len(self._out) or counts[1] > len(self._army):
+        if counts[0] > len(self._out) or counts[1] > len(self._army) or counts[2] > len(self._groups):
             self._out = np.zeros(max(2 * int(counts[0]), len(self._out)), zksim.ORDER_DTYPE)
             self._army = np.zeros(max(2 * int(counts[1]), len(self._army)), zksim.ORDER_DTYPE)
-            total = self.lib.zks_collect(self.handle, self._out.ctypes.data, len(self._out), _ptr(offsets, c_i32p),
-                                         self._army.ctypes.data, len(self._army), _ptr(army_offsets, c_i32p))
-        return self._out[:total], offsets, self._army[:counts[1]].copy(), army_offsets
+            self._groups = np.zeros(max(2 * int(counts[2]), len(self._groups)), zksim.GROUP_DTYPE)
+            total = self.lib.zks_collect(self.handle, *buffers())
+        return self._out[:total], offsets, self._army[:counts[1]].copy(), army_offsets, self._groups[:counts[2]], group_offsets
 
     def seat_counts(self, n: int) -> np.ndarray:
         """The last step's orders by part, per listed seat: pre, army script, post, economy script."""

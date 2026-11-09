@@ -34,12 +34,13 @@ ROLE_ORDER = ("raid", "riot", "assault", "skirm", "arty", "aa", "snipe")     # t
 
 
 def menu(data: "ScriptData", factory_row: int) -> dict[str, int]:
-    """The table row of the cheapest unit this factory builds for each role, among those the sim models."""
+    """The table row of the cheapest unit this factory builds for each role, among those the sim models.  Not ships, which a
+    strider hub can make and the maps here have no sea for, nor bombs that blow themselves up (a gunship plant's Blastwing)."""
     t = data.table
     best: dict[str, int] = {}
     for name in bot_catalog.roster(t.names[factory_row]):
         row = data.row_of_name.get(name)
-        if row is None or not data.modelled[row]:
+        if row is None or not data.modelled[row] or not data.on_land[row] or data.kamikaze[row]:
             continue
         role = data.role_of[row]
         if role not in best or t.cost[row] < t.cost[best[role]]:

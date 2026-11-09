@@ -123,7 +123,8 @@ void World::collect_income() {
         Purse& p = purses[s];
         p.energy_made = energy[s];
         // As the engine counts it, reclaim is income.  This tick's comes after this, so it shows from the next.
-        p.metal_income = metal[s] + p.reclaimed / TICK_SECONDS;
+        p.reclaim_income = p.reclaimed / TICK_SECONDS;
+        p.metal_income = metal[s] + p.reclaim_income;
         p.reclaimed = 0.0f;
         p.energy_income = energy[s] - p.overdrive_energy;
         p.metal = std::min(p.storage, p.metal + p.metal_income * TICK_SECONDS);

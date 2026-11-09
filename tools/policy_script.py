@@ -54,6 +54,8 @@ class ScriptData:
         n = len(table.combat)
         self.regenerates = np.zeros(n, bool)
         self.modelled = np.zeros(n, bool)           # the sim does everything the unit does
+        self.on_land = np.ones(n, bool)             # not a ship: it can go where there's no water
+        self.kamikaze = np.zeros(n, bool)           # a bomb that blows itself up
         self.catalog_row = np.full(n, -1, np.int32)  # its index in the sim's catalog, which orders are given by
         self.extractor = np.zeros(n, bool)
         self.defence = np.zeros(n, bool)
@@ -70,6 +72,8 @@ class ScriptData:
                 self.regenerates[row] = cat.units[i]["idle_regen"] > 0.0
                 self.catalog_row[row] = i
                 self.modelled[row] = modelled(cat, name)
+                self.on_land[row] = cat.units[i]["min_water_depth"] <= 0.0
+                self.kamikaze[row] = cat.units[i]["kamikaze_distance"] > 0.0
             self.extractor[row] = units.is_mex(d)
             self.defence[row] = units.is_defense(d) and bool(table.armed[row])
             self.kitable[row] = bool({"riot", "assault"} & set(roles))

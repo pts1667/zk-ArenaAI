@@ -50,6 +50,11 @@ constexpr int MOST_FACTORIES = 6;
 constexpr double RADAR_FROM = 180.0;
 constexpr int SITE_TRIES = 24;           // policy_opening.Ground.site
 constexpr double NEVER = -1e9;           // pending.get(name, -1e9)
+// The second factory: once it's both 18 minutes in and 50 metal a second not counting reclaim.  What it is is drawn once, when
+// it's due: planes most often, then gunships, then striders (the user's play).  A hub runs only on a grid of enough energy, so
+// with none it's planes.
+constexpr double SECOND_FROM_S = 18.0 * 60.0, SECOND_FROM_M = 50.0;
+const double SECOND_WEIGHTS[3] = {0.5, 0.3, 0.2};     // zks_data_desc.second_factories' order
 
 zk_order_rec order(int64_t uid, int kind, double x, double z, int64_t target) {
     zk_order_rec o;
@@ -77,6 +82,7 @@ struct GridOf {
     std::vector<double> x, z, reach;
     std::vector<int> label, row;
     int main = -1;
+    double main_energy = 0.0;       // what the main grid makes
 
     bool links(double px, double pz, double r, int grid) const {
         for (size_t a = 0; a < x.size(); a++)
@@ -101,7 +107,7 @@ struct Pass {
     int small = 0;
     std::vector<float> taken;       // n x 3
     int pylons = 0;
-    bool radar = false, factory = false;
+    bool radar = false, factory = false, second = false;
     int expanding = 0;
     std::vector<double> claimed;    // n x 2
 };
@@ -425,6 +431,42 @@ Job Seat::factory_job(const Ctx& c, int i, Pass& pass, double income, int by_cla
     return job;
 }
 
+Job Seat::second_factory_job(const Ctx& c, int i, const GridOf& grid, Pass& pass, double income, int by_class, P2 by_at) {
+    const Data& d = *data;
+    const double seconds = c.seconds;
+    if (pass.second || second == -1 || seconds - pending[X_SECOND] < PENDING_FOR) return {};
+    if (seconds < SECOND_FROM_S || income - c.reclaim < SECOND_FROM_M) return {};
+    for (int r : own_rows)
+        for (int k = 0; k < 3; k++)
+            if (r == d.second_factories[k]) return {};
+    if (second == -2) {
+        double total = 0.0;
+        for (int k = 0; k < 3; k++) total += d.second_factories[k] >= 0 ? SECOND_WEIGHTS[k] : 0.0;
+        second = -1;
+        double pick = draws.uniform() * total;
+        for (int k = 0; k < 3 && total > 0.0; k++) {
+            if (d.second_factories[k] < 0) continue;
+            second = d.second_factories[k];
+            if ((pick -= SECOND_WEIGHTS[k]) < 0.0) break;
+        }
+        if (second < 0) return {};
+    }
+    int row = second;
+    bool linked = d.needs_link[row] > 0.0f;
+    if (linked && grid.main_energy < (double)d.needs_link[row] && d.second_factories[0] >= 0) row = second = d.second_factories[0], linked = false;
+    if (!d.can_build(own_rows[i], row)) return {};
+    P2 near = along(base, enemy_base, -BEHIND_BASE);
+    if (linked) near = {grid.x[grid.nearest(base.x, base.z, grid.main)], grid.z[grid.nearest(base.x, base.z, grid.main)]};
+    Job job = build(own[i]->uid, row, near, pass.taken, linked ? SITE_SPREAD : 300.0, linked ? &grid : nullptr, linked ? grid.main : -1,
+                    by_class, by_at, true);
+    if (job.has) {
+        pass.second = true;
+        pending[X_SECOND] = seconds;
+        log.push_back({seconds, 0, row});
+    }
+    return job;
+}
+
 Job Seat::radar_job(const Ctx& c, int i, Pass& pass, int by_class, P2 by_at) {
     const Data& d = *data;
     const double seconds = c.seconds;
@@ -582,6 +624,10 @@ Job Seat::job(const Ctx& c, int i, const GridOf& grid, bool has_project, int pro
         }
         if (best >= 0) return make(uid, K_ASSIST, 0.0, 0.0, own[best]->uid);
     }
+    {
+        Job j = second_factory_job(c, i, grid, pass, income, by_class, by_at);
+        if (j.has) return j;
+    }
     if (pass.made < ENERGY_FIRST * income) {
         Job j = energy_job(c, i, grid, pass, income, being, false);
         if (j.has) return j;
@@ -716,6 +762,7 @@ void Seat::eco(const Ctx& c) {
         for (int a = 0; a < m; a++) makes[grid.label[a]] += (double)d.energy[grid.row[a]], has[grid.label[a]] = 1;
         for (int g = 0; g < m; g++)
             if (has[g] && (grid.main < 0 || makes[g] > makes[grid.main])) grid.main = g;
+        if (grid.main >= 0) grid.main_energy = makes[grid.main];
     }
     Pass pass;
     {

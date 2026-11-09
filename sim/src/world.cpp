@@ -118,6 +118,15 @@ int World::add(int t, int s, float px, float pz, float head, float hp_frac, floa
     jump.emplace_back();
     if (d.jump_range > 0.0f) jumpers.push_back(u);
     skid.emplace_back();
+    {
+        // An aircraft starts on the ground, as one the engine makes does, and takes off when it has somewhere to be.
+        AirState a;
+        a.phase = AIR_LANDED;
+        a.ammo = d.ammo;
+        air.push_back(a);
+        if (d.flags & ZK_U_AIR) aircraft.push_back(u);
+        if (d.pad_count > 0) pads.push_back(u);
+    }
     low_power.push_back(d.needed_link > 0.0f ? 1 : 0);     // until the first look at the grids
     pulling.push_back(0);
     wait_since.push_back(-1);
@@ -156,6 +165,26 @@ void World::ready_weapons() {
     std::fill(cooldown.begin(), cooldown.end(), 0.0f);
     for (int u = 0; u < count(); ++u)
         if (type_of(u).stockpile_frames > 0.0f) stock[size_t(u)] = std::max(stock[size_t(u)], 1);
+}
+
+int World::order_group(const zk_group_rec& g) {
+    if (g.anchor < 0 || g.anchor >= count() || !alive[size_t(g.anchor)]) return 0;
+    const float r2 = g.radius * g.radius, cx = x[size_t(g.anchor)], cz = z[size_t(g.anchor)];
+    const int s = side[size_t(g.anchor)];
+    int n = 0;
+    for (int u = 0; u < count(); ++u) {
+        if (u != g.anchor) {
+            if (!alive[size_t(u)] || side[size_t(u)] != s || build[size_t(u)] < 1.0f || !(type_of(u).flags & ZK_U_MOBILE)) continue;
+            const size_t t = size_t(type[size_t(u)]);
+            const int role = t < role_of_type.size() ? role_of_type[t] : -1;
+            if (role < 0 || role >= 32 || !((g.roles >> role) & 1u)) continue;
+            const float dx = x[size_t(u)] - cx, dz = z[size_t(u)] - cz;
+            if (dx * dx + dz * dz > r2) continue;
+        }
+        order_unit(u, g.kind, g.x, g.z, g.target);
+        ++n;
+    }
+    return n;
 }
 
 void World::order_unit(int u, int kind, float gx, float gz, int target) {
@@ -278,6 +307,7 @@ void World::tick() {
             update_throwers();
             update_teleporters();
             update_jumps();
+            update_air();
         }
         move_units();
     }

@@ -207,6 +207,16 @@ class Ground:
             self._cells[key] = (cells[:, ::-1].astype(np.float32) + 0.5) * float(bd.PASS_CELL)
         return self._cells[key]
 
+    def warm(self, footings: list[tuple[float, float]]) -> None:
+        """Makes now what the scripts ask of every map: each footing's mask and sites, and each move class's parts.  For maps shared by
+        processes forked after (policy_sim_env.share_maps), which then don't each make their own."""
+        for low, high in footings:
+            self._sites(low, high)
+        for c in range(len(bd.MOVE_CLASSES)):
+            self.labels(c)
+            self.share(c)
+            self._main_cells(c)
+
     def has_room(self, low: float, high: float) -> bool:
         return len(self._sites(low, high)) > 0
 

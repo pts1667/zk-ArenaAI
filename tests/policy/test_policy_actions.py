@@ -211,14 +211,14 @@ def test_a_throw_past_its_reach_goes_as_far_as_it_can_the_same_way(small_map, ta
 
 
 def _actor(table, encoder_path):
-    """An untrained actor that never keeps, so every other kind gets chosen."""
+    """An untrained actor that is never done while there's a unit to tell something, so every unit and kind gets chosen."""
     torch = pytest.importorskip("torch")
     import policy_latent as pl
 
     torch.manual_seed(0)
     actor = pl.make(len(table.names) + 1, encoder_path).eval()
     with torch.no_grad():
-        actor.head_kind.bias[rf.KEEP] = -20.0
+        actor.head_done.bias[0] = -20.0
     return actor
 
 
@@ -232,19 +232,22 @@ def test_the_actor_chooses_from_what_is_legal_and_says_what_to_produce(small_map
     actor = _actor(table, encoder_path)
     b = pm.collate([t] * 60).to("cpu")
     with torch.no_grad():
-        units, reg_h, *_ = actor.decide(b, *actor.initial_state(60, 0, "cpu"))
-        a = pm.sample_actions(actor, b, units, reg_h)
+        ctx, *_ = actor.decide(b, *actor.initial_state(60, 0, "cpu"))
+        a = pm.sample_actions(actor, b, ctx)
     seen = set()
     for row in range(60):
-        kind, produce, region, fine = (v[row, :t.controllable].numpy() for v in (a.kind, a.produce, a.region, a.fine))
+        picked = a.anchor[row] >= 0
+        anchor, kind, produce, region, fine = (v[row][picked].numpy() for v in (a.anchor, a.kind, a.produce, a.region, a.fine))
+        assert sorted(anchor) == [u for u in range(t.controllable) if t.kind_mask[u].sum() > t.kind_mask[u, rf.KEEP]]
         seen |= {int(k) for k in kind}
-        for i, k in enumerate(kind):
-            assert t.kind_mask[i, k]
-            assert (produce[i] >= 0) == (k == rf.PRODUCE)
-            assert (region[i] >= 0) == (k in fz.KINDS_WITH_REGION)
-            assert (fine[i] >= 0) == (k in fz.KINDS_WITH_FINE)
+        for i, k in zip(anchor, kind):
+            assert t.kind_mask[i, k] and k != rf.KEEP
+        for i, k, p, r, f in zip(anchor, kind, produce, region, fine):
+            assert (p >= 0) == (k == rf.PRODUCE)
+            assert (r >= 0) == (k in fz.KINDS_WITH_REGION)
+            assert (f >= 0) == (k in fz.KINDS_WITH_FINE)
             if k == rf.THROW:
-                assert t.ptr_jump[i, region[i]]
+                assert t.ptr_jump[i, r]
     assert {rf.PRODUCE, rf.THROW} <= seen
 
 
@@ -260,9 +263,9 @@ def test_sampling_and_evaluating_agree_on_the_new_head(small_map, table, encoder
     actor = _actor(table, encoder_path)
     b = pm.collate([t] * 8).to("cpu")
     with torch.no_grad():
-        units, reg_h, *_ = actor.decide(b, *actor.initial_state(8, 0, "cpu"))
-        a = pm.sample_actions(actor, b, units, reg_h)
-        logp, entropy = pm.evaluate_actions(actor, b, units, reg_h, a)
+        ctx, *_ = actor.decide(b, *actor.initial_state(8, 0, "cpu"))
+        a = pm.sample_actions(actor, b, ctx)
+        logp, entropy = pm.evaluate_actions(actor, b, ctx, a)
     assert torch.allclose(a.logp, logp, atol=1e-3)
     uses = a.kind == rf.PRODUCE
     assert uses.any() and ((a.produce >= 0) == uses).all() and "produce" in entropy

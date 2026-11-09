@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <climits>
 #include <cmath>
+#include <tuple>
 
 #include "scripts.hpp"
 
@@ -60,6 +61,9 @@ const double RIOT_X[4] = {0.0, 4.0, 10.0, 60.0}, RIOT_Y[4] = {0.0, 0.0, 0.3, 0.3
 const double ASSAULT_X[4] = {0.0, 6.0, 12.0, 60.0}, ASSAULT_Y[4] = {0.0, 0.0, 0.25, 0.25};
 const double ARTY_X[4] = {0.0, 12.0, 18.0, 60.0}, ARTY_Y[4] = {0.0, 0.0, 0.1, 0.1};
 constexpr double SKIRM_SHARE = 0.25, AA_SHARE = 0.12, SNIPE_SHARE = 0.10, SNIPE_FROM = 480.0;
+// An air plant's mix, of what it has: a plane plant's bombers (Ravens, Phoenixes), a gunship plant's raiders, assaults and
+// skirmishers; AA once the enemy has been seen with air.  It comes late, so there's no schedule.
+constexpr double AIR_RAID = 0.35, AIR_RIOT = 0.2, AIR_ASSAULT = 0.25, AIR_SKIRM = 0.2, AIR_BOMB = 0.4, AIR_AA = 0.3;
 // policy_eco.py Aimer
 constexpr double FIRE_AGAIN = 60.0;
 constexpr float NUKE_VALUE_REACH = 960.0f;
@@ -122,6 +126,7 @@ void Seat::births_and_forget() {
         if (!born[uid]) {
             born[uid] = 1;
             made[d.role[r]]++;
+            if (d.has(r, ZKS_AIR)) made_air[d.role[r]]++;
         }
     }
     // Per-uid memory of what's gone.  `stamp` was set for every own uid by Seat::run.
@@ -149,13 +154,21 @@ int Seat::choose(int factory_row, double seconds, int constructors, double metal
     if (scout >= 0 && made[d.role_ids[R_SCOUT]] < scout_quota(seconds)) return scout;
     // shares(), in its dict's order: the schedule's roles, then those added once seen
     double minutes = seconds / 60.0;
-    int roles[7];
-    double weights[7];
+    int roles[R_COUNT];
+    double weights[R_COUNT];
     int n = 0;
     auto add = [&](int r, double w) {
-        w *= style.role_weight[r];
+        if (r < ZKS_ROLE_KNOBS) w *= style.role_weight[r];
         if (w > 0.0 && d.menu_of(factory_row, r) >= 0) roles[n] = r, weights[n] = w, n++;
     };
+    if (d.air_plant[factory_row]) {
+        add(R_RAID, AIR_RAID);
+        add(R_RIOT, AIR_RIOT);
+        add(R_ASSAULT, AIR_ASSAULT);
+        add(R_SKIRM, AIR_SKIRM);
+        add(R_BOMB, AIR_BOMB);
+        if (seen_air) add(R_AA, AA_SHARE + AIR_AA);
+    } else {
     add(R_RAID, interp(minutes, RAID_X, RAID_Y, 5));
     add(R_RIOT, interp(minutes, RIOT_X, RIOT_Y, 4));
     add(R_ASSAULT, interp(minutes, ASSAULT_X, ASSAULT_Y, 4));
@@ -163,17 +176,22 @@ int Seat::choose(int factory_row, double seconds, int constructors, double metal
     if (seen_kitable) add(R_SKIRM, SKIRM_SHARE);
     if (seen_air) add(R_AA, AA_SHARE);
     if (seen_heavy && seconds >= SNIPE_FROM) add(R_SNIPE, SNIPE_SHARE);
+    }
     if (!n) return -1;
     PySum sum;     // sum(share.values())
     for (int k = 0; k < n; k++) sum.add(weights[k]);
     double total = sum.value();
+    // An air plant's mix counts what flies, and a ground plant's what doesn't: each keeps its own shares.
+    const bool air = d.air_plant[factory_row] != 0;
+    auto count = [&](int r) -> int64_t { return air ? made_air[d.role_ids[r]] : made[d.role_ids[r]] - made_air[d.role_ids[r]]; };
     int64_t started = 0;
     for (int r = R_RAID; r <= R_SNIPE; r++)
-        if (d.role_ids[r] >= 0) started += made[d.role_ids[r]];
+        if (d.role_ids[r] >= 0) started += count(r);
+    if (air && d.role_ids[R_BOMB] >= 0) started += count(R_BOMB);
     int best = -1;
     double best_behind = 0.0;
     for (int k = 0; k < n; k++) {
-        int64_t have = made[d.role_ids[roles[k]]];
+        int64_t have = count(roles[k]);
         double behind = weights[k] / total * (double)(started + 1) - (double)have;
         if (best < 0 || behind > best_behind || (behind == best_behind && roles[k] < roles[best])) best = k, best_behind = behind;
     }
@@ -394,6 +412,12 @@ void Seat::fight(const Ctx& c, std::vector<Fighter>& f, const std::vector<P2>& e
         } else if (kind == R_SNIPE) {
             int h = nearest(view.slow_heavy, pos);
             if (h >= 0) p.kind = K_ATTACK_UNIT, p.x = view.x[h], p.z = view.z[h], p.target = view.uid[h];
+        } else if (kind == R_BOMB && data->has(f[k].row, ZKS_AIR)) {
+            // A bomber goes for what stands in the army's way, a defence before any other building, and is back on its pad
+            // after each run (the sim's unit_bomber_command.lua).
+            int b = nearest(view.defence, lead);
+            if (b < 0) b = nearest(view.building, lead);
+            if (b >= 0) p.kind = K_ATTACK_UNIT, p.x = view.x[b], p.z = view.z[b], p.target = view.uid[b];
         }
     }
     std::vector<int> raiders;
@@ -401,6 +425,7 @@ void Seat::fight(const Ctx& c, std::vector<Fighter>& f, const std::vector<P2>& e
         if (f[k].kind == R_RAID) raiders.push_back(k);
     raids(c, f, raiders, retreat, extractors, plans);
     // _emit
+    const size_t first = army_out.size();
     for (int k = 0; k < n; k++) {
         const Plan& p = plans[k];
         if (!p.has) continue;
@@ -412,6 +437,118 @@ void Seat::fight(const Ctx& c, std::vector<Fighter>& f, const std::vector<P2>& e
         ordered_x[uid] = p.x;
         ordered_z[uid] = p.z;
         army_out.push_back(order(uid, p.kind, p.x, p.z, p.target));
+    }
+    group_plans(c, first);
+}
+
+// Group orders (capi.h zk_group_rec).  The fighters' orders from army_out[first] on that are the same order, to the letter, and of a kind
+// the policy groups (zkbot.policy.groups.GROUP_KINDS: move, fight, attack), go as one
+// group order: from the one nearest their middle, the anchor, to the units of their roles within the smallest of the group radii
+// (zks_data_desc.group_radii) that takes them all in, if that holds no other unit the sim could select, but for those already told
+// this order: a move or fight the script would leave as it is (`_emit`: the same kind, within REORDER of it), which the group then
+// tells again, to the letter.  If it holds another, or none is large enough, they're split in two across their wider spread and each
+// half tried again; what's left goes alone.  So the sim does what the orders alone would, but that those already on their way there
+// are told again (2026-11-08: a push of the whole army was some 20 orders alone, as most of it was on its way already): it applies a
+// game's group orders before its unit orders, and any other order a fighter gets this step comes after its plan's.  Those it could
+// select are a superset here, every own unit with a role, as it also asks that they be mobile and finished; and a member is within
+// the radius by GROUP_MARGIN, anyone else outside it by as much, which float rounding can't undo.
+void Seat::group_plans(const Ctx& c, size_t first) {
+    constexpr double GROUP_MARGIN = 1.0;     // elmos
+    const Data& d = *data;
+    if (!c.groups || army_out.size() < first + 2) return;
+    grouped.assign(army_out.size(), 0);
+    anchor_of.assign(army_out.size(), -1);
+    struct Mine { float x, z; int role; int64_t uid; };
+    std::vector<Mine> mine;
+    int64_t top = 0;
+    for (const Rec* u : own) top = std::max<int64_t>(top, u->uid);
+    for (size_t i = first; i < army_out.size(); i++) top = std::max<int64_t>(top, army_out[i].unit);
+    mine_of.assign(size_t(top + 1), -1);
+    member_of.assign(size_t(top + 1), 0);
+    for (size_t i = 0; i < own.size(); i++) {
+        int r = own_rows[i];
+        int role = d.catalog_row[r] >= 0 ? d.role[r] : -1;
+        if (role < 0 || role >= 32 || own[i]->uid < 0) continue;
+        mine_of[size_t(own[i]->uid)] = (int32_t)mine.size();
+        mine.push_back({own[i]->x, own[i]->z, role, own[i]->uid});
+    }
+    auto of = [&](size_t i) -> const Mine& { return mine[size_t(mine_of[size_t(army_out[i].unit)])]; };
+    // The orders, those of one order together, in a fixed order.
+    std::vector<size_t> at;
+    for (size_t i = first; i < army_out.size(); i++)
+        if (army_out[i].unit >= 0 && mine_of[size_t(army_out[i].unit)] >= 0 &&
+            (army_out[i].kind == ZK_ORDER_MOVE || army_out[i].kind == ZK_ORDER_FIGHT || army_out[i].kind == ZK_ORDER_ATTACK))
+            at.push_back(i);
+    auto key = [&](size_t i) {
+        const zk_order_rec& o = army_out[i];
+        return std::make_tuple(o.kind, o.target, o.x, o.z);
+    };
+    std::stable_sort(at.begin(), at.end(), [&](size_t a, size_t b) { return key(a) < key(b); });
+    int32_t stamp = 0;
+    auto cover = [&](auto&& self, std::vector<size_t> m) -> void {
+        if (m.size() < 2) return;
+        uint32_t roles = 0;
+        double sx = 0.0, sz = 0.0;
+        for (size_t i : m) roles |= 1u << of(i).role, sx += of(i).x, sz += of(i).z;
+        const double mx = sx / double(m.size()), mz = sz / double(m.size());
+        size_t anchor = m[0];
+        double best = INFINITY;
+        for (size_t i : m) {
+            double dd = std::hypot(double(of(i).x) - mx, double(of(i).z) - mz);
+            if (dd < best) best = dd, anchor = i;
+        }
+        const double ax = of(anchor).x, az = of(anchor).z;
+        double far = 0.0;
+        for (size_t i : m) far = std::max(far, std::hypot(double(of(i).x) - ax, double(of(i).z) - az));
+        double radius = -1.0;
+        for (double r : d.group_radii)
+            if (r >= far + GROUP_MARGIN) {
+                radius = r;
+                break;
+            }
+        bool clash = radius < 0.0;
+        const zk_order_rec& o = army_out[anchor];
+        auto told = [&](int64_t uid) {     // already on its way there, as `_emit` sees it
+            return (o.kind == K_MOVE || o.kind == K_FIGHT) && size_t(uid) < ordered_kind.size() && ordered_kind[size_t(uid)] == o.kind &&
+                   py_hypot(ordered_x[size_t(uid)] - o.x, ordered_z[size_t(uid)] - o.z) <= REORDER;
+        };
+        std::vector<int64_t> again;
+        if (!clash) {
+            ++stamp;
+            for (size_t i : m) member_of[size_t(army_out[i].unit)] = stamp;
+            for (const Mine& u : mine)
+                if (((roles >> u.role) & 1u) && member_of[size_t(u.uid)] != stamp &&
+                    std::hypot(double(u.x) - ax, double(u.z) - az) <= radius + GROUP_MARGIN) {
+                    if (!told(u.uid)) {
+                        clash = true;
+                        break;
+                    }
+                    again.push_back(u.uid);
+                }
+        }
+        if (!clash) {
+            anchor_of[anchor] = (int32_t)groups.size();
+            groups.push_back({o.unit, roles, float(radius), o.kind, o.x, o.z, o.target});
+            for (size_t i : m) grouped[i] = 1;
+            for (int64_t uid : again) ordered_x[size_t(uid)] = o.x, ordered_z[size_t(uid)] = o.z;
+            return;
+        }
+        double lo_x = INFINITY, hi_x = -INFINITY, lo_z = INFINITY, hi_z = -INFINITY;
+        for (size_t i : m) {
+            lo_x = std::min(lo_x, double(of(i).x)), hi_x = std::max(hi_x, double(of(i).x));
+            lo_z = std::min(lo_z, double(of(i).z)), hi_z = std::max(hi_z, double(of(i).z));
+        }
+        const bool by_x = hi_x - lo_x >= hi_z - lo_z;
+        std::stable_sort(m.begin(), m.end(), [&](size_t a, size_t b) { return by_x ? of(a).x < of(b).x : of(a).z < of(b).z; });
+        const size_t half = m.size() / 2;
+        self(self, std::vector<size_t>(m.begin(), m.begin() + std::ptrdiff_t(half)));
+        self(self, std::vector<size_t>(m.begin() + std::ptrdiff_t(half), m.end()));
+    };
+    for (size_t s = 0; s < at.size();) {
+        size_t e = s + 1;
+        while (e < at.size() && key(at[e]) == key(at[s])) e++;
+        cover(cover, std::vector<size_t>(at.begin() + std::ptrdiff_t(s), at.begin() + std::ptrdiff_t(e)));
+        s = e;
     }
 }
 

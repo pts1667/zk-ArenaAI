@@ -60,6 +60,12 @@ float range_falloff(const zk_weapon_rec& w, float dist) {
     return 1.0f - std::pow(std::min(w.dyn_range, dist) / w.dyn_range, w.dyn_exp);
 }
 
+bool harmless(const zk_weapon_rec& w) {
+    for (float v : w.damage)
+        if (v > 0.0f) return false;
+    return true;
+}
+
 bool hurts_health(const zk_weapon_rec& w) { return !(w.flags & (ZK_W_PARALYZER | ZK_W_SLOW_ONLY | ZK_W_DISARM_ONLY)); }
 
 int flight_frames(const zk_weapon_rec& w, float dist) {
@@ -94,8 +100,9 @@ float World::armor_mult(int u) const {
 
 bool World::in_range(int u, const zk_weapon_rec& w, int t) const {
     const float dx = x[size_t(t)] - x[size_t(u)], dz = z[size_t(t)] - z[size_t(u)];
-    // A jumper in the air may be out of reach of what's right under it: a game's Jack didn't get to use its spike.
-    const float dy = (map->height_at(x[size_t(t)], z[size_t(t)]) + jump_altitude(t) - map->height_at(x[size_t(u)], z[size_t(u)]) - jump_altitude(u)) * w.height_mod;
+    // A jumper in the air may be out of reach of what's right under it: a game's Jack didn't get to use its spike.  So may what flies.
+    const float dy = (map->height_at(x[size_t(t)], z[size_t(t)]) + jump_altitude(t) + flight_height(t) - map->height_at(x[size_t(u)], z[size_t(u)]) -
+                      jump_altitude(u) - flight_height(u)) * w.height_mod;
     const float r2 = w.range * w.range - dy * dy;
     return r2 > 0.0f && dx * dx + dz * dz <= r2;
 }
@@ -182,6 +189,14 @@ void World::pick_targets() {
             // What the unit is attacking goes to its weapons, as long as they can reach it (Weapon.cpp SlowUpdate).
             const UnitAI& a = ai[size_t(u)];
             const int forced = order[size_t(u)] == ZK_ORDER_ATTACK ? order_target[size_t(u)] : a.chasing;
+            // A bomb goes only on what it's sent at, when it would land on it (fire_weapons).  One that does no damage marks a
+            // bomber's target: it starts a run if the unit has one, and otherwise does nothing.
+            if (w.flags & ZK_W_BOMB) {
+                bool runs = !harmless(w);
+                for (int k = 0; k < d.n_mounts; ++k) runs = runs || (cat->weapons[size_t(d.mount_weapon[k])].flags & ZK_W_DROPPED);
+                current = runs && forced >= 0 && alive[size_t(forced)] && (type_of(forced).category & d.mount_only[m]) ? forced : -1;
+                continue;
+            }
             if (forced >= 0 && alive[size_t(forced)] && in_range(u, w, forced) && (type_of(forced).category & d.mount_only[m]) && can_be_aimed_at(side[size_t(u)], forced)) {
                 current = forced;
                 continue;
@@ -224,8 +239,23 @@ void World::fire_one(int u, int slot, int frame_offset) {
         tx += ex;
         tz += ez;
     }
-    const float dist = std::hypot(tx - x[size_t(u)], tz - z[size_t(u)]);
-    const int flight = flight_frames(w, dist);
+    float dist = std::hypot(tx - x[size_t(u)], tz - z[size_t(u)]);
+    int flight = flight_frames(w, dist);
+    if (w.flags & ZK_W_BOMB) {
+        // It lands where the plane's going, steered towards the target by up to an elmo a frame (BombDropper.cpp).
+        const float fall = bomb_fall_frames(u, w, t);
+        float ix = x[size_t(u)] + vx[size_t(u)] * fall, iz = z[size_t(u)] + vz[size_t(u)] * fall;
+        const float cx = tx - ix, cz = tz - iz, off = std::hypot(cx, cz);
+        if (off > 0.0f) {
+            const float steer = std::min(off, fall);
+            ix += cx / off * steer;
+            iz += cz / off * steer;
+        }
+        tx = ix;
+        tz = iz;
+        dist = std::hypot(tx - x[size_t(u)], tz - z[size_t(u)]);
+        flight = int(std::ceil(fall));
+    }
     // Measured from muzzle to where it hits, not centre to centre (the battery's Scorcher duels).
     const float power = range_falloff(w, std::max(0.0f, dist - d.hit_radius - type_of(t).hit_radius));
     const float aim_error = speed[size_t(u)] > STOPPED_SPEED && w.moving_accuracy > 0.0f ? w.moving_accuracy : w.accuracy;
@@ -235,7 +265,7 @@ void World::fire_one(int u, int slot, int frame_offset) {
     for (int p = 0; p < int(w.projectiles); ++p) {
         // Weapons lead with the target's velocity, then add their random error.
         float ax = tx, az = tz;
-        if (w.kind == ZK_WEAPON_PROJECTILE) {
+        if (w.kind == ZK_WEAPON_PROJECTILE && !(w.flags & ZK_W_BOMB)) {
             ax += vx[size_t(t)] * float(flight);
             az += vz[size_t(t)] * float(flight);
         }
@@ -254,7 +284,7 @@ void World::fire_one(int u, int slot, int frame_offset) {
                 az = z[size_t(t)] + nz * reach;
             }
         }
-        Shot s{weapon, u, side[size_t(u)], t, ax, az, w.kind == ZK_WEAPON_GUIDED, (td.flags & ZK_U_AIR) != 0, power, x[size_t(u)], z[size_t(u)], blip};
+        Shot s{weapon, u, side[size_t(u)], t, ax, az, w.kind == ZK_WEAPON_GUIDED, airborne(t), power, x[size_t(u)], z[size_t(u)], blip};
         if (w.kind == ZK_WEAPON_INSTANT) {
             apply_shot(s);
         } else {
@@ -287,7 +317,8 @@ void World::fire_weapons() {
         if (!alive[size_t(u)]) continue;
         const auto& d = type_of(u);
         // Disarm stops the reload as well (unit_attributes.lua reloadMult), and stun doesn't.
-        const bool can_fire = active(u) && !disarmed(u) && !power_off(u);
+        // What flies fires only in the air, and nothing new once its ammo is spent: a salvo it has begun it finishes.
+        const bool can_fire = active(u) && !disarmed(u) && !power_off(u) && (!(d.flags & ZK_U_AIR) || airborne(u));
         UnitAI& a = ai[size_t(u)];
         // turretriot.lua: it overheats, and it cools unless stunned or unfinished.
         if (d.heat_per_shot > 0.0f && active(u)) a.heat = std::max(0.0f, a.heat - d.heat_decay * float(ZK_TICK_FRAMES));
@@ -307,14 +338,23 @@ void World::fire_weapons() {
                         const int t = weapon_target[i];
                         const bool blocked = (w.flags & ZK_W_SCRIPT_BURST) && t >= 0 && alive[size_t(t)] &&
                                              overkill_blocks(u, w, t, flight_frames(w, std::hypot(x[size_t(t)] - x[size_t(u)], z[size_t(t)] - z[size_t(u)])));
-                        if (!blocked && pay_for_shot(u, w)) fire_one(u, m, f);
+                        if (!blocked && pay_for_shot(u, w)) {
+                            if (w.flags & ZK_W_DROPPED)
+                                drop_shot(u, m, f);
+                            else
+                                fire_one(u, m, f);
+                        }
                         --salvo_left[i];
                         salvo_timer[i] = w.salvo_delay;
                     }
-                } else if (cooldown[i] <= 0.0f && weapon_target[i] >= 0 && alive[size_t(weapon_target[i])]) {
-                    if (!in_range(u, w, weapon_target[i])) {
+                } else if (cooldown[i] <= 0.0f && !out_of_ammo(u) && weapon_target[i] >= 0 && alive[size_t(weapon_target[i])]) {
+                    if (w.flags & ZK_W_BOMB) {
+                        if (!bomb_due(u, w, weapon_target[i])) continue;
+                    } else if (!in_range(u, w, weapon_target[i])) {
                         weapon_target[i] = -1;
-                    } else if (faces(u, w, weapon_target[i])) {
+                        continue;
+                    }
+                    if ((w.flags & ZK_W_BOMB) || faces(u, w, weapon_target[i])) {
                         const int t = weapon_target[i];
                         const float apart = std::hypot(x[size_t(t)] - x[size_t(u)], z[size_t(t)] - z[size_t(u)]);
                         // Costs no reload, and it looks again when it next picks a target.
@@ -324,12 +364,17 @@ void World::fire_weapons() {
                             continue;
                         }
                         if (!pay_for_shot(u, w)) continue;
-                        fire_one(u, m, f);
+                        const bool marks = (w.flags & ZK_W_BOMB) && harmless(w);
+                        if (marks)
+                            start_run(u);
+                        else
+                            fire_one(u, m, f);
                         cooldown[i] = w.reload;
                         if (m == tactics_mount) a.ready_frame = frame + f + int(w.reload);
                         if (d.heat_per_shot > 0.0f) a.heat = std::min(1.0f, a.heat + d.heat_per_shot);
-                        salvo_left[i] = int(w.salvo) - 1;
+                        salvo_left[i] = marks ? 0 : int(w.salvo) - 1;
                         salvo_timer[i] = w.salvo_delay;
+                        if (d.ammo > 0) used_ammo(u);
                         // Firing finishes the order (CommandAI.cpp WeaponFired).
                         if ((w.flags & ZK_W_MANUAL) && order[size_t(u)] == ZK_ORDER_MANUAL_FIRE) order[size_t(u)] = ZK_ORDER_NONE;
                         if (d.flags & ZK_U_MISSILE) launch_missile(u);
@@ -390,7 +435,7 @@ void World::explode(int weapon, float px, float pz, int source, int source_side,
     float best = 1e30f;
     for_near(px, pz, radius + BLAST_MARGIN, [&](int u) {
         if (!alive[size_t(u)]) return;
-        if (((type_of(u).flags & ZK_U_AIR) != 0) != air) return;  // no height: a shot hits its own layer
+        if (airborne(u) != air) return;  // no height: a shot hits its own layer, and what's landed is on the ground's
         if (u == source && (w.flags & ZK_W_NO_SELF_DAMAGE)) return;
         if ((w.flags & ZK_W_NO_FRIENDLY_FIRE) && side[size_t(u)] == source_side) return;
         const float dx = x[size_t(u)] - px, dz = z[size_t(u)] - pz;
@@ -426,7 +471,7 @@ void World::burn_areas() {
         FireArea area = areas[i];
         const auto& w = *area.weapon;
         for_near(area.x, area.z, w.area_radius, [&](int u) {
-            if (!alive[size_t(u)] || (type_of(u).flags & ZK_U_AIR)) return;
+            if (!alive[size_t(u)] || airborne(u)) return;
             const float dist = std::hypot(x[size_t(u)] - area.x, z[size_t(u)] - area.z);
             if (dist > w.area_radius) return;
             float amount = area.damage_per_frame;
@@ -502,7 +547,7 @@ void World::pierce(const Shot& s, float px, float pz, float power) {
     hits.clear();
     for_side(1 - s.source_side, ox + ux * reach * 0.5f, oz + uz * reach * 0.5f, reach * 0.5f + BLAST_MARGIN, [&](int u) {
         if (!alive[size_t(u)] || u == s.source) return;
-        if (((type_of(u).flags & ZK_U_AIR) != 0) != s.air) return;
+        if (airborne(u) != s.air) return;
         const float r = type_of(u).hit_radius, dx = x[size_t(u)] - ox, dz = z[size_t(u)] - oz;
         const float along = dx * ux + dz * uz;
         if (along < -r || along > reach + r) return;

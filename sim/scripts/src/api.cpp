@@ -152,6 +152,7 @@ void Seat::reset(const Data* d, const Ground* g, int side_, P2 base_, P2 enemy, 
     waiting_since = 0.0;
     reached_start = false;
     made.assign(d->n_roles, 0);
+    made_air.assign(d->n_roles, 0);
     seen_air = seen_kitable = seen_heavy = false;
     aimed.clear();
     log.clear();
@@ -159,6 +160,7 @@ void Seat::reset(const Data* d, const Ground* g, int side_, P2 base_, P2 enemy, 
     checks_eligible = checks_stalled = 0;
     counts.clear();
     nuke_drawn = -1;
+    second = -2;
     for (double& p : pending) p = -1e9;
     going.clear();
     avoid.clear();
@@ -298,7 +300,7 @@ struct zks_runner {
     std::vector<Seat> seats;
     Pool pool;
     std::vector<int32_t> listed;
-    int total = 0, army_total = 0;
+    int total = 0, army_total = 0, group_total = 0;
     zks_runner(const Data* d, int games, int threads) : data(d), seats(2 * games), pool(std::max(1, threads)) {}
 };
 
@@ -335,14 +337,23 @@ zks_data* zks_data_new(const zks_data_desc* s) {
     d.menu.assign(s->menu, s->menu + (size_t)n * s->n_roles);
     std::memcpy(d.role_ids, s->role_ids, sizeof d.role_ids);
     std::memcpy(d.special, s->special, sizeof d.special);
+    std::memcpy(d.second_factories, s->second_factories, sizeof d.second_factories);
+    std::memcpy(d.group_radii, s->group_radii, sizeof d.group_radii);
     d.cerberus_reach = s->cerberus_reach;
     d.missile_reach = s->missile_reach;
     d.extractor_radius = s->extractor_radius;
     d.n_footings = s->n_footings;
     d.kind.assign(n, -1);
     for (int r = 0; r < n; r++)
-        for (int k = 0; k < 9; k++)
+        for (int k = 0; k < R_COUNT; k++)
             if (d.role_ids[k] >= 0 && d.role[r] == d.role_ids[k]) d.kind[r] = (int8_t)k;
+    // A plant whose fighting units fly (a constructor or scout of either kind doesn't decide it: a strider hub makes Athenas).
+    d.air_plant.assign(n, 0);
+    for (int r = 0; r < n; r++)
+        for (int k = 0; k < d.n_roles; k++) {
+            int u = d.menu[(size_t)r * d.n_roles + k];
+            if (u >= 0 && k != d.role_ids[R_BUILDER] && k != d.role_ids[R_SCOUT] && d.has(u, ZKS_FIGHTS) && d.has(u, ZKS_AIR)) d.air_plant[r] = 1;
+        }
     d.special_of.assign(n, -1);
     for (int k = 0; k < 7; k++)
         if (d.special[k] >= 0) d.special_of[d.special[k]] = (int8_t)k;
@@ -390,7 +401,7 @@ void zks_reset(zks_runner* r, int game, int map, const double* starts, const dou
 }
 
 int zks_step(zks_runner* r, const zks_step_args* a, zk_order_rec* out, int out_cap, int32_t* out_offsets, zk_order_rec* army,
-             int army_cap, int32_t* army_offsets) {
+             int army_cap, int32_t* army_offsets, zk_group_rec* groups, int group_cap, int32_t* group_offsets) {
     int n = a->n;
     r->listed.assign(a->games, a->games + n);
     const Rec* records = (const Rec*)a->records;
@@ -402,7 +413,7 @@ int zks_step(zks_runner* r, const zks_step_args* a, zk_order_rec* out, int out_c
     r->pool.run(2 * n, [&](int s) {
         int g = a->games[s / 2], side = s % 2;
         Seat& seat = r->seats[2 * g + side];
-        seat.army_out.clear(), seat.eco_out.clear();
+        seat.army_out.clear(), seat.eco_out.clear(), seat.groups.clear(), seat.grouped.clear(), seat.anchor_of.clear();
         if (!seat.active) return;
         int d = a->decisions[g];
         Ctx c;
@@ -411,42 +422,63 @@ int zks_step(zks_runner* r, const zks_step_args* a, zk_order_rec* out, int out_c
         c.enemy_frame = records + ((size_t)g * 2 + 1 - side) * a->cap;
         c.enemy_n = a->counts[2 * g + 1 - side];
         c.glob = a->globs + ((size_t)g * 2 + side) * zk::G_COUNT;
+        c.reclaim = a->stats ? a->stats[((size_t)g * 2 + side) * ZK_STATS + 2] : 0.0;
         c.busy = a->busy[s];
         c.seconds = (double)d * a->ticks * a->tick_frames / a->frames_per_second;
         c.army_due = (a->seat_flags[s] & ZKS_SEAT_ARMY) && d % a->script_every == 0;
         c.eco_due = seat.economy && d % a->eco_every == 0;
+        c.groups = a->group_orders != 0;
         if (!c.army_due && !c.eco_due) {
             seat.draws.end_step();
             return;
         }
         seat.run(c);
     });
-    int total = 0, army_total = 0;
+    int total = 0, army_total = 0, group_total = 0;
     for (int s = 0; s < 2 * n; s++) {
         const Seat& seat = r->seats[2 * a->games[s / 2] + s % 2];
-        total += (int)(seat.pre.size() + seat.army_out.size() + seat.post.size() + seat.eco_out.size());
-        army_total += (int)seat.army_out.size();
+        int alone = 0;
+        for (size_t i = 0; i < seat.army_out.size(); i++) alone += !(i < seat.grouped.size() && seat.grouped[i]);
+        total += (int)(seat.pre.size() + seat.post.size() + seat.eco_out.size()) + alone;
+        army_total += alone + 2 * (int)seat.groups.size();
+        group_total += (int)seat.groups.size();
     }
-    r->total = total, r->army_total = army_total;
-    if (total > out_cap || army_total > army_cap) return total;
-    return zks_collect(r, out, out_cap, out_offsets, army, army_cap, army_offsets);
+    r->total = total, r->army_total = army_total, r->group_total = group_total;
+    if (total > out_cap || army_total > army_cap || group_total > group_cap) return total;
+    return zks_collect(r, out, out_cap, out_offsets, army, army_cap, army_offsets, groups, group_cap, group_offsets);
 }
 
 int zks_collect(zks_runner* r, zk_order_rec* out, int out_cap, int32_t* out_offsets, zk_order_rec* army, int army_cap,
-                int32_t* army_offsets) {
-    if (r->total > out_cap || r->army_total > army_cap) return -1;
-    int n = (int)r->listed.size(), o = 0, a = 0;
+                int32_t* army_offsets, zk_group_rec* groups, int group_cap, int32_t* group_offsets) {
+    if (r->total > out_cap || r->army_total > army_cap || r->group_total > group_cap) return -1;
+    int n = (int)r->listed.size(), o = 0, a = 0, g = 0;
     out_offsets[0] = 0;
     army_offsets[0] = 0;
+    group_offsets[0] = 0;
     for (int k = 0; k < n; k++) {
         for (int side = 0; side < 2; side++) {
             const Seat& seat = r->seats[2 * r->listed[k] + side];
-            for (auto* part : {&seat.pre, &seat.army_out, &seat.post, &seat.eco_out})
+            for (const auto& order : seat.pre) out[o++] = order;
+            for (size_t i = 0; i < seat.army_out.size(); i++)
+                if (!(i < seat.grouped.size() && seat.grouped[i])) out[o++] = seat.army_out[i];
+            for (auto* part : {&seat.post, &seat.eco_out})
                 for (const auto& order : *part) out[o++] = order;
-            for (const auto& order : seat.army_out) army[a++] = order;
+            for (size_t i = 0; i < seat.army_out.size(); i++) {
+                const bool in_group = i < seat.grouped.size() && seat.grouped[i];
+                const int anchor = i < seat.anchor_of.size() ? seat.anchor_of[i] : -1;
+                if (!in_group || anchor >= 0) army[a++] = seat.army_out[i];
+                if (anchor >= 0) {
+                    const zk_group_rec& g = seat.groups[size_t(anchor)];
+                    zk_order_rec mark{};
+                    mark.unit = g.anchor, mark.kind = ZKS_GROUP_MARK, mark.x = g.radius, mark.z = 0.0f, mark.target = (int32_t)g.roles;
+                    army[a++] = mark;
+                }
+            }
             army_offsets[2 * k + side + 1] = a;
+            for (const auto& group : seat.groups) groups[g++] = group;
         }
         out_offsets[k + 1] = o;
+        group_offsets[k + 1] = g;
     }
     return o;
 }
@@ -454,6 +486,7 @@ int zks_collect(zks_runner* r, zk_order_rec* out, int out_cap, int32_t* out_offs
 void zks_last_counts(const zks_runner* r, int32_t* counts) {
     counts[0] = r->total;
     counts[1] = r->army_total;
+    counts[2] = r->group_total;
 }
 
 void zks_seat_counts(const zks_runner* r, int32_t* counts) {

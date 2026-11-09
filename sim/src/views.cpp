@@ -13,7 +13,6 @@ constexpr float SIGHT_STEP = 32.0f;          // elmos between samples of the hei
 constexpr float TARGET_HEIGHT = 12.0f;       // how far above the ground a unit can be seen, roughly its middle
 constexpr int BLIP_WINDOW_FRAMES = 60;       // blips.py's SPEED_WINDOW
 constexpr int BLIP_MIN_SPAN_FRAMES = 36;     // ... and 0.6 of it before a track counts
-constexpr float AIR_ALTITUDE = 150.0f;
 constexpr float FRAMES_PER_SECOND = 30.0f;
 constexpr float GRID_CELL = 128.0f;          // as the unit grid and wreck_cells
 
@@ -162,7 +161,7 @@ int World::emit_view(int s, UnitRecord* out, int cap, float* glob, int commander
         r.x = x[i];
         r.z = z[i];
         const bool water_top = d.move_class == 4 || d.move_class == 5 || (d.flags & ZK_U_FLOATS);   // hovers, ships and what floats ride on the water
-        r.y = (water_top ? surface(*map, x[i], z[i]) : map->height_at(x[i], z[i])) + ((d.flags & ZK_U_AIR) ? AIR_ALTITUDE : 0.0f) + jump_altitude(u);
+        r.y = (water_top ? surface(*map, x[i], z[i]) : map->height_at(x[i], z[i])) + flight_height(u) + jump_altitude(u);
         r.vx = vx[i];
         r.vz = vz[i];
         r.hp_frac = hp[i] / d.hp;
@@ -370,6 +369,7 @@ void World::side_stats(int s, float* out) const {
     }
     out[0] = value;
     out[1] = float(units);
+    out[2] = purses[s].reclaim_income;
 }
 
 }  // namespace zk

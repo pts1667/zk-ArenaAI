@@ -5,7 +5,7 @@ function gadget:GetInfo()
 end
 
 local mode = (Spring.GetModOptions() or {}).sim_mode
-local active = mode == "mechanics" or mode == "pierce" or mode == "pierce_slow" or mode == "abilities"
+local active = mode == "mechanics" or mode == "pierce" or mode == "pierce_slow" or mode == "abilities" or mode == "air"
 local SPEED = 40
 local LEAD_IN = 300    -- frames before the first case: commanders exist
 local SAFE = 1500      -- elmos from any other unit
@@ -1677,8 +1677,125 @@ local function abilities()
 	end
 end
 
+-- Aircraft: how each one flies, turns and lands; a bomber's runs, its way back to a pad and its rearming; fighters on a plane;
+-- gunships on something on the ground.  Rows: case, frame, x, y above ground, z, vx, vz, then what the case adds.
+local function air()
+	local TOUGH = 1000000
+	plentyOfEnergy()
+	for _, ud in pairs(UnitDefs) do
+		if ud.canFly then
+			for _, w in ipairs(ud.weapons) do
+				Script.SetWatchWeapon(w.weaponDef, true)
+			end
+		end
+	end
+	local function tough(name, team, dx, dz)
+		local unit = add(name, team, dx, dz)
+		passive(unit)
+		Spring.GiveOrderToUnit(unit, CMD.MOVE_STATE, {0}, 0)
+		Spring.SetUnitMaxHealth(unit, TOUGH)
+		Spring.SetUnitHealth(unit, TOUGH)
+		return unit
+	end
+	local function row(case, f, unit, ...)
+		local x, y, z = Spring.GetUnitPosition(unit)
+		local vx, _, vz = Spring.GetUnitVelocity(unit)
+		log(case, f, x - here.x, y - Spring.GetGroundHeight(x, z), z - here.z, vx, vz, ...)
+	end
+	local function to(unit, command, dx, dz, options)
+		local x, z = here.x + dx, here.z + dz
+		Spring.GiveOrderToUnit(unit, command, {x, Spring.GetGroundHeight(x, z), z}, options or 0)
+	end
+	-- Takes off north, is told at frame 300 to go to a point behind where it started, and gets there; then what it does idle.
+	for _, name in ipairs({"planefighter", "planeheavyfighter", "planesupport", "bomberprec", "bomberriot", "bomberdisarm", "bomberassault",
+	                       "bomberheavy", "planescout", "planelightscout", "planecon", "gunshipraid", "gunshipkrow", "gunshipheavytrans", "athena"}) do
+		local unit = add(name, OWN, 0, 0)
+		passive(unit)
+		to(unit, CMD.MOVE, 0, 1200)
+		for f = 1, 900 do
+			coroutine.yield()
+			if f == 300 then
+				to(unit, CMD.MOVE, 0, -600)
+			end
+			if f % 2 == 0 then
+				row("fly_" .. name, f, unit, Spring.GetUnitCurrentCommand(unit) or 0)
+			end
+		end
+		clear()
+	end
+	-- A bomber told to attack something 1500 north, with a plane factory 400 south of where it starts.
+	shotCounts = {}
+	for _, name in ipairs({"bomberprec", "bomberriot", "bomberdisarm", "bomberheavy", "planesupport", "bomberassault"}) do
+		local pad = add("factoryplane", OWN, 0, -400)
+		local bomber = add(name, OWN, 0, 0)
+		local target = tough("staticradar", FOE, 0, 1500)
+		local spotter = add("cloakcon", OWN, 0, 1300)
+		passive(spotter)
+		wait(5)
+		Spring.GiveOrderToUnit(bomber, CMD.ATTACK, {target}, 0)
+		shotCounts[bomber] = 0
+		for f = 1, 2700 do
+			coroutine.yield()
+			if f % 3 == 0 then
+				row("bomb_" .. name, f, bomber, TOUGH - (Spring.GetUnitHealth(target) or 0), Spring.GetUnitRulesParam(bomber, "noammo") or 0,
+				    shotCounts[bomber] or 0, Spring.GetUnitCurrentCommand(bomber) or 0)
+			end
+		end
+		shotCounts[bomber] = nil
+		clear()
+	end
+	-- Fighters told to attack a plane that flies east and west across in front of them.
+	for _, name in ipairs({"planefighter", "planeheavyfighter"}) do
+		local fighter = add(name, OWN, 0, 0)
+		local plane = add("bomberprec", FOE, 0, 1200)
+		passive(plane)
+		Spring.SetUnitMaxHealth(plane, TOUGH)
+		Spring.SetUnitHealth(plane, TOUGH)
+		to(plane, CMD.MOVE, 1500, 1200)
+		to(plane, CMD.MOVE, -1500, 1200, CMD.OPT_SHIFT)
+		to(plane, CMD.MOVE, 1500, 1200, CMD.OPT_SHIFT)
+		to(plane, CMD.MOVE, -1500, 1200, CMD.OPT_SHIFT)
+		wait(5)
+		Spring.GiveOrderToUnit(fighter, CMD.ATTACK, {plane}, 0)
+		shotCounts[fighter] = 0
+		for f = 1, 1800 do
+			coroutine.yield()
+			if f % 3 == 0 then
+				local px, py, pz = Spring.GetUnitPosition(plane)
+				row("fighter_" .. name, f, fighter, TOUGH - (Spring.GetUnitHealth(plane) or 0), shotCounts[fighter] or 0, px - here.x, pz - here.z)
+			end
+		end
+		shotCounts[fighter] = nil
+		clear()
+	end
+	-- Gunships told to attack something on the ground 1000 north.
+	for _, name in ipairs({"gunshipraid", "gunshipskirm", "gunshipassault", "gunshipheavyskirm", "gunshipemp", "gunshipkrow"}) do
+		local gunship = add(name, OWN, 0, 0)
+		local target = tough("staticradar", FOE, 0, 1000)
+		local spotter = add("cloakcon", OWN, 0, 800)
+		passive(spotter)
+		wait(5)
+		Spring.GiveOrderToUnit(gunship, CMD.ATTACK, {target}, 0)
+		shotCounts[gunship] = 0
+		for f = 1, 900 do
+			coroutine.yield()
+			if f % 3 == 0 then
+				row("gunship_" .. name, f, gunship, TOUGH - (Spring.GetUnitHealth(target) or 0), shotCounts[gunship] or 0)
+			end
+		end
+		shotCounts[gunship] = nil
+		clear()
+	end
+end
+
 local script = coroutine.create(function()
 	wait(LEAD_IN)
+	if mode == "air" then
+		here = findOpenPlace() or findSafePlace()
+		air()
+		Spring.SetGameRulesParam("sim_mechanics_done", 1)
+		return
+	end
 	if mode == "abilities" then
 		here = findOpenPlace() or findSafePlace()
 		abilities()

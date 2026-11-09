@@ -48,6 +48,8 @@ struct StepArgs {
     int n_games = 0;
     const zk_order_rec* orders = nullptr;
     const int* order_offsets = nullptr;
+    const zk_group_rec* groups = nullptr;      // may be null
+    const int* group_offsets = nullptr;
     int ticks = 0;
     UnitRecord* records = nullptr;
     int cap = 0;
@@ -67,6 +69,7 @@ class Batch {
 public:
     const Catalog* cat = nullptr;
     std::vector<Game> games;
+    std::vector<int8_t> role_of_type;     // zk_batch_set_roles: each new game's
 
     Batch(const Catalog* c, int n, int threads_) : cat(c), games(size_t(n)) { set_threads(threads_); }
 
@@ -229,6 +232,8 @@ private:
         World& w = *game.world;
         {
             ZK_PROF(ORDERS);
+            if (a.groups)
+                for (int o = a.group_offsets[i]; o < a.group_offsets[i + 1]; ++o) w.order_group(a.groups[o]);
             for (int o = a.order_offsets[i]; o < a.order_offsets[i + 1]; ++o)
                 if (w.alive[size_t(a.orders[o].unit)]) w.order_unit(a.orders[o].unit, a.orders[o].kind, a.orders[o].x, a.orders[o].z, a.orders[o].target);
         }
@@ -255,13 +260,16 @@ private:
     }
 };
 
-StepArgs step_args(const int* games, int n_games, const zk_order_rec* orders, const int* order_offsets, int ticks, void* records, int cap,
+StepArgs step_args(const int* games, int n_games, const zk_order_rec* orders, const int* order_offsets, const zk_group_rec* groups,
+                   const int* group_offsets, int ticks, void* records, int cap,
                    int* counts, float* globs, float* stats, void* features, int feature_cap, int* feature_counts) {
     StepArgs a;
     a.games = games;
     a.n_games = n_games;
     a.orders = orders;
     a.order_offsets = order_offsets;
+    a.groups = groups;
+    a.group_offsets = group_offsets;
     a.ticks = ticks;
     a.records = static_cast<UnitRecord*>(records);
     a.cap = cap;
@@ -351,6 +359,12 @@ void zk_world_order(void* world, int unit, int kind, float x, float z, int targe
     static_cast<World*>(world)->order_unit(unit, kind, x, z, target);
 }
 
+void zk_world_set_roles(void* world, const int32_t* role_of_type, int n_types) {
+    static_cast<World*>(world)->role_of_type.assign(role_of_type, role_of_type + n_types);
+}
+
+int zk_world_order_group(void* world, const zk_group_rec* group) { return static_cast<World*>(world)->order_group(*group); }
+
 void zk_world_set_hp(void* world, int unit, float hp) { static_cast<World*>(world)->hp[size_t(unit)] = hp; }
 
 void zk_world_step(void* world, int ticks) { static_cast<World*>(world)->step(ticks); }
@@ -413,8 +427,10 @@ void zk_world_get(const void* world, int unit, zk_unit_state* out) {
     {
         const auto& flight = w->jump[u];
         const float bend = 2.0f * flight.at - 1.0f;
-        out->altitude = flight.flying ? (1.0f - bend * bend) * flight.height : w->skid[u].y;
+        out->altitude = flight.flying ? (1.0f - bend * bend) * flight.height : w->skid[u].y + w->air[u].height;
     }
+    out->ammo = w->air[u].ammo;
+    out->air_state = (w->type_of(unit).flags & ZK_U_AIR) ? w->air[u].phase : 0;
     out->skidding = w->skid[u].on;
     out->low_power = w->power_off(unit);
     out->pulling = w->pulling[u];
@@ -497,6 +513,7 @@ void zk_batch_reset(void* batch, int g, const void* map, uint64_t seed, int beha
     auto* b = static_cast<Batch*>(batch);
     Game& game = b->games[size_t(g)];
     game.world = std::make_unique<World>(b->cat, static_cast<const Map*>(map), seed, behaviour);
+    game.world->role_of_type = b->role_of_type;
     for (int i = 0; i < n; ++i) game.world->add(type[i], side[i], x[i], z[i], heading[i], hp_frac[i], build_frac[i]);
     game.world->ready_weapons();
     game.world->ensure_views();
@@ -507,14 +524,26 @@ void zk_batch_reset(void* batch, int g, const void* map, uint64_t seed, int beha
 
 void* zk_batch_world(void* batch, int g) { return static_cast<Batch*>(batch)->games[size_t(g)].world.get(); }
 
-void zk_batch_step(void* batch, const int* games, int n_games, const zk_order_rec* orders, const int* order_offsets, int ticks,
-                   void* records, int cap, int* counts, float* globs, float* stats, void* features, int feature_cap, int* feature_counts) {
-    static_cast<Batch*>(batch)->step(step_args(games, n_games, orders, order_offsets, ticks, records, cap, counts, globs, stats, features, feature_cap, feature_counts));
+void zk_batch_set_roles(void* batch, const int32_t* role_of_type, int n_types) {
+    auto* b = static_cast<Batch*>(batch);
+    b->wait();
+    b->role_of_type.assign(role_of_type, role_of_type + n_types);
+    for (auto& game : b->games)
+        if (game.world) game.world->role_of_type = b->role_of_type;
 }
 
-void zk_batch_step_begin(void* batch, const int* games, int n_games, const zk_order_rec* orders, const int* order_offsets, int ticks,
+void zk_batch_step(void* batch, const int* games, int n_games, const zk_order_rec* orders, const int* order_offsets,
+                   const zk_group_rec* groups, const int* group_offsets, int ticks,
+                   void* records, int cap, int* counts, float* globs, float* stats, void* features, int feature_cap, int* feature_counts) {
+    static_cast<Batch*>(batch)->step(step_args(games, n_games, orders, order_offsets, groups, group_offsets, ticks, records, cap, counts, globs, stats,
+                                               features, feature_cap, feature_counts));
+}
+
+void zk_batch_step_begin(void* batch, const int* games, int n_games, const zk_order_rec* orders, const int* order_offsets,
+                         const zk_group_rec* groups, const int* group_offsets, int ticks,
                          void* records, int cap, int* counts, float* globs, float* stats, void* features, int feature_cap, int* feature_counts) {
-    static_cast<Batch*>(batch)->begin(step_args(games, n_games, orders, order_offsets, ticks, records, cap, counts, globs, stats, features, feature_cap, feature_counts));
+    static_cast<Batch*>(batch)->begin(step_args(games, n_games, orders, order_offsets, groups, group_offsets, ticks, records, cap, counts, globs, stats,
+                                                features, feature_cap, feature_counts));
 }
 
 void zk_batch_step_wait(void* batch) { static_cast<Batch*>(batch)->wait(); }

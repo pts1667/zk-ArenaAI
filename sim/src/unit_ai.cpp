@@ -299,7 +299,8 @@ void World::fight_step(int u) {
         a.line_z = off ? at.z : start.z;
     }
     const Point start{a.line_x, a.line_z}, on_line = closest_on_line(start, end, at);
-    if ((d.flags & ZK_U_ARMED) && a.fire_state >= FIRE_AT_WILL) {
+    // Out of ammo, a plane rearms before it fights on (unit_bomber_command.lua puts REARM before the fight).
+    if ((d.flags & ZK_U_ARMED) && a.fire_state >= FIRE_AT_WILL && !out_of_ammo(u)) {
         const float state = float(a.move_state);
         const int enemy = closest_target(u, on_line.x, on_line.z, d.max_range + FIGHT_SEARCH_PER_STATE * state * state);
         if (enemy >= 0) {
@@ -317,6 +318,8 @@ void World::idle_step(int u) {
     UnitAI& a = ai[size_t(u)];
     const auto& d = type_of(u);
     if (!(d.flags & ZK_U_ARMED) || a.fire_state < FIRE_AT_WILL) return;
+    // A plane that's down, or has no ammo, finds nothing to do: the engine's bombers land and wait (tools/sim_engine.py air).
+    if (out_of_ammo(u) || ((d.flags & ZK_U_AIR) && !airborne(u))) return;
     int enemy = -1;
     for (int m = 0; m < d.n_mounts && enemy < 0; ++m) {
         const int t = weapon_target[size_t(u) * ZK_MAX_MOUNTS + size_t(m)];
@@ -740,6 +743,18 @@ bool World::walk_to_target(int u, int t, float& gx, float& gz) {
     const size_t iu = size_t(u), it = size_t(t);
     if (can_hit_now(u, t)) {
         if (a.move_state == HOLD_POSITION) return false;
+        const auto& d = type_of(u);
+        if (d.flags & ZK_U_STRAFES) {
+            // airStrafe: it circles what it shoots at, a fixed way round (fitted to the engine: tools/sim_engine.py air).  Making for a
+            // point that far round the circle, it cuts inside by the cosine, so the point is out by as much.
+            constexpr float STRAFE_LEAD = 0.5f;     // radians round the circle it aims ahead
+            const float round = std::atan2(x[iu] - x[it], z[iu] - z[it]) + ((u & 1) ? STRAFE_LEAD : -STRAFE_LEAD);
+            const float out = d.strafe_radius / std::cos(STRAFE_LEAD);
+            gx = std::clamp(x[it] + std::sin(round) * out, 0.0f, map->width() - 1.0f);
+            gz = std::clamp(z[it] + std::cos(round) * out, 0.0f, map->depth() - 1.0f);
+            a.speed_limit = d.strafe_speed;
+            return true;
+        }
         constexpr float FOLLOW_FRAMES = 80.0f, FOLLOW_SPEED = 1.1f, MOVING = 0.05f;
         if (speed[it] > MOVING && (x[iu] - x[it]) * vx[it] + (z[iu] - z[it]) * vz[it] < 0.0f) {
             gx = x[iu] + vx[it] * FOLLOW_FRAMES;

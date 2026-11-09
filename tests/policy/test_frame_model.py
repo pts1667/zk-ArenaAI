@@ -25,7 +25,7 @@ SMALL = fm.EncoderConfig(d=32, heads=2, queries=4, rounds=1, z=16)
 @pytest.fixture(scope="module")
 def data(tmp_path_factory):
     out = tmp_path_factory.mktemp("frames")
-    fd.collect(out, script_frames=300, scenario_frames=300, games=24, seed=5, threads=4, script_every=6, frames_per_shard=120)
+    fd.collect(out, script_frames=300, scenario_frames=300, games=24, seed=5, threads=4, script_every=6, frames_per_shard=120, army_frames=300)
     return out
 
 
@@ -303,10 +303,10 @@ def test_probes_count_what_is_on_the_board():
 # Shards -------------------------------------------------------------------------------------------------------------------------------------------------------
 
 
-def test_collected_data_has_both_sources_and_good_links(data):
+def test_collected_data_has_every_source_and_good_links(data):
     manifest = json.loads((data / "manifest.json").read_text(encoding="utf8"))
     assert manifest["maps"] == list(se.TRAINING_MAPS)
-    assert sorted(manifest["frames_per_second"]) == ["scenario", "script"]
+    assert sorted(manifest["frames_per_second"]) == ["army", "scenario", "script"]
     for source, name in enumerate(fd.SOURCES):
         paths = sorted(data.glob(f"{name}-*.npz"))
         assert len(paths) >= 2

@@ -19,9 +19,9 @@ enum { K_MOVE = 1, K_FIGHT = 2, K_ATTACK_UNIT = 3, K_MANUAL_FIRE = 6, K_BUILD = 
 // policy_script.py fighter states
 enum { S_NEW = 0, S_WAITING = 1, S_SENT = 2, S_RETREATING = 3 };
 // Roles the scripts tell apart, in ROLE_ORDER first (policy_mix.py)
-enum { R_RAID, R_RIOT, R_ASSAULT, R_SKIRM, R_ARTY, R_AA, R_SNIPE, R_SCOUT, R_BUILDER, R_COUNT };
-// Special rows; X_FACTORY is a pending slot only
-enum { X_CERBERUS, X_LUCIFER, X_SILO, X_NUKE, X_FUSION, X_PYLON, X_RADAR, X_FACTORY };
+enum { R_RAID, R_RIOT, R_ASSAULT, R_SKIRM, R_ARTY, R_AA, R_SNIPE, R_SCOUT, R_BUILDER, R_BOMB, R_COUNT };
+// Special rows; X_FACTORY and X_SECOND are pending slots only
+enum { X_CERBERUS, X_LUCIFER, X_SILO, X_NUKE, X_FUSION, X_PYLON, X_RADAR, X_FACTORY, X_SECOND };
 
 // The standard army script's knobs (army.cpp): what a seat has when it's given none.
 zks_style standard_style();
@@ -53,10 +53,13 @@ struct Data {
     std::vector<int32_t> catalog_row, role, footing, best_missile, generators, option_offsets, options, menu, row_of_catalog;
     std::vector<int8_t> kind;           // R_* of a row's role, -1 for any other
     std::vector<int8_t> special_of;     // X_* of a row, -1 for none
+    std::vector<uint8_t> air_plant;     // a factory whose fighters fly: the army script has its own mix for those
     std::vector<double> footing_radius;
     int n_roles = 0;
-    int role_ids[9] = {};
+    int role_ids[10] = {};
     int special[7] = {};
+    int second_factories[3] = {};
+    double group_radii[ZKS_GROUP_RADII] = {};
     double cerberus_reach = 0.0, missile_reach = 0.0;
     float extractor_radius = 24.0f;
     int n_footings = 0;
@@ -129,9 +132,11 @@ struct Ctx {
     const Rec* enemy_frame;      // the other side's frame
     int enemy_n;
     const float* glob;           // the seat's
+    double reclaim;              // metal a second of the glob's income that's reclaim
     int64_t busy;
     double seconds;
     bool army_due, eco_due;
+    bool groups;                 // zks_step_args.group_orders
 };
 
 struct Job {
@@ -183,6 +188,7 @@ struct Seat {
     bool reached_start = false;
     // Mix
     std::vector<int32_t> made;
+    std::vector<int32_t> made_air;      // the part of made that flies
     bool seen_air = false, seen_kitable = false, seen_heavy = false;
     // Aimer: own uid -> (target, when)
     struct Aim { int64_t uid, target; double when; };
@@ -195,7 +201,8 @@ struct Seat {
     struct Count { double t; int ours, theirs; };
     std::deque<Count> counts;
     int nuke_drawn = -1;
-    double pending[8] = {};     // by X_*
+    double pending[9] = {};     // by X_*
+    int second = -2;            // the second factory's row, drawn when it's due: -1 for none to be had
     struct Going { int64_t uid; double gx, gz, since, nearest; };
     std::vector<Going> going;
     struct Avoid { int64_t ix, iz; double until; };
@@ -209,6 +216,10 @@ struct Seat {
     std::vector<int64_t> seen;   // sorted
     View view;
     std::vector<zk_order_rec> army_out, eco_out, pre, post;
+    std::vector<zk_group_rec> groups;   // the army script's group orders
+    std::vector<uint8_t> grouped;       // by army_out index: sent in a group order, so not alone
+    std::vector<int32_t> anchor_of;     // by army_out index: the group order it's the anchor of, -1 for none
+    std::vector<int32_t> mine_of, member_of;    // group_plans' scratch, by uid
 
     void reset(const Data* d, const Ground* g, int side, P2 base, P2 enemy, P2 rally, bool economy, bool aimer, uint64_t seed,
                const zks_style* knobs);
@@ -226,6 +237,7 @@ struct Seat {
     void raids(const Ctx& c, std::vector<Fighter>& f, const std::vector<int>& raiders, const std::vector<uint8_t>& retreat,
                const std::vector<P2>& extractors, std::vector<Plan>& plans);
     int nearest(const std::vector<uint8_t>& mask, P2 p, double below = INFINITY) const;
+    void group_plans(const Ctx& c, size_t first);
     void cover(const double* px, const double* pz, int n, double reach, bool armies, std::vector<double>& out,
                std::vector<uint8_t>& heavy) const;
     bool acceptable(int64_t target, double metal, double reach);
@@ -253,6 +265,7 @@ struct Seat {
     Job job(const Ctx& c, int i, const GridOf& grid, bool has_project, int prow, P2 pat, Pass& pass, double income);
     Job energy_job(const Ctx& c, int i, const GridOf& grid, Pass& pass, double income, const std::vector<int>& being, bool force);
     Job factory_job(const Ctx& c, int i, Pass& pass, double income, int by_class, P2 by_at);
+    Job second_factory_job(const Ctx& c, int i, const GridOf& grid, Pass& pass, double income, int by_class, P2 by_at);
     Job radar_job(const Ctx& c, int i, Pass& pass, int by_class, P2 by_at);
     Job link_job(const Ctx& c, int i, const GridOf& grid, Pass& pass);
     Job spot_job(const Ctx& c, int i, Pass& pass);

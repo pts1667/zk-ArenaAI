@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pathlib
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 import torch
@@ -21,14 +21,15 @@ import torch.nn.functional as F
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "bots"))
-from zkbot.policy import featurize as fz, rawframe as rf  # noqa: E402
+from zkbot.policy import actions as act, featurize as fz, groups as gr, rawframe as rf  # noqa: E402
 
 ILLEGAL = -1e9
 NAME_DIM = 16
 ID_DIM = 8                   # each of ally team and player
-KEEP_START = 2.0
+DONE_START = 3.0             # an untrained actor's first action is done more often than not, unless it has 20 units or more
+ALONE_START = 2.0            # an untrained group head mostly sends orders alone
 ROUTE_SCALE_START = -3.0     # softplus gives 0.05 nats per walking second: near regions first, and a far one is still sampled
-HEAD_GAIN = 0.01             # an untrained kind head says only what KEEP_START says
+HEAD_GAIN = 0.01             # an untrained head's weights: it says only what its bias says
 KINDS_WITH_REGION, KINDS_WITH_FINE = fz.KINDS_WITH_REGION, fz.KINDS_WITH_FINE
 
 JOINED_FIELDS = ("unit_x", "unit_name", "unit_ally", "unit_player", "hidden_ally", "hidden_player", "unit_mask", "reg_x", "reg_mask", "site_x", "site_mask", "feat_x", "feat_mask", "glob_x", "tok_kind", "ctrl_mask", "kind_mask", "ptr_enemy",
@@ -258,75 +259,211 @@ class Critic(nn.Module):
 
 @dataclass
 class Actions:
-    kind: torch.Tensor      # B x C
-    enemy: torch.Tensor     # B x C, -1 if unused
-    region: torch.Tensor    # B x C, -1 if unused
-    fine: torch.Tensor      # B x C, -1 if unused
-    produce: torch.Tensor   # B x C, -1 if unused
-    logp: torch.Tensor      # B x C
+    """A decision's actions, B x K: each picks a controllable unit, its anchor (-1 for done, and for every slot after it), and
+    an order for it.  The rest is as the anchor would choose for itself: -1 where a field isn't used, kind KEEP where there's no
+    action.  logp: each action's, 0 after done."""
+    anchor: torch.Tensor
+    kind: torch.Tensor
+    enemy: torch.Tensor
+    region: torch.Tensor
+    fine: torch.Tensor
+    produce: torch.Tensor
+    group: torch.Tensor     # index into groups.GROUP_RADII, -1 alone or unused
+    roles: torch.Tensor     # the group's roles as bits, 0 if none
+    logp: torch.Tensor
 
 
-def sample_actions(actor: nn.Module, b: Batch, units: torch.Tensor, reg_h: torch.Tensor) -> Actions:
-    kind_l, region_l, enemy_l, enemy_h, produce_l = actor.heads(b, units, reg_h)
-    kind = _sample(kind_l)
+def actions_from(fields: dict, device: str) -> Actions:
+    """From numpy arrays of `actions.SLOT_FIELDS` (and logp, or zeros), each B x K."""
+    t = {f: torch.as_tensor(np.asarray(fields[f]), dtype=torch.int64, device=device) for f in act.SLOT_FIELDS}
+    logp = torch.as_tensor(np.asarray(fields["logp"]), dtype=torch.float32, device=device) if "logp" in fields else torch.zeros(t["anchor"].shape, device=device)
+    return Actions(**t, logp=logp)
+
+
+def chosen(a: Actions) -> torch.Tensor:
+    """B x K: the slots that were chosen: every one up to and including done."""
+    return torch.cat((torch.ones_like(a.anchor[:, :1], dtype=torch.bool), a.anchor[:, :-1] >= 0), 1)
+
+
+def role_bits(roles: torch.Tensor, count: int) -> torch.Tensor:
+    """... to ... x count bools."""
+    return ((roles[..., None] >> torch.arange(count, device=roles.device)) & 1).bool()
+
+
+def _bits_logp(logits: torch.Tensor, bits: torch.Tensor, legal: torch.Tensor) -> torch.Tensor:
+    """Each role in or out on its own: the log-probability of these, over the legal roles."""
+    return (torch.where(bits, F.logsigmoid(logits), F.logsigmoid(-logits)) * legal).sum(-1)
+
+
+def _bits_entropy(logits: torch.Tensor, legal: torch.Tensor) -> torch.Tensor:
+    """Mean over the legal roles of each one's entropy."""
+    p = torch.sigmoid(logits)
+    e = -(p * F.logsigmoid(logits) + (1.0 - p) * F.logsigmoid(-logits))
+    return (e * legal).sum(-1) / legal.sum().clamp_min(1)
+
+
+def _groupable(kind: torch.Tensor, on: torch.Tensor) -> torch.Tensor:
+    return torch.isin(kind, torch.tensor(gr.GROUP_KINDS, device=kind.device)) & on
+
+
+def acting_kinds(kind_mask: torch.Tensor) -> torch.Tensor:
+    """What an action may tell a unit: anything legal but keep."""
+    out = kind_mask.clone()
+    out[..., rf.KEEP] = False
+    return out
+
+
+def anchors_legal(b: Batch) -> torch.Tensor:
+    """B x C: the units an action may pick, those that may be told something."""
+    return b.ctrl_mask & acting_kinds(b.kind_mask).any(-1)
+
+
+def per_action(b: Batch, anchor: torch.Tensor) -> Batch:
+    """The batch as each action's anchor sees it: the per-unit masks of the unit each of the K picked, as if they were K units.
+    Only what the heads read is taken; the rest is the batch's own.  An action that picked none (done) is no unit."""
+    i = anchor.clamp_min(0)
+
+    def take(x: torch.Tensor) -> torch.Tensor:
+        return torch.gather(x, 1, i.view(*i.shape, *([1] * (x.dim() - 2))).expand(-1, -1, *x.shape[2:]))
+
+    enemy = torch.gather(b.ptr_enemy, 2, i[:, None, :, None].expand(-1, b.ptr_enemy.shape[1], -1, b.ptr_enemy.shape[3]))
+    return replace(b, ctrl_mask=anchor >= 0, kind_mask=acting_kinds(take(b.kind_mask)), ptr_enemy=enemy, ptr_region=take(b.ptr_region),
+                   ptr_jump=take(b.ptr_jump), ptr_wait=take(b.ptr_wait), ptr_produce=take(b.ptr_produce), route_bias=take(b.route_bias),
+                   unit_x=take(b.unit_x))
+
+
+def _choices(actor: nn.Module, v: Batch, me: torch.Tensor, keys: torch.Tensor, reg_h: torch.Tensor, given: Actions | None = None):
+    """For each action, given its anchor (`per_action`'s v, and what the anchor read, me): a kind, and then what the kind needs.
+    Sampled, or with `given`, those scored.  Returns the choices, each action's log-probability of them, and each head's entropy with
+    the actions it applies to."""
+    def choose(logits: torch.Tensor, field: str) -> torch.Tensor:
+        return _sample(logits) if given is None else getattr(given, field).clamp_min(0)
+
+    kind_l, region_l, enemy_l, enemy_h, produce_l = actor.heads(v, me, keys, reg_h)
+    on = v.ctrl_mask
+    kind = choose(kind_l, "kind")
     logp = _pick(kind_l, kind)
-    uses_region = torch.isin(kind, torch.tensor(KINDS_WITH_REGION, device=kind.device))
-    region_l = region_legal(b, region_l, kind)
-    region = _sample(region_l)
-    logp = logp + uses_region * _pick(region_l, region)
-    # The enemy head per kind: only a kind with an enemy pointer uses one.
-    enemy = torch.full_like(kind, -1)
-    width = reg_h.shape[-1]
-    target = torch.gather(reg_h, 1, region[:, :, None].expand(-1, -1, width))
-    for slot, k in enumerate(fz.ENEMY_POINTER_KINDS):
-        here = (kind == k) & b.ctrl_mask
-        if here.any():
-            choice = _sample(enemy_l[:, slot])
-            logp = logp + here * _pick(enemy_l[:, slot], choice)
-            enemy = torch.where(here, choice, enemy)
-            target = torch.where(here[:, :, None], torch.gather(enemy_h, 1, choice[:, :, None].expand(-1, -1, width)), target)
-    me = units[:, :kind.shape[1]]
-    fine_l = actor.fine(me, target)
-    fine = _sample(fine_l)
-    uses_fine = torch.isin(kind, torch.tensor(KINDS_WITH_FINE, device=kind.device))
-    logp = logp + uses_fine * _pick(fine_l, fine)
-    produce = _sample(produce_l)
-    uses_produce = kind == rf.PRODUCE
-    logp = logp + uses_produce * _pick(produce_l, produce)
-    off = ~b.ctrl_mask
-    return Actions(kind, enemy.masked_fill(off, -1), region.masked_fill(~uses_region | off, -1), fine.masked_fill(~uses_fine | off, -1),
-                   produce.masked_fill(~uses_produce | off, -1), logp.masked_fill(off, 0.0))
-
-
-def evaluate_actions(actor: nn.Module, b: Batch, units: torch.Tensor, reg_h: torch.Tensor, a: Actions) -> tuple[torch.Tensor, dict[str, tuple[torch.Tensor, torch.Tensor]]]:
-    """Log-probability of stored actions, per unit; and each head's entropy with the mask of units it applies to."""
-    kind_l, region_l, enemy_l, enemy_h, produce_l = actor.heads(b, units, reg_h)
-    legal_choices = b.kind_mask.sum(-1) > 1
-    logp = _pick(kind_l, a.kind)
-    ent = {"kind": (_masked_entropy(kind_l), b.ctrl_mask & legal_choices)}
-    region_l = region_legal(b, region_l, a.kind)
-    uses_region = a.region >= 0
-    region = a.region.clamp_min(0)
+    ent = {"kind": (_masked_entropy(kind_l), on & (v.kind_mask.sum(-1) > 1))}
+    uses_region = torch.isin(kind, torch.tensor(KINDS_WITH_REGION, device=kind.device)) & on
+    region_l = region_legal(v, region_l, kind)
+    region = choose(region_l, "region")
     logp = logp + uses_region * _pick(region_l, region)
     ent["region"] = (_masked_entropy(region_l), uses_region)
     width = reg_h.shape[-1]
     target = torch.gather(reg_h, 1, region[:, :, None].expand(-1, -1, width))
-    uses_enemy = a.enemy >= 0
-    enemy = a.enemy.clamp_min(0)
+    # The enemy head per kind: only a kind with an enemy pointer uses one.
+    enemy = torch.full_like(kind, -1)
     enemy_entropy = torch.zeros_like(logp)
     for slot, k in enumerate(fz.ENEMY_POINTER_KINDS):
-        here = (a.kind == k) & uses_enemy
+        here = (kind == k) & on
         if here.any():
-            logp = logp + here * _pick(enemy_l[:, slot], enemy)
+            choice = choose(enemy_l[:, slot], "enemy")
+            logp = logp + here * _pick(enemy_l[:, slot], choice)
+            enemy = torch.where(here, choice, enemy)
             enemy_entropy = torch.where(here, _masked_entropy(enemy_l[:, slot]), enemy_entropy)
-    target = torch.where(uses_enemy[:, :, None], torch.gather(enemy_h, 1, enemy[:, :, None].expand(-1, -1, width)), target)
-    ent["enemy"] = (enemy_entropy, uses_enemy)
-    uses_fine = a.fine >= 0
-    fine_l = actor.fine(units[:, :a.kind.shape[1]], target)
-    logp = logp + uses_fine * _pick(fine_l, a.fine.clamp_min(0))
+            target = torch.where(here[:, :, None], torch.gather(enemy_h, 1, choice[:, :, None].expand(-1, -1, width)), target)
+    ent["enemy"] = (enemy_entropy, enemy >= 0)
+    fine_l = actor.fine(me, target)
+    fine = choose(fine_l, "fine")
+    uses_fine = torch.isin(kind, torch.tensor(KINDS_WITH_FINE, device=kind.device)) & on
+    logp = logp + uses_fine * _pick(fine_l, fine)
     ent["fine"] = (_masked_entropy(fine_l), uses_fine)
-    uses_produce = a.produce >= 0
-    logp = logp + uses_produce * _pick(produce_l, a.produce.clamp_min(0))
+    produce = choose(produce_l, "produce")
+    uses_produce = (kind == rf.PRODUCE) & on
+    logp = logp + uses_produce * _pick(produce_l, produce)
     ent["produce"] = (_masked_entropy(produce_l), uses_produce)
-    return logp.masked_fill(~b.ctrl_mask, 0.0), ent
+    # Alone or as a group order, and then the group's roles.
+    groupable = _groupable(kind, on)
+    group_l = actor.group(me, kind)
+    radius = _sample(group_l) if given is None else (given.group + 1).clamp_min(0)
+    logp = logp + groupable * _pick(group_l, radius)
+    ent["group"] = (_masked_entropy(group_l), groupable)
+    group = torch.where(groupable, radius - 1, -1)
+    roles_l = actor.roles(me, kind, group)
+    legal = actor.choosable_roles
+    if given is None:
+        bits = (torch.rand_like(roles_l) < torch.sigmoid(roles_l)) & legal
+    else:
+        bits = role_bits(given.roles, roles_l.shape[-1])
+    in_group = group >= 0
+    logp = logp + in_group * _bits_logp(roles_l, bits, legal)
+    ent["roles"] = (_bits_entropy(roles_l, legal), in_group)
+    roles = torch.where(in_group, (bits.long() << torch.arange(bits.shape[-1], device=bits.device)).sum(-1), 0)
+    out = {"kind": torch.where(on, kind, rf.KEEP), "enemy": enemy, "region": region.masked_fill(~uses_region, -1),
+           "fine": fine.masked_fill(~uses_fine, -1), "produce": produce.masked_fill(~uses_produce, -1), "group": group, "roles": roles}
+    return out, logp.masked_fill(~on, 0.0), ent
 
+
+def _taken_before(anchor: torch.Tensor, units: int) -> torch.Tensor:
+    """B x K x C: the units actions before each have picked."""
+    hot = F.one_hot(anchor.clamp_min(0), units).bool() & (anchor >= 0)[..., None]
+    return (torch.cumsum(hot.long(), 1) - hot.long()) > 0
+
+
+def sample_actions(actor: nn.Module, b: Batch, ctx, slots: int = act.SLOTS) -> Actions:
+    """A decision's actions, one after another, each reading those before it, until done or `slots` of them."""
+    count, units = b.ctrl_mask.shape
+    device = b.ctrl_mask.device
+    out = {f: torch.full((count, slots), act.UNSET[f], dtype=torch.long, device=device) for f in act.SLOT_FIELDS}
+    logp = torch.zeros(count, slots, device=device)
+    taken = torch.zeros(count, units, dtype=torch.bool, device=device)
+    going = torch.ones(count, dtype=torch.bool, device=device)
+    vectors = ctx.hu.new_zeros(count, 0, ctx.hu.shape[-1])
+    for k in range(slots):
+        h = actor.plan(ctx, vectors)[:, -1:]
+        anchor_l = actor.anchor_logits(b, ctx, h, taken[:, None])
+        pick = _sample(anchor_l)
+        anchor = torch.where(going[:, None], pick - 1, -1)
+        lp = _pick(anchor_l, pick).masked_fill(~going[:, None], 0.0)
+        choice, lp_rest, _ = _choices(actor, per_action(b, anchor), actor.reading(ctx, anchor, h), ctx.keys, ctx.reg_h)
+        out["anchor"][:, k] = anchor[:, 0]
+        for f, value in choice.items():
+            out[f][:, k] = value[:, 0]
+        logp[:, k] = (lp + lp_rest)[:, 0]
+        this = Actions(anchor, **choice, logp=lp)
+        vectors = torch.cat((vectors, actor.action_vectors(b, ctx, this).to(vectors.dtype)), 1)
+        taken = taken | (F.one_hot(anchor[:, 0].clamp_min(0), units).bool() & (anchor >= 0))
+        going = going & (anchor[:, 0] >= 0)
+        if not going.any():
+            break
+    return Actions(**out, logp=logp)
+
+
+def evaluate_actions(actor: nn.Module, b: Batch, ctx, a: Actions, labelled: torch.Tensor | None = None) -> tuple[torch.Tensor, dict[str, tuple[torch.Tensor, torch.Tensor]]]:
+    """Log-probability of stored actions, B x K, 0 past done; and each head's entropy with the actions it applies to.  All the
+    actions at once, each reading those before it, as when they were chosen.
+
+    labelled: B x C, for cloning a decision whose actions came in no order of their own (a script's): an action's anchor then scores
+    as any unit labelled and not yet picked, whichever is next in `a`, and done once they all are."""
+    units = b.ctrl_mask.shape[1]
+    vectors = actor.action_vectors(b, ctx, a)
+    h = actor.plan(ctx, vectors[:, :-1])
+    taken = _taken_before(a.anchor, units)
+    anchor_l = actor.anchor_logits(b, ctx, h, taken)
+    scores = F.log_softmax(anchor_l, -1)
+    logp = scores.gather(-1, (a.anchor + 1)[..., None])[..., 0]
+    if labelled is not None:
+        remaining = labelled[:, None] & ~taken
+        anywhere = torch.logsumexp(scores[..., 1:].masked_fill(~remaining, float("-inf")), -1)
+        logp = torch.where(a.anchor >= 0, anywhere, logp)
+    valid = chosen(a)
+    ent = {"anchor": (_masked_entropy(anchor_l), valid)}
+    _, rest, more = _choices(actor, per_action(b, a.anchor), actor.reading(ctx, a.anchor, h), ctx.keys, ctx.reg_h, given=a)
+    ent.update(more)
+    return (logp + rest).masked_fill(~valid, 0.0), ent
+
+
+def teacher_logits(actor: nn.Module, b: Batch, ctx, a: Actions) -> tuple[torch.Tensor, torch.Tensor]:
+    """The anchor logits (B x K x (1 + C)) and kind logits (B x K x KIND_COUNT) each of the actions had, given those before it, as
+    `evaluate_actions` scores them: for measuring what cloning has learned."""
+    h = actor.plan(ctx, actor.action_vectors(b, ctx, a)[:, :-1])
+    anchor_l = actor.anchor_logits(b, ctx, h, _taken_before(a.anchor, b.ctrl_mask.shape[1]))
+    return anchor_l, actor.heads(per_action(b, a.anchor), actor.reading(ctx, a.anchor, h), ctx.keys, ctx.reg_h)[0]
+
+
+def each_unit_heads(actor: nn.Module, b: Batch, ctx):
+    """The heads' logits for every controllable unit, as if each were the first action's anchor: B x C rows, as `heads` gives them.
+    For looking at what the policy makes of each unit."""
+    anchor = torch.arange(b.ctrl_mask.shape[1], device=b.ctrl_mask.device).expand(b.ctrl_mask.shape).masked_fill(~b.ctrl_mask, -1)
+    h = actor.plan(ctx, ctx.hu.new_zeros(len(anchor), 0, ctx.hu.shape[-1])).expand(-1, anchor.shape[1], -1)
+    return actor.heads(per_action(b, anchor), actor.reading(ctx, anchor, h), ctx.keys, ctx.reg_h)

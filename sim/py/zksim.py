@@ -19,7 +19,7 @@ sys.path.insert(0, str(ROOT / "py"))
 sys.path.insert(0, str(ROOT.parent / "bots"))
 import zknav  # noqa: E402
 from zkbot.policy import rawframe  # noqa: E402
-ABI_VERSION = 15
+ABI_VERSION = 17
 MAX_MOUNTS = 8
 TICK_FRAMES = 5
 FRAMES_PER_SECOND = 30
@@ -29,10 +29,10 @@ ORDER_NONE, ORDER_MOVE, ORDER_FIGHT, ORDER_ATTACK, ORDER_MANUAL_FIRE, ORDER_JUMP
 ORDER_BUILD, ORDER_ASSIST, ORDER_RECLAIM, ORDER_PRODUCE, ORDER_MOVE_STATE, ORDER_FIRE_STATE, ORDER_UNIT_AI, ORDER_SELF_DESTRUCT = 10, 11, 13, 14, 15, 16, 17, 18
 ORDER_PLACE_BEACON, ORDER_WAIT_AT_BEACON, ORDER_ON_OFF = 19, 20, 21
 MOBILE, AIR, ARMED, FIREPROOF, FACTORY, PLOPPABLE, COMMANDER, CAN_CLOAK, STARTS_CLOAKED, FIRES_CLOAKED, AREA_CLOAK_ON, LEAVES_GHOST, KAMIKAZE_BLIND, FLOATS = 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192
-MISSILE, NEUTRAL = 16384, 32768
+MISSILE, NEUTRAL, PLANE, LANDS, STRAFES = 16384, 32768, 65536, 131072, 262144
 FEATURES_PER_SIDE = 256             # records a frame can hold: more than is in sight in any game looked at
 W_TURRET, W_NO_AUTO_TARGET, W_MANUAL, W_UNMODELLED = 2, 16, 512, 2048
-W_PIERCES, W_ONE_HIT_EACH, W_THROWS = 524288, 1048576, 2097152
+W_PIERCES, W_ONE_HIT_EACH, W_THROWS, W_BOMB, W_DROPPED = 524288, 1048576, 2097152, 4194304, 8388608
 
 
 class WeaponRec(ct.Structure):
@@ -46,7 +46,7 @@ class WeaponRec(ct.Structure):
         "area_dps", "area_radius", "area_plateau", "area_range_fall", "area_plateau_fall", "area_time_fall", "area_frames",
         "burn_frames", "burn_random", "burn_chance", "burn_damage",
         "okp_damage", "okp_frames", "okp_full_frames", "okp_hit_mod", "okp_min_range", "okp_fast_mult", "okp_radar_mult",
-        "radar_wobble_penalty", "radar_dot_penalty", "impulse")] + [(n, ct.c_int32) for n in (
+        "radar_wobble_penalty", "radar_dot_penalty", "impulse", "gravity")] + [(n, ct.c_int32) for n in (
             "kind", "flags", "shield_intercept", "intercepted_by")]
 
 
@@ -58,9 +58,10 @@ class TypeRec(ct.Structure):
         "metal_cost", "energy_cost", "build_time", "build_speed", "build_range", "metal_make", "energy_make", "extract_mult", "pylon_range",
         "reclaim_speed", "wreck_metal", "wreck_hp", "heap_metal", "heap_hp", "energy_upkeep", "stockpile_cost", "close_frames",
         "cloak_cost", "cloak_cost_moving", "decloak_distance", "bestowed_decloak", "area_cloak_radius", "area_cloak_upkeep",
-        "perceived_range", "heat_per_shot", "heat_decay", "heat_max_slow", "heat_initial", "bait_cost", "kamikaze_distance", "detonate_reach", "drop_height", "drop_gravity", "jump_range", "jump_speed", "jump_height", "jump_reload", "jump_delay", "burrow_speed", "mass", "push_scale", "needed_link", "throw_radius", "teleport_rate", "beacon_frames")] + [(n, ct.c_int32) for n in (
+        "perceived_range", "heat_per_shot", "heat_decay", "heat_max_slow", "heat_initial", "bait_cost", "kamikaze_distance", "detonate_reach", "drop_height", "drop_gravity", "jump_range", "jump_speed", "jump_height", "jump_reload", "jump_delay", "burrow_speed", "mass", "push_scale", "needed_link", "throw_radius", "teleport_rate", "beacon_frames",
+        "cruise_height", "vertical_speed", "turn_speed", "strafe_radius", "strafe_speed", "reammo_frames", "reammo_energy", "pad_bp")] + [(n, ct.c_int32) for n in (
             "move_state", "fire_state", "no_chase", "bait_level", "bait_target", "bait_target_armor",
-            "def_id", "wreck_feature", "heap_feature", "armor_class", "move_class", "category", "flags", "explode_weapon", "n_mounts", "landing_weapon", "drop_weapon", "missile_pads", "beacon_type")] + [
+            "def_id", "wreck_feature", "heap_feature", "armor_class", "move_class", "category", "flags", "explode_weapon", "n_mounts", "landing_weapon", "drop_weapon", "missile_pads", "beacon_type", "ammo", "pad_count")] + [
         ("mount_weapon", ct.c_int32 * MAX_MOUNTS), ("mount_only", ct.c_int32 * MAX_MOUNTS),
         ("mount_bad", ct.c_int32 * MAX_MOUNTS)]
 
@@ -77,7 +78,7 @@ class TacticsRec(ct.Structure):
 class UnitState(ct.Structure):
     _fields_ = [(n, ct.c_float) for n in (
         "x", "z", "vx", "vz", "heading", "speed", "hp", "damage_taken", "para", "shield", "disarm", "build", "heat", "jump_charge", "altitude")] + [
-        (n, ct.c_int32) for n in ("alive", "order", "target", "stock", "cloaked", "chasing", "dodging", "shots_fired", "jumping", "skidding", "low_power", "deployed", "beacon", "pulling")]
+        (n, ct.c_int32) for n in ("alive", "order", "target", "stock", "cloaked", "chasing", "dodging", "shots_fired", "jumping", "skidding", "low_power", "deployed", "beacon", "pulling", "ammo", "air_state")]
 
 
 def _load_library() -> ct.CDLL:
@@ -123,11 +124,14 @@ def _load_library() -> ct.CDLL:
     lib.zk_batch_reset.argtypes = [vp, it, cvp, ct.c_uint64, it, it, ip, ip, fp, fp, fp, fp, fp, ip, fp]
     lib.zk_batch_world.restype = vp
     lib.zk_batch_world.argtypes = [vp, it]
-    lib.zk_batch_step.argtypes = [vp, ip, it, vp, ip, it, vp, it, ip, fp, fp, vp, it, ip]
-    if hasattr(lib, "zk_batch_step_begin"):     # older builds step only whole
-        lib.zk_batch_step_begin.argtypes = [vp, ip, it, vp, ip, it, vp, it, ip, fp, fp, vp, it, ip]
-        lib.zk_batch_step_wait.argtypes = [vp]
-        lib.zk_batch_set_threads.argtypes = [vp, it]
+    lib.zk_batch_step.argtypes = [vp, ip, it, vp, ip, vp, ip, it, vp, it, ip, fp, fp, vp, it, ip]
+    lib.zk_batch_step_begin.argtypes = [vp, ip, it, vp, ip, vp, ip, it, vp, it, ip, fp, fp, vp, it, ip]
+    lib.zk_batch_step_wait.argtypes = [vp]
+    lib.zk_batch_set_roles.argtypes = [vp, ip, it]
+    lib.zk_world_set_roles.argtypes = [vp, ip, it]
+    lib.zk_world_order_group.argtypes = [vp, vp]
+    lib.zk_world_order_group.restype = it
+    lib.zk_batch_set_threads.argtypes = [vp, it]
     lib.zk_replay.argtypes = [cvp, ct.POINTER(vp), ip, it, ip, ip, ip, fp, fp, fp, fp, ct.POINTER(ct.c_uint8), it,
                               ct.c_uint64, ip, it, it, it, fp]
     if lib.zk_abi_version() != ABI_VERSION:
@@ -338,6 +342,17 @@ class World:
     def place_beacon(self, unit: int, x: float, z: float) -> None:
         _lib.zk_world_order(self.handle, unit, ORDER_PLACE_BEACON, x, z, -1)
 
+    def set_roles(self, role_of_type: np.ndarray) -> None:
+        """Each catalog type's role, 0 to 31, or -1 for none: what group orders select by."""
+        roles = np.require(role_of_type, np.int32, "C")
+        _lib.zk_world_set_roles(self.handle, _ints(roles), len(roles))
+
+    def order_group(self, anchor: int, roles: int, radius: float, kind: int, x: float = 0.0, z: float = 0.0, target: int = -1) -> int:
+        """One order to the anchor and each other mobile, finished unit of its side of a role in the `roles` bits within `radius` of it.
+        Returns how many it went to."""
+        g = np.array([(anchor, roles, radius, kind, x, z, target)], GROUP_DTYPE)
+        return _lib.zk_world_order_group(self.handle, g.ctypes.data)
+
     def wait_at_beacon(self, unit: int, beacon: int) -> None:
         """beacon: it, or the teleporter it belongs to."""
         _lib.zk_world_order(self.handle, unit, ORDER_WAIT_AT_BEACON, 0.0, 0.0, beacon)
@@ -407,7 +422,9 @@ class World:
 
 
 ORDER_DTYPE = np.dtype([("unit", "i4"), ("kind", "i4"), ("x", "f4"), ("z", "f4"), ("target", "i4")], align=True)
-STATS = 2      # per side: tracked value, live units
+# capi.h zk_group_rec: one order to the anchor and every unit of its side that's mobile and finished, of a role in `roles`, within `radius` of it
+GROUP_DTYPE = np.dtype([("anchor", "i4"), ("roles", "u4"), ("radius", "f4"), ("kind", "i4"), ("x", "f4"), ("z", "f4"), ("target", "i4")], align=True)
+STATS = 3      # per side: tracked value, live units, metal a second from reclaim
 
 
 class Batch:
@@ -456,26 +473,37 @@ class Batch:
         for x, z, metal, hp, radius, feature_def in features:
             _lib.zk_world_add_feature(world, x, z, metal, hp, radius, int(feature_def))
 
-    def _step_args(self, orders, order_offsets, games, ticks) -> tuple:
+    def _step_args(self, orders, order_offsets, games, ticks, groups, group_offsets) -> tuple:
         listed = self.positions if games is None else np.require(games, np.int32, "C")
         if orders is None:
             orders = np.zeros(0, ORDER_DTYPE)
             order_offsets = np.zeros(len(listed) + 1, np.int32)
         orders, order_offsets = np.require(orders, ORDER_DTYPE, "C"), np.require(order_offsets, np.int32, "C")
-        call = (self.handle, _ints(listed), len(listed), orders.ctypes.data, _ints(order_offsets), ticks,
+        if groups is not None:
+            groups, group_offsets = np.require(groups, GROUP_DTYPE, "C"), np.require(group_offsets, np.int32, "C")
+        call = (self.handle, _ints(listed), len(listed), orders.ctypes.data, _ints(order_offsets),
+                None if groups is None else groups.ctypes.data, None if groups is None else _ints(group_offsets), ticks,
                 self.records.ctypes.data, self.cap, _ints(self.counts), _floats(self.globs), _floats(self.stats),
                 self.features.ctypes.data, FEATURES_PER_SIDE, _ints(self.feature_counts))
-        return call, (listed, orders, order_offsets)
+        return call, (listed, orders, order_offsets, groups, group_offsets)
 
-    def step(self, orders: np.ndarray | None = None, order_offsets: np.ndarray | None = None, games: np.ndarray | None = None, ticks: int = 3) -> None:
-        """orders: ORDER_DTYPE, grouped by listed game; order_offsets: where each listed game's begin, plus the end."""
-        call, _keep = self._step_args(orders, order_offsets, games, ticks)
+    def step(self, orders: np.ndarray | None = None, order_offsets: np.ndarray | None = None, games: np.ndarray | None = None, ticks: int = 3,
+             groups: np.ndarray | None = None, group_offsets: np.ndarray | None = None) -> None:
+        """orders: ORDER_DTYPE, grouped by listed game; order_offsets: where each listed game's begin, plus the end.  groups, group_offsets:
+        GROUP_DTYPE group orders likewise, which go before a game's unit orders."""
+        call, _keep = self._step_args(orders, order_offsets, games, ticks, groups, group_offsets)
         _lib.zk_batch_step(*call)
 
-    def step_begin(self, orders: np.ndarray | None = None, order_offsets: np.ndarray | None = None, games: np.ndarray | None = None, ticks: int = 3) -> None:
+    def step_begin(self, orders: np.ndarray | None = None, order_offsets: np.ndarray | None = None, games: np.ndarray | None = None, ticks: int = 3,
+                   groups: np.ndarray | None = None, group_offsets: np.ndarray | None = None) -> None:
         """`step`, on the batch's threads while this returns at once.  The frames are being written until `step_wait`."""
-        call, self._in_flight = self._step_args(orders, order_offsets, games, ticks)
+        call, self._in_flight = self._step_args(orders, order_offsets, games, ticks, groups, group_offsets)
         _lib.zk_batch_step_begin(*call)
+
+    def set_roles(self, role_of_type: np.ndarray) -> None:
+        """Each catalog type's role, 0 to 31, or -1 for none: what group orders select by, in every game from now on."""
+        roles = np.require(role_of_type, np.int32, "C")
+        _lib.zk_batch_set_roles(self.handle, _ints(roles), len(roles))
 
     def step_wait(self) -> None:
         _lib.zk_batch_step_wait(self.handle)
@@ -487,7 +515,7 @@ class Batch:
     def refresh(self, game: int) -> None:
         """This game's frames, in place, without stepping: after a reset, while the rest of the batch stays as it was."""
         empty = np.zeros(1, ORDER_DTYPE)
-        _lib.zk_batch_step(self.handle, _ints(self.positions[game:game + 1]), 1, empty.ctypes.data, _ints(np.zeros(2, np.int32)), 0,
+        _lib.zk_batch_step(self.handle, _ints(self.positions[game:game + 1]), 1, empty.ctypes.data, _ints(np.zeros(2, np.int32)), None, None, 0,
                            self.records[game:].ctypes.data, self.cap, _ints(self.counts[game:]), _floats(self.globs[game:]), _floats(self.stats[game:]),
                            self.features[game:].ctypes.data, FEATURES_PER_SIDE, _ints(self.feature_counts[game:]))
 

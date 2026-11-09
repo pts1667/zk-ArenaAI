@@ -12,18 +12,24 @@ tools/policy_train.py (PPO):
   far back.  Its action tokens say what the policy chose at that frame; they attend to that frame's latent tokens and everything before, so a decision never sees its own
   choice, and the next frame's does.  One forward pass over a run of frames gives every decision in it, and training takes a segment of decisions at once, from the latents
   kept at collection and the actions taken.  Nothing is unrolled: what's kept between decisions is each frame before's latents and action tokens.
-* **Action tokens** (`action_tokens`): each own unit that was told something other than keep becomes a vector of what it is (its raw features' embedding), the kind, and
-  what it was pointed at (an enemy's or a region's key, a fine option, a type to make).  `ACTION_TOKENS` learned queries read those, with one learned "nothing" always
-  there to read, and a count of how many acted.  So a frame where the policy kept everything has action tokens too, which say so.  They're the policy's own choices only:
-  the economy script's orders and the opening's aren't, and show only in the frames, as each unit's order.  In cloning, they're the script's labels.
+* **It acts as a player does, one order after another** (2026-11-08, after Pluto): a decision is up to `actions.SLOTS` actions, then done.  Each picks a unit, its
+  anchor, and an order for it, which may go as a group order to the units about it (zkbot.policy.groups).  A small decoder (`plan`) reads the frame and the actions
+  already chosen at this decision, so each action knows what the others before it did; its anchor then reads the frame for itself (`reading`), and the heads choose
+  the order as they did when every unit chose its own.  A unit no action picks keeps what it's doing.
+* **Action tokens** (`action_tokens`): each action becomes a vector of who it picked (its raw features' embedding), the kind, and what it was pointed at (an enemy's
+  or a region's key, a fine option, a type to make), and for a group order its radius and roles (`action_vectors`, which the decoder reads too).  `ACTION_TOKENS`
+  learned queries read those, with one learned "nothing" always there to read, and a count of how many there were.  So a frame where the policy did nothing has
+  action tokens too, which say so.  They're the policy's own choices only: the economy script's orders and the opening's aren't, and show only in the frames, as each
+  unit's order.  In cloning, they're the script's labels.
 * **It's exact in play as in training.**  With a window of W frames a layer reaches W - 1 frames further back, so a decision depends on `reach` = LAYERS x (W - 1) frames
   before it, and play keeps those; a segment in training starts from the same frames.  Frames from before the game began are a learned embedding.
-* **Each own unit reads what that made for its frame,** with a query of its own raw features, so it knows exactly where it is and what it is.
+* **An action's anchor reads what that made for its frame,** with a query of its own raw features and what the action is about, so it knows exactly where it is
+  and what it is.
 * **Pointers score against embeddings of the raw features** of what they point at, so a target's exact place is there for the choosing, whatever the latent blurred.
 * **A key ends in sine codes of its place,** and a pointer's query ends in those of the unit's own, each band scaled by a gain the unit chooses.  Their dot product is then
   a sum over bands of gain x cos(band x (difference in place)): a learned function of how far away and in which direction, which a dot product of raw coordinates can't give.
 
-`units` from `read` is B x U x (D + KEY): each token's reading, 0 for those that didn't read, then its key, in one tensor.
+`context` gives what every action of a decision reads (`Context`): the frame as the sequence left it, every unit's raw embedding and key, and the regions' keys.
 
 What a seat keeps between decisions (`initial_state`, `decide`) is B x reach x RECORD per frame, newest first: the frame's latents, then its action tokens, flat, so the
 trainer's state handling doesn't change.  `decide` leaves the newest frame's action tokens empty; once actions are chosen, `acted` fills them in.
@@ -33,6 +39,7 @@ from __future__ import annotations
 import math
 import pathlib
 import sys
+from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
@@ -44,9 +51,9 @@ sys.path.insert(0, str(ROOT / "bots"))
 import policy_model as pm  # noqa: E402
 from frame_model import CrossBlock  # noqa: E402
 from frame_vae import LatentEncoder, load_vae  # noqa: E402
-from zkbot.policy import featurize as fz, rawframe as rf, tables  # noqa: E402
+from zkbot.policy import actions as act, featurize as fz, groups as gr, rawframe as rf, tables  # noqa: E402
 
-ENCODER = "/mnt/d/zk-learned/runs/encoder-questions/final/vae-last.pt"     # the frozen frame encoder it reads
+ENCODER = "/mnt/d/zk-learned/runs/encoder-big/final/vae-last.pt"     # the frozen frame encoder it reads (03-training.md 11.17)
 D = 128
 HEADS = 4
 LAYERS = 2
@@ -57,6 +64,7 @@ UNIT_PLACE = (fz._I, fz._I + 2)
 REGION_PLACE = (0, 2)
 WINDOW_SECONDS = 8.0        # how far back a frame's tokens attend, in each layer
 ACTION_TOKENS = 4           # what the policy did at a frame, as tokens after that frame's
+PLAN_LAYERS = 2             # of the decoder that chooses a decision's actions one after another
 DECISIONS_A_SECOND = 2.0    # at decide_every 1
 
 
@@ -99,6 +107,42 @@ class TimeBlock(nn.Module):
         return x + self.ff2(F.gelu(self.ff1(self.ln2(x)), approximate="tanh"))
 
 
+class PlanBlock(nn.Module):
+    """A decoder block: each action's slot reads the frame and the slots up to its own."""
+
+    def __init__(self, d: int, heads: int):
+        super().__init__()
+        self.heads = heads
+        self.ln_q = nn.LayerNorm(d)
+        self.ln_t = nn.LayerNorm(d)
+        self.q = nn.Linear(d, d)
+        self.kv = nn.Linear(d, 2 * d)
+        self.out = nn.Linear(d, d)
+        self.ln2 = nn.LayerNorm(d)
+        self.ff1 = nn.Linear(d, 4 * d)
+        self.ff2 = nn.Linear(4 * d, d)
+
+    def forward(self, x: torch.Tensor, frame: torch.Tensor) -> torch.Tensor:
+        b, count, d = x.shape
+        split = lambda t: t.view(b, t.shape[1], self.heads, d // self.heads).transpose(1, 2)  # noqa: E731
+        k, v = self.kv(torch.cat((self.ln_t(frame), self.ln_q(x)), 1)).chunk(2, -1)
+        earlier = torch.ones(count, count, dtype=torch.bool, device=x.device).tril()
+        seen = torch.cat((torch.ones(count, frame.shape[1], dtype=torch.bool, device=x.device), earlier), 1)
+        o = F.scaled_dot_product_attention(split(self.q(self.ln_q(x))), split(k), split(v), attn_mask=seen)
+        x = x + self.out(o.transpose(1, 2).reshape(b, count, d))
+        return x + self.ff2(F.gelu(self.ff1(self.ln2(x)), approximate="tanh"))
+
+
+@dataclass
+class Context:
+    """What a decision's actions read: the frame as the sequence left it (B x tokens x D), every unit token's raw embedding (B x U x D)
+    and key (B x U x KEY), and the regions' keys (B x R x KEY)."""
+    now: torch.Tensor
+    hu: torch.Tensor
+    keys: torch.Tensor
+    reg_h: torch.Tensor
+
+
 class LatentActor(nn.Module):
     def __init__(self, vocabulary: int, encoder: LatentEncoder, window: int = window_frames()):
         super().__init__()
@@ -120,6 +164,14 @@ class LatentActor(nn.Module):
         self.unit_in1 = nn.Linear(D, D)
         self.reg_in = nn.Linear(fz.REGION_DIM + CODE, D)
         self.read_unit = CrossBlock(D, HEADS)
+        # A decision's actions, one after another: a slot reads the frame and the actions before it, and picks a unit or done.
+        self.plan_start = nn.Parameter(torch.randn(1, D) / math.sqrt(D))
+        self.plan_slots = nn.Parameter(torch.randn(act.SLOTS, D) / math.sqrt(D))
+        self.plan_blocks = nn.ModuleList(PlanBlock(D, HEADS) for _ in range(PLAN_LAYERS))
+        self.plan_ln = nn.LayerNorm(D)
+        self.q_anchor = nn.Linear(D, KEY)
+        self.head_done = nn.Linear(D, 1)
+        self.slot_unit = nn.Linear(D, D)        # what the action is about, in its anchor's query
         self.key_unit = nn.Linear(D, D)
         self.key_region = nn.Linear(D, D)
         self.head_kind = nn.Linear(D, rf.KIND_COUNT)
@@ -133,6 +185,14 @@ class LatentActor(nn.Module):
         self.register_buffer("produce_stats", torch.from_numpy(table.stats[table.producible].copy()), persistent=False)
         self.fine0 = nn.Linear(D + KEY, D)
         self.fine1 = nn.Linear(D, fz.FINE_OPTIONS)
+        # Group orders (zkbot.policy.groups): alone or which radius, by the unit and its kind; then which roles, by the radius too.
+        roles = len(gr.roles()[0])
+        self.register_buffer("choosable_roles", torch.tensor([bool((gr.choosable() >> r) & 1) for r in range(roles)]), persistent=False)
+        self.group_kind = nn.Embedding(rf.KIND_COUNT, D)
+        self.group0 = nn.Linear(D, D)
+        self.group1 = nn.Linear(D, len(gr.GROUP_RADII) + 1)
+        self.group_radius = nn.Embedding(len(gr.GROUP_RADII) + 1, D)
+        self.roles1 = nn.Linear(D, roles)
         # What was done: a vector per unit that acted, read by learned queries.
         self.act_kind = nn.Embedding(rf.KIND_COUNT, D)
         self.act_unit = nn.Linear(D, D)
@@ -140,16 +200,20 @@ class LatentActor(nn.Module):
         self.act_region = nn.Linear(KEY, D)
         self.act_fine = nn.Embedding(fz.FINE_OPTIONS + 1, D)
         self.act_type = nn.Linear(tables.TYPE_DIM, D)
+        self.act_group = nn.Embedding(len(gr.GROUP_RADII) + 1, D)
+        self.act_roles = nn.Linear(roles, D)
         self.act_out = nn.Linear(D, D)
         self.act_nothing = nn.Parameter(torch.randn(1, D) / math.sqrt(D))
         self.act_queries = nn.Parameter(torch.randn(ACTION_TOKENS, D) / math.sqrt(D))
         self.act_count = nn.Linear(1, D)
         self.act_read = CrossBlock(D, HEADS)
         self.route_scale = nn.Parameter(torch.tensor(pm.ROUTE_SCALE_START))
-        nn.init.normal_(self.head_kind.weight, std=pm.HEAD_GAIN / math.sqrt(D))
-        nn.init.zeros_(self.head_kind.bias)
+        for head in (self.head_kind, self.group1, self.head_done):
+            nn.init.normal_(head.weight, std=pm.HEAD_GAIN / math.sqrt(D))
+            nn.init.zeros_(head.bias)
         with torch.no_grad():
-            self.head_kind.bias[rf.KEEP] = pm.KEEP_START
+            self.group1.bias[0] = pm.ALONE_START
+            self.head_done.bias[0] = pm.DONE_START
 
     def code(self, place: torch.Tensor) -> torch.Tensor:
         """... x 2 to ... x CODE: every sine, then every cosine."""
@@ -194,17 +258,17 @@ class LatentActor(nn.Module):
         return torch.zeros(seats, self.reach, self.record, device=device), torch.zeros(seats, self.reach, device=device)
 
     def decide(self, b, history: torch.Tensor, seen: torch.Tensor):
-        """A decision while playing.  Returns what the heads read, what to keep for next time, and what training will need of this decision.
-        The newest frame's action tokens in what's kept are empty until `acted`."""
+        """A decision while playing.  Returns what its actions read (`Context`), what to keep for next time, and what training will need
+        of this decision.  The newest frame's action tokens in what's kept are empty until `acted`."""
         now = self.encoder(b).float()
         latents, acted = self._unpack(history)
         frames = torch.cat((latents.flip(1), now[:, None]), 1)
         acts = torch.cat((acted.flip(1), torch.zeros_like(acted[:, :1])), 1)
         present = torch.cat((seen.flip(1), torch.ones_like(seen[:, :1])), 1) > 0.5
-        units, reg_h = self.read(b, self.sequence(frames, present, acts, newest_only=True)[:, -1])
+        ctx = self.context(b, self.sequence(frames, present, acts, newest_only=True)[:, -1])
         newest = torch.cat((now.flatten(1), torch.zeros(len(now), ACTION_TOKENS * D, device=now.device)), 1)
         kept = torch.cat((newest[:, None], history[:, :-1]), 1), torch.cat((torch.ones_like(seen[:, :1]), seen[:, :-1]), 1)
-        return units, reg_h, *kept, {"latents": now}
+        return ctx, *kept, {"latents": now}
 
     def acted(self, b, a: pm.Actions, history: torch.Tensor) -> torch.Tensor:
         """What `decide` kept, with what was just done filled in as the newest frame's action tokens."""
@@ -236,22 +300,29 @@ class LatentActor(nn.Module):
 
     # What was done ----------------------------------------------------------------------------------------------------------------------------------
 
-    def action_tokens(self, b, a: pm.Actions) -> torch.Tensor:
-        """B x ACTION_TOKENS x D: what each decision's units were told, as `sequence` reads it.  Keep is nothing."""
-        hu, keys, reg_h = self._raw(b)
-        count = b.kind_mask.shape[1]
-        kind = a.kind[:, :count]
-        acting = b.ctrl_mask & (kind != rf.KEEP)
-        e = self.act_kind(kind.clamp(0, rf.KIND_COUNT - 1)) + self.act_unit(hu[:, :count])
+    def action_vectors(self, b, ctx: Context | None, a: pm.Actions) -> torch.Tensor:
+        """B x K x D: each action as a vector, of who it picked and what it told them.  Those that picked none are no action: their
+        vectors are there, and the readers leave them out."""
+        hu, keys, reg_h = (ctx.hu, ctx.keys, ctx.reg_h) if ctx is not None else self._raw(b)
+        at = a.anchor.clamp_min(0)
+        e = self.act_kind(a.kind.clamp(0, rf.KIND_COUNT - 1)) + self.act_unit(torch.gather(hu, 1, at[..., None].expand(-1, -1, hu.shape[-1])))
         enemy_h = torch.gather(keys, 1, b.enemy_tokens[:, :, None].expand(-1, -1, KEY))
-        enemy = torch.gather(enemy_h, 1, a.enemy[:, :count].clamp_min(0)[..., None].expand(-1, -1, KEY))
-        e = e + self.act_enemy(enemy) * (a.enemy[:, :count] >= 0)[..., None]
-        region = torch.gather(reg_h, 1, a.region[:, :count].clamp_min(0)[..., None].expand(-1, -1, KEY))
-        e = e + self.act_region(region) * (a.region[:, :count] >= 0)[..., None]
-        e = e + self.act_fine((a.fine[:, :count] + 1).clamp(0, fz.FINE_OPTIONS))
-        made = self.act_type(self.produce_stats[a.produce[:, :count].clamp_min(0)].to(e.dtype))
-        e = e + made * (a.produce[:, :count] >= 0)[..., None]
-        e = self.act_out(F.gelu(e, approximate="tanh"))
+        enemy = torch.gather(enemy_h, 1, a.enemy.clamp_min(0)[..., None].expand(-1, -1, KEY))
+        e = e + self.act_enemy(enemy) * (a.enemy >= 0)[..., None]
+        region = torch.gather(reg_h, 1, a.region.clamp_min(0)[..., None].expand(-1, -1, KEY))
+        e = e + self.act_region(region) * (a.region >= 0)[..., None]
+        e = e + self.act_fine((a.fine + 1).clamp(0, fz.FINE_OPTIONS))
+        made = self.act_type(self.produce_stats[a.produce.clamp_min(0)].to(e.dtype))
+        e = e + made * (a.produce >= 0)[..., None]
+        e = e + self.act_group((a.group + 1).clamp_min(0))
+        e = e + self.act_roles(pm.role_bits(a.roles, self.act_roles.in_features).to(e.dtype)) * (a.group >= 0)[..., None]
+        return self.act_out(F.gelu(e, approximate="tanh"))
+
+    def action_tokens(self, b, a: pm.Actions, ctx: Context | None = None) -> torch.Tensor:
+        """B x ACTION_TOKENS x D: what each decision's actions were, as `sequence` reads it.  Done is nothing.  Any number of actions,
+        in any order: the tokens read them as a set."""
+        e = self.action_vectors(b, ctx, a)
+        acting = a.anchor >= 0
         tokens = torch.cat((self.act_nothing.to(e.dtype).expand(len(e), 1, D), e), 1)
         mask = torch.cat((torch.ones_like(acting[:, :1]), acting), 1)
         queries = self.act_queries.to(e.dtype) + self.act_count(torch.log1p(acting.sum(-1, keepdim=True).float()))[:, None].to(e.dtype)
@@ -269,23 +340,45 @@ class LatentActor(nn.Module):
         hr = self.reg_in(torch.cat((b.reg_x, centre), -1))
         return hu, torch.cat((self.key_unit(hu), code.to(hu.dtype)), -1), torch.cat((self.key_region(hr), centre.to(hr.dtype)), -1)
 
-    def read(self, b, now: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def context(self, b, now: torch.Tensor) -> Context:
         """now: B x tokens x D, what each decision's frame holds."""
         hu, keys, reg_h = self._raw(b)
-        count = min(b.ctrl_mask.shape[1], hu.shape[1])
-        everyone = torch.ones(now.shape[:2], dtype=torch.bool, device=now.device)
-        me = self.read_unit(hu[:, :count], now.to(hu.dtype), everyone)
-        return torch.cat((F.pad(me, (0, 0, 0, hu.shape[1] - count)), keys), -1), reg_h
+        return Context(now.to(hu.dtype), hu, keys, reg_h)
+
+    # Actions, one after another -------------------------------------------------------------------------------------------------------------------
+
+    def plan(self, ctx: Context, vectors: torch.Tensor) -> torch.Tensor:
+        """vectors: B x k x D, the actions chosen so far (`action_vectors`).  Returns B x (k + 1) x D: what each of the slots up to the
+        next reads, each from the frame and the actions before it."""
+        count = vectors.shape[1] + 1
+        x = torch.cat((self.plan_start.to(vectors.dtype).expand(len(vectors), 1, D), vectors), 1) + self.plan_slots[:count].to(vectors.dtype)
+        for block in self.plan_blocks:
+            x = block(x, ctx.now.to(x.dtype))
+        return self.plan_ln(x)
+
+    def anchor_logits(self, b, ctx: Context, h: torch.Tensor, taken: torch.Tensor) -> torch.Tensor:
+        """h: B x K x D, slots from `plan`; taken: B x K x C, the units actions before each picked.  Returns float32 B x K x (1 + C):
+        done, then each controllable unit, those that may not be picked (nothing to tell them, or picked already) taken out."""
+        units = b.ctrl_mask.shape[1]
+        score = (self.q_anchor(h) @ ctx.keys[:, :units].transpose(1, 2)).float() / math.sqrt(D)
+        score = score.masked_fill(~(pm.anchors_legal(b)[:, None] & ~taken), pm.ILLEGAL)
+        return torch.cat((self.head_done(h).float(), score), -1)
+
+    def reading(self, ctx: Context, anchor: torch.Tensor, h: torch.Tensor) -> torch.Tensor:
+        """B x K x D: each action's anchor reads the frame, as itself and with what the action is about (h, its slot)."""
+        hu = torch.gather(ctx.hu, 1, anchor.clamp_min(0)[..., None].expand(-1, -1, ctx.hu.shape[-1]))
+        everyone = torch.ones(ctx.now.shape[:2], dtype=torch.bool, device=hu.device)
+        return self.read_unit(hu + self.slot_unit(h).to(hu.dtype), ctx.now.to(hu.dtype), everyone)
 
     def _score(self, query: torch.Tensor, gain: torch.Tensor, own: torch.Tensor, keys: torch.Tensor) -> torch.Tensor:
         scaled = gain.repeat(1, 1, 2) * own.to(gain.dtype)
         return (torch.cat((query, scaled), -1) @ keys.transpose(1, 2)).float() / math.sqrt(D)
 
-    def heads(self, b, units: torch.Tensor, reg_h: torch.Tensor):
-        """Float32 logits with the illegal choices taken out: kind, region, enemy per pointer kind, the enemies' keys, and what to produce.
-        Which regions are legal depends on the kind: policy_model.region_legal."""
-        count = b.kind_mask.shape[1]
-        me, keys = units[:, :count, :D], units[..., D:]
+    def heads(self, b, me: torch.Tensor, keys: torch.Tensor, reg_h: torch.Tensor):
+        """For each action, of its anchor: float32 logits with the illegal choices taken out: kind, region, enemy per pointer kind, the
+        enemies' keys, and what to produce.  b is as the anchors see it (policy_model.per_action), me what they read (B x K x D), keys
+        every unit token's.  Which regions are legal depends on the kind: policy_model.region_legal."""
+        count = me.shape[1]
         own = self.code(b.unit_x[:, :count, UNIT_PLACE[0]:UNIT_PLACE[1]])
         kind = self.head_kind(me).float().masked_fill(~b.kind_mask, pm.ILLEGAL)
         region = self._score(self.q_region(me), self.gain_region(me), own, reg_h)
@@ -298,6 +391,18 @@ class LatentActor(nn.Module):
 
     def fine(self, me: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         return self.fine1(F.gelu(self.fine0(torch.cat((me[..., :D], target), -1)), approximate="tanh")).float()
+
+    def _group_in(self, me: torch.Tensor, kind: torch.Tensor) -> torch.Tensor:
+        return self.group0(me[..., :D]) + self.group_kind(kind.clamp(0, rf.KIND_COUNT - 1)).to(me.dtype)
+
+    def group(self, me: torch.Tensor, kind: torch.Tensor) -> torch.Tensor:
+        """B x C x (1 + radii): alone, or a group order of each radius."""
+        return self.group1(F.gelu(self._group_in(me, kind), approximate="tanh")).float()
+
+    def roles(self, me: torch.Tensor, kind: torch.Tensor, group: torch.Tensor) -> torch.Tensor:
+        """B x C x roles: each role's logit of being in the group, given its radius (group: -1 for alone)."""
+        h = self._group_in(me, kind) + self.group_radius((group + 1).clamp_min(0)).to(me.dtype)
+        return self.roles1(F.gelu(h, approximate="tanh")).float()
 
 
 def make(vocabulary: int, encoder_path: str | pathlib.Path, decide_every: int = 1) -> LatentActor:

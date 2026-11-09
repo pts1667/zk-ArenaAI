@@ -4,7 +4,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from zkbot.policy import actions, featurize as fz, rawframe as rf, tables
+from zkbot.policy import actions, featurize as fz, groups, rawframe as rf, tables
 
 from conftest import sim_frames
 
@@ -24,9 +24,10 @@ def _frames(count: int, seed: int, start: int = 120):
 
 
 def _random_choice(t: fz.Tensors, rng: np.random.Generator) -> actions.Decision:
-    """Any legal choice for each unit, as the policy could make."""
+    """Any legal choice for each unit, as the policy could make, half those that can be group orders as one."""
     c = t.controllable
-    kind, enemy, region, fine, produce = (np.full(c, v, np.int64) for v in (rf.KEEP, -1, -1, -1, -1))
+    kind, enemy, region, fine, produce, group, roles = (np.full(c, v, np.int64) for v in (rf.KEEP, -1, -1, -1, -1, -1, 0))
+    choosable = np.flatnonzero([(groups.choosable() >> r) & 1 for r in range(len(groups.roles()[0]))])
     for i in range(c):
         k = int(rng.choice(np.flatnonzero(t.kind_mask[i])))
         kind[i] = k
@@ -39,7 +40,10 @@ def _random_choice(t: fz.Tensors, rng: np.random.Generator) -> actions.Decision:
             fine[i] = int(rng.integers(fz.FINE_OPTIONS))
         if k == rf.PRODUCE:
             produce[i] = int(rng.choice(np.flatnonzero(t.ptr_produce[i])))
-    return actions.Decision(kind, enemy, region, fine, produce)
+        if k in groups.GROUP_KINDS and rng.random() < 0.5:
+            group[i] = int(rng.integers(len(groups.GROUP_RADII)))
+            roles[i] = int(sum(1 << int(r) for r in choosable[rng.random(len(choosable)) < 0.3]))
+    return actions.Decision(kind, enemy, region, fine, produce, group, roles)
 
 
 def test_fine_points_are_where_decoding_sends_a_unit():
@@ -51,14 +55,20 @@ def test_fine_points_are_where_decoding_sends_a_unit():
 
 
 def test_what_decoding_makes_reads_back_as_the_same_choices():
+    """Also through the sim's orders and back, as the environment sends them and the scripts' are recorded."""
     rng = np.random.default_rng(1)
-    checked = 0
+    checked = grouped = 0
     for t, bundle in _frames(12, 4, start=480):        # 4 minutes in, when there's an army to order about
         chosen = _random_choice(t, rng)
         x, z = actions.world_positions(t, bundle)
-        back, missed = actions.encode(actions.decode(chosen, t, bundle, x, z), t, bundle, x, z)
+        orders = actions.decode(chosen, t, bundle, x, z)
+        rows = policy_sim_env.sim_orders(orders)
+        alone, sent = policy_sim_env.split_groups(rows)
+        assert len(sent) == sum(o.radius > 0 for o in orders) and len(alone) + len(sent) == len(orders)
+        back, missed = actions.encode(policy_sim_env.policy_orders(rows), t, bundle, x, z)
         assert missed == 0
-        for field in ("kind", "enemy", "produce"):
+        grouped += int((chosen.group >= 0).sum())
+        for field in ("kind", "enemy", "produce", "group", "roles"):
             assert np.array_equal(getattr(back, field), getattr(chosen, field)), field
         # A region and option are the same place, unless two of them coincide.
         for i in np.flatnonzero(np.isin(chosen.kind, fz.KINDS_WITH_REGION)):
@@ -66,7 +76,7 @@ def test_what_decoding_makes_reads_back_as_the_same_choices():
             got = fz.fine_point(t, bundle, int(back.region[i]), max(int(back.fine[i]), 0))
             assert np.hypot(want[0] - got[0], want[1] - got[1]) < 1e-3
             checked += 1
-    assert checked > 10
+    assert checked >= 10 and grouped > 5
 
 
 def test_a_place_anywhere_becomes_the_nearest_the_unit_could_go():

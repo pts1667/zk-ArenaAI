@@ -66,8 +66,8 @@ def test_the_encoder_is_the_trained_ones_without_its_decoder(actor, encoder_path
 def test_the_encoder_does_not_train(actor):
     b = _batch(_items())
     assert all(not p.requires_grad for p in actor.encoder.parameters())
-    units, reg_h, _, _, _ = _decided(actor, b, 3)
-    kind, *_ = actor.heads(b, units, reg_h)
+    ctx, _, _, _ = _decided(actor, b, 3)
+    kind, *_ = pm.each_unit_heads(actor, b, ctx)
     kind.masked_fill(kind < -1e8, 0.0).sum().backward()
     assert all(p.grad is None for p in actor.encoder.parameters())
     assert float(actor.latent_in.weight.grad.abs().sum()) > 0.0 and float(actor.slots.grad.abs().sum()) > 0.0
@@ -79,48 +79,39 @@ def test_the_encoder_sees_true_names_and_the_actor_those_it_is_allowed(actor):
     b = _batch(_items(1))
     dropped = replace(b, unit_name=torch.full_like(b.unit_name, VOCABULARY - 1))
     assert torch.equal(actor.encoder(b), actor.encoder(dropped))
-    assert not torch.allclose(_decided(actor, b, 1)[0], _decided(actor, dropped, 1)[0])
-
-
-def test_only_the_units_that_decide_read_the_latents(actor):
-    b = _batch(_items(1))
-    units = _decided(actor, b, 1)[0].detach()
-    c = int(b.ctrl_mask.sum())
-    assert units.shape[-1] == pl.D + pl.KEY
-    assert float(units[0, :c, :pl.D].abs().sum()) > 0.0
-    assert float(units[0, b.ctrl_mask.shape[1]:, :pl.D].abs().sum()) == 0.0
+    assert not torch.allclose(_decided(actor, b, 1)[0].hu, _decided(actor, dropped, 1)[0].hu)
 
 
 def test_what_it_reads_changes_a_units_decision_but_not_its_key(actor):
     b = _batch(_items(1))
-    now = torch.randn(1, actor.encoder.tokens, pl.D)
-    before = actor.read(b, now)[0]
-    after = actor.read(b, torch.randn(1, actor.encoder.tokens, pl.D))[0]
-    assert not torch.allclose(before[..., :pl.D], after[..., :pl.D])
-    assert torch.equal(before[..., pl.D:], after[..., pl.D:])
+    before = actor.context(b, torch.randn(1, actor.encoder.tokens, pl.D))
+    after = actor.context(b, torch.randn(1, actor.encoder.tokens, pl.D))
+    kinds = [pm.each_unit_heads(actor, b, ctx)[0] for ctx in (before, after)]
+    legal = kinds[0] > -1e8
+    assert not torch.allclose(kinds[0][legal], kinds[1][legal])
+    assert torch.equal(before.keys, after.keys) and torch.equal(before.hu, after.hu)
 
 
 def test_padding_changes_no_decision(actor):
     items = _items(3)
     alone = _batch(items[:1])
-    units, reg_h, *_ = _decided(actor, alone, 1)
-    kind = actor.heads(alone, units, reg_h)[0]
+    kind = pm.each_unit_heads(actor, alone, _decided(actor, alone, 1)[0])[0]
     both = _batch(items)
-    units3, reg_h3, *_ = _decided(actor, both, 3)
-    kind3 = actor.heads(both, units3, reg_h3)[0]
+    kind3 = pm.each_unit_heads(actor, both, _decided(actor, both, 3)[0])[0]
     c = items[0].controllable
     assert torch.allclose(kind[0, :c], kind3[0, :c], atol=1e-3)
+    anchor = [actor.anchor_logits(b, ctx, actor.plan(ctx, ctx.hu.new_zeros(len(b.ctrl_mask), 0, pl.D)), torch.zeros(len(b.ctrl_mask), 1, b.ctrl_mask.shape[1], dtype=torch.bool))
+              for b, ctx in ((alone, _decided(actor, alone, 1)[0]), (both, _decided(actor, both, 3)[0]))]
+    assert torch.allclose(anchor[0][0, 0, :c + 1], anchor[1][0, 0, :c + 1], atol=1e-3)
 
 
 def test_the_order_of_a_batch_changes_nothing(actor):
     """As a plain transformer's: a decision doesn't depend on what else is in its batch, or on any step before it."""
     items = _items(3)
     b = _batch(items)
-    forward = _decided(actor, b, 3)
     backward = _batch(items[::-1])
-    units = _decided(actor, backward, 3)
-    first = actor.heads(b, forward[0], forward[1])[0][0, :items[0].controllable]
-    last = actor.heads(backward, units[0], units[1])[0][2, :items[0].controllable]
+    first = pm.each_unit_heads(actor, b, _decided(actor, b, 3)[0])[0][0, :items[0].controllable]
+    last = pm.each_unit_heads(actor, backward, _decided(actor, backward, 3)[0])[0][2, :items[0].controllable]
     assert torch.allclose(first, last, atol=1e-3)
 
 
@@ -218,7 +209,7 @@ def test_a_seat_keeps_its_frames_newest_first_and_forgets_the_oldest(actor):
     marks = iter(range(1, 100))
     actor.encoder.forward = lambda _: torch.full((1, actor.encoder.tokens, actor.encoder.latent), float(next(marks)))
     for _ in range(actor.reach + 5):
-        _, _, history, seen, keep = actor.decide(b, history, seen)
+        _, history, seen, keep = actor.decide(b, history, seen)
     assert keep["latents"].shape == (1, actor.encoder.tokens, actor.encoder.latent)
     assert history.shape == (1, actor.reach, actor.record)
     assert [float(history[0, k, 0]) for k in (0, 1, actor.reach - 1)] == [actor.reach + 5.0, actor.reach + 4.0, 6.0]
@@ -227,42 +218,48 @@ def test_a_seat_keeps_its_frames_newest_first_and_forgets_the_oldest(actor):
 
 def test_what_it_did_is_kept_as_the_newest_frames_action_tokens(actor):
     b = _batch(_items(1))
-    units, reg_h, history, seen, _ = _decided(actor, b, 1)
+    ctx, history, seen, _ = _decided(actor, b, 1)
     cut = actor.encoder.tokens * actor.encoder.latent
     assert float(history[0, 0, cut:].abs().sum()) == 0.0
-    a = pm.sample_actions(actor, b, units, reg_h)
+    a = pm.sample_actions(actor, b, ctx)
     done = actor.acted(b, a, history)
     assert torch.allclose(done[0, 0, cut:], actor.action_tokens(b, a)[0].flatten(), atol=1e-6)
     assert torch.equal(done[0, 0, :cut], history[0, 0, :cut]) and torch.equal(done[:, 1:], history[:, 1:])
 
 
-def _keep_all(b) -> pm.Actions:
-    shape = b.ctrl_mask.shape
-    none = torch.full(shape, -1, dtype=torch.long)
-    return pm.Actions(torch.full(shape, rf.KEEP, dtype=torch.long), none, none, none, none, torch.zeros(shape))
+def _nothing(count: int, slots: int = 3) -> pm.Actions:
+    return pm.actions_from({f: np.full((count, slots), pt.act.UNSET[f]) for f in pt.act.SLOT_FIELDS}, "cpu")
 
 
-def test_keeping_everything_reads_alike_whoever_kept(actor):
-    """Keep is nothing done: the action tokens say only that."""
+def test_doing_nothing_reads_alike_whoever_did_it(actor):
+    """Done at once is nothing done: the action tokens say only that."""
     b = _batch(_items(3))
-    tokens = actor.action_tokens(b, _keep_all(b))
+    tokens = actor.action_tokens(b, _nothing(3))
     assert tokens.shape == (3, pl.ACTION_TOKENS, pl.D)
     assert torch.allclose(tokens[0], tokens[1], atol=1e-5) and torch.allclose(tokens[0], tokens[2], atol=1e-5)
 
 
-def test_what_a_unit_was_told_and_where_reaches_the_action_tokens(actor):
+def test_who_was_told_what_and_where_reaches_the_action_tokens_in_any_order(actor):
     b = _batch(_items(1))
-    kept = _keep_all(b)
-    u = int(torch.nonzero(b.ctrl_mask[0] & b.kind_mask[0, :, rf.MOVE]).flatten()[0])
+    nothing = _nothing(1)
+    movers = torch.nonzero(b.ctrl_mask[0] & b.kind_mask[0, :, rf.MOVE]).flatten()
+    u = int(movers[0])
     regions = torch.nonzero(b.ptr_region[0, u]).flatten()
-    moves = []
-    for r in regions[:2]:
-        kind, region = kept.kind.clone(), kept.region.clone()
-        kind[0, u], region[0, u] = rf.MOVE, int(r)
-        moves.append(actor.action_tokens(b, pm.Actions(kind, kept.enemy, region, kept.fine, kept.produce, kept.logp)))
-    assert not torch.allclose(moves[0], actor.action_tokens(b, kept), atol=1e-4)
-    if len(moves) == 2:
-        assert not torch.allclose(moves[0], moves[1], atol=1e-5)
+
+    def told(*moves) -> pm.Actions:
+        a = _nothing(1)
+        for k, (unit, region) in enumerate(moves):
+            a.anchor[0, k], a.kind[0, k], a.region[0, k], a.fine[0, k] = unit, rf.MOVE, region, 0
+        return a
+
+    first = actor.action_tokens(b, told((u, int(regions[0]))))
+    assert not torch.allclose(first, actor.action_tokens(b, nothing), atol=1e-4)
+    assert not torch.allclose(first, actor.action_tokens(b, told((u, int(regions[1])))), atol=1e-5)
+    if len(movers) > 1:
+        v = int(movers[1])
+        both = actor.action_tokens(b, told((u, int(regions[0])), (v, int(regions[0]))))
+        assert not torch.allclose(first, both, atol=1e-5)
+        assert torch.allclose(both, actor.action_tokens(b, told((v, int(regions[0])), (u, int(regions[0])))), atol=1e-5)
 
 
 # Pointers ------------------------------------------------------------------------------------------------------------------------------------------
@@ -293,53 +290,75 @@ def test_a_target_a_little_further_gets_another_score_whatever_the_latents_say(a
     b = _batch(items)
     now = actor.sequence(actor.encoder(b).float()[:, None], torch.ones(1, 1, dtype=torch.bool), torch.zeros(1, 1, pl.ACTION_TOKENS, pl.D))[:, -1]
     assert len(items[0].enemy_tokens) > 0
-    units, reg_h = actor.read(b, now)
-    enemy = actor.heads(b, units, reg_h)[2]
+    enemy = pm.each_unit_heads(actor, b, actor.context(b, now))[2]
     moved = b.unit_x.clone()
     moved[0, int(items[0].enemy_tokens[0]), fz._I] += 0.02
     shifted = replace(b, unit_x=moved)
-    units2, reg_h2 = actor.read(shifted, now)
     legal = b.ptr_enemy[0, 0, :, 0]
     if legal.any():
-        again = actor.heads(shifted, units2, reg_h2)[2]
+        again = pm.each_unit_heads(actor, shifted, actor.context(shifted, now))[2]
         assert not torch.allclose(enemy[0, 0, legal, 0], again[0, 0, legal, 0], atol=1e-6)
 
 
 # Choosing ------------------------------------------------------------------------------------------------------------------------------------------
 
 
-def _sampled(actor, seed: int = 3):
+def _sampled(actor, seed: int = 3, done: float | None = None):
     items = _items(3, seed)
     b = _batch(items)
     torch.manual_seed(seed)
-    units, reg_h, *_ = _decided(actor, b, 3)
-    return items, b, units, reg_h, pm.sample_actions(actor, b, units, reg_h)
+    if done is not None:
+        with torch.no_grad():
+            actor.head_done.bias[0] = done
+    ctx, *_ = _decided(actor, b, 3)
+    return items, b, ctx, pm.sample_actions(actor, b, ctx)
 
 
-def test_it_starts_by_mostly_keeping_what_it_is_doing(actor):
-    _, b, units, _, _ = _sampled(actor)
-    raw = actor.head_kind(units[:, :b.ctrl_mask.shape[1], :pl.D])[b.ctrl_mask]
-    assert (raw.argmax(-1) == rf.KEEP).all()    # before the masks, as a unit with no order has nothing to keep
+def test_it_starts_by_being_done_rather_than_picking_any_one_unit(actor):
+    _, b, ctx, _ = _sampled(actor)
+    first = actor.anchor_logits(b, ctx, actor.plan(ctx, ctx.hu.new_zeros(3, 0, pl.D)), torch.zeros(3, 1, b.ctrl_mask.shape[1], dtype=torch.bool))[:, 0]
+    assert (first.argmax(-1) == 0).all()
 
 
-def test_every_choice_is_legal(actor):
+def test_every_choice_is_legal_and_no_unit_is_picked_twice(actor):
+    acted = 0
     for seed in range(4):
-        items, b, _, _, a = _sampled(actor, seed)
+        items, b, _, a = _sampled(actor, seed, done=-3.0)
         for i, t in enumerate(items):
-            c = t.controllable
-            assert t.kind_mask[np.arange(c), a.kind[i, :c].numpy()].all()
-            used = a.region[i, :c] >= 0
-            for u in np.flatnonzero(used.numpy()):
-                k = int(a.kind[i, u])
-                legal = t.ptr_jump if k in (rf.JUMP, rf.THROW) else t.ptr_wait if k == rf.WAIT_AT_BEACON else t.ptr_region
-                assert legal[u, int(a.region[i, u])]
+            picked = [int(u) for u in a.anchor[i] if u >= 0]
+            assert len(set(picked)) == len(picked) and all(t.kind_mask[u].sum() > t.kind_mask[u, rf.KEEP] for u in picked)
+            assert (a.anchor[i, len(picked):] == -1).all()
+            acted += len(picked)
+            for k, u in enumerate(picked):
+                kind = int(a.kind[i, k])
+                assert kind != rf.KEEP and t.kind_mask[u, kind]
+                if a.region[i, k] >= 0:
+                    legal = t.ptr_jump if kind in (rf.JUMP, rf.THROW) else t.ptr_wait if kind == rf.WAIT_AT_BEACON else t.ptr_region
+                    assert legal[u, int(a.region[i, k])]
+    assert acted > 10
 
 
-def test_a_choice_scores_the_same_when_it_is_evaluated(actor):
-    _, b, units, reg_h, a = _sampled(actor)
-    logp, entropy = pm.evaluate_actions(actor, b, units, reg_h, a)
+@pytest.mark.parametrize("done", (None, -3.0))
+def test_a_choice_scores_the_same_when_it_is_evaluated(actor, done):
+    _, b, ctx, a = _sampled(actor, done=done)
+    logp, entropy = pm.evaluate_actions(actor, b, ctx, a)
     assert torch.allclose(logp, a.logp, atol=1e-3)
-    assert set(entropy) == {"kind", "region", "enemy", "fine", "produce"}
+    assert set(entropy) == {"anchor", "kind", "region", "enemy", "fine", "produce", "group", "roles"}
+
+
+def test_a_scripts_actions_score_as_a_set(actor):
+    """In cloning, an action's anchor may be any of the units still to be told: so the order they're given in changes nothing."""
+    _, b, ctx, a = _sampled(actor, done=-3.0)
+    picked = a.anchor[0] >= 0
+    n = int(picked.sum())
+    assert n >= 2
+    labelled = torch.zeros_like(b.ctrl_mask)
+    labelled[0, a.anchor[0, :n]] = True
+    with torch.no_grad():
+        as_set = pm.evaluate_actions(actor, b, ctx, a, labelled)[0][0]
+        in_order = pm.evaluate_actions(actor, b, ctx, a)[0][0]
+    assert (as_set >= in_order - 1e-5).all() and float(as_set[0]) > float(in_order[0]) + 1e-4
+    assert abs(float(as_set[n - 1]) - float(in_order[n - 1])) < 1e-4      # the last can only be what's left
 
 
 # The size ------------------------------------------------------------------------------------------------------------------------------------------
@@ -410,7 +429,7 @@ def test_segments_score_in_training_as_their_decisions_did_in_play(tmp_path, enc
     for t, frame in enumerate(frames):
         items, acts, value, seats.history, seats.seen = learner.act([(frame, bundle, names)], seats.history, seats.seen)
         c = items[0].controllable
-        tr.steps.append(pt.Step(frame, *(acts[h][0, :c] for h in ("kind", "enemy", "region", "fine", "produce", "logp")), float(value[0]), latents=acts["latents"][0]))
+        tr.steps.append(pt.Step(frame, *(acts[h][0] for h in pt.act.SLOT_FIELDS + ("logp",)), float(value[0]), latents=acts["latents"][0]))
         if t in (6, learner.actor.reach + 4):
             pt._cut(tr, segments, seats.history[0], seats.seen[0])
     pt._close(tr, segments)
@@ -427,10 +446,10 @@ def test_segments_score_in_training_as_their_decisions_did_in_play(tmp_path, enc
     history = torch.as_tensor(np.stack([seg.history for seg in batch]))
     seen = torch.as_tensor(np.stack([seg.seen for seg in batch]))
     with torch.no_grad():
-        a = pt._stored_actions(steps, whole, "cpu")
+        a = pt._stored_actions(steps, "cpu")
         acted = learner.actor.segment_actions(whole, a, lengths)
-        units, reg_h = learner.actor.read(whole, learner.actor.segments(history, seen, latents, lengths, acted))
-        logp, _ = pm.evaluate_actions(learner.actor, whole, units, reg_h, a)
+        ctx = learner.actor.context(whole, learner.actor.segments(history, seen, latents, lengths, acted))
+        logp, _ = pm.evaluate_actions(learner.actor, whole, ctx, a)
     for k, s in enumerate(steps):
         assert np.allclose(logp[k, :len(s.logp)].numpy(), s.logp, atol=2e-3), k
 

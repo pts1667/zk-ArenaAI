@@ -1,6 +1,6 @@
 # HANDOFF: zk-ArenaAI, the learned policy
 
-Updated 2026-11-08.  Branch `learned-policy-plan`.  Repo: `C:/Users/Thoma/Documents/sources/zk-ArenaAI`.
+Updated 2026-11-09.  Branch `learned-policy-plan`.  Repo: `C:/Users/Thoma/Documents/sources/zk-ArenaAI`.
 
 This file is the current state only.  How things got here is in git history and in `docs/learned-policy/`, whose numbered
 sections (`03-training.md` 11.x for the latest work) hold every result with its numbers.
@@ -22,17 +22,26 @@ A Zero-K AI that beats CircuitAI, now pursued as a Pluto-style learned policy: a
   versions they were ported from are gone (in git at `8e9bca7`); `tools/policy_eco.py` and `tools/policy_mix.py` describe what
   the scripts do and build the tables they're given.  The encoder's frame games (`frame_world.FrameGames`,
   `frame_data.ScenarioEnv`) play their own Python scripts instead (`SimEnv.own_scripts`).
-* **The actor** (`tools/policy_latent.py`) reads a frozen frame encoder's latent tokens, frame after frame, with what it did at
-  each frame as 4 action tokens after that frame's: `[frame 1 latents] [actions at 1] [frame 2 latents] ...`, causal, windowed
-  8 s in each of 2 layers.
+* **The actor** (`tools/policy_latent.py`) reads a frozen frame encoder's 40 latent tokens, frame after frame, with what it did
+  at each frame as 4 action tokens after that frame's: `[frame 1 latents] [actions at 1] [frame 2 latents] ...`, causal,
+  windowed 8 s in each of 2 layers.  It gives its orders as Pluto does, as actions one after another (up to 16, then done):
+  each picks a unit, the anchor, and an order for it, which may go as a group order.  A unit no action picks keeps.
 * **Cloning** (`tools/policy_clone_train.py`) learns the army script's choices from recorded games
-  (`tools/policy_clone_data.py`), with keep weighted down.  Latest dataset `army-3`; latest result in `03-training.md` 11.9.
+  (`tools/policy_clone_data.py`), its orders as actions in a random order, each anchor scored as any unit still to be told.
+  Only smoke runs on the action form so far (`03-training.md` 11.18).
+* **PPO's reward** has Pluto's diversity bonus as well (11.19): zero-sum, for finished units of types the policy rarely makes.
 * **Recording** is C++ (`sim/record/`, `libzkrecord.so`, through `sim/py/zkrecord.py`): straight from the batch's arrays, a
-  `.zkr` file a game, both sides, narrowed and compressed (192 bytes a decision against the npz's 516).  Data version 4; the
-  trainer and `check` read the old npz files too.
+  `.zkr` file a game, both sides, narrowed and compressed (192 bytes a decision against the npz's 516).  Data version 5 (group
+  orders as labels); the trainer and `check` read the old npz files too.
 * **Script variants** (`tools/policy_variants.py`): with `--variants`, each side's army script draws its own role mix and
   aggression at game start, recorded in the game's file.  Without it, play is as before.
 * **How the model works**, with diagrams: `docs/model.md`.
+* **Air** (2026-11-08): the sim flies every aircraft (planes turn in circles, bombers rearm at pads, gunships strafe, what a
+  plane plant makes lands when idle), and the scripts build a second factory, planes, gunships or a strider hub, once it's both
+  18 minutes in and 50 metal a second without reclaim.  Air plants have their own mix.
+* **Group orders** (2026-11-08): one unit's move, fight or attack can go as well to every unit of its side of some roles within
+  one of ten radii of it (`bots/zkbot/policy/groups.py`).  The C++ army script sends its fighters' identical orders that way
+  wherever that's exact, they're recorded that way as labels, and the policy chooses them: alone or a radius, then the roles.
 
 ## 2. Environment
 
@@ -50,7 +59,11 @@ A Zero-K AI that beats CircuitAI, now pursued as a Pluto-style learned policy: a
   |---|---|
   | `maps/` | the map pool: 98 real and 200 made-up maps (`tools/map_gen.py`).  About 7.5 GB in memory when loaded |
   | `frames/pool2`, `frames/pool3` | 1M script frames and 1M scenario frames each (`tools/frame_data.py`), for encoders |
-  | `runs/encoder-questions/final/vae-last.pt` | the frozen encoder the actor reads (`policy_latent.ENCODER`) |
+  | `frames/pool4` | the same, collected with air and second factories |
+  | `frames/pool5` | 1M frames each of script games, scenarios (60% themed: air battles and raids, fleets, heavies, swarms) and the C++ scripts' games |
+  | `runs/encoder-big/final/vae-last.pt` | the frozen encoder the actor reads (`policy_latent.ENCODER`): 40 tokens, 1.65M parameters, trained on `pool5` |
+  | `runs/encoder-air/final/vae-last.pt` | the one before, trained on `pool4` |
+  | `runs/encoder-questions/final/vae-last.pt` | the one before that, which never saw aircraft |
   | `clone/army-1`, `army-2`, `army-3` | recorded army-script games, data versions 1 to 3 (npz, a file a side) |
   | `clone/army-4` | 3,243 games (3.8 GB) of the standard script, .zkr; a 100 GB run stopped early to add variants first |
   | `runs/` | every training run, one directory each |
@@ -103,6 +116,25 @@ README.md has the template's rules for engine games (headless, max speed; window
 
 Latest first; each item's numbers are in the section named.
 
+* **A diversity bonus** (`03-training.md` 11.19): at the default 0.05, about 2% of the shaped reward a game on script games, 14%
+  at most.  Not yet trained with.
+* **Actions one after another** (11.18): the army script's grouping now takes in units already told that order, so a look's
+  orders went from a 99th percentile of 28 actions (max 111) to 11 (max 41); 16 cuts 1.1% of them.  The actor's decoder picks
+  anchors in turn; 600 CPU cloning steps took the likeliest anchor being a unit the script told from 5% to 39%.
+* **The bigger encoder** (11.17): on `pool4`'s held-out maps, better on everything than `encoder-air`: where any within 0.05
+  0.743 to 0.865, aircraft type 0.579 to 0.759, own ground counts R2 0.41 to 0.73, reconstruction 0.924 to 0.945.  The actor
+  reads it now.  What part is size, tokens or data isn't separated.
+* **The encoder retrained with air** (`03-training.md` 11.16): on `pool4`'s held-out maps, better on the questions (where any
+  within 0.05: 0.706 to 0.743; aircraft found 0.744 to 0.761, type 0.559 to 0.579), worse on the count grid (own ground R2 0.50
+  to 0.41) and aircraft health (0.47 to 0.43).  The actor reads it now.
+* **Group orders, the policy's too** (`01-simulator.md` 8.19, `03-training.md` 11.15): on 16 games x 2,000 decisions, the same
+  frames with the script's and without; 29% of its army orders went in group orders of 3.4 units, so the sim got 79% as many.
+  What's recorded tells every unit what it was told; the policy's group orders reach exactly the units they select.  The actor
+  has two more heads (group, roles) and isn't trained with them yet.
+* **Air, and a second factory** (`01-simulator.md` 8.18, `03-training.md` 11.14): plane turns within 10% of the game's, bomber
+  rearm times within 3 frames, strafing circles within 8 elmos.  The second plant needs both 18 minutes and 50 metal a
+  second.  In 16 script games to 25 minutes, 17 of 32 sides built one (11 plane, 5 gunship, 1 hub), between 18.0 and 24.5
+  minutes; 8 sides' games ended before 18 minutes.  AA gets built once air is seen.
 * **Script variants** (`03-training.md` 11.13): 4 presets (standard, rush, turtle, skirmish) with jittered knobs.  On 64 games
   their production mixes differ as meant and each wins and loses.  The script's orders are group orders: where units act, a median
   of 3 share 1 distinct order.
@@ -127,15 +159,18 @@ Latest first; each item's numbers are in the section named.
 
 ## 6. Next
 
-* Record the big dataset (about 100 GB) with `--variants`, on the map pool.
+* `army-5` (`/mnt/d/zk-learned/clone/army-5`, 400M decisions, about 95 GB, `--variants`, seed 5, the map pool) was being
+  recorded on 2026-11-09; its log is `army-5.log` beside it, which ends with `check`'s output and the size once it's done.
+  The first try was stopped: each worker made its own copy of each map's masks and labels, Python and C++, as it came to the
+  map (about 6 MB a map, 1.6 GB a worker over the pool).  `policy_sim_env.share_maps` now makes them before the workers fork;
+  12 workers level off at about 5.4 GB together.  Then clone on it with the action form and the bigger encoder: older
+  checkpoints don't load into this actor.
+* Whether the policy should run the economy too (constructors and buildings, as Pluto does), which the economy script does now:
+  asked by the user on 2026-11-09, not yet decided.  It would need the economy script's orders recorded as labels.
 * The user's open questions on the actor:
-  * FlexAttention, with one action token per command or acting unit, causal within a frame, in place of the 4 summary tokens;
-  * group ("area") commands: role or type within a radius of a point, told one order.  First check: what share of the
-    script's orders 8 such commands reproduce exactly;
+  * one token per action between frames too, in place of the 4 summary tokens (within a decision the actions are such tokens now);
   * full attention over all past frames, through summary tokens, in place of the 16 s window.
-* Cloning learns slowly: an act's kind is right a quarter of the time after 3,000 steps.  Whether to run it longer, with or
-  without action tokens (the A/B didn't separate them), or to change what it learns from first, is the user's to decide.
-  Then the cloned actor playing the army script in the sim.
+* Then the cloned actor playing the army script in the sim, and PPO with the diversity bonus.
 * The engine hand-off: a numpy forward of the latent actor and its encoder for the bot, decoded orders sent as commands, and the
   opening and economy script in the engine.
 

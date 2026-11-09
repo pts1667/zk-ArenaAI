@@ -29,7 +29,7 @@ def test_a_minibatch_budgets_its_padded_size(learner):
     """A few frames from a big map can't ride along with many small ones: padded, they would all cost as much as the big map's."""
     def segment(n_units, regions, length):
         frame = rf.Frame(np.zeros(n_units, rf.UNIT_DTYPE), np.zeros(0, rf.SITE_DTYPE), np.zeros(len(rf.GLOBAL_FIELDS), np.float32))
-        return pt.Segment([pt.Step(frame, *(np.zeros(0) for _ in range(6)))] * length, np.zeros(1), np.zeros((regions, 1)), SimpleNamespace(regions=regions), np.zeros(1))
+        return pt.Segment([pt.Step(frame, *(np.zeros(0) for _ in range(9)))] * length, np.zeros(1), np.zeros((regions, 1)), SimpleNamespace(regions=regions), np.zeros(1))
     segments = [segment(40, 24, 32) for _ in range(40)] + [segment(20, 76, 32) for _ in range(40)]
     budget = learner.cfg.token_budget
     learner.cfg.token_budget = 100_000
@@ -48,7 +48,7 @@ def test_big_frames_get_fewer_tokens_in_a_minibatch(learner):
     """A frame of many tokens costs more memory per token."""
     def segment(n_units):
         frame = rf.Frame(np.zeros(n_units, rf.UNIT_DTYPE), np.zeros(0, rf.SITE_DTYPE), np.zeros(len(rf.GLOBAL_FIELDS), np.float32))
-        return pt.Segment([pt.Step(frame, *(np.zeros(0) for _ in range(6)))] * 32, np.zeros(1), np.zeros((76, 1)), SimpleNamespace(regions=76), np.zeros(1))
+        return pt.Segment([pt.Step(frame, *(np.zeros(0) for _ in range(9)))] * 32, np.zeros(1), np.zeros((76, 1)), SimpleNamespace(regions=76), np.zeros(1))
     budget = learner.cfg.token_budget
     learner.cfg.token_budget = 165_000
     try:
@@ -73,8 +73,8 @@ def test_playing_in_pieces_decides_the_same_as_in_one(learner, monkeypatch):
     assert np.allclose(cut_value, value, atol=1e-5)
     assert torch.allclose(cut_seen, new_seen)
     for k, t in enumerate(cut_items):
-        chosen = cut["kind"][k, :t.controllable]
-        assert t.kind_mask[np.arange(t.controllable), chosen].all()
+        picked = cut["anchor"][k] >= 0
+        assert t.kind_mask[cut["anchor"][k][picked], cut["kind"][k][picked]].all()
 
 
 def _self_play():

@@ -289,7 +289,14 @@ void World::move_one(int u) {
     float sin_h = cls >= 0 ? std::sin(h) : 0.0f, cos_h = cls >= 0 ? std::cos(h) : 0.0f;
     size_t here = cls >= 0 ? size_t(map->cell_index(px, pz)) : 0;
     const float* walkable = cls >= 0 ? map->speed_grid(cls) : nullptr;
+    // A gunship goes up before it goes anywhere, and one that lands does when it has nothing to do (air.cpp).
+    const bool flies = (d.flags & ZK_U_AIR) != 0;
+    const bool busy = walking || order[size_t(u)] != ZK_ORDER_NONE || ai[size_t(u)].chasing >= 0 || !(d.flags & ZK_U_LANDS);
     for (int f = 0; f < ZK_TICK_FRAMES; ++f) {
+        if (flies && !climb_or_land(u, busy)) {
+            v = 0.0f;
+            continue;
+        }
         const bool go = walking && (wait == 0 || lag > 0);
         if (wait > 0) --wait;
         if (lag > 0) --lag;
@@ -374,7 +381,12 @@ void World::separate() {
 void World::move_units() {
     const int n = count();
     for (int u = 0; u < n; ++u)
-        if (alive[size_t(u)] && (type_of(u).flags & ZK_U_MOBILE)) move_one(u);
+        if (alive[size_t(u)] && (type_of(u).flags & ZK_U_MOBILE)) {
+            if (type_of(u).flags & ZK_U_PLANE)
+                fly_plane(u);
+            else
+                move_one(u);
+        }
     {
         ZK_PROF(MOVE_SEPARATE);
         separate();

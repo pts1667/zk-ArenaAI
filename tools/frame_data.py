@@ -1,11 +1,14 @@
-"""Frames for the frame encoder (frame_model.py, trained by frame_vae.py): what a seat saw, from two sources, on all the training maps.
+"""Frames for the frame encoder (frame_model.py, trained by frame_vae.py): what a seat saw, from three sources, on all the training maps.
 
 Script games are real games: both sides play the opening, a script for factories and builders, and the fight script, with every factory there is, on the map's own terms.
 Scenarios are built at random but could have happened, so they reach what script games don't: other unit types, big armies, a fight in someone's base, a base that's been fought over.
+Each is of a flavour (`FLAVOURS`): as any game, or what the army script seldom or never makes: air battles, air raids on a base with AA, fleets,
+heavy units, swarms of cheap ones.
+Army games are the C++ army and economy scripts against each other (policy_sim_env, with variants): what the policy is cloned from and plays.
 
 Both are on maps from a pool, real and made up (tools/map_gen.py), with and without water:
 
-    python tools/frame_data.py collect --maps /mnt/d/zk-learned/maps --out /mnt/d/zk-learned/frames/NAME --script-frames 1000000 --scenario-frames 1000000 --games 256 --workers 8
+    python tools/frame_data.py collect --maps /mnt/d/zk-learned/maps --out /mnt/d/zk-learned/frames/NAME --script-frames 1000000 --scenario-frames 1000000 --army-frames 1000000 --games 256 --workers 8
 
 Each shard is an uncompressed npz of concatenated tokens and offsets.  Links between frames (a seat's frame a moment later) stay within a shard.
 """
@@ -24,11 +27,11 @@ import numpy as np
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 import policy_sim_env as se  # noqa: E402
-from frame_world import BaseOrders, BaseScript, EXTRACTOR_REACH as SPOT_REACH, FrameFight, FrameGames, Ground, Roster, extractors, fight_data, held_out_maps, pool_weights  # noqa: E402
+from frame_world import BaseOrders, BaseScript, EXTRACTOR_REACH as SPOT_REACH, WATER_MAP, FrameFight, FrameGames, Ground, Roster, extractors, fight_data, held_out_maps, pool_weights  # noqa: E402
 import zksim  # noqa: E402
 from zkbot.policy import bundle as bd, featurize as fz, rawframe as rf, tables  # noqa: E402
 
-SOURCES = ("script", "scenario")
+SOURCES = ("script", "scenario", "army")
 PROBES = ("own_value", "enemy_value", "own_fighters", "enemy_fighters", "enemy_known", "own_x", "own_z", "enemy_x", "enemy_z", "commander_hp", "metal", "seconds",
           "own_air", "enemy_air", "own_ships", "enemy_ships", "sea_share", "wreck_metal")
 # Token groups as stored: name, feature size.  Floats go to 16 bits, as these are all small numbers and it halves the disk.
@@ -46,6 +49,29 @@ class Capture:
     def __post_init__(self) -> None:
         if not 0 < self.later < self.every:
             raise ValueError(f"a later frame {self.later} decisions on, every {self.every}: the two would coincide")
+
+
+@dataclass(frozen=True)
+class Flavour:
+    """A kind of scenario: what each side's army is drawn from (`army_pools`, or "mixed" for as in any game), and whether the first
+    raids the second's base.  The sides are swapped at random.  value, structures: each side's, in place of ScenarioRules.side_value and
+    structure_share."""
+    name: str
+    armies: tuple[str, str] = ("mixed", "mixed")
+    raid: bool = False
+    value: tuple[float, float] | None = None
+    needs_water: bool = False
+    structures: tuple[tuple[float, float], tuple[float, float]] | None = None
+
+
+FLAVOURS = ((Flavour("mixed"), 0.4),
+            (Flavour("air battle", ("air", "air_aa"), value=(3000.0, 40000.0), structures=((0.0, 0.1), (0.0, 0.2))), 0.2),
+            (Flavour("air raid", ("air", "aa_base"), raid=True, value=(3000.0, 40000.0), structures=((0.0, 0.1), (0.3, 0.6))), 0.1),
+            (Flavour("fleets", ("ships", "ships"), value=(1000.0, 30000.0), needs_water=True), 0.1),
+            (Flavour("heavies", ("heavy", "mixed"), value=(4000.0, 40000.0)), 0.1),
+            (Flavour("swarms", ("swarm", "swarm"), value=(1500.0, 15000.0)), 0.1))
+HEAVY_FROM = 1200.0     # metal: a heavy unit
+SWARM_UP_TO = 120.0     # metal: a swarm's
 
 
 @dataclass(frozen=True)
@@ -72,6 +98,8 @@ class ScenarioRules:
     decisions: int = 48             # a scenario plays this long, then a new one starts
     capture: Capture = Capture(every=12, later=4, warm=4)
     income_per_second: float = 15.0  # what a side's value says about its game's clock
+    flavours: tuple[tuple[Flavour, float], ...] = FLAVOURS
+    aa_turret_share: tuple[float, float] = (0.3, 0.7)    # of an AA base's structure budget
 
 
 # Frames as a model reads them -------------------------------------------------------------------------------------------------------------------------
@@ -322,11 +350,37 @@ def _draw_wrecks(rng: np.random.Generator, rules: ScenarioRules, roster: Roster,
     return np.array(out, np.float32).reshape(-1, 6)
 
 
-def draw_side(rng: np.random.Generator, rules: ScenarioRules, roster: Roster, ground: Ground, own: tuple[float, float], enemy: tuple[float, float]) -> Side:
+def army_pools(roster: Roster) -> dict[str, np.ndarray]:
+    """What a flavour's army is drawn from, rows of the type table: fighters that fly, ground AA, both, ships, heavy fighters, cheap
+    ones; and AA turrets for an AA base."""
+    from zkbot import catalog as bot_catalog
+    from zkbot.policy import groups
+    table = roster.table
+    names, role_of = groups.roles()
+    aa = role_of[:len(role_of)] == names.index("aa")
+    mobile = roster.mobile
+    fighter = mobile[table.combat[mobile] & ~table.builder[mobile]]
+    air, ships = fighter[table.air[fighter]], fighter[table.move_class[fighter] == bd.MOVE_CLASSES.index("ship")]
+    ground_aa = fighter[aa[fighter] & ~table.air[fighter] & (table.move_class[fighter] != bd.MOVE_CLASSES.index("ship"))]
+    walks = fighter[~table.air[fighter] & (table.move_class[fighter] != bd.MOVE_CLASSES.index("ship"))]
+    return {"air": air, "air_aa": np.union1d(air, ground_aa), "aa_base": np.union1d(walks, ground_aa), "ships": ships,
+            "heavy": walks[table.cost[walks] >= HEAVY_FROM], "swarm": walks[table.cost[walks] <= SWARM_UP_TO],
+            "aa_turrets": np.array([r for r in roster.structures if roster.is_turret[r] and _shoots_only_air(bot_catalog.stats(table.names[r]))], np.int64)}
+
+
+def _shoots_only_air(stats: dict | None) -> bool:
+    """As zkbot.catalog.stat_role tells a mobile AA unit, for a turret."""
+    return stats is not None and stats["dps_ground"] <= 0.5 < stats["dps_air"]
+
+
+def draw_side(rng: np.random.Generator, rules: ScenarioRules, roster: Roster, ground: Ground, own: tuple[float, float], enemy: tuple[float, float],
+              army: str = "mixed", pools: dict[str, np.ndarray] | None = None, raid: bool = False, values: tuple[float, float] | None = None,
+              structures: tuple[float, float] | None = None) -> Side:
+    """army: what its army is drawn from (`army_pools`), "mixed" as in any game.  raid: its army is at the enemy's base."""
     table = roster.table
     bundle = ground.bundle
-    value = float(np.exp(rng.uniform(*np.log(rules.side_value))))
-    for_structures = value * float(rng.uniform(*rules.structure_share))
+    value = float(np.exp(rng.uniform(*np.log(values or rules.side_value))))
+    for_structures = value * float(rng.uniform(*(structures or rules.structure_share)))
     factories, chances = roster.factories_for(ground)
     cheap = np.array([r for r in roster.structures if table.cost[r] <= rules.most_structure_cost and not table.factory[r] and ground.has_room(roster.footing[int(r)].low, roster.footing[int(r)].high)], np.int64)
     # A base starts with a factory and something to pay for it, so that most scenarios look like one.  A side with a lot has more of them.
@@ -339,6 +393,10 @@ def draw_side(rng: np.random.Generator, rules: ScenarioRules, roster: Roster, gr
         own_factories = own_factories[np.cumsum(table.cost[own_factories]) <= for_structures]
     extractor_count = int(rng.integers(rules.extractors[0], rules.extractors[1] + 1))
     wanted = [own_factories, np.full(extractor_count, roster.extractor, np.int64)]
+    if army == "aa_base" and pools is not None:
+        turrets = pools["aa_turrets"]
+        turrets = turrets[np.isin(turrets, cheap)]
+        wanted.append(_spend(rng, turrets, table.cost, for_structures * float(rng.uniform(*rules.aa_turret_share)), rules.most_units // 8))
     wanted.append(_spend(rng, cheap, table.cost, for_structures - sum(float(table.cost[w].sum()) for w in wanted), rules.most_units // 4))
     built, bx, bz = _place_structures(rng, ground, roster, np.concatenate(wanted), own, enemy)
     parts = [(built, bx, bz)]
@@ -346,10 +404,16 @@ def draw_side(rng: np.random.Generator, rules: ScenarioRules, roster: Roster, gr
     if factories and rng.random() < rules.keeps_to_one_factory:
         one = int(own_factories[int(rng.integers(len(own_factories)))]) if len(own_factories) else int(rng.choice(np.array(factories), p=chances))
         pool = roster.by_factory[one]
+    if army != "mixed" and pools is not None and len(pools[army]):
+        pool = pools[army]
     clusters = int(rng.integers(rules.clusters[0], rules.clusters[1] + 1))
     room = rules.most_units - len(built)
     for _ in range(clusters):
-        cx, cz = _army_place(rng, bundle, own, enemy)
+        if raid:
+            t = float(rng.uniform(0.75, 1.0))
+            cx, cz = own[0] + t * (enemy[0] - own[0]), own[1] + t * (enemy[1] - own[1])
+        else:
+            cx, cz = _army_place(rng, bundle, own, enemy)
         picked = _spend(rng, pool, table.cost, (value - for_structures) / clusters, room // clusters)
         if len(picked):
             parts.append(_place_units(rng, ground, table, picked, cx, cz))
@@ -374,9 +438,11 @@ class ScenarioEnv(BaseOrders, se.SimEnv):
         self.scouted: list[tuple[np.ndarray, np.ndarray] | None] = [None] * games
         super().__init__(games, seed, ["scripts"], units=1, threads=threads, maps=maps, weights=weights)
         self.roster = Roster(self.table, se.catalog())
+        self.pools = army_pools(self.roster)
         self.script_data = fight_data(self.table, se.catalog())
         self.grounds = {id(b): Ground(b, f) for _, b, f in self.maps}
         self.bases: list = [None] * games
+        self.flavour: list[str] = [""] * games
         self.time_limit = rules.decisions
         self.early_end = rules.decisions + 1
 
@@ -387,7 +453,17 @@ class ScenarioEnv(BaseOrders, se.SimEnv):
         one, other = self.rng.choice(len(boxes), 2, replace=False)
         x0, z0 = boxes[one].pick(self.rng, bundle)
         x1, z1 = boxes[other].pick(self.rng, bundle)
-        sides = (draw_side(self.rng, self.rules, self.roster, ground, (x0, z0), (x1, z1)), draw_side(self.rng, self.rules, self.roster, ground, (x1, z1), (x0, z0)))
+        flavours, weights = zip(*self.rules.flavours)
+        flavour = flavours[int(self.rng.choice(len(flavours), p=np.array(weights) / sum(weights)))]
+        if flavour.needs_water and facts.water < WATER_MAP:
+            flavour = Flavour("mixed")
+        self.flavour[g] = flavour.name
+        armies, raid = flavour.armies, (flavour.raid, False)
+        structures = flavour.structures or (None, None)
+        if self.rng.random() < 0.5:
+            armies, raid, structures = armies[::-1], raid[::-1], structures[::-1]
+        sides = (draw_side(self.rng, self.rules, self.roster, ground, (x0, z0), (x1, z1), armies[0], self.pools, raid[0], flavour.value, structures[0]),
+                 draw_side(self.rng, self.rules, self.roster, ground, (x1, z1), (x0, z0), armies[1], self.pools, raid[1], flavour.value, structures[1]))
         self.mode[g] = "scripts"
         count = self._load(g, world_map, bundle, sides, (x0, z0, x1, z1))
         self.batch.add_features(g, np.concatenate((facts.features, sides[0].wrecks, sides[1].wrecks)))
@@ -532,7 +608,8 @@ class Part:
     number: int = 0
 
 
-GAMES_APART = 1 << 26       # of numbers for each part's games.  Game numbers don't overlap between the parts of a collection.
+GAMES_APART = 1 << 23       # of numbers for each part's games.  Game numbers don't overlap between the parts of a collection.
+SOURCES_APART = 1 << 29     # and each source's, so that three fit in the int32 they're stored in
 _FORKED_MAPS: list = []     # as forked processes see them, so that none has to load the pool
 
 
@@ -542,9 +619,11 @@ def _collect_part(part: Part, maps: list | None = None) -> tuple[dict[int, float
     seed = part.seed + 1000 * part.number + SOURCES.index(part.source)
     if part.source == "script":
         env, capture = FrameGames(part.games, seed, part.threads, maps, weights), Capture(part.script_every)
+    elif part.source == "army":
+        env, capture = se.SimEnv(part.games, seed, ["scripts"], threads=part.threads, maps=maps, weights=weights, variants=True), Capture(part.script_every)
     else:
         env, capture = ScenarioEnv(part.games, seed, part.rules, part.threads, maps, weights), part.rules.capture
-    first_game = SOURCES.index(part.source) * (1 << 30) + part.number * GAMES_APART
+    first_game = SOURCES.index(part.source) * SOURCES_APART + part.number * GAMES_APART
     prefix = part.source if not part.number else f"{part.source}-w{part.number}"
     started = time.time()
     collector = Collector(env, capture, ShardWriter(part.out, prefix, part.frames_per_shard), part.source, seed, first_game=first_game)
@@ -553,13 +632,13 @@ def _collect_part(part: Part, maps: list | None = None) -> tuple[dict[int, float
 
 
 def collect(out: pathlib.Path, script_frames: int, scenario_frames: int, games: int = 128, seed: int = 1, threads: int = 16, script_every: int = 30, rules: ScenarioRules = ScenarioRules(),
-            frames_per_shard: int = 2000, maps: list | None = None, workers: int = 1) -> dict:
+            frames_per_shard: int = 2000, maps: list | None = None, workers: int = 1, army_frames: int = 0) -> dict:
     """Plays until there are this many frames of each, on these maps or else the training maps.  `workers` processes share the frames, the games and the threads, for what takes the time is making frames, in Python."""
     global _FORKED_MAPS
     maps = se.pool() if maps is None else maps
     outcomes: dict[int, float] = {}
     rates, shares = {}, {}
-    for source, frames in (("script", script_frames), ("scenario", scenario_frames)):
+    for source, frames in (("script", script_frames), ("scenario", scenario_frames), ("army", army_frames)):
         if not frames:
             continue
         parts = [Part(out, source, frames // workers, max(1, games // workers), seed, max(1, threads // workers), script_every, rules, frames_per_shard, k) for k in range(workers)]
@@ -588,6 +667,7 @@ def main() -> None:
     c.add_argument("--maps", type=pathlib.Path, help="a directory tools/map_gen.py wrote to.  Otherwise the training maps.")
     c.add_argument("--script-frames", type=int, default=0)
     c.add_argument("--scenario-frames", type=int, default=0)
+    c.add_argument("--army-frames", type=int, default=0, help="from the C++ army and economy scripts' games, with variants")
     c.add_argument("--games", type=int, default=128)
     c.add_argument("--seed", type=int, default=1)
     c.add_argument("--threads", type=int, default=16)
@@ -595,7 +675,7 @@ def main() -> None:
     c.add_argument("--workers", type=int, default=1)
     args = parser.parse_args()
     maps = se.load_pool(args.maps) if args.maps else None
-    print(json.dumps({k: v for k, v in collect(args.out, args.script_frames, args.scenario_frames, args.games, args.seed, args.threads, args.script_every, maps=maps, workers=args.workers).items() if k not in ("maps", "kinds", "water", "weights")}, indent=1))
+    print(json.dumps({k: v for k, v in collect(args.out, args.script_frames, args.scenario_frames, args.games, args.seed, args.threads, args.script_every, maps=maps, workers=args.workers, army_frames=args.army_frames).items() if k not in ("maps", "kinds", "water", "weights")}, indent=1))
 
 
 if __name__ == "__main__":

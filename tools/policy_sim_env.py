@@ -24,7 +24,7 @@ sys.path.insert(0, str(ROOT / "sim" / "py"))
 sys.path.insert(0, str(ROOT / "bots"))
 import zksim  # noqa: E402
 from zkbot import catalog as bot_catalog  # noqa: E402
-from zkbot.policy import bundle as bd, rawframe as rf, tables  # noqa: E402
+from zkbot.policy import bundle as bd, groups, rawframe as rf, tables  # noqa: E402
 from policy_eco import ECO_EVERY, EcoData  # noqa: E402
 from policy_opening import Ground, Opening, Seat, is_buildable, modelled  # noqa: E402
 from policy_script import ScriptData  # noqa: E402
@@ -35,6 +35,7 @@ KINDS = (rf.KEEP, rf.MOVE, rf.FIGHT, rf.ATTACK_UNIT, rf.MANUAL_FIRE, rf.JUMP, rf
 TICKS_PER_DECISION = 3
 TIME_LIMIT_DECISIONS = 2400         # 20 minutes
 VALUE_CONSTANT = 1000.0
+DIVERSITY_DECAY = 0.999     # a decision, of the counts of what the policy's sides have made: their half-life is 700 decisions of the batch
 SCRIPT_EVERY = 6                    # decisions: as often as the policy's commit lock lets it re-order
 SPREAD = 220.0
 MOST_COST = 600.0
@@ -132,11 +133,31 @@ def pool() -> list[tuple[zksim.Map, bd.Bundle, MapFacts]]:
     return _POOL
 
 
+_SHARED: dict[int, tuple[list, dict, object]] = {}     # id(maps) -> (maps, their Grounds, the C++ scripts' data with every map added)
+
+
+def share_maps(maps: list) -> None:
+    """Makes, for every SimEnv on this map list, each map's `Ground` warmed with what the scripts ask of it, and the C++ scripts'
+    data with every map added.  A recorder calls it before its workers fork, so that they share these (about 6 MB a map) rather
+    than each make its own as it comes to a map: 12 workers on the 298-map pool came to 1.6 GB each."""
+    import policy_scripts_cpp
+    table = tables.table()
+    data = policy_scripts_cpp.ScriptsData(ScriptData(table, catalog()), EcoData(table, catalog()))
+    grounds = {id(b): Ground(b, f) for _, b, f in maps}
+    for ground in grounds.values():
+        ground.warm(data.footings)
+        data.map_index(ground)
+    _SHARED[id(maps)] = (maps, grounds, data)
+
+
 def sim_orders(orders: list) -> np.ndarray:
-    """The policy's orders as the sim's.  Its kinds up to PRODUCE have the same numbers; a thrower's fire at the ground, and a switch's target, are the sim's own."""
+    """The policy's orders as the sim's.  Its kinds up to PRODUCE have the same numbers; a thrower's fire at the ground, and a switch's target, are the sim's own.
+    A group order is its unit's, followed by a groups.GROUP_MARK record with the radius as x and the roles as target, as the scripts record theirs:
+    `split_groups` makes the sim's group orders of them."""
     table, cat = tables.table(), catalog()
-    out = np.zeros(len(orders), zksim.ORDER_DTYPE)
-    for i, o in enumerate(orders):
+    out = np.zeros(len(orders) + sum(o.radius > 0.0 for o in orders), zksim.ORDER_DTYPE)
+    i = 0
+    for o in orders:
         kind, target = o.kind, o.target
         if kind == rf.THROW:
             kind = zksim.ORDER_MANUAL_FIRE
@@ -149,17 +170,40 @@ def sim_orders(orders: list) -> np.ndarray:
         elif kind == rf.PRODUCE:
             target = cat.index[table.names[target]]
         out[i] = (o.uid, kind, o.x, o.z, target)
+        i += 1
+        if o.radius > 0.0:
+            out[i] = (o.uid, groups.GROUP_MARK, o.radius, 0.0, o.roles)
+            i += 1
     return out
+
+
+def split_groups(rows: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Orders with group marks (`sim_orders`) as the sim takes them: the unit orders, and the group orders (zksim.GROUP_DTYPE)."""
+    mark = rows["kind"] == groups.GROUP_MARK
+    if not mark.any():
+        return rows, np.zeros(0, zksim.GROUP_DTYPE)
+    at = np.flatnonzero(mark)
+    anchor = rows[at - 1]
+    out = np.zeros(len(at), zksim.GROUP_DTYPE)
+    out["anchor"], out["roles"], out["radius"] = anchor["unit"], rows["target"][at].astype(np.uint32), rows["x"][at]
+    out["kind"], out["x"], out["z"], out["target"] = anchor["kind"], anchor["x"], anchor["z"], anchor["target"]
+    alone = ~mark
+    alone[at - 1] = False
+    return rows[alone], out
 
 
 def policy_orders(rows: np.ndarray) -> list:
     """`sim_orders` the other way: what a script told the sim, in the policy's terms, so it can be read as the policy's choices.
-    A manual fire with no unit to aim at is a throw, as the policy has no other ground-aimed one."""
+    A manual fire with no unit to aim at is a throw, as the policy has no other ground-aimed one.  A group mark makes the order before it a group order."""
+    from dataclasses import replace
     from zkbot.policy import actions
     table, cat = tables.table(), catalog()
     out = []
     for o in rows:
         kind, target = int(o["kind"]), int(o["target"])
+        if kind == groups.GROUP_MARK:
+            out[-1] = replace(out[-1], radius=float(o["x"]), roles=target)
+            continue
         if kind == zksim.ORDER_MANUAL_FIRE and target < 0:
             kind = rf.THROW
         elif kind == zksim.ORDER_ON_OFF:
@@ -227,7 +271,9 @@ class SimEnv:
         every side plays the standard script."""
         self.count, self.modes, self.units = games, modes, units
         self.maps = pool() if maps is None else maps
-        self.grounds = {id(b): Ground(b, f) for _, b, f in self.maps}
+        shared = _SHARED.get(id(self.maps))
+        shared = shared if shared is not None and shared[0] is self.maps else None
+        self.grounds = shared[1] if shared else {id(b): Ground(b, f) for _, b, f in self.maps}
         self.weights = weights
         self.self_play_share = 0.0      # of games starting from now on, whatever `modes` says
         self.ended: dict[int, dict] = {}    # a seat's last finished game, for a test to note
@@ -237,6 +283,9 @@ class SimEnv:
         self.script_record: dict[int, np.ndarray] = {}      # seat -> the orders its script gave this decision, as the sim takes them
         # The same with the C++ scripts, over every seat: (orders, where each seat's start).  None with a subclass's own scripts.
         self.army_orders: tuple[np.ndarray, np.ndarray] | None = None
+        # Whether the C++ army script sends what it can as group orders (capi.h zk_group_rec), which play exactly as the same orders
+        # sent unit by unit.  They're in army_orders, as the policy would give them (policy_orders).
+        self.group_orders = True
         self.outcomes: list[dict] = []                      # every side of every finished game, for a measurement to take and clear
         self.opening = Opening(catalog(), decide_every) if units is None else None
         self.seats: list[tuple[Seat, Seat] | None] = [None] * games
@@ -256,8 +305,9 @@ class SimEnv:
         self.cpp = None         # policy_scripts_cpp.Scripts, which plays the army and economy scripts of every game
         if not self.own_scripts:
             import policy_scripts_cpp
-            self.cpp_data = policy_scripts_cpp.ScriptsData(self.script_data, self.eco_data)
+            self.cpp_data = shared[2] if shared else policy_scripts_cpp.ScriptsData(self.script_data, self.eco_data)
             self.cpp = policy_scripts_cpp.Scripts(self.cpp_data, games, threads if script_threads is None else script_threads)
+        self.batch.set_roles(self._role_of_type())
         self.seat_count = games * 2
         self.max_regions = max(b.regions for _, b, _ in self.maps)
         self.mode = [modes[0]] * games
@@ -267,9 +317,26 @@ class SimEnv:
         self.last_raw = np.zeros(games)
         self.delta = np.zeros(games)
         self.result = np.zeros(games)
+        # The diversity bonus (`_diversity`, after Pluto's): each side's this decision, and what's behind it.
+        self.diversity = 0.0                        # a unit's bonus at most; 0 is none
+        self.bonus = np.zeros((games, 2))
+        self.makeable = np.zeros(len(self.table.mobile), bool)     # by type-table row: what a factory can make that moves
+        self.makeable[self.table.producible] = True
+        self.makeable &= np.asarray(self.table.mobile, bool)
+        self.made = np.zeros(len(self.makeable))       # the policy's sides' finished units of those, by row, decayed
+        self.known: list[list[np.ndarray | None]] = [[None, None] for _ in range(games)]     # each side's finished units so far
         self.pending: dict[int, list] = {}
         self.done: list[tuple[int, str, float]] = []
         self._replace: list[int] = []
+
+    def _role_of_type(self) -> np.ndarray:
+        """Each sim type's role (groups.roles), by the type-table row it is, for the sim's group orders."""
+        _, role_of = groups.roles()
+        rows = np.asarray(self.script_data.catalog_row)
+        out = np.full(len(catalog().units), -1, np.int32)
+        has = np.flatnonzero(rows >= 0)
+        out[rows[has]] = role_of[has]
+        return out
 
     def bundles(self) -> list[bd.Bundle]:
         return [b for _, b, _ in self.maps]
@@ -303,6 +370,7 @@ class SimEnv:
         self.bundle[g] = bundle
         self.starts[g] = (x0, z0, x1, z1)
         self.decisions[g] = 0
+        self.known[g] = [None, None]
 
     def _draw_styles(self, g: int) -> tuple[pv.Variant, pv.Variant] | None:
         """Each side's army script knobs for game `g`: drawn from the environment's generator when variants are on, else None."""
@@ -400,15 +468,17 @@ class SimEnv:
         flags, busy = np.zeros(n, np.int32), np.full(n, -1, np.int32)
         pre, post = [], []
         pre_counts, post_counts = np.zeros(n, np.int32), np.zeros(n, np.int32)
+        policy_groups: list[list[np.ndarray]] = [[] for _ in range(self.count)]
         for g in range(self.count):
             seats = self.seats[g]
             for side in (0, 1):
                 seat = g * 2 + side
                 orders = self.pending.pop(seat, None)
                 if orders is not None:
-                    part = sim_orders(orders)
+                    part, grouped = split_groups(sim_orders(orders))
                     pre.append(part)
                     pre_counts[seat] = len(part)
+                    policy_groups[g].append(grouped)
                 elif not self._is_policy(seat):
                     flags[seat] = 1         # policy_scripts_cpp.SEAT_ARMY
                 opening = self._opening_orders(g, side)
@@ -419,28 +489,35 @@ class SimEnv:
                     busy[seat] = side       # the commander, while the opening has it
         join = lambda parts, counts: (np.concatenate(parts) if parts else np.zeros(0, zksim.ORDER_DTYPE),  # noqa: E731
                                       np.concatenate(([0], np.cumsum(counts))).astype(np.int32))
-        orders, offsets, army, army_offsets = self.cpp.step(self.batch, self.decisions, flags, busy, self.ticks, self.script_every, ECO_EVERY,
-                                                            pre=join(pre, pre_counts) if pre else None, post=join(post, post_counts) if post else None)
+        orders, offsets, army, army_offsets, groups, group_offsets = self.cpp.step(
+            self.batch, self.decisions, flags, busy, self.ticks, self.script_every, ECO_EVERY, pre=join(pre, pre_counts) if pre else None,
+            post=join(post, post_counts) if post else None, group_orders=self.group_orders)
         self.script_record = {int(s): army[army_offsets[s]:army_offsets[s + 1]] for s in np.flatnonzero(flags)}
         self.army_orders = (army, army_offsets)
-        return orders, offsets
+        if any(len(p) for parts in policy_groups for p in parts):      # the policy's group orders join the scripts'
+            whole = [np.concatenate([groups[group_offsets[g]:group_offsets[g + 1]], *policy_groups[g]]) for g in range(self.count)]
+            groups = np.concatenate(whole)
+            group_offsets = np.concatenate(([0], np.cumsum([len(w) for w in whole]))).astype(np.int32)
+        return orders, offsets, groups, group_offsets
 
     def step(self, progress: float) -> None:
         if self.cpp is not None:
-            all_orders, offsets = self._scripts_cpp()
-            self.batch.step(all_orders, offsets, ticks=self.ticks)
+            all_orders, offsets, groups, group_offsets = self._scripts_cpp()
+            self.batch.step(all_orders, offsets, ticks=self.ticks, groups=groups, group_offsets=group_offsets)
             self._after_step()
             return
         # A subclass's own scripts.
-        parts, offsets = [], [0]
+        parts, offsets, group_parts, group_offsets = [], [0], [], [0]
         self.script_record = {}
         for g in range(self.count):
-            total = 0
+            total = grouped = 0
             for side in (0, 1):
                 seat = g * 2 + side
                 orders = self.pending.pop(seat, None)
                 if orders is not None:
-                    part = sim_orders(orders)
+                    part, some = split_groups(sim_orders(orders))
+                    group_parts.append(some)
+                    grouped += len(some)
                 elif not self._is_policy(seat):
                     part = self.script_orders(g, side)
                     self.script_record[seat] = part
@@ -454,19 +531,55 @@ class SimEnv:
                     parts.append(extra)
                     total += len(extra)
             offsets.append(offsets[-1] + total)
+            group_offsets.append(group_offsets[-1] + grouped)
         all_orders = np.concatenate(parts) if parts else np.zeros(0, zksim.ORDER_DTYPE)
-        self.batch.step(all_orders, np.array(offsets, np.int32), ticks=self.ticks)
+        all_groups = np.concatenate(group_parts) if group_parts else np.zeros(0, zksim.GROUP_DTYPE)
+        self.batch.step(all_orders, np.array(offsets, np.int32), ticks=self.ticks, groups=all_groups if len(all_groups) else None,
+                        group_offsets=np.array(group_offsets, np.int32) if len(all_groups) else None)
         self._after_step()
 
     def _made(self, g: int, side: int) -> dict:
         """What the side's army script has started, by role, for the outcome."""
         return self.cpp.made(g, side) if self.cpp is not None else {}
 
+    def rarity(self, rows: np.ndarray) -> np.ndarray:
+        """0 to 1 for each type-table row: 0 for a type the policy's sides make at least as often as the average of what factories
+        can make, and towards 1 the rarer it is, on a log scale (1 at a share of 1 / N squared, N those types: 122)."""
+        n = int(self.makeable.sum())
+        share = (self.made[rows] + 1.0) / (self.made.sum() + n)
+        return np.clip(np.log(1.0 / (n * share)) / np.log(n), 0.0, 1.0)
+
+    def _diversity(self) -> None:
+        """Pluto's diversity bonus, for the units the policy chooses to make: each unit a factory could make that a side finishes
+        this decision is worth `diversity` x its type's `rarity`.  Rarity is counted over the policy's sides only; both sides earn the bonus, and `reward`
+        takes it zero-sum.  A side's units at its first decision of a game, the commander's among them, count as made already."""
+        self.bonus[:] = 0.0
+        if not self.diversity:
+            return
+        self.made *= DIVERSITY_DECAY
+        for g in range(self.count):
+            for side in (0, 1):
+                u = self.batch.records[g, side, :int(self.batch.counts[g, side])]
+                done = u["uid"][(u["player"] == side) & ((u["flags"] & rf.BEING_BUILT) == 0)].astype(np.int64)
+                known = self.known[g][side]
+                self.known[g][side] = np.union1d(done, known) if known is not None else np.unique(done)
+                if known is None:
+                    continue
+                fresh = np.isin(u["uid"], done[~np.isin(done, known)]) & (u["player"] == side)
+                rows = self.table.rows(u["def_id"][fresh])
+                rows = rows[self.makeable[rows]]
+                if not len(rows):
+                    continue
+                self.bonus[g, side] = self.diversity * float(self.rarity(rows).sum())
+                if self._is_policy(g * 2 + side):
+                    np.add.at(self.made, rows, 1.0)
+
     def _after_step(self) -> None:
         self.decisions += 1
         raw = self._raw()
         self.delta = raw - self.last_raw
         self.last_raw = raw
+        self._diversity()
         self.done, self._replace = [], []
         self.result[:] = 0.0
         alive_a, alive_b = self.batch.stats[:, 0, 1] > 0, self.batch.stats[:, 1, 1] > 0
@@ -504,9 +617,12 @@ class SimEnv:
         }
 
     def reward(self, seat: int, beta: float) -> float:
+        """Zero-sum: side 0's is the change in the value balance and its diversity bonus less side 1's, fading by beta into the result;
+        side 1's is the opposite."""
         g = seat // 2
         sign = 1.0 if seat % 2 == 0 else -1.0
-        return float(sign * ((1.0 - beta) * self.delta[g] + beta * self.result[g]))
+        shaped = self.delta[g] + self.bonus[g, 0] - self.bonus[g, 1]
+        return float(sign * ((1.0 - beta) * shaped + beta * self.result[g]))
 
     def finished_seats(self) -> list[tuple[int, str, float]]:
         """Seats whose game just ended.  The call also starts those games afresh, so read the reward first."""

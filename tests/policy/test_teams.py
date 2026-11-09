@@ -164,15 +164,15 @@ def actor(table, encoder_path):
 
 
 def _kinds(actor, t: fz.Tensors) -> np.ndarray:
-    """Each controllable unit's kind probabilities, with nothing before this frame."""
+    """Each controllable unit's kind probabilities were it the first action's, with nothing before this frame."""
     import torch
 
     import policy_model as pm
 
     b = pm.collate([t]).to("cpu")
     with torch.no_grad():
-        units, reg_h, *_ = actor.decide(b, *actor.initial_state(1, 0, "cpu"))
-        return torch.softmax(actor.heads(b, units, reg_h)[0], -1)[0, :t.controllable].numpy()
+        ctx, *_ = actor.decide(b, *actor.initial_state(1, 0, "cpu"))
+        return torch.softmax(pm.each_unit_heads(actor, b, ctx)[0], -1)[0, :t.controllable].numpy()
 
 
 def test_the_actor_decides_on_a_frame_with_three_alliances(small_map, table, actor):

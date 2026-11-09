@@ -5,6 +5,7 @@
   python tools/sim_engine.py overdrive           log what the game's overdrive makes of some layouts (SIMOD lines)
   python tools/sim_engine.py mechanics           log what wrecks, reclaim, upkeep, cloak, stockpiling, a shot solar and shields come to (SIMMECH lines)
   python tools/sim_engine.py pierce              only what shots that go through what they hit come to
+  python tools/sim_engine.py air                 how aircraft fly, bomb, rearm and fight (SIMMECH lines)
 
 These come from a game on the map rather than from its files, since Zero-K decides between its own configs, the map's and a
 fallback, and a map's file is Lua that may depend on the number of teams or build its list in code.
@@ -173,7 +174,7 @@ def facts(maps: list[str], timeout: float, launches: int, out: pathlib.Path = FA
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=("dump", "facts", "overdrive", "mechanics", "pierce", "pierce_slow", "abilities"))
+    ap.add_argument("mode", choices=("dump", "facts", "overdrive", "mechanics", "pierce", "pierce_slow", "abilities", "air"))
     ap.add_argument("maps", nargs="*")
     ap.add_argument("--map", default="TitanDuel 2.2")
     ap.add_argument("--timeout", type=float, default=240.0)
@@ -184,7 +185,7 @@ def main() -> None:
         facts(a.maps, a.timeout, a.launches, a.out)
     else:
         wd = run(a.mode, a.map, a.timeout)
-        marker = {"overdrive": "SIMOD", "mechanics": "SIMMECH", "pierce": "SIMMECH", "pierce_slow": "SIMMECH", "abilities": "SIMMECH"}.get(a.mode)
+        marker = {"overdrive": "SIMOD", "mechanics": "SIMMECH", "pierce": "SIMMECH", "pierce_slow": "SIMMECH", "abilities": "SIMMECH", "air": "SIMMECH"}.get(a.mode)
         if marker:
             for line in (wd / f"engine-{a.mode}.log").read_text(encoding="utf8", errors="replace").splitlines():
                 if marker in line:

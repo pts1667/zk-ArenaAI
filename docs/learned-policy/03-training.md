@@ -103,8 +103,9 @@ Annealing with `p` = fraction of the stage's decision budget used:
 Keeping 0.1 of the shaped term gives a dense signal when wins are rare.  If the win rate against anchors is
 under 5% at p = 0.6, hold beta at 0.5 (section 3).
 
-Opening bonus: none (user exclusion).  Diversity bonus: none in v1.  It is added only if the unit-mix trigger
-in 4.4 fires, at most 5% of the shaped magnitude.
+Opening bonus: none (user exclusion).  Diversity bonus: none in v1, it said here; added at the user's request
+on 2026-11-08 (11.19), inside the shaped term, zero-sum: `r_A` gains (1 - beta) times A's bonus less B's.  At
+its default its share of the shaped term's magnitude was about 2% a game on script games, 14% at most.
 
 Scale [E]: `V` is perhaps 10-30k metal per side at 20 minutes, so `Phi` moves 0.1-0.3 per game, about 1e-3
 to 1e-2 per decision.
@@ -1695,3 +1696,130 @@ What limits variety in the script itself:
 * The role schedule is a fixed function of time.
 
 **Not checked:** more than one seed, the map pool, a full recording with variants, training on it.  There are no tests of the variant path beyond the default's hash.
+
+### 11.14 Air in the sim, and a second factory for the scripts (2026-11-08)
+
+At the user's request: the sim flies every aircraft (`01-simulator.md` 8.18, ABI 16), and the scripts build a second factory.
+
+**The second factory** (`second_factory_job` in `sim/scripts/src/eco.cpp`, scripts ABI 3).  Once it's both 18 minutes in and 50 metal a second not counting reclaim (the user's rule; it was first either 18 minutes or 45, which income alone always met first, at 4 to 13 minutes), an idle constructor starts a plane plant, a gunship plant or a strider hub, drawn once per side when it's first due (0.5, 0.3, 0.2: planes most often, then gunships, as the user plays).  A hub needs a grid of 50 energy and is built on the main grid; with less there, it's planes instead.  Reclaim's share of income comes from the batch's third stat (`ZK_STATS` is 3).  The floating rule that adds factories of the first kind is unchanged.
+
+**What they make** (`choose` in `army.cpp`).  An air plant has its own mix, of whatever's on its menu: raiders 0.35, riots 0.2, assaults 0.25, skirmishers 0.2, bombers 0.4, and AA 0.42 once the enemy has been seen with air.  It counts only what flies, and a ground plant only what doesn't, so neither's mix moves the other's.  A plane plant makes Ravens, Phoenixes, and Swifts once it has seen air; a gunship plant Locusts, Revenants and Harpies.  A strider hub, not an air plant, follows the ground schedule: Scorpions, and Merlins once artillery's share comes in (none were seen).  Menus leave out ships and units that blow themselves up (`policy_mix.menu`): the hub had picked a Reef for artillery, and a gunship plant would have made Blastwings.  New role `bomb` (`R_BOMB`): a flying bomber goes for the defence nearest the army's lead, else the nearest building, and is ordered again when it's back and idle.
+
+**One check**: 16 script games on the training maps, one seed, run to 25 minutes with no early end.
+* 17 of 32 sides built one: 11 plane plants, 5 gunship plants, 1 hub.  Four games, 8 sides, were over before 18 minutes; of the 24 sides still playing then, 7 never reached 50 metal a second or lost first.
+* 12 started between 18.0 and 18.8 minutes, with income from 50 to 119; the other 5 at 19.5 to 24.5 minutes, when income reached 50.  No reclaim was seen: the scripts don't reclaim.
+* With the earlier rule (either trigger) on the same games, 29 of 32 built one: 17 plane plants, 8 gunship plants, 4 hubs.  The production counts below and the AA count are from that rule.
+* On a second seed, what the second plants were told to make: plane plants Ravens 162, Swifts 110, Phoenixes 108, constructors 106, Sparrows 20; gunship plants constructors 22, Locusts 14, Tridents 14, Revenants 12, transports 9, Harpies 7; hubs Scorpions 21, Athenas 19.  Bombers were given 820 attack orders.
+* Ground AA now appears: up to 52 a side.
+
+**Not checked:** whether air is any good in these games (no win rates by plant), the map pool, more seeds, the policy with air, or the frame encoder on aircraft, which it never saw.  Constructors are a large share of what air plants make, since the constructor quota is filled by whichever plant asks first.  The gunship plant's scout is a transport (`gunshiptrans`), which carries nothing here.
+
+### 11.15 Group orders: the army script's, and the policy's (2026-11-08)
+
+At the user's request, after weighing FlexAttention with a token per order: group ("area") commands, in the sim (`01-simulator.md` 8.19), the C++ army script, and then the policy's actions and the labels.
+
+**The form** (`zkbot/policy/groups.py`, sim ABI 17).  A group order is one unit's order, the anchor's, with a radius and a set of roles: the sim gives it as well to every unit of the anchor's side of those roles within the radius of the anchor.  The radius is one of ten, 60 to 2,250 elmos, each 1.5 times the one before (`GROUP_RADII`); roles are the bot catalog's 19, numbered in sorted order, of which the 15 with a mobile type can be chosen (`choosable`).  Only move, fight and attack go as groups (`GROUP_KINDS`).  It was first a centre and a radius; an anchor makes it a choice of a unit the policy already has a token for, as a player clicks a unit to start a box.
+
+**What the script sends** (`Seat::group_plans`, `sim/scripts/src/army.cpp`; scripts ABI 4).  Of the fighters' move, fight and attack orders it sends this step, those that are the same order to the letter (kind, target, place) go as one group order: the anchor is the member nearest their middle, the radius the smallest of the ten that reaches the farthest member by an elmo.  If none does, or the circle would take in any other own unit of those roles, they're split in two across their wider spread and each half is tried again; any left alone go as unit orders.  So the sim does just what the orders alone would do: those it could select are taken as every own unit with a role, a superset of what it selects; a member is inside the radius and anyone else outside it by an elmo, which float rounding can't undo; and the sim applies group orders before unit orders, while a fighter's other orders in a step all come after its plan's.  `SimEnv.group_orders` (on by default) turns it off.
+
+**Recorded as the policy would give them** (data version 5).  The army's orders in `army_orders`, `script_record` and the `.zkr` files are those sent alone, and each group order as its anchor's order followed by a record of kind `GROUP_MARK` (100) for the same unit, with the radius as x and the roles as target; the other members have none, so their label is keep.  `.zkr` keeps orders exactly, so the format didn't change.  `policy_sim_env.policy_orders` reads a mark as the radius and roles of the order before it; `sim_orders` writes them the same way for the policy's orders, and `split_groups` makes the sim's group orders of them.
+
+**The policy's heads** (`policy_latent.LatentActor.group`, `.roles`; `policy_model.sample_actions`).  A unit whose kind is move, fight or attack then chooses alone or one of the ten radii (11 ways, from its reading and an embedding of its kind; alone starts 2 nats ahead, as keep does), and if a radius, each choosable role in or out on its own (a Bernoulli each, from the same and an embedding of the radius).  The log-probability adds the group choice for those kinds and the roles' for a group; PPO's entropy bonus has two more heads, `group` (floor 0.3 x ln 4) and `roles` (mean over roles, floor 0.3 x ln 2).  Action tokens add an embedding of the radius and a projection of the roles.  A unit given another's group order in the same step keeps its own choice if it made one: group orders go first.  The actor's weights don't load into older checkpoints' shapes; cloning has to be run again on version 5 data.
+
+**Checks.**
+* 16 script games with variants, 2,000 decisions each, with group orders and without: no frame differed.  Of the army script's 17,748 orders, 5,224 (29%) went in 1,548 group orders, 3.4 units each, so the sim got 14,072 (79%).  The centre form grouped 48%: ten radii and an anchor at a member, not at the middle, need bigger circles that take in others more often.
+* `test_group_orders_play_the_same_games_as_the_same_orders_unit_by_unit_and_are_recorded_as_given`: 600 decisions both ways, same frames, and at every decision what's recorded, expanded by `groups.expand`, tells every unit what the orders alone told it.
+* `test_the_policys_group_orders_reach_the_units_they_select`: a policy's group order through the environment reaches exactly the units `expand` selects (at least 4).
+* `test_what_decoding_makes_reads_back_as_the_same_choices`: random choices with groups, decoded, through the sim's orders and back, encode to the same kind, enemy, produce, group and roles.
+* A small version 5 recording (35 games): no order the policy can't say, 117 group labels in 2,670 decisions read; 30 cloning steps run on it.  Full suite: 596 passed.
+
+**Not done:** cloning or RL with the group heads; whether the policy uses them well.  How much more the script would group if a group could take units already doing that order wasn't measured: exactness keeps a unit that's already on its way, and so isn't re-ordered, from sharing its squad's circle.
+
+### 11.16 The encoder retrained with air (2026-11-08)
+
+At the user's request: `frame_vae.py train` as before (`--autoencoder --region-pool 32 --two-part --questions --muon-lr 0.008`, 25,000 steps, 50 minutes) on `frames/pool4`, collected with the sim's air and second factories, to `runs/encoder-air/final`.  The actor now reads it (`policy_latent.ENCODER`).
+
+On the same 8,000 frames of `pool4`'s held-out maps, the old encoder (`encoder-questions`, which never saw aircraft) and the new:
+
+| | old | new |
+|---|---|---|
+| reconstruction R2 | 0.926 | 0.924 |
+| unit counts R2, own ground | 0.503 | 0.411 |
+| unit counts R2, own / enemy air | -0.12 / -0.12 | -0.21 / -0.18 |
+| where, any within 0.05 | 0.706 | 0.743 |
+| where, top within 0.05 | 0.598 | 0.605 |
+| what: type / side | 0.670 / 0.964 | 0.678 / 0.968 |
+| what: hp R2 / vx R2 | 0.559 / 0.637 | 0.563 / 0.657 |
+| aircraft asked about: found / type | 0.744 / 0.559 | 0.761 / 0.579 |
+| aircraft: vx R2 / hp R2 | 0.586 / 0.469 | 0.610 / 0.431 |
+
+Mixed: the questions, which ask what the latents say about a place or a unit and are nearer what the actor reads, are better on all but aircraft health; the count grid is worse.  The switch is because the actor has to be cloned again anyway for the group heads, and this encoder has seen the units it will meet.  **Not checked:** an actor trained on each.
+
+### 11.17 A bigger encoder, 40 latent tokens, on themed scenarios and the C++ scripts' games (2026-11-08)
+
+At the user's request: 40 latent tokens of 32 (1,280 numbers a frame, from 24), an encoder of 1.5 to 2 times the parameters, wider and deeper, and frames of what the C++ army script seldom makes, aircraft fighting above all.
+
+**The data** (`tools/frame_data.py`, `frames/pool5`).  Three sources, 1M frames each, on the map pool with its held-out maps left out:
+* `script`: the Python frame games (`frame_world.FrameGames`), as before.
+* `scenario`: random scenarios, now 40% of them as before (`mixed`) and 60% themed (`FLAVOURS`): air battles 20% (one side all aircraft, the other aircraft and ground AA, small bases, 3,000 to 40,000 metal), air raids 10% (aircraft against a base that spends 30 to 70% of its building budget on AA turrets, the attackers' clusters placed most of the way to the enemy), fleets 10% (ships against ships, only on maps with water; on a map without, a mixed one), heavies 10% (units of 1,200 metal or more against a mixed army) and swarms 10% (units of 120 metal or less on both sides).  Which side gets which is by chance.  AA turrets are what shoot air and not ground (`_shoots_only_air`); the torpedo turret passes too, from how its weapon is rated.
+* `army`: the C++ army and economy scripts' games with variants (`SimEnv(..., ["scripts"], variants=True)`), which the actor is cloned from and the encoder hadn't seen.  Game numbers are now spaced so that three sources fit in int32 (`SOURCES_APART`, `GAMES_APART`).
+
+How often a frame holds aircraft (`seen_in`, own / enemy): script 23% / 23%, scenario 48% / 48%, army 0.2% / 0.2%.  Ships: 3%, 9%, 0%.  So the C++ script all but never flies by the time its games end, and what the encoder knows of air is from the scenarios.  The grouping change of 11.18 was built while the collection ran; any worker that loaded the scripts' library after it played the new grouping, so the `army` frames may hold some of each.  The change only tells some units their order again; it wasn't checked which workers had which.
+
+**The encoder** (run `encoder-big/final`): as `encoder-air` (`--autoencoder --region-pool 32 --two-part --questions --muon-lr 0.008`, 25,000 steps), with `--queries 40 --d 144 --rounds 3`: 1,650,624 parameters to `encoder-air`'s 915,920 (1.8 times), 82 minutes on the RTX 4070.  `policy_latent.ENCODER` is now it; the actor's sequence has 44 tokens a frame where it had 28, and it has 4,096 more parameters (1,550,478) for its 40 slot embeddings.
+
+On the same 8,000 frames of each collection's held-out maps (`pool4` as in 11.16; `pool5` taking each source's shards in turn, so the three are alike):
+
+| | `pool4`: questions / air / big | `pool5`: questions / air / big |
+|---|---|---|
+| reconstruction R2 | 0.926 / 0.924 / **0.945** | 0.933 / 0.926 / **0.970** |
+| unit counts R2, own ground | 0.503 / 0.411 / **0.726** | 0.307 / 0.228 / **0.722** |
+| unit counts R2, own / enemy air | -0.12 / -0.21 / **-0.04**, -0.12 / -0.18 / **-0.01** | 0.13 / 0.15 / **0.50**, 0.11 / 0.22 / **0.62** |
+| where, any within 0.05 | 0.706 / 0.743 / **0.865** | 0.624 / 0.672 / **0.781** |
+| where, top within 0.05 | 0.598 / 0.605 / **0.740** | 0.486 / 0.493 / **0.601** |
+| what: unit found / false | 0.790 / 0.798 / **0.900**, 0.077 / 0.076 / **0.033** | 0.778 / 0.793 / **0.890**, 0.100 / 0.098 / **0.043** |
+| what: type / side | 0.670 / 0.678 / **0.812**, 0.964 / 0.968 / **0.983** | 0.650 / 0.666 / **0.818**, 0.974 / 0.977 / **0.988** |
+| what: hp R2 / vx R2 | 0.559 / 0.563 / **0.747**, 0.637 / 0.657 / **0.807** | 0.592 / 0.589 / **0.764**, 0.547 / 0.567 / **0.740** |
+| aircraft asked about: found / type | 0.744 / 0.761 / **0.885**, 0.559 / 0.579 / **0.759** | 0.712 / 0.736 / **0.871**, 0.450 / 0.474 / **0.722** |
+| aircraft: vx R2 / hp R2 | 0.586 / 0.610 / **0.784**, 0.469 / 0.431 / **0.677** | 0.572 / 0.615 / **0.797**, 0.466 / 0.486 / **0.689** |
+
+Better on every measure on both, by a lot: aircraft type 0.58 to 0.76, own ground counts 0.41 to 0.73.  **Not separated:** how much is the 40 tokens, the size, or the data; and what any of it does for an actor (the actor has to be cloned again in any case, for 11.18).
+
+### 11.18 Actions one after another, as Pluto acts (2026-11-08)
+
+At the user's request, after comparing the model with Pluto's (a StarCraft: Brood War bot that gives one action a step, a selection or a command, through a few heads chosen in turn): a decision is now a short list of actions, chosen one after another, where every unit chose its own order at once before.  The user's reason: Zero-K's unit AI is made to need as little micro as it can, so the per-unit form's one strength, cheap micro for every unit at once, buys little.  `docs/model.md` section 5 has the model.
+
+**The script's grouping first** (`Seat::group_plans`).  Whether a few actions a decision could say what the army script says was measured first, on 35 version 5 games: actions a look (units told something, a group order counting once) had a median of 1, a 95th percentile of 8, a 99th of 28 and a maximum of 111, and at most 8 a decision would have cut 28% of the orders.  The big ones were pushes late in the game: in looks of more than 8 orders (22 on average), 82% of them went to one place, yet they made 1.8 group orders.  The script doesn't send a unit an order it already has (`_emit`: the same kind, within `REORDER`, 200 elmos), and those units, of the same roles and inside the circle, stopped it as units the group would wrongly take in.  Now such a unit doesn't stop it: the group order takes it in, and tells it its order again, to the letter of the group's.  So the games are no longer exactly those of the orders alone; the test that said so is now `test_group_orders_tell_each_unit_what_it_was_told_alone_and_again_what_it_was_already_told` (the same games up to the first such unit, and each taken-in unit's last order a move or fight of that kind within 200 elmos).  On 74 games recorded with it: 1.28 actions a look, median 0, 95th percentile 6, 99th 11, maximum 41.
+
+| at most | looks with more | orders cut |
+|---|---|---|
+| 8 | 2.1% | 7.3% |
+| 12 | 0.7% | 2.7% |
+| 16 | 0.3% | 1.1% |
+
+**The form** (`policy_latent.py`, `policy_model.py`, `zkbot/policy/actions.py`).  Up to 16 actions a decision (`actions.SLOTS`).  For each, a decoder (`plan`, two blocks) reads the frame's latent tokens and the actions chosen so far, and a pointer picks a unit, the anchor, or done: a unit that may be told something other than keep and that no action before picked; done starts 3 nats up (`DONE_START`).  The anchor reads the frame with a query of its own embedding and its slot (`reading`, the old per-unit `read_unit`), and the heads choose its order as each unit's did (kind, never keep; region, enemy, fine, produce, group, roles), with its masks (`per_action`).  The action becomes a vector (`action_vectors`: what each acting unit's part of the action tokens was), which the next slot reads; the action tokens read the same vectors.  A unit no action picks keeps.  An action's log-probability is its anchor's (or done's) plus its heads'.  `Decision`, `encode` and `decode` stay per unit: `actions.to_slots` and `to_decision` go between.  The actor has 1,546,382 trained parameters, 435,737 of them the decoder and anchor; it was 1,082,199.
+
+**PPO** (`policy_train.py`).  A step keeps its actions as chosen (`Step.anchor` first, each field one entry an action).  Each action, done included, has its own clipped ratio, averaged within the decision; one advantage a decision, as before.  The entropy bonus has an `anchor` head (floor 0.3 x ln 4).  `actions_a_decision` is logged; `share_kind*` is now of actions, so keep is no longer in it.
+
+**Cloning** (`policy_clone_train.py`).  The script's orders, as the policy's choices per unit, become actions in a random order, at most 16 (1.1% cut, `cut_share`), with done after.  They have no order of their own, so an action's anchor scores as any unit the script told something and no action before it picked (`evaluate_actions`' `labelled`: the log of the sum of their probabilities), and done once none is left; its heads score the one given.  So the actor is taught which units to give orders to, and not an order among them that isn't in the data.  The keep weight and its shift are gone: done stands for what's left, and a unit the script left alone is one no action picks.  Held-out measures: `anchor_right` (the likeliest anchor is a unit still to be told), `stops_early`, `done_right`, `kind_right` and `right_KIND` given the anchor, `nll_act`, `nll_done`.
+
+**Checks.**  Full suite: 650 passed.  New or rewritten: a sampled decision scores the same when evaluated, for an untrained actor and for one that's never done; a script's actions scored as a set score at least as well as in their order, and the last of them the same; no unit is picked twice and every choice is legal for its anchor; the action tokens read actions as a set; segments in training score as their decisions did in play.  30 cloning steps ran on the 74 new games.
+
+**Not done:** cloning long enough to compare with the per-unit form, and RL.  The decision rate is as before: cloning counts the decisions where the script looked, every 6th, and the policy decides at every one.
+
+600 steps of cloning on CPU (8 stretches of 24 decisions a step, `--lr 1e-3`, on the 74 new games; held out: 2 games, 82 actions and 192 dones): the likeliest anchor was a unit still to be told 5% of the time at step 150 and 39% at 600, done where there was more to do fell from 95% to 61%, and done where the script was done stayed at 93%.  The kind is right 93% given the anchor, most of them factories producing.  So the set loss learns; how far it goes is for a real run.
+
+### 11.19 A diversity bonus, after Pluto's (2026-11-08)
+
+At the user's request: Pluto's reward has "a small bonus for building less-frequently seen units and tech", zero-sum.  Here (`policy_sim_env.SimEnv._diversity`, `rarity`; `policy_train.Config.diversity`):
+
+* Each unit a side finishes, of a type a factory can make that moves (122 types), is worth `diversity` x its type's rarity.  Rarity is 0 for a type the policy's sides make at least as often as the average of those 122, and rises on a log scale the rarer it is: log(1 / (N x share)) / log N, at most 1.  The shares are counts of what the policy's sides finished, over every game of the batch, decayed by 0.999 a decision (a half-life of 700 decisions), with one of each type added so that nothing is rare from the start.
+* Both sides earn it, and `reward` takes it zero-sum, as Pluto does: side 0's shaped reward is the change in the value balance plus its bonus less side 1's.  It's in the shaped part, so it fades with beta into the result (03-training.md 1.3) as the value balance does.  Against the script, the script's rare units count against the policy; that adds noise, not a bias, as the policy can't change them.
+* Only what's finished counts, so ordering a rare unit and cancelling it earns nothing; the units a side starts a game with count as made already.  Buildings and tech aren't counted: in the sim the economy script builds them, so they're not the policy's to choose.  Pluto's bonus is for building; using a rare unit well earns what it earns through the value balance.
+* `diversity_a_decision` is logged.
+
+**How big.**  On 155 script games with variants (1,526 decisions on average), rarity counted over both sides, at 0.005 a side's bonus came to 0.0025 a game on average (0.019 at most), against a sum of 1.35 of the value balance's changes: nothing.  17 of the 54 types made had a bonus (amphibious AA 0.6, the plane constructor 0.63, the light scout plane 0.57, the cloaked AA 0.35, ...); constructors and raiders were the most made, 4 to 7% each.  The default is 0.05: a unit of a type at rarity 0.6 is then worth 0.03, about what losing a 300-metal unit costs at 10,000 metal on the field (the value balance is (a - b) / (a + b + 1000)).  On those games that's 0.025 a side a game on average, 1.9% of the value balance's changes, and 0.19 at most (14%); the plan's ceiling was 5% (1.3).  It's a guess, not a tuned figure.
+
+**Checks.**  `test_finished_units_of_rare_types_earn_a_zero_sum_bonus_and_the_first_units_none`: a type made 10,000 times has rarity 0 and one never made more than 0.8; nothing at the first decision; over 300 decisions of 4 games the policy's sides earn some, the counts grow, and every seat's reward is the negative of its opponent's.
+
+**Not done:** a PPO run with it, or any check that it changes what the policy makes.

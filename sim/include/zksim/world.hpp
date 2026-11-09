@@ -44,6 +44,7 @@ struct Purse {
     float energy_spent = 0.0f;      // by builders, since the last overdrive update
     float overdrive_metal = 0.0f, overdrive_energy = 0.0f;      // per second, as of that update
     float reclaimed = 0.0f;     // metal, in the last tick
+    float reclaim_income = 0.0f;    // per second, the part of metal_income that reclaim is
     bool free_factory = true;   // a side's first ploppable factory is free and instant (start_unit_setup.lua)
 };
 
@@ -179,6 +180,17 @@ struct Skid {
     float vx = 0.0f, vz = 0.0f, vy = 0.0f, y = 0.0f;
 };
 
+// An aircraft: air.cpp.
+enum AirPhase { AIR_FLYING = 0, AIR_LANDED = 1, AIR_TAKEOFF = 2, AIR_LANDING = 3, AIR_ON_PAD = 4 };
+struct AirState {
+    float height = 0.0f;         // above the ground
+    int phase = AIR_FLYING;
+    int takeoff_left = 0;        // frames of climbing before it moves off
+    int ammo = 0;                // salvos left, for what has ammo
+    int pad = -1;                // the pad it's making for or sits on, or -1
+    float rearmed = 0.0f;        // frames of rearming done on the pad
+};
+
 // A Djinn and its beacon.
 struct Teleporter {
     int unit;
@@ -312,6 +324,8 @@ struct World {
     std::vector<int> wait_since;           // frame it was told to wait at a beacon
     std::vector<SiloMissile> silo_missiles;
     std::vector<int> droppers;             // what drops a bomb when it goes
+    std::vector<AirState> air;
+    std::vector<int> aircraft, pads;       // handles of what flies, and of what planes rearm at
     // Wrecks, by id.  One with nothing left stays in the list, so an id stays good, and leaves the others.
     std::vector<Wreck> wrecks;
     std::vector<int> live_wrecks;
@@ -344,6 +358,9 @@ struct World {
     World(const Catalog* c, const Map* m, uint64_t seed, int behaviour_);
     int add(int type, int side, float x, float z, float heading, float hp_frac, float build_frac);
     void order_unit(int unit, int kind, float gx, float gz, int target);
+    // Group orders (capi.h zk_group_rec): each catalog type's role, -1 for none.
+    std::vector<int8_t> role_of_type;
+    int order_group(const zk_group_rec& g);
     void ready_weapons();
     void set_economy(int n_spots, const float* spot_triples, float metal, float energy, float innate_metal, float innate_energy, float storage);
     int add_wreck(float px, float pz, float metal, float wreck_hp, float radius, int feature_def, int heap_of);
@@ -363,6 +380,10 @@ struct World {
     bool throw_ready(int u) const;
     float slow_now(int u) const { return slow[size_t(u)] < MAX_SLOW ? slow[size_t(u)] : MAX_SLOW; }
     bool active(int u) const { return build[size_t(u)] >= 1.0f && !stunned(u); }
+    // Aircraft: how high it is, and whether it's up there, where only what fires at the air can reach it.
+    float flight_height(int u) const { return air[size_t(u)].height; }
+    bool airborne(int u) const;
+    bool out_of_ammo(int u) const { return type_of(u).ammo > 0 && air[size_t(u)].ammo <= 0; }
     bool wreck_exists(int id) const { return id >= 0 && id < int(wrecks.size()) && wrecks[size_t(id)].left > 0.0f; }
     // energysolar.lua: it stops making at once, is armoured when shut, loses that when it starts to open, and makes again once open.
     bool shut_for_hit(int u) const;
@@ -460,6 +481,16 @@ private:
     void land(int u);
     void update_jumps();
     void update_burrows();
+    void update_air();
+    void fly_plane(int u);
+    bool air_goal(int u, float& gx, float& gz);
+    bool climb_or_land(int u, bool wants_to_go);
+    int find_pad(int u) const;
+    void used_ammo(int u);
+    bool bomb_due(int u, const zk_weapon_rec& w, int t) const;
+    void start_run(int u);
+    void drop_shot(int u, int slot, int frame_offset);
+    float bomb_fall_frames(int u, const zk_weapon_rec& w, int t) const;
     void push_from(int u, int source, float impulse);
     void step_skid(int u);
     void step_air_skid(int u, float& px, float& pz);

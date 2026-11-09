@@ -40,7 +40,7 @@ import policy_model as pm  # noqa: E402
 from zkbot.policy import actions as act, bundle as bd, featurize as fz, rawframe as rf, tables  # noqa: E402
 
 torch.backends.cuda.matmul.allow_tf32 = True
-HEADS = ("kind", "region", "enemy", "fine", "produce")
+HEADS = ("anchor", "kind", "region", "enemy", "fine", "produce", "group", "roles")
 NAME_DROPOUT = 0.3
 ENTROPY_FLOOR = 0.3         # of a head's maximum
 ENTROPY_BASE = 0.01
@@ -80,6 +80,8 @@ class Config:
     self_play_holds_below: float = 0.7      # and over the same two, what pauses it
     self_play_per_iteration: float = 0.01   # share of new games added each iteration: 100 iterations from none to all
     latent_encoder: str = policy_latent.ENCODER     # the trained frame encoder whose latents the actor reads
+    diversity: float = 0.05         # a finished unit of a type the policy rarely makes is worth up to this (policy_sim_env._diversity;
+                                    # 03-training.md 11.19): about a 300-metal unit's loss mid-game
 
 
 # A big frame costs more memory per token than a small one.  Fitted on the first actor, whose attention was over every pair of
@@ -142,12 +144,16 @@ class SelfPlay:
 
 @dataclass
 class Step:
+    """A decision as it was played.  Its actions, one entry each, in the order they were chosen (actions.Slots)."""
     frame: rf.Frame
+    anchor: np.ndarray
     kind: np.ndarray
     enemy: np.ndarray
     region: np.ndarray
     fine: np.ndarray
     produce: np.ndarray
+    group: np.ndarray
+    roles: np.ndarray
     logp: np.ndarray
     value: float = 0.0
     reward: float = 0.0
@@ -290,11 +296,11 @@ class Player:
     def _forward(self, items: list[fz.Tensors], history: torch.Tensor, seen: torch.Tensor):
         b = pm.collate(items).to(self.device)
         with self.autocast:
-            units, reg_h, new_history, new_seen, keep = self.actor.decide(b, history, seen)
-            a = pm.sample_actions(self.actor, b, units, reg_h)
+            ctx, new_history, new_seen, keep = self.actor.decide(b, history, seen)
+            a = pm.sample_actions(self.actor, b, ctx)
             new_history = self.actor.acted(b, a, new_history)       # what it did, for the decisions after
             value = self.critic(b)
-        out = {k: getattr(a, k).cpu().numpy() for k in ("kind", "enemy", "region", "fine", "produce", "logp")}
+        out = {k: getattr(a, k).cpu().numpy() for k in act.SLOT_FIELDS + ("logp",)}
         out.update({k: v.cpu().numpy() for k, v in keep.items()})
         return out, value.float().cpu().numpy(), new_history.float(), new_seen.float()
 
@@ -385,29 +391,29 @@ class Learner:
         history = torch.as_tensor(np.stack([seg.history for seg in batch]), device=device)
         seen = torch.as_tensor(np.stack([seg.seen for seg in batch]), device=device)
         with self.autocast:
-            a = _stored_actions(steps, whole, device)
+            a = _stored_actions(steps, device)
             acted = self.actor.segment_actions(whole, a, lengths)
             now = self.actor.segments(history, seen, torch.as_tensor(latents, device=device), lengths, acted)
-            units, reg_h = self.actor.read(whole, now)
-            logp, entropy = pm.evaluate_actions(self.actor, whole, units, reg_h, a)
+            logp, entropy = pm.evaluate_actions(self.actor, whole, self.actor.context(whole, now), a)
             value = self.critic(whole)
-        return self._ppo_loss(steps, whole, logp, entropy, value, clip, note)
+        return self._ppo_loss(steps, a, logp, entropy, value, clip, note)
 
-    def _ppo_loss(self, steps: list[Step], whole: pm.Batch, logp: torch.Tensor, entropy: dict, value: torch.Tensor, clip: float, note) -> torch.Tensor:
+    def _ppo_loss(self, steps: list[Step], a: pm.Actions, logp: torch.Tensor, entropy: dict, value: torch.Tensor, clip: float, note) -> torch.Tensor:
+        """Each action's own clipped ratio, averaged over the decision's actions, done included; one advantage a decision."""
         cfg, device = self.cfg, self.device
         decisions = len(steps)
         advantages = np.array([s.advantage for s in steps], np.float32)
         adv = torch.as_tensor((advantages - advantages.mean()) / (float(advantages.std()) + 1e-6), device=device)
         ret = torch.as_tensor([s.ret for s in steps], device=device, dtype=torch.float32)
-        old = _pad([s.logp for s in steps], whole.ctrl_mask.shape, 0.0, device, torch.float32)
-        weights = (whole.ctrl_mask & (whole.kind_mask.sum(-1) > 1)).float()
+        old = a.logp
+        weights = pm.chosen(a).float()
         ratio = (logp - old).clamp(-20.0, 20.0).exp()
-        per_unit = -torch.min(ratio * adv[:, None], ratio.clamp(1.0 - clip, 1.0 + clip) * adv[:, None])
+        per_action = -torch.min(ratio * adv[:, None], ratio.clamp(1.0 - clip, 1.0 + clip) * adv[:, None])
         count = weights.sum(-1)
         has = count > 0
         pg = torch.zeros((), device=device)
         if has.any():
-            pg = ((per_unit * weights).sum(-1)[has] / count[has]).sum() / decisions
+            pg = ((per_action * weights).sum(-1)[has] / count[has]).sum() / decisions
             with torch.no_grad():
                 note("kl", float(((old - logp) * weights).sum() / weights.sum()), float(weights.sum()))
                 note("clip_fraction", float((((ratio - 1.0).abs() > clip).float() * weights).sum() / weights.sum()), float(weights.sum()))
@@ -452,7 +458,8 @@ class Learner:
 
     def adjust_entropy(self, metrics: dict[str, float]) -> None:
         """Keeps each head above a share of its maximum, so none collapses."""
-        maxima = {"kind": math.log(4.0), "region": math.log(4.0), "enemy": math.log(8.0), "fine": math.log(fz.FINE_OPTIONS), "produce": math.log(4.0)}
+        maxima = {"anchor": math.log(4.0), "kind": math.log(4.0), "region": math.log(4.0), "enemy": math.log(8.0), "fine": math.log(fz.FINE_OPTIONS), "produce": math.log(4.0),
+                  "group": math.log(4.0), "roles": math.log(2.0)}
         for h in HEADS:
             e = metrics.get(f"entropy_{h}")
             if e is None:
@@ -499,14 +506,9 @@ def _pad(arrays: list[np.ndarray], shape: tuple, fill: float, device: str, dtype
     return torch.as_tensor(out, device=device, dtype=dtype)
 
 
-def _stored_actions(steps: list[Step], b: pm.Batch, device: str) -> pm.Actions:
-    shape = b.ctrl_mask.shape
-    kind = _pad([s.kind for s in steps], shape, 0, device, torch.int64)
-    enemy = _pad([s.enemy for s in steps], shape, -1, device, torch.int64)
-    region = _pad([s.region for s in steps], shape, -1, device, torch.int64)
-    fine = _pad([s.fine for s in steps], shape, -1, device, torch.int64)
-    produce = _pad([s.produce for s in steps], shape, -1, device, torch.int64)
-    return pm.Actions(kind, enemy, region, fine, produce, torch.zeros(shape, device=device))
+def _stored_actions(steps: list[Step], device: str) -> pm.Actions:
+    """The actions the decisions were played with, and their log-probabilities then."""
+    return pm.actions_from({f: np.stack([getattr(s, f) for s in steps]) for f in act.SLOT_FIELDS + ("logp",)}, device)
 
 
 def finish(trajectories: list[Trajectory], gae: float) -> tuple[list[Segment], list[float], list[float]]:
@@ -546,6 +548,7 @@ class Collector:
     def __init__(self, learner: Learner, env, rng: np.random.Generator):
         self.learner, self.env, self.rng = learner, env, rng
         self.player = learner.player
+        env.diversity = learner.cfg.diversity
         env.begin()
         self.seats = Seats(env.seat_count, learner.device, learner.actor)
         self.current: dict[int, Trajectory] = {}
@@ -572,7 +575,8 @@ class Collector:
         finished: list[Trajectory] = []
         segments: list[Segment] = []
         wins: dict[str, list[float]] = {}
-        masked_out = 0
+        masked_out = actions = 0
+        bonus = 0.0
         kind_counts = np.zeros(rf.KIND_COUNT, np.int64)
         progress = learner.progress
         while stored < want:
@@ -589,21 +593,20 @@ class Collector:
             items, out, value, new_history, new_seen = self.player.act(frames, seats.history[index], seats.seen[index])
             for k, seat in enumerate(acting):
                 t = items[k]
-                c = t.controllable
-                kind = out["kind"][k, :c].copy()
-                if c:
-                    masked_out += int((~t.kind_mask[np.arange(c), kind]).sum())
-                kind_counts += np.bincount(kind, minlength=rf.KIND_COUNT)
                 raw = frames[k][0]
-                step = Step(rf.Frame(raw.units.copy(), raw.sites.copy(), raw.glob.copy(), raw.features.copy()), kind, out["enemy"][k, :c].copy(),
-                            out["region"][k, :c].copy(), out["fine"][k, :c].copy(), out["produce"][k, :c].copy(), out["logp"][k, :c].copy(), float(value[k]))
+                step = Step(rf.Frame(raw.units.copy(), raw.sites.copy(), raw.glob.copy(), raw.features.copy()),
+                            *(out[h][k].copy() for h in act.SLOT_FIELDS + ("logp",)), float(value[k]))
+                picked = step.anchor >= 0
+                masked_out += int((~t.kind_mask[step.anchor[picked], step.kind[picked]]).sum())
+                kind_counts += np.bincount(step.kind[picked], minlength=rf.KIND_COUNT)
+                actions += int(picked.sum())
                 if "latents" in out:
                     step.latents = out["latents"][k].copy()
                 tr = current[seat]
                 tr.steps.append(step)
                 stored += 1
                 x, z = act.world_positions(t, tr.bundle)
-                env.give_orders(seat, act.decode(act.Decision(step.kind, step.enemy, step.region, step.fine, step.produce), t, tr.bundle, x, z))
+                env.give_orders(seat, act.decode(act.to_decision(act.Slots(*(getattr(step, h) for h in act.SLOT_FIELDS)), t.controllable), t, tr.bundle, x, z))
                 # A segment ends here: the next one starts from what the actor keeps now.
                 if len(tr.steps) - tr.segment_start == cfg.segment:
                     _cut(tr, segments, new_history[k], new_seen[k])
@@ -612,6 +615,7 @@ class Collector:
             env.step(progress)
             for seat in acting:
                 current[seat].steps[-1].reward = env.reward(seat, beta(progress))
+                bonus += float(env.bonus[seat // 2, seat % 2])
             for seat, mode, won in env.finished_seats():
                 wins.setdefault(mode, []).append(won)
                 tr = current[seat]
@@ -635,7 +639,8 @@ class Collector:
         _, values, returns = finish(finished, cfg.gae ** cfg.decide_every)
         v, r = np.array(values), np.array(returns)
         explained = 1.0 - float(np.var(r - v)) / max(float(np.var(r)), 1e-8)
-        metrics = {"explained_variance": explained, "masked_out": masked_out, "decisions": stored, "return_min": float(r.min()), "return_max": float(r.max())}
+        metrics = {"explained_variance": explained, "masked_out": masked_out, "decisions": stored, "actions_a_decision": actions / max(stored, 1),
+                   "diversity_a_decision": bonus / max(stored, 1), "return_min": float(r.min()), "return_max": float(r.max())}
         total = max(int(kind_counts.sum()), 1)
         metrics.update({f"share_kind{k}": float(kind_counts[k]) / total for k in range(rf.KIND_COUNT) if kind_counts[k]})
         for mode, results in wins.items():
@@ -682,8 +687,7 @@ def evaluate(learner: Learner, make_env, opponent: str, games: int, seed: int) -
             items, out, _, new_history, new_seen = learner.act(frames, seats.history[index], seats.seen[index])
             for k, seat in enumerate(acting):
                 t = items[k]
-                c = t.controllable
-                d = act.Decision(out["kind"][k, :c], out["enemy"][k, :c], out["region"][k, :c], out["fine"][k, :c], out["produce"][k, :c])
+                d = act.to_decision(act.Slots(*(out[h][k] for h in act.SLOT_FIELDS)), t.controllable)
                 b = env.bundle_of(seat)
                 x, z = act.world_positions(t, b)
                 env.give_orders(seat, act.decode(d, t, b, x, z))

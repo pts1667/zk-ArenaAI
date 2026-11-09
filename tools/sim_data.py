@@ -48,12 +48,25 @@ MISSILE_TYPES = {"MissileLauncher", "StarburstLauncher", "TorpedoLauncher"}
 W_DISARM_ONLY, W_MANUAL, W_STOCKPILE, W_UNMODELLED, W_UNLINKED, W_HIGH_ARC, W_BEAM = 256, 512, 1024, 2048, 4096, 8192, 16384
 W_IMPACT_ONLY, W_TURRET, W_PARALYZER, W_NO_SELF_DAMAGE, W_NO_AUTO_TARGET, W_NO_FRIENDLY_FIRE, W_SLOW_ONLY, W_AREA_SLOWS = 1, 2, 4, 8, 16, 32, 64, 128
 W_OKP_STATIC_ONLY, W_OKP_FLIGHT, W_OKP_TARGET_SPEED, W_SCRIPT_BURST = 32768, 65536, 131072, 262144
-W_PIERCES, W_ONE_HIT_EACH, W_THROWS = 524288, 1048576, 2097152
+W_PIERCES, W_ONE_HIT_EACH, W_THROWS, W_BOMB, W_DROPPED = 524288, 1048576, 2097152, 4194304, 8388608
 # Metal and energy per second from the module all new commanders have (dynamic_comm_defs.lua, "econ"); it's not in the unit def.
 # Logged games agree: income less 2 per extractor and solar is 6 and 8, this and the team's innate 2 and 2.
 COMMANDER_ECON = (4.0, 6.0)
 U_MOBILE, U_AIR, U_ARMED, U_FIREPROOF, U_FACTORY, U_PLOPPABLE, U_COMMANDER = 1, 2, 4, 8, 16, 32, 64
-U_FLOATS, U_MISSILE, U_NEUTRAL = 8192, 16384, 32768
+U_FLOATS, U_MISSILE, U_NEUTRAL, U_PLANE, U_LANDS, U_STRAFES = 8192, 16384, 32768, 65536, 131072, 262144
+# Planes: frames a half turn takes, and the share of top speed held through it.  `tools/sim_engine.py air`, a move order
+# straight behind (03-training.md 11.14).  The engine's flight model is 3D with rudder, elevator and bank; the sim's is a
+# turn at a fixed rate, so these are what it's fitted to.  A plane not here turns as the median one.
+PLANE_TURNS = {"planefighter": (72, 0.59), "planeheavyfighter": (56, 0.84), "planesupport": (50, 0.85), "bomberprec": (54, 0.63),
+               "bomberriot": (64, 0.71), "bomberdisarm": (102, 0.85), "bomberassault": (176, 0.89), "bomberheavy": (90, 0.78),
+               "planescout": (46, 0.60), "planelightscout": (64, 0.73)}
+PLANE_TURN_DEFAULT = (64, 0.75)
+STRAFE_SHARE = 0.8         # of its combat range, where a strafing gunship circles: the same run, five gunships within 10 elmos
+STRAFE_GRIP = 0.37         # its speed round that circle is as if it could turn with this much of its acceleration, at most top speed
+REAMMO_DRAIN = 10.0        # unit_refuel_pad_handler.lua DEFAULT_REAMMO_DRAIN, energy a second
+PAD_BP = 2.5               # ... DEFAULT_REPAIR_BP
+RUN_SHOT_FRAMES = 1.0      # bomberdisarm.lua: a bolt each Sleep(35), which is a frame (the engine run, 03-training.md 11.14)
+THERMITE_START_SHARE = 0.05   # of its end dps: an area here can't start at nothing, so it ramps from this to keep the same total
 # weapon_impulse.lua: GRAVITY_BASELINE, and what a unit gets of an impulse by how it moves.
 IMPULSE_BASELINE, IMPULSE_PLANE, IMPULSE_GUNSHIP, IMPULSE_GROUND = 120.0, 0.022, 0.004, 0.0036
 BEACON_SECONDS_PER_SPAWN_TIME = 9.0 / 8.0  # amphtele.lua: 90 steps of 0.1 s at a speed of 8 over its def's time
@@ -187,6 +200,15 @@ def _weapon_record(w: dict, velocity: tuple[float, float, float], alpha: float, 
     # A Lobster's guns fire only when told to (ATTACK_BLOCK_DEFAULT) and do nothing but throw (unit_thrower.lua).
     if "thower_weapon" in custom:
         flags |= W_THROWS | W_NO_AUTO_TARGET
+    if w["type"] == "AircraftBomb":
+        flags |= W_BOMB
+    # A bomber's fake bomb only marks where it's going: Odin's script blocks it, and Thunderbird's starts its run when it would
+    # drop (bomberassault.lua, bomberdisarm.lua).  Thermite falls from the plane, and then burns where it lands.
+    if flags & W_BOMB and "fake_weapon" in custom:
+        damage = [0.0] * 5
+    thermite = "thermite_frames" in custom
+    if thermite:
+        flags |= W_BOMB
     # Slow: timeslow_defs.lua.  Slow-only weapons default to 1; an absolute amount scales with the damage.
     raw_damage = _custom(w, "raw_damage")
     slow_factor = _custom(w, "timeslow_damagefactor", 1.0 if "timeslow_onlyslow" in custom else 0.0)
@@ -198,7 +220,7 @@ def _weapon_record(w: dict, velocity: tuple[float, float, float], alpha: float, 
     if "shield_damage" in custom:
         damage[int(SHIELD_ARMOR)] = _custom(w, "stats_shield_damage", _custom(w, "shield_damage"))
     para_seconds = _custom(w, "emp_paratime", _custom(w, "disarmtimer", float(damages.get("paralyzeDamageTime") or 0.0)))
-    return {
+    rec = {
         "name": w["name"], "damage": damage,
         "range": w["range"], "reload": _frames(reload_s), "salvo": max(1.0, float(salvo)),
         "salvo_delay": _frames(salvo_delay_s) if salvo > 1 else 0.0,
@@ -233,9 +255,20 @@ def _weapon_record(w: dict, velocity: tuple[float, float, float], alpha: float, 
         "burn_chance": _custom(w, "burnchance", fire_starter / 10.0) if on_fire else 0.0,
         "burn_damage": _custom(w, "burndamage", DEFAULT_BURN_DAMAGE),
         "impulse": _custom(w, "impulse"),
+        "gravity": float(w.get("myGravity") or 0.0) or game_gravity,
         "kind": _weapon_kind(w), "flags": flags,
         "shield_intercept": int(w["shieldInterceptType"]), "intercepted_by": int(w["interceptedByShieldType"]),
     }
+    if thermite:
+        # weapon_noexplode_speed_damage.lua: it burns what it's in for thermite_frames, its dps going from start to end.  Here
+        # an area, from the start share up to what keeps the total, as wide as the bomb and what it's in together.
+        start, end = _custom(w, "thermite_dps_start"), _custom(w, "thermite_dps_end")
+        first = max(start, THERMITE_START_SHARE * end)
+        last = start + end - first
+        rec.update(range=_custom(w, "truerange", w["range"]), area_dps=first, area_time_fall=1.0 - last / first,
+                   area_frames=_custom(w, "thermite_frames"), area_radius=2.0 * w["damageAreaOfEffect"],
+                   area_plateau=0.0, area_range_fall=0.0, area_plateau_fall=0.0)
+    return rec
 
 
 def _move_class(u: dict) -> int:
@@ -345,6 +378,12 @@ def _unit_record(u: dict, weapon_index: dict[str, int], weapons_by_id: dict[int,
         picked.append((name, m))
     truncated = len(picked) > MAX_MOUNTS
     picked = picked[:MAX_MOUNTS]
+    # bomberdisarm.lua: where the fake bomb would drop, the script fires what targets nothing, a shot a frame straight down.
+    marks = any(records[weapon_index[n]]["flags"] & W_BOMB and max(records[weapon_index[n]]["damage"]) <= 0.0 for n, _ in picked)
+    for n, m in picked:
+        if marks and set(m.get("onlyTargets") or {}) == {"none"}:
+            records[weapon_index[n]]["flags"] |= W_DROPPED
+            records[weapon_index[n]]["salvo_delay"] = RUN_SHOT_FRAMES
     armed = False
     max_range = 0.0
     for name, _ in picked:
@@ -369,9 +408,23 @@ def _unit_record(u: dict, weapon_index: dict[str, int], weapons_by_id: dict[int,
     explosion = u.get("deathExplosion") or ""
     flags = (U_MOBILE if mobile else 0) | (U_AIR if air else 0) | (U_ARMED if armed else 0)
     custom = u.get("customParams") or {}
+    plane = air and not u.get("isHoveringAirUnit")
+    if plane:
+        flags |= U_PLANE
+        half_turn, held = PLANE_TURNS.get(u["name"], PLANE_TURN_DEFAULT)
+        turn = math.pi / half_turn
+    # A gunship that strafes circles inside its combat range (unit_control_gunship_stafe_range.lua sets it).
+    strafe_radius = strafe_speed = 0.0
+    if air and not plane and u.get("airStrafe") and armed:
+        reach = max(float((weapons_by_id[int(m["weaponDef"])].get("customParams") or {}).get("combatrange") or records[weapon_index[n]]["range"])
+                    for n, m in picked if records[weapon_index[n]]["kind"] != KIND_SHIELD and max(records[weapon_index[n]]["damage"]) > 0.0)
+        strafe_radius = STRAFE_SHARE * reach
+        strafe_speed = min(speed, math.sqrt(STRAFE_GRIP * u["maxAcc"] * strafe_radius))
+        flags |= U_STRAFES
     if custom.get("fireproof") == "1":
         flags |= U_FIREPROOF
-    if u.get("isFactory"):
+    # The strider hub isn't a factory to the engine, but builds as one: what it's told to, near it, over and over.
+    if u.get("isFactory") or (custom.get("isfakefactory") == "1" and not mobile):
         flags |= U_FACTORY
     if custom.get("ploppable"):
         flags |= U_PLOPPABLE
@@ -408,6 +461,16 @@ def _unit_record(u: dict, weapon_index: dict[str, int], weapons_by_id: dict[int,
         "teleport_rate": float(custom.get("teleporter_throughput") or 0.0) / FRAMES,
         "beacon_frames": float(custom.get("teleporter_beacon_spawn_time") or 0.0) * BEACON_SECONDS_PER_SPAWN_TIME * FRAMES,
         "missile_pads": int(custom.get("missile_silo_capacity") or 0), "beacon_type": 0,
+        "cruise_height": float(u.get("wantedHeight") or 0.0) if air else 0.0,
+        "vertical_speed": float(u.get("verticalSpeed") or 0.0) if air else 0.0,
+        "turn_speed": speed * held if plane else 0.0,
+        "strafe_radius": strafe_radius, "strafe_speed": strafe_speed,
+        # scripts/bombers.lua: a salvo empties it, or for planesupport.lua so many shots.
+        "ammo": int(custom.get("shots_per_refuel") or 1) if custom.get("reammoseconds") else 0,
+        "reammo_frames": float(custom.get("reammoseconds") or 0.0) * FRAMES,
+        "reammo_energy": float(custom.get("reammodrain") or REAMMO_DRAIN) / FRAMES if custom.get("reammoseconds") else 0.0,
+        "pad_count": int(custom.get("pad_count") or 1) if custom.get("ispad") else 0,
+        "pad_bp": float(custom.get("pad_bp") or PAD_BP) if custom.get("ispad") else 0.0,
         "name": u["name"], "cost": u["cost"], "hp": u["health"], "speed": speed,
         "accel": u["maxAcc"], "brake": u["maxDec"], "turn_rate": turn, "slow_turn_speed": slow_turn,
         "footprint_radius": footprint, "hit_radius": hit_radius,
@@ -432,6 +495,23 @@ def _unit_record(u: dict, weapon_index: dict[str, int], weapons_by_id: dict[int,
         "mount_only": [_mask(m.get("onlyTargets"), categories) for _, m in picked],
         "mount_bad": [_mask(m.get("badTargets"), categories) for _, m in picked],
     }, truncated
+
+
+def _air_idle(units: list[dict], raw_units: dict[str, dict]) -> None:
+    """unit_air_plants.lua: what a plant builds lands when idle or not by the plant's factory_land_state; anything else as the
+    engine would, which lands it."""
+    by_id = {int(u["id"]): u["name"] for u in raw_units.values()}
+    states: dict[str, set[str]] = {}
+    for u in raw_units.values():
+        state = (u.get("customParams") or {}).get("factory_land_state")
+        if state is not None:
+            for o in (u.get("buildOptions") or {}).values():
+                states.setdefault(by_id[int(o)], set()).add(state)
+    # Planetwars' own plants fly what the ordinary plane plant lands: the ordinary plant's state goes.
+    hovers = {name for name, s in states.items() if s == {"0"}}
+    for rec in units:
+        if rec["flags"] & U_AIR and rec["name"] not in hovers:
+            rec["flags"] |= U_LANDS
 
 
 def _link_abilities(units: list[dict], raw_units: dict[str, dict]) -> None:
@@ -675,6 +755,7 @@ def catalog() -> None:
             for mount in rec["mount_weapon"]:
                 weapons[mount]["flags"] |= W_HIGH_ARC
     _link_abilities(units, raw_units)
+    _air_idle(units, raw_units)
     extras = json.loads((DUMP / "tactics.json").read_text("utf8", "replace"))
     print("scripts read for overkill prevention:", _apply_overkill(units, weapons, raw_units, extras["overkill"]))
     for w in weapons:
