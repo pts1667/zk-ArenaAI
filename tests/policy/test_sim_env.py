@@ -276,10 +276,10 @@ def test_the_script_sends_raiders_and_leaves_the_commander_to_build():
     assert raiders > 0
 
 
-def test_the_policy_is_given_its_fighters_and_factories_but_no_constructors():
+def test_the_policy_is_given_its_fighters_factories_and_constructors():
     env = se.SimEnv(2, 11, ["mirror"], threads=2)
     _play(env, 80)
-    seen = factories = 0
+    seen = factories = constructors = 0
     for g in range(2):
         for s in (0, 1):
             units = env.batch.records[g, s, :env.batch.counts[g, s]]
@@ -289,16 +289,19 @@ def test_the_policy_is_given_its_fighters_and_factories_but_no_constructors():
             assert np.all(own["player"] == s) and np.all((own["flags"] & rf.BEING_BUILT) == 0)
             rows = env.table.rows(own["def_id"])
             factory = env.table.factory[rows]
-            assert np.all(env.table.mobile[rows] & ~env.table.builder[rows] | factory)
+            constructor = env.table.constructor[rows]
+            assert np.all(env.table.mobile[rows] & ~env.table.builder[rows] | factory | constructor)
             factories += int(factory.sum())
-    assert seen > factories > 0
+            constructors += int(constructor.sum())
+    assert seen > factories > 0 and constructors > 0
 
 
-def test_a_policy_with_no_units_yet_still_has_a_frame_to_read():
+def test_a_policy_starts_with_its_commander_to_control():
     env = se.SimEnv(1, 13, ["mirror"], threads=1)
     env.begin()
     units = env.batch.records[0, 0, :env.batch.counts[0, 0]]
-    assert len(units) >= 1 and fz._select(units, env.table, 0, 0)[1] == 0
+    kept, controllable, *_ = fz._select(units, env.table, 0, 0)
+    assert controllable == 1 and env.table.constructor[env.table.rows(units["def_id"][kept[:1]])][0]
 
 
 def test_the_same_seed_plays_the_same_game_at_any_thread_count():

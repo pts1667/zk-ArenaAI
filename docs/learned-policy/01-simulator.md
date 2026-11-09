@@ -1106,7 +1106,7 @@ Only the solar closes: `energysolar` alone has `auto_close_time`.  Until now the
 | Lent cloak: fired, to cloaked again | 240-255 frames | 240-255 |
 | Sniper firing | stays cloaked | same |
 
-Nothing issues RECLAIM in training yet: the opening's commander assists its factory for good, and the policy has only the fighters, with kind 13 masked until stage 3.  So wrecks are there to see and don't yet change a game's outcome.
+Nothing issued RECLAIM in training at first: the opening's commander assists its factory for good, and the policy had only the fighters, with kind 13 masked until stage 3.  Since 2026-11-09 the economy script reclaims and the policy may (`04-economy.md`, "Reclaim").
 
 **What it did to the numbers** (256 games, side 0's wins/draws/losses; the earlier figures are from before this section):
 

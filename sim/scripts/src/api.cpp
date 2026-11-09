@@ -181,6 +181,7 @@ void Seat::grow(int64_t uid) {
     born.resize(n, 0);
     patrol.resize(n, 0);
     helps.resize(n, INT64_MIN);
+    reclaims.resize(n, INT64_MIN);
     noted.resize(n, 0);
     stamp.resize(n, -1);
     fighter_of.resize(n, 0);
@@ -428,6 +429,10 @@ int zks_step(zks_runner* r, const zks_step_args* a, zk_order_rec* out, int out_c
         c.army_due = (a->seat_flags[s] & ZKS_SEAT_ARMY) && d % a->script_every == 0;
         c.eco_due = seat.economy && d % a->eco_every == 0;
         c.groups = a->group_orders != 0;
+        if (a->features) {
+            c.features = (const zk::FeatureRecord*)a->features + ((size_t)g * 2 + side) * a->feature_cap;
+            c.feature_n = a->feature_counts[2 * g + side];
+        }
         if (!c.army_due && !c.eco_due) {
             seat.draws.end_step();
             return;
@@ -496,6 +501,21 @@ void zks_seat_counts(const zks_runner* r, int32_t* counts) {
             int32_t* c = counts + 4 * (2 * k + side);
             c[0] = (int32_t)s.pre.size(), c[1] = (int32_t)s.army_out.size(), c[2] = (int32_t)s.post.size(), c[3] = (int32_t)s.eco_out.size();
         }
+}
+
+int zks_eco_orders(const zks_runner* r, zk_order_rec* out, int cap, int32_t* offsets) {
+    int total = 0;
+    for (int32_t g : r->listed)
+        for (int side = 0; side < 2; side++) total += (int)r->seats[2 * g + side].eco_out.size();
+    if (total > cap) return total;
+    int o = 0;
+    offsets[0] = 0;
+    for (size_t k = 0; k < r->listed.size(); k++)
+        for (int side = 0; side < 2; side++) {
+            for (const auto& order : r->seats[2 * r->listed[k] + side].eco_out) out[o++] = order;
+            offsets[2 * k + side + 1] = o;
+        }
+    return total;
 }
 
 int zks_made(const zks_runner* r, int game, int side, int32_t* made) {

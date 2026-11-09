@@ -24,11 +24,12 @@ A Zero-K AI that beats CircuitAI, now pursued as a Pluto-style learned policy: a
   `frame_data.ScenarioEnv`) play their own Python scripts instead (`SimEnv.own_scripts`).
 * **The actor** (`tools/policy_latent.py`) reads a frozen frame encoder's 40 latent tokens, frame after frame, with what it did
   at each frame as 4 action tokens after that frame's: `[frame 1 latents] [actions at 1] [frame 2 latents] ...`, causal,
-  windowed 8 s in each of 2 layers.  It gives its orders as Pluto does, as actions one after another (up to 16, then done):
+  a 4-frame window in each of 2 layers.  It decides every 3 s (`decide_every` 6, when the army script looks; 2026-11-09) and
+  reads only those frames.  It gives its orders as Pluto does, as actions one after another (up to 16, then done):
   each picks a unit, the anchor, and an order for it, which may go as a group order.  A unit no action picks keeps.
 * **Cloning** (`tools/policy_clone_train.py`) learns the army script's choices from recorded games
   (`tools/policy_clone_data.py`), its orders as actions in a random order, each anchor scored as any unit still to be told.
-  Only smoke runs on the action form so far (`03-training.md` 11.18).
+  `clone-6` on `army-5` was the run (`03-training.md` 11.20), stopped at step 2,000 for the economy (section 6).
 * **PPO's reward** has Pluto's diversity bonus as well (11.19): zero-sum, for finished units of types the policy rarely makes.
 * **Recording** is C++ (`sim/record/`, `libzkrecord.so`, through `sim/py/zkrecord.py`): straight from the batch's arrays, a
   `.zkr` file a game, both sides, narrowed and compressed (192 bytes a decision against the npz's 516).  Data version 5 (group
@@ -58,15 +59,18 @@ A Zero-K AI that beats CircuitAI, now pursued as a Pluto-style learned policy: a
   | Path | What |
   |---|---|
   | `maps/` | the map pool: 98 real and 200 made-up maps (`tools/map_gen.py`).  About 7.5 GB in memory when loaded |
-  | `frames/pool2`, `frames/pool3` | 1M script frames and 1M scenario frames each (`tools/frame_data.py`), for encoders |
-  | `frames/pool4` | the same, collected with air and second factories |
+  | `frames/pool4` | 1M script frames and 1M scenario frames (`tools/frame_data.py`), with air and second factories |
   | `frames/pool5` | 1M frames each of script games, scenarios (60% themed: air battles and raids, fleets, heavies, swarms) and the C++ scripts' games |
   | `runs/encoder-big/final/vae-last.pt` | the frozen encoder the actor reads (`policy_latent.ENCODER`): 40 tokens, 1.65M parameters, trained on `pool5` |
   | `runs/encoder-air/final/vae-last.pt` | the one before, trained on `pool4` |
   | `runs/encoder-questions/final/vae-last.pt` | the one before that, which never saw aircraft |
-  | `clone/army-1`, `army-2`, `army-3` | recorded army-script games, data versions 1 to 3 (npz, a file a side) |
-  | `clone/army-4` | 3,243 games (3.8 GB) of the standard script, .zkr; a 100 GB run stopped early to add variants first |
+  | `clone/army-5` | 114,223 games, 401.5M decisions (138 GB) of the C++ scripts with variants, .zkr, data version 5: what's cloned |
+  | `runs/clone-6/actor.pt` | the cloned actor at a decision every 3 s (saved every 500 steps); `clone-5` the one at every slot |
   | `runs/` | every training run, one directory each |
+
+  On 2026-11-09 the user was given a command to delete what's no longer used: `clone/army-1` to `army-4` (older data
+  versions), `frames/pool2` and `pool3` (frames for the encoders before air) and the runs from before the latent actor.  If
+  they're still there, the command wasn't run; `frames/pool4` (25 GB, the held-out set of 11.16-11.17) was left to the user.
 
 * `sim/data/maps` is gitignored too: after a pull, `python tools/sim_data.py maps`.
 
@@ -102,8 +106,8 @@ In WSL, from the repo (`cd /mnt/c/Users/Thoma/Documents/sources/zk-ArenaAI`), wi
     ~/zkml/bin/python tools/policy_clone_data.py record --out /mnt/d/zk-learned/clone/NAME --games 32 --decisions 10000000 \
         --workers 12 --threads 12 --seed 1 --maps /mnt/d/zk-learned/maps          # --level: zstd's, 3 by default
     ~/zkml/bin/python tools/policy_clone_data.py check --data /mnt/d/zk-learned/clone/NAME --maps /mnt/d/zk-learned/maps
-    ~/zkml/bin/python tools/policy_clone_train.py --data /mnt/d/zk-learned/clone/army-3 --maps /mnt/d/zk-learned/maps \
-        --run /mnt/d/zk-learned/runs/NAME --steps 3000 --workers 12          # --blind: no action tokens, for comparison
+    ~/zkml/bin/python tools/policy_clone_train.py --data /mnt/d/zk-learned/clone/army-5 --maps /mnt/d/zk-learned/maps \
+        --run /mnt/d/zk-learned/runs/NAME --steps 20000 --workers 8    # --decide-every 6 by default; --blind: no action tokens
     ~/zkml/bin/python tools/policy_train.py --run /mnt/d/zk-learned/runs/NAME        # the encoder is policy_latent.ENCODER
 
 To stop a PPO run, create a file named `stop` in its directory; the same command resumes from its last checkpoint.
@@ -116,6 +120,12 @@ README.md has the template's rules for engine games (headless, max speed; window
 
 Latest first; each item's numbers are in the section named.
 
+* **Cloning 18x faster** (`03-training.md` 11.20): 52 to about 950 of the script's decisions a second, by deciding every 3 s
+  (the user's choice), decoding only what a sample needs, indexing the age bias by frame (its backward was 77% of the GPU's
+  time) and one encoder call a step.  `clone-6` ran at about 1,050 a second once started; stopped at step 2,000 (for the
+  economy), the likeliest anchor was one the script told 67.5% of the time and the kind right 98.9%, as `clone-5` at 11,500.
+* **`army-5` and `clone-5`** (11.20): 401.5M decisions recorded in 2 hours once the workers shared each map's data.  `clone-5`, at
+  a decision every slot, reached anchor right 0.68 and kind right 0.99 at 11,500 steps, still improving.
 * **A diversity bonus** (`03-training.md` 11.19): at the default 0.05, about 2% of the shaped reward a game on script games, 14%
   at most.  Not yet trained with.
 * **Actions one after another** (11.18): the army script's grouping now takes in units already told that order, so a look's
@@ -159,24 +169,55 @@ Latest first; each item's numbers are in the section named.
 
 ## 6. Next
 
-* `army-5` (`/mnt/d/zk-learned/clone/army-5`, 400M decisions, about 95 GB, `--variants`, seed 5, the map pool) was being
-  recorded on 2026-11-09; its log is `army-5.log` beside it, which ends with `check`'s output and the size once it's done.
-  The first try was stopped: each worker made its own copy of each map's masks and labels, Python and C++, as it came to the
-  map (about 6 MB a map, 1.6 GB a worker over the pool).  `policy_sim_env.share_maps` now makes them before the workers fork;
-  12 workers level off at about 5.4 GB together.  Then clone on it with the action form and the bigger encoder: older
-  checkpoints don't load into this actor.
-* Whether the policy should run the economy too (constructors and buildings, as Pluto does), which the economy script does now:
-  asked by the user on 2026-11-09, not yet decided.  It would need the economy script's orders recorded as labels.
+* **The policy runs the economy too** (the user's decision, 2026-11-09): the plan is `docs/learned-policy/04-economy.md`, the
+  user's five decisions in its section 5.  `clone-6` was stopped for it at step 2,000 (`runs/clone-6/actor.pt`: held-out
+  anchor right 0.675, kind right 0.989, NLL of actions 3.89, at about 1,050 decisions a second), since cloning starts again on a
+  dataset with the economy script's orders as labels.  Steps 0-2 are done (section 4 there): constructors are controllable,
+  BUILD (type, a place among our units and the sites, an offset) and ASSIST are in the featurizer, `actions`, the actor and the
+  sim, feature version 6 (the version-5 encoder still loads: `ENCODER_FEATURE_VERSIONS`), data version 6.  `clone-6`'s checkpoint
+  doesn't load into the new actor (new layers); `clone-7` starts fresh.
+* **Reclaim** (the user, 2026-11-09, before recording): the economy script reclaims (2 dedicated constructors at most, idle ones
+  near; avoids enemies, goes home when hurt; libzkscripts ABI 6), and the policy has RECLAIM with a wreck pointer.  4% of a side's
+  metal income in the scripts' games; the round trip gives the same wreck every time (04-economy.md, "Reclaim").
+* **`army-6` is recorded** (`army-5` is deleted): 83,820 games, 300.6M decisions, 105 GB, stopped at the user's word at 75% of the
+  400M asked (`policy_clone_data.py record --out /mnt/d/zk-learned/clone/army-6 --games 32 --workers 12 --threads 12 --seed 5
+  --variants --maps /mnt/d/zk-learned/maps`; log `/mnt/d/zk-learned/clone/army-6.log`).  Every game reads back whole.  The
+  ~1,000-game `army-6-test` passed `check` (missed 0.35%; build, assist and reclaim all there).
+* **S1-S5, P1, P2 are in** (`05-literature.md`, "Taken up so far").  Every trainer caps its GPU memory (`--gpu-memory` 0.85): past
+  the card, the Windows driver spills into system RAM instead of failing (30 GB on 2026-11-09).
+* **The actor is 10.5M parameters** (`policy_latent.SIZE`: d 256, 8 heads, 4 time layers, 4 plan layers; `SMALL` is the old 1.9M)
+  and the critic 3.2M.  At 8 stretches of 48 decisions a forward pass it peaks at 4.5 GB; 16 doesn't fit in 85% of the card.
+* **The time transformer's attention is flex attention in cloning** (`--attention flex`, the default on CUDA): a block mask skips
+  the keys outside the window, ~93% of them, and the age bias rides in 18 extra query/key dimensions (`TimeBlock.bias_dims`).  A
+  score_mod bias was 2.4x slower than dense: its gradient came a pair of tokens at a time as atomic adds.  The main process alone:
+  230 ms a step dense, 157 ms flex.  `--compile reduce-overhead` (CUDA graphs) on top: 147 ms; `default`: 155 ms; left off.
+* **Cloning is limited by making samples**, not the GPU (`05-literature.md` S1b): 791 decisions a second at first, 1,462 now with
+  15 workers, against the GPU's 2,450.  The trainer no longer takes a whole step's samples before its first forward; a worker cuts
+  4 stretches one after another from each game it decodes, each frame featurized once; `featurize._masks` lost its loop over units.
+  What's left is featurize itself (~1.7 ms a frame, ~1,500 small numpy calls: a C++ featurize would be the real fix), the main
+  process sharing the 8 cores (Ryzen 7 5800X3D, 16 threads) with the workers, and `/mnt/d` (~15% slower than WSL's own disk).
+* **The `clone-7` baseline is running** (started 2026-11-09), which P3-P8, C1 and C4-C8 are measured against, each run the same:
+  `policy_clone_train.py --data /mnt/d/zk-learned/clone/army-6 --maps /mnt/d/zk-learned/maps --run /mnt/d/zk-learned/runs/clone-7
+  --decide-every 6 --samples 8 --accumulate 8 --lr 6e-4 --muon-lr 0.008 --workers 15 --steps 1000 --check-every 250` (the user:
+  1,000 steps is enough for the baseline; a whole cosine schedule of them, not a longer run cut short), about 40 minutes; output
+  in `runs/clone-7/train.out`, rows in `log.jsonl` (appended to: clear it before rerunning a run).  Its start lists 83,820
+  files over /mnt/d: about 3 minutes.
+* Whether cloning plateaus, and the cloned actor playing the scripts in the sim.
+* PPO from the cloned actor: `policy_train.py` doesn't load a cloning checkpoint yet, and must run at `--decide-every 6`.
 * The user's open questions on the actor:
   * one token per action between frames too, in place of the 4 summary tokens (within a decision the actions are such tokens now);
-  * full attention over all past frames, through summary tokens, in place of the 16 s window.
-* Then the cloned actor playing the army script in the sim, and PPO with the diversity bonus.
+  * full attention over all past frames, through summary tokens, in place of the 9 s window.
+* PPO with the diversity bonus.
 * The engine hand-off: a numpy forward of the latent actor and its encoder for the bot, decoded orders sent as commands, and the
   opening and economy script in the engine.
 
 ## 7. Traps
 
 * **Memory**: check `wsl free -g` before a launch.  Never run two jobs that load the map pool at once (it thrashed on 2026-11-08).
+* **Listing `army-5`** takes 4 to 12 minutes (a header read for each of 114,224 files over `/mnt/d`); a profile or smoke run
+  should use a few hundred files linked into a directory of their own (`~/army5-small`).
+* **`pkill -f` / `pgrep -f` from `wsl bash -c '...'`** match that shell too, whose command line holds the pattern: write the
+  pattern as `[p]olicy_...`.  A `kill -STOP` that way stopped the shell itself.
   The cloning trainer loads only map bundles.
 * **Engine games**: never start one, or kill engine processes, while the user is playing.  Check
   `tasklist | grep -i "spring\|zero-k"` first.

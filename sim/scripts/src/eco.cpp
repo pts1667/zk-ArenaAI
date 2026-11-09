@@ -55,6 +55,19 @@ constexpr double NEVER = -1e9;           // pending.get(name, -1e9)
 // with none it's planes.
 constexpr double SECOND_FROM_S = 18.0 * 60.0, SECOND_FROM_M = 50.0;
 const double SECOND_WEIGHTS[3] = {0.5, 0.3, 0.2};     // zks_data_desc.second_factories' order
+// Reclaim (the user, 2026-11-09): a few constructors kept at it while there are wrecks worth taking, and an idle one takes what's
+// near it when there's nothing better to do.  Only what's safe (no enemy army or defence near it) and on our side of the map, or
+// a little past the middle, where the fighting leaves most.  A reclaimer goes home if an enemy army comes near or it's hurt, and
+// a hurt constructor isn't sent again.
+constexpr float RECLAIM_MIN = 30.0f;          // metal: less isn't worth the walk
+constexpr int RECLAIMERS = 2;                 // at most this many kept at it
+constexpr int RECLAIMER_PER = 3;              // one for each this many constructors (the commander isn't one)
+constexpr double RECLAIM_HALF = 1.15;         // as near our base as this times the enemy's, or nearer
+constexpr double RECLAIM_NEAR = 1200.0;       // an idle constructor's reach for it
+constexpr double RECLAIM_WALK = 400.0;        // a wreck's worth is its metal / (distance + this)
+constexpr float RECLAIM_FLEE = 500.0f;        // a reclaimer with an enemy army this near goes home
+constexpr float RECLAIM_HURT = 0.5f;          // and one below this share of its health
+constexpr float RECLAIM_FIT = 0.7f;           // a constructor below this isn't sent to reclaim
 
 zk_order_rec order(int64_t uid, int kind, double x, double z, int64_t target) {
     zk_order_rec o;
@@ -110,6 +123,8 @@ struct Pass {
     bool radar = false, factory = false, second = false;
     int expanding = 0;
     std::vector<double> claimed;    // n x 2
+    std::vector<int64_t> reclaimed; // features someone of ours is reclaiming or was sent to this pass
+    int reclaimers = 0, reclaimers_wanted = 0;
 };
 
 bool Seat::avoided(double x, double z) const {
@@ -587,6 +602,50 @@ Job Seat::spot_job(const Ctx& c, int i, Pass& pass) {
     return {};
 }
 
+// An enemy defence in range of p (and a margin), or an enemy army within army_reach of it.
+bool Seat::unsafe(P2 p, float army_reach) const {
+    const Data& d = *data;
+    float px = (float)p.x, pz = (float)p.z;
+    for (size_t e = 0; e < enemies.size(); e++) {
+        int r = enemy_rows[e];
+        bool defence = d.has(r, ZKS_STATIC_ARMED) && built(enemies[e]);
+        bool army = d.has(r, ZKS_ARMED) && d.has(r, ZKS_MOBILE);
+        if (!defence && !army) continue;
+        float dd = hypotf(enemies[e]->x - px, enemies[e]->z - pz);
+        if ((defence && dd <= d.range[r] + SAFE_MARGIN) || (army && dd <= army_reach)) return true;
+    }
+    return false;
+}
+
+// The wreck most worth this constructor's walk, within reach of it: safe, on ground it can walk to, nearer our base than the
+// enemy's (RECLAIM_HALF), and nobody of ours on it already.
+Job Seat::reclaim_job(const Ctx& c, int i, Pass& pass, double reach) {
+    const Data& d = *data;
+    const Rec* u = own[i];
+    int row = own_rows[i];
+    if (!c.feature_n || u->hp_frac < RECLAIM_FIT || d.has(row, ZKS_COMMANDER)) return {};
+    int cls = d.move_class[row];
+    P2 at{(double)u->x, (double)u->z};
+    int best = -1;
+    double best_worth = 0.0;
+    for (int k = 0; k < c.feature_n; k++) {
+        const zk::FeatureRecord& f = c.features[k];
+        if (f.metal < RECLAIM_MIN) continue;
+        if (std::find(pass.reclaimed.begin(), pass.reclaimed.end(), f.feat_id) != pass.reclaimed.end()) continue;
+        P2 p{(double)f.x, (double)f.z};
+        double away = py_hypot(p.x - at.x, p.z - at.z);
+        if (away > reach) continue;
+        if (py_hypot(p.x - base.x, p.z - base.z) > RECLAIM_HALF * py_hypot(p.x - enemy_base.x, p.z - enemy_base.z)) continue;
+        double worth = (double)f.metal / (away + RECLAIM_WALK);
+        if (best >= 0 && worth <= best_worth) continue;
+        if (avoided(p.x, p.z) || unsafe(p, SAFE_FROM_ARMY) || (cls != -1 && !ground->joined(cls, at, p))) continue;
+        best = k, best_worth = worth;
+    }
+    if (best < 0) return {};
+    pass.reclaimed.push_back(c.features[best].feat_id);
+    return make(u->uid, K_RECLAIM, c.features[best].x, c.features[best].z, c.features[best].feat_id);
+}
+
 Job Seat::job(const Ctx& c, int i, const GridOf& grid, bool has_project, int prow, P2 pat, Pass& pass, double income) {
     const Data& d = *data;
     const double seconds = c.seconds;
@@ -612,6 +671,13 @@ Job Seat::job(const Ctx& c, int i, const GridOf& grid, bool has_project, int pro
                 log.push_back({seconds, 0, prow});
                 return job;
             }
+        }
+    }
+    if (pass.reclaimers < pass.reclaimers_wanted) {
+        Job j = reclaim_job(c, i, pass, INFINITY);
+        if (j.has) {
+            pass.reclaimers++;
+            return j;
         }
     }
     {
@@ -672,6 +738,10 @@ Job Seat::job(const Ctx& c, int i, const GridOf& grid, bool has_project, int pro
         Job j = factory_job(c, i, pass, income, by_class, by_at);
         if (j.has) return j;
     }
+    {
+        Job j = reclaim_job(c, i, pass, RECLAIM_NEAR);
+        if (j.has) return j;
+    }
     int best = -1;
     float bd = 0.0f;
     for (size_t k = 0; k < own.size(); k++) {
@@ -712,6 +782,20 @@ void Seat::eco(const Ctx& c) {
     for (size_t i = 0; i < n; i++) {
         int r = own_rows[i];
         builders[i] = built(own[i]) && (d.has(r, ZKS_BUILDER) || d.has(r, ZKS_COMMANDER)) && d.has(r, ZKS_MOBILE);
+    }
+    // Reclaimers go home if an enemy army comes near or they're hurt.
+    std::vector<uint8_t> fled(n, 0);
+    {
+        P2 home = along(base, enemy_base, -BEHIND_BASE * 0.5);
+        for (size_t i = 0; i < n; i++) {
+            const Rec* u = own[i];
+            if (!builders[i] || u->ord_kind != K_RECLAIM) continue;
+            if (u->hp_frac < RECLAIM_HURT || unsafe({(double)u->x, (double)u->z}, RECLAIM_FLEE)) {
+                eco_out.push_back(order(u->uid, K_MOVE, home.x, home.z, -1));
+                reclaims[u->uid] = INT64_MIN;
+                fled[i] = 1;
+            }
+        }
     }
     std::vector<uint8_t> stuck_ = stuck(c, builders);
     std::vector<int> idle;
@@ -771,6 +855,18 @@ void Seat::eco(const Ctx& c) {
             if (built(own[i])) b.push_back(own_rows[i]);
         pass.made = INNATE_ENERGY + (double)np_sum<float>([&](int64_t k) { return d.energy[b[k]]; }, (int64_t)b.size());
     }
+    // Who's reclaiming already, what, and how many should be.
+    {
+        int constructors = 0;
+        for (size_t i = 0; i < n; i++) {
+            if (!builders[i] || d.has(own_rows[i], ZKS_COMMANDER)) continue;
+            constructors++;
+            if (own[i]->ord_kind != K_RECLAIM || fled[i]) continue;
+            pass.reclaimers++;
+            if (reclaims[own[i]->uid] != INT64_MIN) pass.reclaimed.push_back(reclaims[own[i]->uid]);
+        }
+        pass.reclaimers_wanted = std::min(RECLAIMERS, constructors / RECLAIMER_PER);
+    }
     // _taken
     for (size_t i = 0; i < n; i++) {
         int r = own_rows[i];
@@ -798,6 +894,7 @@ void Seat::eco(const Ctx& c) {
         int64_t uid = own[i]->uid;
         if (!j.has || (j.o.kind == K_ASSIST && own[i]->ord_kind == K_ASSIST && helps[uid] == j.o.target)) continue;
         helps[uid] = j.o.kind == K_ASSIST ? j.o.target : -1;
+        reclaims[uid] = j.o.kind == K_RECLAIM ? j.o.target : INT64_MIN;
         eco_out.push_back(j.o);
         if (j.o.kind == K_BUILD) {
             int r = d.row_of_catalog[j.o.target];

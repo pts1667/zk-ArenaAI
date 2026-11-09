@@ -19,11 +19,11 @@ GROUND_FINE_RADIUS = 200.0
 THROW_SHORT = 0.98      # of its reach at most, or it'd walk off to get in range and leave behind those it meant to throw
 
 
-FIELDS = ("kind", "enemy", "region", "fine", "produce", "group", "roles")
+FIELDS = ("kind", "enemy", "region", "fine", "produce", "group", "roles", "place", "offset")
 SLOT_FIELDS = ("anchor",) + FIELDS
 SLOTS = 16              # actions a decision at most.  The army script's looks gave more than 16 in 0.3% of them, 1.1% of its
                         # orders (03-training.md 11.18)
-UNSET = {"anchor": -1, "kind": rf.KEEP, "enemy": -1, "region": -1, "fine": -1, "produce": -1, "group": -1, "roles": 0}
+UNSET = {"anchor": -1, "kind": rf.KEEP, "enemy": -1, "region": -1, "fine": -1, "produce": -1, "group": -1, "roles": 0, "place": -1, "offset": -1}
 
 
 @dataclass
@@ -36,12 +36,19 @@ class Decision:
     produce: np.ndarray           # C: place in table.producible, or -1
     group: np.ndarray | None = None     # C: for a kind of groups.GROUP_KINDS, index into GROUP_RADII if it goes as a group order, else -1
     roles: np.ndarray | None = None     # C: that group's roles, as bits (groups.roles), else 0
+    place: np.ndarray | None = None     # C: for a BUILD, what it's beside: index into place_tokens, then past them the sites; for a
+                                        # RECLAIM, which feature token (index into feat_ids); else -1
+    offset: np.ndarray | None = None    # C: for a BUILD, where beside it (fz.PLACE_OFFSETS: on it, then 8 a ring), else -1
 
     def __post_init__(self):
         if self.group is None:
             self.group = np.full(len(self.kind), -1, np.int64)
         if self.roles is None:
             self.roles = np.zeros(len(self.kind), np.int64)
+        if self.place is None:
+            self.place = np.full(len(self.kind), -1, np.int64)
+        if self.offset is None:
+            self.offset = np.full(len(self.kind), -1, np.int64)
 
 
 @dataclass
@@ -56,6 +63,8 @@ class Slots:
     produce: np.ndarray
     group: np.ndarray
     roles: np.ndarray
+    place: np.ndarray
+    offset: np.ndarray
 
 
 def to_decision(s: Slots, controllable: int) -> Decision:
@@ -128,9 +137,16 @@ def decode(decision: Decision, t: fz.Tensors, bundle: Bundle, unit_x: np.ndarray
             if kind == rf.THROW:
                 x, z = _within_throw(t, i, x, z, unit_x, unit_z)
             order = Order(uid, kind, x, z)
+        elif kind == rf.BUILD:
+            # The point it chose; whoever obeys it finds the nearest place there the type fits.
+            x, z = place_points(t, unit_x, unit_z)[int(decision.place[i]), int(decision.offset[i])]
+            order = Order(uid, kind, float(x), float(z), int(table().producible[decision.produce[i]]))
         elif kind == rf.PRODUCE:
             order = Order(uid, kind, target=int(table().producible[decision.produce[i]]))
-        elif kind in (rf.ATTACK_UNIT, rf.MANUAL_FIRE):
+        elif kind == rf.RECLAIM:
+            f = int(decision.place[i])
+            order = Order(uid, kind, float(t.feat_pos[f, 0]), float(t.feat_pos[f, 1]), int(t.feat_ids[f]))
+        elif kind in (rf.ATTACK_UNIT, rf.MANUAL_FIRE, rf.ASSIST):
             token = int(t.enemy_tokens[decision.enemy[i]])
             order = Order(uid, kind, float(unit_x[token]), float(unit_z[token]), int(t.uids[token]))
         elif kind == rf.ATTACK_GROUND:
@@ -160,6 +176,24 @@ def fine_points(t: fz.Tensors, bundle: Bundle) -> np.ndarray:
     return np.concatenate((centre[:, None, :], around), 1)
 
 
+def place_points(t: fz.Tensors, unit_x: np.ndarray, unit_z: np.ndarray) -> np.ndarray:
+    """(P + S) x PLACE_OFFSETS x 2: the point of each place a BUILD can choose, in elmos: beside each of `place_tokens`, then each
+    site; on it, then 8 compass points on each of fz.PLACE_RINGS, north towards the enemy."""
+    base = np.concatenate((np.stack((unit_x[t.place_tokens], unit_z[t.place_tokens]), 1), t.site_pos), 0).astype(np.float64)
+    angle = np.arange(8) * np.pi / 4.0
+    north, east = np.asarray(t.north, np.float64), np.array((t.north[1], -t.north[0]), np.float64)
+    compass = np.cos(angle)[:, None] * north + np.sin(angle)[:, None] * east
+    offsets = np.concatenate((np.zeros((1, 2)), (np.array(fz.PLACE_RINGS)[:, None, None] * compass[None]).reshape(-1, 2)))
+    return base[:, None, :] + offsets[None, :, :]
+
+
+def _producible_index(row: int) -> int:
+    """Where a type-table row is in `producible`, or -1."""
+    made = table().producible
+    p = int(np.searchsorted(made, row))
+    return p if p < len(made) and made[p] == row else -1
+
+
 def _nearest(points: np.ndarray, legal: np.ndarray, x: float, z: float) -> tuple[int, int]:
     """The legal region, and its option, whose point is nearest.  points: R x O x 2."""
     away = np.hypot(points[..., 0] - x, points[..., 1] - z)
@@ -170,12 +204,14 @@ def _nearest(points: np.ndarray, legal: np.ndarray, x: float, z: float) -> tuple
 
 def encode(orders: list[Order], t: fz.Tensors, bundle: Bundle, unit_x: np.ndarray, unit_z: np.ndarray) -> tuple[Decision, int]:
     """`decode` the other way: orders someone else gave, such as a script, as the choices that would have given them.  A unit with no
-    order keeps what it has.  A place becomes the nearest region and option the unit could have chosen.  Returns the choices, and how
+    order keeps what it has.  A place becomes the nearest region and option the unit could have chosen, and a BUILD's the nearest
+    place and offset (`place_points`).  Returns the choices, and how
     many orders couldn't be put in the policy's terms at all (a unit it doesn't control, a kind its masks rule out now, a target that
     isn't a token), which stay KEEP.  A group order is its unit's choice with its radius and roles, the roles it can't choose
     dropped (groups.choosable); the units it gives the order to keep what they have."""
     c = t.controllable
-    kind, enemy, region, fine, produce, group, roles = (np.full(c, v, np.int64) for v in (rf.KEEP, -1, -1, -1, -1, -1, 0))
+    kind, enemy, region, fine, produce, group, roles, place, offset = (np.full(c, v, np.int64) for v in (rf.KEEP, -1, -1, -1, -1, -1, 0, -1, -1))
+    places = None
     token_of = {int(u): k for k, u in enumerate(t.uids) if u >= 0}
     enemy_of = {int(token): e for e, token in enumerate(t.enemy_tokens)}
     points = fine_points(t, bundle) if c else np.zeros((0, fz.FINE_OPTIONS, 2))
@@ -199,7 +235,7 @@ def encode(orders: list[Order], t: fz.Tensors, bundle: Bundle, unit_x: np.ndarra
             legal = np.repeat(mask[i][:, None], options.shape[1], 1)
             region[i], option = _nearest(options, legal, x, z)
             fine[i] = option if k in fz.KINDS_WITH_FINE else -1
-        elif k in (rf.ATTACK_UNIT, rf.MANUAL_FIRE, rf.ATTACK_GROUND):
+        elif k in (rf.ATTACK_UNIT, rf.MANUAL_FIRE, rf.ATTACK_GROUND, rf.ASSIST):
             pointer = fz.ENEMY_POINTER_KINDS.index(k)
             if k == rf.ATTACK_GROUND:
                 legal = t.ptr_enemy[pointer, i]
@@ -219,18 +255,28 @@ def encode(orders: list[Order], t: fz.Tensors, bundle: Bundle, unit_x: np.ndarra
                     missed += 1
                     continue
                 enemy[i] = e
-        elif k == rf.PRODUCE:
-            made = table().producible
-            p = int(np.searchsorted(made, o.target))
-            if p >= len(made) or made[p] != o.target or not t.ptr_produce[i, p]:
+        elif k == rf.PRODUCE or k == rf.BUILD:
+            p = _producible_index(o.target)
+            if p < 0 or not t.ptr_produce[i, p]:
                 missed += 1
                 continue
             produce[i] = p
+            if k == rf.BUILD:
+                if places is None:
+                    places = place_points(t, unit_x, unit_z)
+                away = np.hypot(places[..., 0] - o.x, places[..., 1] - o.z)
+                place[i], offset[i] = np.unravel_index(int(np.argmin(away)), away.shape)
+        elif k == rf.RECLAIM:
+            f = np.flatnonzero(t.feat_ids == int(o.target))
+            if not len(f):
+                missed += 1     # not among the feature tokens the cap kept
+                continue
+            place[i] = int(f[0])
         kind[i] = k
         if o.radius > 0.0 and k in gr.GROUP_KINDS:
             group[i] = gr.bucket(o.radius)
             roles[i] = int(o.roles) & gr.choosable() if group[i] >= 0 else 0
-    return Decision(kind, enemy, region, fine, produce, group, roles), missed
+    return Decision(kind, enemy, region, fine, produce, group, roles, place, offset), missed
 
 
 def world_positions(t: fz.Tensors, bundle: Bundle) -> tuple[np.ndarray, np.ndarray]:

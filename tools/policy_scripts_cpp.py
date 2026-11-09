@@ -28,7 +28,7 @@ import policy_eco as eco  # noqa: E402
 from policy_mix import menu as factory_menu  # noqa: E402
 from policy_variants import ROLES, Variant  # noqa: E402
 
-ABI_VERSION = 4
+ABI_VERSION = 6
 MOVE_CLASSES = 6
 SEAT_ARMY = 1
 ROLE_NAMES = ("raid", "riot", "assault", "skirm", "arty", "aa", "snipe", "scout", "builder", "bomb")
@@ -64,7 +64,8 @@ class StepArgs(ct.Structure):
     _fields_ = [("n", ct.c_int), ("games", c_i32p), ("records", ct.c_void_p), ("cap", ct.c_int), ("counts", c_i32p), ("globs", c_f32p),
                 ("stats", c_f32p), ("decisions", c_i32p), ("seat_flags", c_i32p), ("busy", c_i32p), ("ticks", ct.c_int), ("tick_frames", ct.c_int),
                 ("frames_per_second", ct.c_int), ("script_every", ct.c_int), ("eco_every", ct.c_int), ("pre", ct.c_void_p),
-                ("pre_offsets", c_i32p), ("post", ct.c_void_p), ("post_offsets", c_i32p), ("group_orders", ct.c_int)]
+                ("pre_offsets", c_i32p), ("post", ct.c_void_p), ("post_offsets", c_i32p), ("group_orders", ct.c_int),
+                ("features", ct.c_void_p), ("feature_cap", ct.c_int), ("feature_counts", c_i32p)]
 
 
 class Style(ct.Structure):
@@ -112,6 +113,8 @@ def lib() -> ct.CDLL:
         L.zks_collect.argtypes = [vp, vp, ct.c_int, c_i32p, vp, ct.c_int, c_i32p, vp, ct.c_int, c_i32p]
         L.zks_last_counts.argtypes = [vp, c_i32p]
         L.zks_seat_counts.argtypes = [vp, c_i32p]
+        L.zks_eco_orders.restype = ct.c_int
+        L.zks_eco_orders.argtypes = [vp, vp, ct.c_int, c_i32p]
         L.zks_made.restype = ct.c_int
         L.zks_made.argtypes = [vp, ct.c_int, ct.c_int, c_i32p]
         L.zks_eco_stats.argtypes = [vp, ct.c_int, ct.c_int, c_i32p]
@@ -234,6 +237,7 @@ class Scripts:
         self.handle = self.lib.zks_runner_new(data.handle, games, threads)
         self._out = np.zeros(4096, zksim.ORDER_DTYPE)
         self._army = np.zeros(1024, zksim.ORDER_DTYPE)
+        self._eco = np.zeros(1024, zksim.ORDER_DTYPE)
         self._groups = np.zeros(256, zksim.GROUP_DTYPE)
         self._empty = np.zeros(1, zksim.ORDER_DTYPE)
 
@@ -268,7 +272,8 @@ class Scripts:
         args = StepArgs(n=n, games=_ptr(listed, c_i32p), records=batch.records.ctypes.data, cap=batch.cap, counts=_ptr(batch.counts, c_i32p),
                         globs=_ptr(batch.globs, c_f32p), stats=_ptr(batch.stats, c_f32p), decisions=_ptr(decisions, c_i32p), seat_flags=_ptr(flags, c_i32p),
                         busy=_ptr(busy, c_i32p), ticks=ticks, tick_frames=zksim.TICK_FRAMES, frames_per_second=zksim.FRAMES_PER_SECOND,
-                        script_every=script_every, eco_every=eco_every, group_orders=int(group_orders))
+                        script_every=script_every, eco_every=eco_every, group_orders=int(group_orders),
+                        features=batch.features.ctypes.data, feature_cap=batch.features.shape[2], feature_counts=_ptr(batch.feature_counts, c_i32p))
         keep = []
         for name, part in (("pre", pre), ("post", post)):
             if part is not None:
@@ -297,6 +302,15 @@ class Scripts:
         out = np.zeros((2 * n, 4), np.int32)
         self.lib.zks_seat_counts(self.handle, _ptr(out, c_i32p))
         return out
+
+    def eco_orders(self, n: int) -> tuple[np.ndarray, np.ndarray]:
+        """The last step's economy-script orders alone, a copy, and their offsets by listed seat (2 n + 1)."""
+        offsets = np.zeros(2 * n + 1, np.int32)
+        total = self.lib.zks_eco_orders(self.handle, self._eco.ctypes.data, len(self._eco), _ptr(offsets, c_i32p))
+        if total > len(self._eco):
+            self._eco = np.zeros(2 * total, zksim.ORDER_DTYPE)
+            self.lib.zks_eco_orders(self.handle, self._eco.ctypes.data, len(self._eco), _ptr(offsets, c_i32p))
+        return self._eco[:total].copy(), offsets
 
     def made(self, game: int, side: int) -> dict[str, int]:
         """The army script's Mix.made: units started by role."""

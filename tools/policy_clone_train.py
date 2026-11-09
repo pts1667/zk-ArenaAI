@@ -17,6 +17,9 @@ orders to, and isn't taught an order among them that isn't there.  A unit the sc
 
   --looked-only   (the default) only decisions where the script looked count: it looks every SCRIPT_EVERY decisions, and in
                   between it does nothing because it isn't looking, not because it chose to.  --all-decisions counts them all.
+  --decide-every  recorded decisions between the actor's (SCRIPT_EVERY by default: 3 s): it reads only those frames, as it
+                  would play at that rate, so a stretch of 48 is 48 looks.  At 1 it read every frame, 6 for each look it learnt
+                  from, and cloned about 50 looks a second (03-training.md 11.20).
 
 The checkpoint holds the actor's weights and this run's settings.
 """
@@ -32,6 +35,8 @@ import sys
 import time
 import zlib
 from collections import Counter, deque
+from dataclasses import asdict, replace
+from types import SimpleNamespace
 
 import numpy as np
 import torch
@@ -39,6 +44,7 @@ import torch.nn.functional as F
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
+import frame_vae  # noqa: E402
 import policy_clone_data as cd  # noqa: E402
 import policy_latent  # noqa: E402
 import policy_model as pm  # noqa: E402
@@ -56,49 +62,65 @@ _W: dict = {}
 
 def _setup(bundles: dict, regions: int, vocabulary: int, looked_only: bool) -> None:
     signal.signal(signal.SIGINT, signal.SIG_IGN)
-    _W.update(bundles=bundles, regions=regions, vocabulary=vocabulary, looked_only=looked_only, table=tables.table(), cache={})
+    _W.update(bundles=bundles, regions=regions, vocabulary=vocabulary, looked_only=looked_only, table=tables.table())
 
 
-def _game(path: str, side: int):
-    cache = _W["cache"]
-    if path not in cache:
-        if len(cache) > 8:
-            cache.pop(next(iter(cache)))
-        cache[path] = cd.read_game(pathlib.Path(path))
-    return cache[path][side]
-
-
-def _sample(spec: tuple[str, int, int, int, int, int]) -> dict:
-    """One stretch of a game, ready to batch: what the encoder reads (history, then the stretch), what the script did at each of
-    those frames (the actor reads it as action tokens), what the heads read (the counted decisions), and their labels."""
-    path, side, start, length, reach, seed = spec
-    frames, orders, info = _game(path, side)
+def _samples(spec: tuple[str, int, int, int, int, int, int, int]) -> list[dict]:
+    """`count` stretches of one side of a game (`_cut`), one after another from `start`, the game decoded once for them all and
+    each frame featurized once: a record is changes along the game, so a stretch late in it decoded the whole game before it, a
+    third of a worker's time with one stretch a read; and a stretch's history is the one before's end (2026-11-09)."""
+    path, side, start, count, length, reach, seed, every = spec
+    # Only this side, and only as far as the stretches: decoding was most of a sample's time, as the whole game for a few minutes of it.
+    frames, orders, info = cd.read_side(pathlib.Path(path), side, until=(start + count * length - 1) * every + 1)
+    decisions = (len(frames) - 1) // every + 1
+    starts = [min(start, decisions - 1)] + [s for s in range(start + length, start + count * length, length) if s < decisions]
     bundle = _W["bundles"][info["map"]]
-    table = _W["table"]
+    made: dict[int, tuple] = {}
+
+    def frame(j: int) -> tuple:
+        if j not in made:
+            k = j * every
+            t = fz.featurize(frames[k], bundle, _W["table"], enabled_kinds=se.KINDS, economy=True)
+            x, z = cd.actions.world_positions(t, bundle)
+            made[j] = (t, *cd.actions.encode(se.policy_orders(orders[k]), t, bundle, x, z))
+        return made[j]
+
+    return [_cut(frame, orders, decisions, s, length, reach, seed + i, every) for i, s in enumerate(starts)]
+
+
+def _sample(spec: tuple[str, int, int, int, int, int, int, int]) -> dict:
+    """The first stretch of a spec alone (the held-out check's)."""
+    path, side, start, _, *rest = spec
+    return _samples((path, side, start, 1, *rest))[0]
+
+
+def _cut(frame, orders: list, decisions: int, start: int, length: int, reach: int, seed: int, every: int) -> dict:
+    """One stretch of a game, ready to batch: what the encoder reads (history, then the stretch), what the script did at each of
+    those frames (the actor reads it as action tokens), what the heads read (the counted decisions), and their labels.  Positions
+    are the actor's decisions, `every` recorded decisions apart: its decision j is recorded decision j * every.  frame(j): decision
+    j featurized, and the script's orders there encoded (`_samples`)."""
     rng = np.random.default_rng(seed)
     names = np.arange(_W["vocabulary"], dtype=np.int32)
     names[rng.random(_W["vocabulary"]) < NAME_DROPOUT] = _W["vocabulary"] - 1
-    start = min(start, len(frames) - 1)
     first = max(0, start - reach)
-    end = min(len(frames), start + length)
+    end = min(decisions, start + length)
     tensors, done, labels, labelled, counted, missed, cut = [], [], [], [], [], 0, 0
-    for k in range(first, end):
-        t = fz.featurize(frames[k], bundle, table, enabled_kinds=se.KINDS)
-        x, z = cd.actions.world_positions(t, bundle)
-        decision, m = cd.actions.encode(se.policy_orders(orders[k]), t, bundle, x, z)
+    for j in range(first, end):
+        t, decision, m = frame(j)
         done.append(cd.actions.to_slots(decision, slots=None))
-        if k >= start and (not _W["looked_only"] or k % se.SCRIPT_EVERY == 0):
+        if j >= start and (not _W["looked_only"] or j * every % se.SCRIPT_EVERY == 0):
             labels.append(cd.actions.to_slots(decision, rng.permutation(t.controllable)))
             labelled.append(decision.kind != rf.KEEP)
-            counted.append(k - start)
+            counted.append(j - start)
             missed += m
             cut += int(labelled[-1].sum()) - int((labels[-1].anchor >= 0).sum())
-        t.true_name, t.unit_name = t.unit_name, names[t.unit_name]
-        tensors.append(t)
-    seen = pm.collate(tensors, regions=_W["regions"])
-    heads = pm.collate([tensors[(start - first) + i] for i in counted], regions=_W["regions"]) if counted else None
-    return {"seen": seen, "history": start - first, "length": end - start, "heads": heads, "counted": counted, "missed": missed, "cut": cut,
-            "orders": int(sum(len(orders[k]) for k in range(start, end))), "labelled": labelled,
+        # This stretch's names, on a copy: a frame may be another stretch's too.
+        tensors.append(replace(t, true_name=t.unit_name, unit_name=names[t.unit_name]))
+    # Every frame as the encoder and the action tokens read it; and only for the counted decisions, what the heads alone read.  The
+    # heads' batch is those rows of the frames', picked out on the GPU (05-literature.md S2): sending both whole was twice the bytes.
+    seen, heads = pm.collate(tensors, regions=_W["regions"]).half().split([start - first + j for j in counted])
+    return {"seen": seen, "heads": heads, "history": start - first, "length": end - start, "counted": counted, "missed": missed, "cut": cut,
+            "orders": int(sum(len(orders[j * every]) for j in range(start, end))), "labelled": labelled,
             "labels": {key: [getattr(s, key) for s in labels] for key in cd.actions.SLOT_FIELDS},
             "done": {key: [getattr(s, key) for s in done] for key in cd.actions.SLOT_FIELDS}}
 
@@ -121,34 +143,42 @@ def _files(data: pathlib.Path) -> tuple[list[tuple[str, int, int]], list[tuple[s
     return train, held
 
 
-def _specs(files: list[tuple[str, int, int]], length: int, reach: int, rng: np.random.Generator):
-    """Stretches of games, drawn in proportion to their length, without end."""
+def _specs(files: list[tuple[str, int, int]], length: int, reach: int, rng: np.random.Generator, every: int, per_read: int = 1):
+    """Runs of `per_read` stretches of games, one after another, drawn in proportion to the games' length, without end; in the
+    actor's decisions, `every` recorded ones apart."""
     lengths = np.array([n for _, _, n in files], float)
     p = lengths / lengths.sum()
     while True:
         i = int(rng.choice(len(files), p=p))
         path, side, n = files[i]
-        start = int(rng.integers(0, max(1, n - length + 1)))
-        yield path, side, start, length, reach, int(rng.integers(1 << 31))
+        decisions = (n - 1) // every + 1
+        start = int(rng.integers(0, max(1, decisions - per_read * length + 1)))
+        yield path, side, start, per_read, length, reach, int(rng.integers(1 << 31)), every
 
 
 class Prefetch:
-    """Samples from the workers, at most `ahead` of them made or being made at once.  (Pool.imap over an endless stream doesn't
-    wait: it hands out work as fast as it can and keeps every result until it's read, which filled 30 GB in a minute.)"""
+    """Samples from the workers, at most `ahead` reads of them made or being made at once, handed out at random from at least
+    `mixed` made, so that a batch isn't one game's stretches.  (Pool.imap over an endless stream doesn't wait: it hands out work as
+    fast as it can and keeps every result until it's read, which filled 30 GB in a minute.)"""
 
-    def __init__(self, pool, specs, ahead: int):
-        self.pool, self.specs = pool, specs
-        self.waiting = deque(pool.apply_async(_sample, (next(specs),)) for _ in range(ahead))
+    def __init__(self, pool, specs, ahead: int, mixed: int = 1, seed: int = 0):
+        self.pool, self.specs, self.mixed = pool, specs, mixed
+        self.rng = np.random.default_rng(seed)
+        self.ready: list[dict] = []
+        self.waiting = deque(pool.apply_async(_samples, (next(specs),)) for _ in range(ahead))
 
     def __next__(self) -> dict:
-        out = self.waiting.popleft().get()
-        self.waiting.append(self.pool.apply_async(_sample, (next(self.specs),)))
-        return out
+        while len(self.ready) < self.mixed:
+            self.ready.extend(self.waiting.popleft().get())
+            self.waiting.append(self.pool.apply_async(_samples, (next(self.specs),)))
+        i = int(self.rng.integers(len(self.ready)))
+        self.ready[i], self.ready[-1] = self.ready[-1], self.ready[i]
+        return self.ready.pop()
 
 
-def _fixed_specs(files: list[tuple[str, int, int]], count: int, length: int, reach: int) -> list[tuple]:
+def _fixed_specs(files: list[tuple[str, int, int]], count: int, length: int, reach: int, every: int) -> list[tuple]:
     rng = np.random.default_rng(12345)
-    gen = _specs(files, length, reach, rng)
+    gen = _specs(files, length, reach, rng, every)
     return [next(gen) for _ in range(count)]
 
 
@@ -167,6 +197,15 @@ def _actions(fields: dict[str, list[np.ndarray]], device: str) -> pm.Actions:
     return pm.actions_from({key: _pad(arrays, width, cd.actions.UNSET[key]) for key, arrays in fields.items()}, device)
 
 
+def heads_rows(samples: list[dict]) -> np.ndarray:
+    """Where the counted decisions are among the samples' frames, joined: each sample's history, then its stretch."""
+    rows, at = [], 0
+    for s in samples:
+        rows += [at + s["history"] + j for j in s["counted"]]
+        at += s["history"] + s["length"]
+    return np.array(rows, np.int64)
+
+
 def forward(actor: policy_latent.LatentActor, samples: list[dict], device: str, autocast, measuring: bool = False, blind: bool = False):
     """The counted decisions, their labels (actions), which units the script told something, and each action's log-probability; with
     measuring, also each action's anchor and kind logits.  blind: the actor isn't shown what was done (its action tokens are all
@@ -175,38 +214,66 @@ def forward(actor: policy_latent.LatentActor, samples: list[dict], device: str, 
     longest = max(s["length"] for s in samples)
     frames = torch.zeros(len(samples), reach + longest, tokens, latent, device=device)
     present = torch.zeros(len(samples), reach + longest, dtype=torch.bool, device=device)
-    seen = [s["seen"].to(device) for s in samples]
-    with torch.no_grad(), autocast:
-        for i, s in enumerate(samples):
-            h = s["history"]
-            frames[i, reach - h:reach + s["length"]] = actor.encoder(seen[i]).float()
-            present[i, reach - h:] = True
+    # Every sample's frames at once, through the encoder and into action tokens: one call each, not one a sample, as the main
+    # process making a step's thousands of small calls was what held it up (03-training 11.20).
+    sizes = [s["history"] + s["length"] for s in samples]
+    phase = torch.profiler.record_function      # each part's time, under the profiler
+    with phase("clone.join"):
+        # Everything onto the GPU before anything is computed: a copy from pageable memory waits for the work queued before it,
+        # so copies between the parts of the forward pass made the host and the GPU take turns.
+        seen = pm.join([s["seen"] for s in samples], device).to(device)
+        heads = pm.join([s["heads"] for s in samples if s["counted"]], device).to(device)
+        done = None if blind else _actions({key: [x for s in samples for x in s["done"][key]] for key in cd.actions.SLOT_FIELDS}, device)
+        a = _actions({key: [x for s in samples for x in s["labels"][key]] for key in cd.actions.SLOT_FIELDS}, device)
+        rows, labelled, counted = pm.stage([heads_rows(samples), _pad([x for s in samples for x in s["labelled"]], heads.ctrl_mask.shape[1], 0) > 0,
+                                            np.array([i * longest + j for i, s in enumerate(samples) for j in s["counted"]], np.int64)], device)
+    with torch.no_grad(), autocast, phase("clone.encoder"):
+        latents = actor.encoder(seen).float().split(sizes)
+    for i, s in enumerate(samples):
+        h = s["history"]
+        frames[i, reach - h:reach + s["length"]] = latents[i]
+        present[i, reach - h:] = True
     with autocast:
         # What the script did at every frame, as the actor reads it: tokens after each frame's.
-        parts = []
-        for i, s in enumerate(samples if not blind else ()):
-            parts.append(actor.action_tokens(seen[i], _actions(s["done"], device)))
-        acted = torch.zeros(len(samples), reach + longest, policy_latent.ACTION_TOKENS, policy_latent.D, device=device,
-                            dtype=parts[0].dtype if parts else torch.float32)
-        for i, part in enumerate(parts):
-            acted[i, reach - samples[i]["history"]:reach + samples[i]["length"]] = part
-        held = actor.sequence(frames, present, acted)[:, reach:]
-        now = torch.cat([held[i, s["counted"]] for i, s in enumerate(samples) if s["counted"]])
-        whole = pm.join([s["heads"] for s in samples if s["counted"]]).to(device)
-        ctx = actor.context(whole, now)
-        a = _actions({key: [x for s in samples for x in s["labels"][key]] for key in cd.actions.SLOT_FIELDS}, device)
-        labelled = torch.as_tensor(_pad([x for s in samples for x in s["labelled"]], whole.ctrl_mask.shape[1], 0) > 0, device=device)
-        logp, _ = pm.evaluate_actions(actor, whole, ctx, a, labelled)
-        logits = pm.teacher_logits(actor, whole, ctx, a) if measuring else None
-    return whole, a, labelled, logp.float(), logits
+        with phase("clone.action_tokens"):
+            parts = () if blind else actor.action_tokens(seen, done).split(sizes)
+            acted = torch.zeros(len(samples), reach + longest, policy_latent.ACTION_TOKENS, actor.d, device=device,
+                                dtype=parts[0].dtype if parts else torch.float32)
+            for i, part in enumerate(parts):
+                acted[i, reach - samples[i]["history"]:reach + samples[i]["length"]] = part
+        with phase("clone.sequence"):
+            held = actor.sequence(frames, present, acted)[:, reach:]
+        with phase("clone.context"):
+            now = held.flatten(0, 1).index_select(0, counted)
+            whole = seen.rows(rows).with_heads(heads)
+            ctx = actor.context(whole, now)
+        with phase("clone.actions"):
+            logp, _ = pm.evaluate_actions(actor, whole, ctx, a, labelled)
+            logits = pm.teacher_logits(actor, whole, ctx, a) if measuring else None
+    return whole, a, labelled, logp.float(), logits, ctx.ordered
 
 
-def measure(a: pm.Actions, labelled: torch.Tensor, logp: torch.Tensor, logits: tuple[torch.Tensor, torch.Tensor]) -> dict[str, float]:
+def ordered_loss(whole: pm.Batch, labelled: torch.Tensor, ordered: torch.Tensor) -> torch.Tensor:
+    """05-literature.md P2: for every unit an action could pick, whether the script told it anything this decision; a label for
+    every unit at every decision, where the anchor's softmax gives one an action.  Mean over those units."""
+    legal = pm.anchors_legal(whole)
+    bce = F.binary_cross_entropy_with_logits(ordered, labelled.float(), reduction="none")
+    return (bce * legal).sum() / legal.sum().clamp_min(1)
+
+
+def measure(whole: pm.Batch, a: pm.Actions, labelled: torch.Tensor, logp: torch.Tensor, logits: tuple[torch.Tensor, torch.Tensor],
+            ordered: torch.Tensor) -> dict[str, float]:
     """Over the actions (n_act) and the dones (n_done) of the labels, each given those before it: how often the most likely anchor
     is a unit the script told something and no action has picked yet (anchor_right), or done where there was more to do
     (stops_early); how often it's done where the script was (done_right); how often the most likely kind is the script's, given its
-    anchor (kind_right, and right_KIND for each kind); and the negative log-probabilities."""
+    anchor (kind_right, and right_KIND for each kind); and the negative log-probabilities, also for each kind (nll_KIND).
+    Over the units an action could pick (n_unit): the side loss of whether each is told anything (ordered_bce), what it would be
+    guessing the share told for all (ordered_base), and how often the more likely answer is right (ordered_right)."""
     anchor_l, kind_l = logits
+    legal = pm.anchors_legal(whole)
+    told = labelled[legal].float()
+    rate = float(told.mean()) if len(told) else 0.0
+    base = F.binary_cross_entropy(torch.full_like(told, min(max(rate, 1e-6), 1 - 1e-6)), told) if len(told) else torch.tensor(float("nan"))
     is_act = (a.anchor >= 0).cpu().numpy()
     is_done = pm.chosen(a).cpu().numpy() & ~is_act
     guess = anchor_l.argmax(-1)
@@ -223,11 +290,15 @@ def measure(a: pm.Actions, labelled: torch.Tensor, logp: torch.Tensor, logits: t
            "done_right": float((guess == 0)[is_done].mean()) if is_done.any() else nan,
            "kind_right": float((kind_guess == label)[is_act].mean()) if is_act.any() else nan,
            "nll_act": float(nll[is_act].mean()) if is_act.any() else nan,
-           "nll_done": float(nll[is_done].mean()) if is_done.any() else nan}
+           "nll_done": float(nll[is_done].mean()) if is_done.any() else nan,
+           "n_unit": float(len(told)), "ordered_bce": float(ordered_loss(whole, labelled, ordered)), "ordered_base": float(base),
+           "ordered_right": float(((ordered[legal] > 0) == (told > 0.5)).float().mean()) if len(told) else nan}
     for k in np.unique(label[is_act]):
         here = is_act & (label == k)
         out[f"right_{cd.rf_name(int(k))}"] = float((kind_guess == label)[here].mean())
         out[f"n_{cd.rf_name(int(k))}"] = float(here.sum())
+        # The whole action's: for a build, its type, place and offset together.
+        out[f"nll_{cd.rf_name(int(k))}"] = float(nll[here].mean())
     return out
 
 
@@ -240,8 +311,13 @@ def main() -> None:
     ap.add_argument("--run", required=True)
     ap.add_argument("--encoder", default=policy_latent.ENCODER)
     ap.add_argument("--steps", type=int, default=20_000)
-    ap.add_argument("--samples", type=int, default=16, help="stretches of games a step")
-    ap.add_argument("--length", type=int, default=48, help="decisions a stretch")
+    ap.add_argument("--samples", type=int, default=16, help="stretches of games a forward pass")
+    ap.add_argument("--accumulate", type=int, default=1, help="forward passes a step: a step learns from samples x accumulate")
+    ap.add_argument("--muon-lr", type=float, default=0.0, help="above 0, Muon trains the actor's hidden matrices at this rate (S4)")
+    ap.add_argument("--length", type=int, default=48, help="the actor's decisions a stretch")
+    ap.add_argument("--decide-every", type=int, default=se.SCRIPT_EVERY,
+                    help="recorded decisions between the actor's: it reads only the frames it decides at.  The script looks every "
+                         "SCRIPT_EVERY, so by default the actor decides when it looks; PPO must play at the same rate")
     ap.add_argument("--all-decisions", action="store_true", help="count every decision, not only those where the script looked")
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--workers", type=int, default=12)
@@ -249,6 +325,13 @@ def main() -> None:
     ap.add_argument("--check-samples", type=int, default=96)
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--blind", action="store_true", help="don't show the actor what was done: its action tokens are all zeros")
+    ap.add_argument("--compile", choices=("none", "default", "reduce-overhead"), default="none",
+                    help="torch.compile the time transformer; reduce-overhead also replays it as CUDA graphs")
+    ap.add_argument("--per-read", type=int, default=4, help="stretches a worker cuts, one after another, from each side of a game it decodes")
+    ap.add_argument("--attention", choices=("flex", "dense"), default="flex",
+                    help="the time transformer's attention on CUDA: flex skips the keys out of the window (a step 32%% faster, 2026-11-09)")
+    ap.add_argument("--gpu-memory", type=float, default=0.85, help="share of the GPU's memory this may use before it fails")
+    ap.add_argument("--ordered-weight", type=float, default=1.0, help="the side loss of whether each unit is told anything (P2)")
     args = ap.parse_args()
     run = pathlib.Path(args.run)
     run.mkdir(parents=True, exist_ok=True)
@@ -264,14 +347,21 @@ def main() -> None:
     loaded = time.perf_counter() - began
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    if device == "cuda":
+        # Past the card's memory, the Windows driver spills into system RAM (30 GB on 2026-11-09) rather than failing: fail instead.
+        torch.cuda.set_per_process_memory_fraction(args.gpu_memory)
     autocast = torch.autocast(device, dtype=torch.bfloat16, enabled=device == "cuda")
-    actor = policy_latent.make(vocabulary, args.encoder).to(device)
+    assert se.SCRIPT_EVERY % args.decide_every == 0, "the actor's decisions must include each one where the script looks"
+    actor = policy_latent.make(vocabulary, args.encoder, args.decide_every).to(device)
+    policy_latent.compile_for_cloning(actor, args.compile, flex=device == "cuda" and args.attention == "flex")
     trained = [p for p in actor.parameters() if p.requires_grad]
-    optimizer = torch.optim.AdamW(trained, lr=args.lr, weight_decay=0.01)
+    optimizer = frame_vae.Optimisers(actor, SimpleNamespace(lr=args.lr, muon_lr=args.muon_lr, weight_decay=0.01), policy_latent.answers)
     rng = np.random.default_rng(args.seed)
     reach = actor.reach
-    check = _fixed_specs(held_files, args.check_samples, args.length, reach)
-    stream = Prefetch(pool, _specs(train_files, args.length, reach, rng), ahead=2 * args.samples)
+    check = _fixed_specs(held_files, args.check_samples, args.length, reach, args.decide_every)
+    # Each worker read gives per_read stretches; the trainer draws from 4 forward passes' worth made, so a pass mixes many games.
+    stream = Prefetch(pool, _specs(train_files, args.length, reach, rng, args.decide_every, args.per_read),
+                      ahead=max(2 * args.samples, 3 * args.workers), mixed=4 * args.samples, seed=args.seed)
     log = open(run / "log.jsonl", "a")
     print(json.dumps({"train_files": len(train_files), "held_files": len(held_files), "loading_seconds": round(loaded, 1),
                       "trained_parameters": sum(p.numel() for p in trained)}), flush=True)
@@ -280,25 +370,29 @@ def main() -> None:
     step_began = time.perf_counter()
     for step in range(1, args.steps + 1):
         lr = args.lr * min(1.0, step / 200.0) * 0.5 * (1.0 + np.cos(np.pi * step / args.steps))
-        for group in optimizer.param_groups:
-            group["lr"] = lr
-        samples = [next(stream) for _ in range(args.samples)]
-        samples = [s for s in samples if s["counted"]]
-        if not samples:
-            continue
-        _, a, _, logp, _ = forward(actor, samples, device, autocast, blind=args.blind)
-        w = pm.chosen(a).float()
-        loss = -(w * logp).sum() / w.sum().clamp_min(1.0)
+        optimizer.set_rate(lr)
         optimizer.zero_grad(set_to_none=True)
-        loss.backward()
+        # A step's samples in `accumulate` parts: the step's loss is the mean of theirs.  Each part's are taken as it's needed, so the
+        # workers make the next while the GPU runs this one: taking a whole step's first left each waiting on the other, the GPU
+        # busy a third of the time (2026-11-09).
+        for _ in range(args.accumulate):
+            samples = [s for s in (next(stream) for _ in range(args.samples)) if s["counted"]]
+            if not samples:
+                continue
+            whole, a, labelled, logp, _, ordered = forward(actor, samples, device, autocast, blind=args.blind)
+            w = pm.chosen(a).float()
+            loss = -(w * logp).sum() / w.sum().clamp_min(1.0) / args.accumulate
+            side = ordered_loss(whole, labelled, ordered) / args.accumulate
+            (loss + args.ordered_weight * side).backward()
+            totals["loss"] += float(loss.detach())
+            totals["ordered"] += float(side.detach())
+            totals["decisions"] += sum(len(s["counted"]) for s in samples)
+            totals["orders"] += sum(s["orders"] for s in samples)
+            totals["missed"] += sum(s["missed"] for s in samples)
+            totals["cut"] += sum(s["cut"] for s in samples)
         torch.nn.utils.clip_grad_norm_(trained, 1.0)
         optimizer.step()
-        totals["loss"] += float(loss.detach())
         totals["steps"] += 1
-        totals["decisions"] += sum(len(s["counted"]) for s in samples)
-        totals["orders"] += sum(s["orders"] for s in samples)
-        totals["missed"] += sum(s["missed"] for s in samples)
-        totals["cut"] += sum(s["cut"] for s in samples)
         if step % args.check_every == 0 or step == args.steps:
             actor.eval()
             parts: list[dict] = []
@@ -306,18 +400,20 @@ def main() -> None:
                 for i in range(0, len(check), args.samples):
                     chunk = [s for s in pool.map(_sample, check[i:i + args.samples], chunksize=1) if s["counted"]]
                     if chunk:
-                        parts.append(measure(*forward(actor, chunk, device, autocast, measuring=True, blind=args.blind)[1:]))
+                        parts.append(measure(*forward(actor, chunk, device, autocast, measuring=True, blind=args.blind)))
             actor.train()
             held = {}
             for key in sorted({k for p in parts for k in p}):
                 if key.startswith("n_"):
                     held[key] = sum(p.get(key, 0.0) for p in parts)
                 else:
-                    weight = ("n_done" if key in ("done_right", "nll_done") else "n_" + key[6:] if key.startswith("right_") else "n_act")
+                    weight = ("n_done" if key in ("done_right", "nll_done") else "n_act" if key == "nll_act" else
+                              "n_unit" if key.startswith("ordered_") else
+                              "n_" + key[6:] if key.startswith("right_") else "n_" + key[4:] if key.startswith("nll_") else "n_act")
                     vals = [(p[key], p.get(weight, 1.0)) for p in parts if key in p and not np.isnan(p[key])]
                     held[key] = sum(v * n for v, n in vals) / max(sum(n for _, n in vals), 1e-9)
             seconds = time.perf_counter() - step_began
-            row = {"step": step, "loss": totals["loss"] / max(totals["steps"], 1), "lr": lr,
+            row = {"step": step, "loss": totals["loss"] / max(totals["steps"], 1), "ordered_bce": totals["ordered"] / max(totals["steps"], 1), "lr": lr,
                    "decisions_a_second": totals["decisions"] / max(seconds, 1e-9), "missed_share": totals["missed"] / max(totals["orders"], 1),
                    "cut_share": totals["cut"] / max(totals["orders"], 1),
                    **{f"held_{k}": round(v, 4) for k, v in held.items()}}
@@ -327,7 +423,8 @@ def main() -> None:
             totals.clear()
             step_began = time.perf_counter()
             temp = run / "actor.pt.tmp"
-            torch.save({"actor": actor.state_dict(), "step": step, "config": vars(args), "vocabulary": vocabulary}, temp)
+            torch.save({"actor": actor.state_dict(), "step": step, "config": vars(args), "vocabulary": vocabulary,
+                        "size": asdict(actor.size)}, temp)
             os.replace(temp, run / "actor.pt")
     pool.terminate()
 

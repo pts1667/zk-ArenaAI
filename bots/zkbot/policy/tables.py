@@ -115,10 +115,23 @@ class TypeTable:
                 roster = [row[o] for o in catalog.roster(name) if o in row]
                 if roster:
                     makers[row[name]] = roster
-        self.producible = np.array(sorted({o for options in makers.values() for o in options}), np.int64)
+        # What a BUILD can start, and which constructor can start which: its build options (the commander's too).  The type head
+        # scores both kinds of choice over `producible` (docs/learned-policy/04-economy.md).  What the sim can't place (a geothermal
+        # vent's generator) it drops.
+        builders = {}
+        for name in names:
+            if self.builder[row[name]] and self.mobile[row[name]]:
+                options = [units.name_of(o) if not isinstance(o, dict) else o.get("name") for o in (units.by_name(name) or {}).get("buildOptions") or []]
+                # Structures: some commanders' lists name mobile units too, which come from factories.
+                builders[row[name]] = sorted({row[o] for o in options if o in row and not self.mobile[row[o]]})
+        builders = {maker: options for maker, options in builders.items() if options}
+        self.producible = np.array(sorted({o for table in (makers, builders) for options in table.values() for o in options}), np.int64)
         self.produces = np.zeros((n, len(self.producible)), bool)
         for maker, options in makers.items():
             self.produces[maker, np.searchsorted(self.producible, options)] = True
+        self.builds = np.zeros((n, len(self.producible)), bool)
+        for maker, options in builders.items():
+            self.builds[maker, np.searchsorted(self.producible, options)] = True
         # What a silo makes, and what fires a manual weapon from where it stands (the Trinity): neither moves, and neither counts as
         # armed in the type stats, but the policy aims them (2026-11-08), at what's in sight or on radar.
         self.missile = np.zeros(n, bool)
@@ -126,6 +139,11 @@ class TypeTable:
         self.launcher = self.manualfire & ~self.mobile
         # Those the policy gives orders to though they aren't fighters that walk.
         self.acts_in_place = self.switches | self.produces.any(axis=1) | self.missile | self.launcher
+
+    @property
+    def constructor(self) -> np.ndarray:
+        """Types that BUILD and ASSIST: those with anything to build."""
+        return self.builds.any(axis=1)
 
     def rows(self, def_ids: np.ndarray) -> np.ndarray:
         """Catalog row per def id; -1 and anything unheard of give the unknown row."""

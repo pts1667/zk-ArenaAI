@@ -1,8 +1,9 @@
 """The economy script's tables.  The script is C++ (sim/scripts/src/eco.cpp, through policy_scripts_cpp.py), and its numbers
 are there; this is what it does.
 
-It runs for every side of a `SimEnv` game, the policy's as well, since the policy is given no constructors.  Its orders aren't
-recorded as the script's (`SimEnv.script_record`): they aren't the policy's to give.  Constructors come from the factory: the army
+It runs for every side of a `SimEnv` game, the policy's as well, for now: the policy may tell its constructors too (BUILD, ASSIST, RECLAIM),
+and until a seat can have the script off (docs/learned-policy/04-economy.md) both give them orders.  Its orders are kept each
+decision (`SimEnv.eco_orders`) and recorded after the army script's, for the policy to learn the economy from (policy_clone_data.py).  Constructors come from the factory: the army
 script builds them (policy_mix.py), and so may the policy.  Once the opening is over the commander is one of them, though it takes
 no extractor farther than COMMANDER_REACH from the base.  It has to be: builders are paid first come, first served, as in the
 engine, and a commander helping the factory leaves nothing for the constructors.
@@ -22,7 +23,12 @@ Each idle constructor, every few seconds, takes the first of these it can do:
   radar     a radar tower behind the front from RADAR_FROM, and a second once there's a silo: what a missile is aimed at has to be seen
   grid      a pylon from an extractor or turret that's on no grid with the base, towards it, since overdrive is capped by what each
             grid makes and Cerberus and Lucifer fire only on a grid making 50
+  reclaim   the best wreck for its metal and walk within RECLAIM_NEAR, on our half, clear of enemy defences and armies
   assist    help the factory, which is what a constructor does when there's nothing else: so one helping a factory counts as free
+
+Up to RECLAIMERS constructors, one for each RECLAIMER_PER, reclaim full time at any distance, before `finish` (only the big
+project comes first); the commander never does.  A reclaimer below RECLAIM_HURT of its health, or with an armed enemy within RECLAIM_FLEE,
+goes home.
 
 Metal in storage is income not yet spent, and past the cap it's lost: the user wants it spent almost all the time (2026-11-08).
 The army script makes a constructor for each INCOME_PER_CONSTRUCTOR of income (policy_mix.py) to have the build power.
@@ -60,7 +66,7 @@ from zkbot.policy import tables  # noqa: E402
 from policy_opening import Footing  # noqa: E402
 from policy_script import HURTS_NOT  # noqa: E402
 
-ECO_EVERY = 4               # decisions between passes: 2 s
+ECO_EVERY = 6               # slots between passes: 3 s, when the army script and the actor look (4, 2 s, until 2026-11-09)
 SMALL_ENERGY_BELOW = 10.0   # energy a second: below this a generator is a small one (solar, wind), at or above it a big one
 RADAR = "staticradar"
 CERBERUS, LUCIFER, SILO, NUKE = "staticarty", "turretantiheavy", "staticmissilesilo", "staticnuke"

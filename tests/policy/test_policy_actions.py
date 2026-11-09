@@ -34,7 +34,7 @@ def legal(t, i=0):
 def test_order_memory_keeps_its_width_when_the_policy_gains_kinds():
     """Frames on disk and encoders trained on them have 16 slots."""
     assert rf.ORDER_SLOTS == 16 and rf.KIND_COUNT > rf.ORDER_SLOTS
-    assert fz.UNIT_DIM == 127 and fz.FEATURE_VERSION == 5
+    assert fz.UNIT_DIM == 127 and fz.FEATURE_VERSION == 6
 
 
 def test_the_facts_come_from_the_generated_data(table):
@@ -462,6 +462,110 @@ def test_the_sim_builds_what_the_policy_chose_and_the_frame_says_so(sim, land, t
     after = game.tensors()
     i = next(i for i in range(after.controllable) if table.names[after.unit_name[i]] == "factorycloak")
     assert not after.ptr_produce[i, which] and after.ptr_produce[i].any()
+
+
+def test_the_sim_builds_what_an_untrained_actor_tells_its_constructors(sim, land, table, encoder_path):
+    """Constructors told by sampled decisions, through collate, the actor's heads, decode and the sim's placing: what they're told
+    to build goes up, and nothing else does; those told to assist are given someone of ours to help, and those told to reclaim a
+    wreck in sight."""
+    torch = pytest.importorskip("torch")
+    import policy_model as pm
+
+    _, se = sim
+    game = Game(se, land, ["cloakcon"] * 4, table)
+    torch.manual_seed(0)
+    actor = _actor(table, encoder_path)
+    before = set(game.own()["uid"].tolist())
+    told, kinds = set(), set()
+    for _ in range(8):
+        t = game.tensors()
+        b = pm.collate([t]).to("cpu")
+        with torch.no_grad():
+            ctx, *_ = actor.decide(b, *actor.initial_state(1, 0, "cpu"))
+            a = pm.sample_actions(actor, b, ctx)
+        d = actions.to_decision(actions.Slots(*(getattr(a, f)[0].numpy() for f in actions.SLOT_FIELDS)), t.controllable)
+        x, z = actions.world_positions(t, game.bundle)
+        orders = actions.decode(d, t, game.bundle, x, z)
+        ours = set(game.own()["uid"].tolist())
+        for o in orders:
+            kinds.add(o.kind)
+            if o.kind == rf.BUILD:
+                told.add(table.names[o.target])
+            elif o.kind == rf.ASSIST:
+                assert o.target in ours
+            elif o.kind == rf.RECLAIM:
+                assert o.target in set(t.feat_ids.tolist())
+        game.env.give_orders(0, orders)
+        game.env.give_orders(1, [])
+        game.env.step(1.0)
+        game.wait(15)       # long enough to walk there and start: the next decision may tell it something else
+    assert rf.BUILD in kinds and kinds & {rf.ASSIST, rf.RECLAIM}, kinds
+    new = game.own()
+    new = new[~np.isin(new["uid"], list(before))]
+    # Structures only: a factory that went up was told to produce, too.
+    made = {table.names[r] for r in table.rows(new["def_id"]) if not table.mobile[r]}
+    assert made and made <= told, (made, told)
+
+
+def test_a_build_place_means_the_same_in_any_batch(sim, table, encoder_path):
+    """A decision's place index counts its own units, then its sites: in a batch with frames of more units, it must still pick the
+    same unit's or site's key."""
+    torch = pytest.importorskip("torch")
+    import policy_model as pm
+    from conftest import sim_frames
+
+    items = []
+    for start in (10, 400):
+        (frame,), bundle = sim_frames(1, start=start)
+        items.append(fz.featurize(frame, bundle, table, enabled_kinds=sim[1].KINDS, economy=True))
+    assert len(items[0].place_tokens) != len(items[1].place_tokens) and all(len(t.site_x) for t in items)
+    b = pm.join([pm.collate([t]) for t in items]).to("cpu")
+    actor = _actor(table, encoder_path)
+    with torch.no_grad():
+        _, keys, _, site_h, _ = actor._raw(b)
+        place_h = actor._places(b, keys, site_h)
+    for i, t in enumerate(items):
+        n, s = len(t.place_tokens), len(t.site_x)
+        assert len(t.site_pos) == s and int(b.place_mask[i].sum()) == n + s
+        want = torch.cat((keys[i, torch.as_tensor(t.place_tokens)], site_h[i, :s].to(keys.dtype)))
+        assert torch.equal(place_h[i, :n + s], want)
+
+
+def test_decisions_score_the_same_picked_out_of_a_bigger_batch(sim, table, encoder_path):
+    """Cloning picks the counted decisions' rows out of the batch of all a stretch's frames (05-literature.md S2): padded for more
+    units, sites and regions than theirs, they must score as a batch of their own does; and sent as float16, nearly so."""
+    torch = pytest.importorskip("torch")
+    import policy_model as pm
+    from conftest import sim_frames
+
+    items = []
+    for start in (10, 400, 800):
+        (frame,), bundle = sim_frames(1, start=start)
+        items.append(fz.featurize(frame, bundle, table, enabled_kinds=sim[1].KINDS, economy=True))
+    assert len(items[2].unit_x) > max(len(items[0].unit_x), len(items[1].unit_x))
+    actor = _actor(table, encoder_path)
+    torch.manual_seed(0)
+    now = torch.randn(2, actor.encoder.tokens, actor.d)
+    pick = torch.tensor([0, 1])
+
+    def scores(b, a=None):
+        with torch.no_grad():
+            ctx = actor.context(b, now)
+            a = pm.sample_actions(actor, b, ctx) if a is None else a
+            return a, pm.evaluate_actions(actor, b, ctx, a)[0], ctx.ordered
+
+    a, own, ordered = scores(pm.join([pm.collate(items[:2])]).to("cpu"))
+    assert (a.anchor >= 0).sum() > 4
+
+    def picked_out(whole):
+        """As the cloning trainer does: the frames without the heads' fields, and those of the counted rows alone."""
+        seen, heads = whole.split(pick.tolist())
+        return pm.join([seen], "cpu").to("cpu").rows(pick).with_heads(pm.join([heads], "cpu").to("cpu"))
+
+    _, picked, picked_ordered = scores(picked_out(pm.collate(items)), a)
+    assert torch.allclose(picked, own, atol=1e-4) and torch.allclose(picked_ordered[:, :ordered.shape[1]], ordered, atol=1e-4)
+    _, half, _ = scores(picked_out(pm.collate(items).half()), a)
+    assert (half - own).abs().max() < 0.05
 
 
 def test_every_kind_the_policy_has_is_one_the_sim_obeys(sim):

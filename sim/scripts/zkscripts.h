@@ -19,7 +19,7 @@
 extern "C" {
 #endif
 
-#define ZKS_ABI_VERSION 4
+#define ZKS_ABI_VERSION 6
 #define ZKS_MOVE_CLASSES 6
 #define ZKS_ROLE_KNOBS 7             /* raid, riot, assault, skirm, arty, aa, snipe: the roles ROLE_ORDER of policy_mix.py has */
 #define ZKS_GROUP_RADII 10           /* zkbot.policy.groups.GROUP_RADII */
@@ -158,6 +158,11 @@ typedef struct {
     /* 1: the army script sends its fighters' plans as group orders (zk_group_rec) wherever a group order gives exactly the units
      * it means and no others; 0: every order goes to its unit. */
     int group_orders;
+    /* What each side sees to reclaim, indexed by slot as records are (zksim.Batch.features, feature_counts): slots x 2 x
+     * feature_cap FeatureRecord.  NULL for none: then the economy script doesn't reclaim. */
+    const void* features;
+    int feature_cap;
+    const int32_t* feature_counts;  /* slots x 2 */
 } zks_step_args;
 
 /* Computes every listed seat's orders, then writes them as zk_batch_step takes them, if they fit:
@@ -178,6 +183,9 @@ int zks_collect(zks_runner* runner, zk_order_rec* out, int out_cap, int32_t* out
 void zks_last_counts(const zks_runner* runner, int32_t* counts);
 /* The last step's orders by part: 4 per listed seat, pre, army script, post, economy script. */
 void zks_seat_counts(const zks_runner* runner, int32_t* counts);
+/* The last step's economy-script orders alone, per listed seat (2 n + 1 offsets), as they are in `out`.  Returns how many there
+ * are; writes them only if they fit in cap. */
+int zks_eco_orders(const zks_runner* runner, zk_order_rec* out, int cap, int32_t* offsets);
 
 /* Measurements. */
 /* made: n_roles, the army script's Mix.made.  Returns whether the side has an army script state. */

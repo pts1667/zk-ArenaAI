@@ -20,7 +20,10 @@ from . import rawframe as rf
 from .bundle import PASS_CELL, Bundle
 from .tables import TYPE_DIM, TypeTable
 
-FEATURE_VERSION = 5          # what a saved encoder or actor was trained to read: raise it with any change to the tensors' meaning
+FEATURE_VERSION = 6          # what a saved encoder or actor was trained to read: raise it with any change to the tensors' meaning
+                             # 6: constructors are controllable, BUILD, ASSIST and RECLAIM, own tokens to assist among the targets (2026-11-09)
+ENCODER_FEATURE_VERSIONS = (5, 6)   # those an encoder reads alike: 6 changed only the actor's tensors and which unit tokens come first,
+                                    # and the encoder doesn't depend on the tokens' order (each token's features are as they were)
 
 CAP_CONTROLLABLE, CAP_UNITS, CAP_HIDDEN = 256, 592, 64
 CAP_SITES = 24
@@ -44,12 +47,21 @@ COMMIT_DECISIONS = 6
 DECISION_FRAMES = 15
 STAGE2_KINDS = (*range(10), rf.PRODUCE, rf.THROW, rf.PUSH, rf.PULL, rf.PLACE_BEACON, rf.WAIT_AT_BEACON)
 
-# The three kinds that point at an enemy token, in the order of `ptr_enemy`.
-ENEMY_POINTER_KINDS = (rf.ATTACK_UNIT, rf.ATTACK_GROUND, rf.MANUAL_FIRE)
+ECONOMY_KINDS = (rf.BUILD, rf.ASSIST, rf.RECLAIM)      # a constructor's (docs/learned-policy/04-economy.md)
+# A RECLAIM points at one of the feature tokens (wrecks and the like in sight, `feat_ids`), with the same field a BUILD's place has.
+
+# The kinds that point at a target token, in the order of `ptr_enemy`: the first three at an enemy's, ASSIST at one of our own.
+# `enemy_tokens` holds both, so one pointer, with a query per kind, serves them all.
+ENEMY_POINTER_KINDS = (rf.ATTACK_UNIT, rf.ATTACK_GROUND, rf.MANUAL_FIRE, rf.ASSIST)
 FINE_OPTIONS = 9
 # What each kind is told besides itself.  A throw and a jump choose among the same regions: ptr_jump, where this unit's own reach lands.
 KINDS_WITH_REGION = (rf.MOVE, rf.FIGHT, rf.JUMP, rf.THROW, rf.PLACE_BEACON, rf.WAIT_AT_BEACON)
 KINDS_WITH_FINE = (rf.MOVE, rf.FIGHT, rf.JUMP, rf.ATTACK_GROUND, rf.THROW, rf.PLACE_BEACON)
+# A BUILD is a type (the produce head) at a place: beside one of our unit tokens or a metal site (`place_tokens`, then the sites),
+# on it or at one of 8 compass points on each ring, north towards the enemy as for fine points; whoever obeys it finds the nearest
+# place there the type fits.  On the script's own builds this lands within 30 elmos 9 times in 10 (04-economy.md, step 1).
+PLACE_RINGS = (64.0, 128.0, 256.0)
+PLACE_OFFSETS = 1 + 8 * len(PLACE_RINGS)
 
 # unit_x layout.
 _INSTANCE = 19
@@ -98,7 +110,8 @@ class Tensors:
     gate_b: np.ndarray            # G
     gate_x: np.ndarray            # G x GATE_DIM, normalised
     uids: np.ndarray              # U: uid per unit token, -1 for a summary
-    enemy_tokens: np.ndarray      # E: unit-token index of each token that can be aimed at: any other alliance's, in sight or on radar
+    enemy_tokens: np.ndarray      # E: unit-token index of each token that can be aimed at (any other alliance's, in sight or on
+                                  # radar) or helped (one of our own being built, or a factory): the targets of ptr_enemy
     north: np.ndarray             # 2: from our army towards the enemy, for fine positions
     region_radius: np.ndarray     # R: half the equivalent radius, for fine positions
     own_beacons: np.ndarray       # B: unit-token index of each finished beacon of ours
@@ -112,6 +125,9 @@ class Tensors:
     feat_x: np.ndarray = field(default_factory=lambda: np.zeros((0, FEATURE_DIM), np.float32))  # F x FEATURE_DIM
     feat_ids: np.ndarray = field(default_factory=lambda: np.zeros(0, np.int64))                 # F
     true_name: np.ndarray | None = None     # U: set if unit_name has had this game's names dropped
+    place_tokens: np.ndarray = field(default_factory=lambda: np.zeros(0, np.int64))   # P: unit-token index of each of ours a BUILD can be beside
+    site_pos: np.ndarray = field(default_factory=lambda: np.zeros((0, 2), np.float32))  # S x 2: each site's x, z in elmos
+    feat_pos: np.ndarray = field(default_factory=lambda: np.zeros((0, 2), np.float32))  # F x 2: each feature token's x, z in elmos
 
 
 def _centroid(x: np.ndarray, z: np.ndarray, fallback: tuple[float, float]) -> np.ndarray:
@@ -137,7 +153,7 @@ def _select(units: np.ndarray, table: TypeTable, player: int, ally: int) -> tupl
     hostile = units["ally_team"] != ally
     knowledge = units["knowledge"]
     fights = table.combat[rows] & table.mobile[rows]
-    can = own & finished & (fights | table.acts_in_place[rows]) & ~table.air[rows] & ((units["flags"] & rf.RESERVED) == 0)
+    can = own & finished & (fights | table.acts_in_place[rows] | table.constructor[rows]) & ~table.air[rows] & ((units["flags"] & rf.RESERVED) == 0)
     x, z = units["x"], units["z"]
 
     def near(idx: np.ndarray, centre: np.ndarray) -> np.ndarray:
@@ -379,9 +395,11 @@ def featurize(frame: rf.Frame, bundle: Bundle, table: TypeTable, commit_decision
                                np.full(len(sites), TK_SITE, np.int8), np.full(len(features), TK_FEATURE, np.int8), np.array([TK_GLOBAL], np.int8)))
 
     # Actions.
-    enemy_tokens = np.flatnonzero(hostile & ((knowledge == rf.KNOW_LOS) | (knowledge == rf.KNOW_RADAR)))
+    helped = is_own & (((units["flags"] & rf.BEING_BUILT) != 0) | table.factory[rows])
+    enemy_tokens = np.flatnonzero((hostile & ((knowledge == rf.KNOW_LOS) | (knowledge == rf.KNOW_RADAR))) | helped)
     own_beacons = np.flatnonzero(is_own & table.beacon[rows] & ((units["flags"] & rf.BEING_BUILT) == 0))
-    legal = _masks(_Tokens(units, rows, unit_region, enemy_tokens, own_beacons), locked, c, bundle, table, enabled_kinds)
+    legal = _masks(_Tokens(units, rows, unit_region, enemy_tokens, own_beacons, hostile[enemy_tokens], len(features)), locked, c, bundle, table,
+                   enabled_kinds)
 
     if foe is None:
         foe = np.array((bundle.map_w * 0.5, bundle.map_h * 0.5), np.float32)
@@ -400,6 +418,8 @@ def featurize(frame: rf.Frame, bundle: Bundle, table: TypeTable, commit_decision
         uids=np.concatenate((units["uid"], np.full(s, -1, np.int64))), enemy_tokens=enemy_tokens, north=north,
         region_radius=(np.sqrt(bundle.area / np.pi) * 0.5).astype(np.float32), unit_ally=unit_ally, unit_player=unit_player,
         feat_x=feat_x, feat_ids=features["feat_id"].astype(np.int64),
+        place_tokens=np.flatnonzero(is_own), site_pos=np.stack((sites["x"], sites["z"]), 1).astype(np.float32),
+        feat_pos=np.stack((features["x"], features["z"]), 1).astype(np.float32),
     )
     if privileged:
         out.hidden_x, out.hidden_name, out.hidden_ally, out.hidden_player = _hidden(all_units, all_rows, army, bundle, table, player, ally)
@@ -478,6 +498,8 @@ class _Tokens:
     regions: np.ndarray
     enemies: np.ndarray
     beacons: np.ndarray
+    foes: np.ndarray        # per enemy token: whether it's another alliance's (else one of ours to help)
+    features: int = 0       # feature tokens: what there is to reclaim
 
 
 @dataclass
@@ -510,7 +532,8 @@ def _masks(tokens: _Tokens, locked: np.ndarray, c: int, bundle: Bundle, table: T
     ptr_wait = np.zeros((c, r), bool)
     route = np.zeros((c, r), np.float32)
     me = rows[:c]
-    ptr_produce = table.produces[me].copy()
+    # A factory's or silo's PRODUCE and a constructor's BUILD both choose a type of `producible`; a type is one or the other.
+    ptr_produce = table.produces[me] | table.builds[me]
     # Not what it's making already: a PRODUCE is a change.
     making = np.flatnonzero((units["ord_kind"][:c] == rf.PRODUCE) & (units["ord_target"][:c] >= 0))
     if len(making) and len(table.producible):
@@ -525,15 +548,16 @@ def _masks(tokens: _Tokens, locked: np.ndarray, c: int, bundle: Bundle, table: T
     mobile, armed = table.mobile[me], table.armed[me]
     classes = table.move_class[me]
     here = unit_region[:c]
-    # Regions a unit can walk to, by its class; its own always counts, so a unit always has a legal MOVE.
-    for i in range(c):
-        if classes[i] >= 0 and here[i] >= 0:
-            walk = bundle.walk[classes[i], here[i]]
-            ptr_region[i] = np.isfinite(walk)
-            route[i] = np.where(np.isfinite(walk), walk, 0.0) / max(table.speed[me[i]], 1.0)
-            ptr_region[i, here[i]] = True
-        elif here[i] >= 0:
-            ptr_region[i, here[i]] = True
+    # Regions a unit can walk to, by its class; its own always counts, so a unit always has a legal MOVE.  All of them at once: a
+    # loop over units was a quarter of a cloning worker's featurize (2026-11-09).
+    walks = np.flatnonzero((classes >= 0) & (here >= 0))
+    if len(walks):
+        walk = bundle.walk[classes[walks], here[walks]]
+        finite = np.isfinite(walk)
+        ptr_region[walks] = finite
+        route[walks] = np.where(finite, walk, 0.0) / np.maximum(table.speed[me[walks]], 1.0)[:, None]
+    on_map = np.flatnonzero(here >= 0)
+    ptr_region[on_map, here[on_map]] = True
     can_go = ptr_region.any(axis=1)
 
     if e:
@@ -543,18 +567,21 @@ def _masks(tokens: _Tokens, locked: np.ndarray, c: int, bundle: Bundle, table: T
         dz = units["z"][:c, None] - units["z"][enemy_tokens][None, :]
         dist = np.hypot(dx, dz)
         air_target = table.air[targets]
+        foes = tokens.foes[None, :]
         hits = (table.can_hit_ground[me][:, None] & ~air_target[None, :]) | (table.can_hit_air[me][:, None] & air_target[None, :])
-        ptr_enemy[0] = hits & in_los[None, :]
-        ptr_enemy[1] = armed[:, None] & (dist <= (table.range[me] * 1.5 + 300.0)[:, None])
-        ptr_enemy[2] = table.manualfire[me][:, None] & in_los[None, :] & (dist <= table.manual_range[me][:, None])
+        ptr_enemy[0] = hits & in_los[None, :] & foes
+        ptr_enemy[1] = armed[:, None] & (dist <= (table.range[me] * 1.5 + 300.0)[:, None]) & foes
+        ptr_enemy[2] = table.manualfire[me][:, None] & in_los[None, :] & (dist <= table.manual_range[me][:, None]) & foes
         # Missiles and the Trinity (tables.missile, tables.launcher): at what's on the ground in reach, in sight or on radar, as
         # every enemy token is.  The Trinity needs no sight in the game, but what's only remembered isn't a token.
-        ground = ~air_target[None, :]
+        ground = ~air_target[None, :] & foes
         missile, launcher = table.missile[me], table.launcher[me]
         if missile.any():
             ptr_enemy[0][missile] = ground & (dist[missile] <= table.range[me[missile]][:, None])
         if launcher.any():
             ptr_enemy[2][launcher] = ground & (dist[launcher] <= table.manual_range[me[launcher]][:, None])
+        # ASSIST: a constructor helps build one of ours anywhere (it walks there), or helps a factory with what it makes.
+        ptr_enemy[3] = table.constructor[me][:, None] & ~foes & (enemy_tokens[None, :] != np.arange(c)[:, None])
 
     kind[:, rf.KEEP] = ~idle | ~mobile
     kind[:, rf.MOVE] = free & mobile & can_go
@@ -594,7 +621,10 @@ def _masks(tokens: _Tokens, locked: np.ndarray, c: int, bundle: Bundle, table: T
     with_beacon[unit_region[tokens.beacons][unit_region[tokens.beacons] >= 0]] = True
     ptr_wait = ptr_region & with_beacon[None, :] & (mobile & ~teleports)[:, None]
     kind[:, rf.WAIT_AT_BEACON] = free & ptr_wait.any(axis=1)
-    kind[:, rf.PRODUCE] = free & ptr_produce.any(axis=1)
+    kind[:, rf.PRODUCE] = free & table.produces[me].any(axis=1) & ptr_produce.any(axis=1)
+    kind[:, rf.BUILD] = free & table.builds[me].any(axis=1)        # there's always a place: beside itself
+    kind[:, rf.ASSIST] = free & ptr_enemy[3].any(axis=1)
+    kind[:, rf.RECLAIM] = free & table.constructor[me] & (tokens.features > 0)     # any feature token: it walks there
     off = np.ones(rf.KIND_COUNT, bool)
     off[list(enabled)] = False
     kind[:, off] = False

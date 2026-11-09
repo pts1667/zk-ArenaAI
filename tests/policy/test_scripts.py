@@ -169,11 +169,18 @@ def test_policy_seats_get_the_economy_but_not_the_army_script():
     env.begin()
     economy = np.zeros(env.seat_count, np.int64)
     for _ in range(600):
+        looked = env.decisions.copy()
         env.step(0.0)
         assert set(env.script_record) == {1, 3}         # side 1 is the script's in "fight" mode
         counts = env.cpp.seat_counts(env.count)
         assert counts[[0, 2], 1].sum() == 0
         economy += counts[:, 3]
+        orders, offsets = env.eco_orders            # the economy script's alone, by seat: the labels for cloning it
+        assert (np.diff(offsets) == counts[:, 3]).all()
+        assert set(orders["kind"].tolist()) <= {zksim.ORDER_BUILD, zksim.ORDER_ASSIST, zksim.ORDER_RECLAIM, zksim.ORDER_MOVE}
+        for g in range(env.count):          # it looks when the army script and the actor do
+            if counts[2 * g:2 * g + 2, 3].any():
+                assert looked[g] % env.eco_every == 0 and env.eco_every == se.SCRIPT_EVERY
         env.finished_seats()
     assert (economy > 0).all()          # the economy script plays every side, the policy's too
 

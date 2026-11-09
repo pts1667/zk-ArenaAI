@@ -1823,3 +1823,71 @@ At the user's request: Pluto's reward has "a small bonus for building less-frequ
 **Checks.**  `test_finished_units_of_rare_types_earn_a_zero_sum_bonus_and_the_first_units_none`: a type made 10,000 times has rarity 0 and one never made more than 0.8; nothing at the first decision; over 300 decisions of 4 games the policy's sides earn some, the counts grow, and every seat's reward is the negative of its opponent's.
 
 **Not done:** a PPO run with it, or any check that it changes what the policy makes.
+
+### 11.20 `army-5`, and cloning 18 times faster: a decision every 3 s, and the age bias's backward (2026-11-09)
+
+**`army-5`** (`/mnt/d/zk-learned/clone/army-5`, data version 5): the C++ army and economy scripts against themselves with variants, on the map pool's training maps, 12 workers, seed 5.  114,223 games, 401.5M decisions (both sides), 138 GB: 368 bytes a decision, not the 239 of 11.12's 64 games, as these run longer and hold more units.  1 h 56 min at 58,100 decisions a second.  Endings: 71,183 on a lead, 39,180 at the time limit, 3,860 by elimination.  `check` on 20 sides: no order missed, 107 of 704 orders group orders; labels keep 98.0%, fight 1.2%, produce 0.6%, move 0.2%.  1.1M units' current-order places were clamped to -25..125% of the map, about 0.005% of the unit records.
+
+The first try was stopped at 5 minutes: each worker grew about 3 MB a second.  Not a leak: each made its own copy of each map's masks, site samples and part labels (`policy_opening.Ground`) and the C++ scripts' copy of them, as it first played the map, about 6 MB a map.  On the 298-map pool that's about 1.6 GB a worker, 20 GB for 12 on top of the shared 7.5 GB pool.  `policy_sim_env.share_maps` now makes them all before the workers fork (`Ground.warm`, and the scripts' data with every map added), so the workers share them: 12 level off at 5.4 GB together.  Games play the same either way (`test_shared_maps_are_used_and_play_as_each_env_making_its_own`).
+
+**`clone-5`**, `/mnt/d/zk-learned/runs/clone-5`: the action form (11.18) with `encoder-big` (11.17), a decision every slot as before, 16 stretches of 48 a step, every 6th decision counted (where the script looked).  52 counted decisions a second.  Stopped at 11,500 of 20,000 steps, when the user chose a decision every 3 s instead.  On 96 held-out stretches (1,489 actions, 759 dones):
+
+| Step | Loss | Anchor right | Kind right | Move right | Done right | Stops early | NLL of actions | NLL of done |
+|---|---|---|---|---|---|---|---|---|
+| 500 | 4.67 | 0.578 | 0.950 | 0.00 | 0.961 | 0.403 | 5.86 | 0.47 |
+| 3,000 | 2.79 | 0.667 | 0.988 | 0.87 | 0.881 | 0.234 | 3.96 | 0.66 |
+| 6,000 | 2.51 | 0.648 | 0.987 | 0.89 | 0.950 | 0.306 | 3.66 | 0.41 |
+| 9,000 | 2.34 | 0.678 | 0.990 | 0.89 | 0.951 | 0.263 | 3.44 | 0.43 |
+| 11,500 | 2.27 | 0.678 | 0.989 | 0.89 | 0.945 | 0.259 | 3.32 | 0.37 |
+
+"Anchor right" is how often the likeliest anchor is a unit the script told and no action before picked; "stops early" how often done is likelier than any such unit while some are left.  Kinds are all but learned (fight and produce 1.00; move from 0 to 0.89 on 75 labels).  Choosing whom to tell is the hard part, and still improving when stopped.
+
+**Speed.**  At 52 counted decisions a second, 20,000 steps would have taken 82 hours.  An `nvidia-smi` reading of 3% had suggested the workers held it up; the user saw the GPU at 90-95% in Task Manager, and that reading was a moment between steps.  What was done, in order, each measured on 600 of `army-5`'s files:
+
+1. **A decision every 3 s** (`--decide-every 6`, the user's choice).  The script looks every 6 decisions, and only those count, but the actor read every frame: a stretch of 48 decisions and its 32 frames of history were 80 frames encoded for 8 counted decisions.  Now the actor reads only the frames it decides at, `policy_latent.window_frames(6)`: a window of 4 frames (8 s rounded to the rate, 9 s back), a reach of 6.  A stretch of 48 is 48 looks and 6 frames of history.  PPO must play at the same rate.  262 a second (5x).
+2. **Decoding only what a sample needs** (`zkrecord.read(side=, until=)`, `policy_clone_data.read_side`).  A worker read the whole game, both sides, for 54 frames of one: 0.24 s of a sample's 0.32 s.  Records are deltas along the game, so it still reads from the start, but stops after the chunk holding the stretch's last frame and doesn't unpack the other side.  488 a second.
+3. **The age bias's backward.**  A PyTorch profile of a step: 77% of the GPU's time was one kernel, `indexing_backward_kernel`, 250 ms a call, twice a step.  `TimeBlock.bias` indexed the age table (heads x window) once for every pair of tokens, about 2,400 x 2,400 a layer, and the backward of that indexing adds 5.6M gradients one at a time into a few dozen places.  `_age_bias` now indexes it a pair of frames at a time and spreads that over their tokens, which backward sums; the same values and gradients (`test_the_age_bias_by_frame_is_the_age_bias_by_token_and_learns_the_same`).  A GPU step took 1.07 s and takes 0.49 s.  716 a second.
+4. **One encoder call and one action-token call a step**, over all the samples' frames joined (`pm.join`, which now keeps the true names the encoder reads), in place of 16 of each.  With samples made beforehand a step took 0.57 s; with the workers making them as it ran, 0.93 s.  Fewer torch threads changed nothing, so what was left was the main process taking in about 120 MB of samples a step while issuing a step's thousands of small kernels.  Joined, the latents differ from one sample at a time by at most 6e-4 (different padding) and the action tokens by 7e-7.  961 a second with 6 workers, 918 with 12.
+
+Longer stretches (8 of 96 in place of 16 of 48) gained 10% on the GPU once history was 6 frames, not 32, and were left out for their more correlated batches.  Not done: sending samples through shared memory rather than pipes, or not sending the decision frames twice (`seen` and `heads` hold mostly the same frames now), worth up to 1.4x by the 0.57 s step.
+
+**`clone-6`**, `/mnt/d/zk-learned/runs/clone-6`: as `clone-5` but `--decide-every 6`, 8 workers, 20,000 steps of 16 x 48 looks, 15.4M of `army-5`'s 67M looks.  860 counted decisions a second, about 5 hours; 1,550,374 trained parameters (the age tables are smaller).  Its checks hold 96 stretches of 48 looks: 8,395 actions, 4,573 dones.  At step 500: anchor right 0.625, kind right 0.951, done right 0.949, NLL of actions 5.26 (`clone-5` at 500: 0.578, 0.950, 0.961, 5.86, on other stretches, having read a sixth as many of the script's decisions).  Starting took 11.6 minutes, most of it reading 114,224 files' headers over `/mnt/d` (3.5 minutes for `clone-5`).
+
+**Tests:** `tests/policy`, 317 passed.  New: the partial read reads the start of the whole (`test_one_side_as_far_as_a_frame_reads_as_the_start_of_the_whole`, over 8-frame chunks), the age bias by frame, the shared maps.
+
+### 11.21 `army-6`, a 10M actor, flex attention, and a trainer that keeps the GPU fed (2026-11-09)
+
+**`army-6`** (`/mnt/d/zk-learned/clone/army-6`, data version 6): as `army-5` (11.20), with the economy script's orders recorded after the army script's, both looking every 6 slots, and reclaim (`04-economy.md`).  83,820 games, 300.6M decisions, 105 GB; stopped by the user at 75% of the 400M asked.  Every game reads back whole (167,640 sides).  The 1,044-game `army-6-test` passed `check`: 0.35% of orders missed; build, assist and reclaim all there.
+
+**The actor at 10M** (the user, 2026-11-09): `policy_latent.Size(d=256, heads=8, layers=4, plan_layers=4)`, 10,537,808 trained parameters; the old 1.9M is `SMALL`.  The critic is d 256, 4 layers, 8 heads, 3,221,769 parameters.  A reach of 12 decisions.  Every GPU script caps its memory (`set_per_process_memory_fraction`, `--gpu-memory` 0.85): past the card, the Windows driver spilled into 30 GB of system RAM instead of failing.  8 stretches of 48 a forward pass peak at 4.5 GB; 16 don't fit.
+
+**The cloning step, the main process alone** on samples made beforehand, 8 stretches (`policy_clone_train.forward`, backward, optimizer):
+
+| | ms a step | Peak GPU |
+|---|---|---|
+| Dense attention, after staging every host copy at the step's start and removing the syncs mid-pass | 230 | 4.8 GB |
+| Flex attention, the age bias as a score_mod | 562 | 4.4 GB |
+| Flex attention, the age bias frozen (no gradient) | 159 | 4.4 GB |
+| Flex attention, the age bias as appended query and key dimensions (`TimeBlock.bias_dims`) | 157 | 4.5 GB |
+| ... and `--compile default` on `sequence` | 155 | 4.4 GB |
+| ... and `--compile reduce-overhead` (CUDA graphs) | 147 | 3.6 GB |
+
+The dense path's biggest cost was the time transformer scoring every pair of a stretch's ~2,640 tokens, ~93% masked.  Flex attention skips the masked blocks, but a score_mod reading the age table gets its gradient a pair of tokens at a time, as atomic adds into ~136 places: 11.20's mistake again, inside the kernel.  As appended dimensions the bias is a dot product, and its gradient comes through dq, summed a frame at a time.  It matches the dense path to 1e-4 in outputs and gradients without TF32, whole and newest only (`test_flex_attention_reads_and_learns_as_the_bias_does`; with TF32 on, as `policy_train` sets, the two paths round differently by ~3e-3).  `--attention flex` is the default on CUDA; compiling adds little and is off.  Flex is compiled with automatic dynamic shapes, so a second shape (a held-out batch, a short game's stretch) doesn't pile up recompiles until it falls back to eager, which scores every pair: 8 to 7 to 8 stretches stayed at 157 ms.
+
+**The trainer.**  The user saw the GPU at 100% for a second, then idle for one or two.  The trainer took a whole step's 64 stretches before its first forward pass, with 16 being made: the GPU and the workers waited on each other in turn.  Each pass's stretches are now taken as it needs them, with `max(2 x samples, 3 x workers)` reads in flight.  Then the workers were the limit, which was cut three ways:
+
+* **Several stretches a read** (`--per-read` 4, `_samples`): a record is changes along the game, so a stretch is decoded from the game's start, a third of a worker's time.  A worker now cuts 4 stretches one after another from one decoding, and the next stretch's 12 frames of history are this one's end, featurized once.  The trainer draws stretches at random from 4 passes' worth made (`Prefetch(mixed=)`), so a pass isn't one game's.  Each stretch is what reading it alone gives, its own names dropped (`test_stretches_cut_from_one_read_are_those_read_one_at_a_time`).
+* **`featurize._masks`** built each unit's reachable regions in a loop over units, a quarter of featurize; now all at once.  The golden fixtures are unchanged.
+* **15 workers.**
+
+| Trainer, `army-6-test` on `/mnt/d` | Decisions a second |
+|---|---|
+| As it was, 12 workers | 791 |
+| A pass's stretches taken as needed | 1,145 |
+| 4 stretches a read, `_masks` at once | 1,356 |
+| History shared between a read's stretches | 1,397 |
+| 15 workers | 1,462 |
+
+The workers alone, from WSL's own disk: 1 makes 393 decisions a second, 4 make 1,431, 8 2,137, 15 2,392 (the CPU is a Ryzen 7 5800X3D, 8 cores, 16 threads).  `/mnt/d` is ~15% slower; one thread a worker changed nothing.  What's left is featurize, 1.7 ms a frame in ~1,500 small numpy calls, and the main process, which needs most of a core to issue a step's kernels and shares the cores with 15 workers.  A C++ featurize would be the real fix.
+
+**`clone-7`**, `/mnt/d/zk-learned/runs/clone-7`: the baseline P3-P8, C1 and C4-C8 are measured against (`05-literature.md`), each run the same: `--decide-every 6 --samples 8 --accumulate 8 --lr 6e-4 --muon-lr 0.008 --workers 15 --steps 1000 --check-every 250` on `army-6`, a whole cosine schedule of 1,000 steps (the user: 1,000 is enough for a baseline), 3.1M looks.  Starting lists the 83,820 files in 194 s.

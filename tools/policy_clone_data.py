@@ -7,8 +7,9 @@ Games run as a batch in the sim, which steps them on its threads, and the script
 processes of their own, each with its own seed.  `--variants` gives each side's army script its own knobs at each game's start
 (policy_variants.py), and each game's meta says which: without it every side plays the standard script, as before.
 
-A file a game (`game-*.zkr`, data version 5): both sides' frames in order, the orders each side's script gave at each, as the policy
-would give them (a group order as its anchor's order and a groups.GROUP_MARK record after it), and how the game ended.  libzkrecord writes it straight from the batch's arrays, narrowed and compressed (sim/record/zkrecord.h);
+A file a game (`game-*.zkr`, data version 6): both sides' frames in order, the orders each side's scripts gave at each, as the policy
+would give them (a group order as its anchor's order and a groups.GROUP_MARK record after it; the army script's, then the economy
+script's), and how the game ended.  libzkrecord writes it straight from the batch's arrays, narrowed and compressed (sim/record/zkrecord.h);
 `zkrecord.read` gives it back.  Data versions 1 to 3 were a file a side (`game-*-SIDE.npz`, rawframe.save_frames): `read_game` reads
 both.  Frames and orders are kept raw, not as features or choices, so the data outlives changes to the featurizer: `labels` turns them
 into the policy's choices when they're read.  The commander's opening orders aren't kept: they aren't the policy's to give, so the
@@ -34,11 +35,12 @@ import zkrecord  # noqa: E402
 import zksim  # noqa: E402
 from zkbot.policy import actions, bundle as bd, featurize as fz, rawframe as rf, tables  # noqa: E402
 
-DATA_VERSION = 5      # 1: the army script with the opening's economy only.  2: with the economy script (policy_eco.py), 2026-11-08.
+DATA_VERSION = 6      # 1: the army script with the opening's economy only.  2: with the economy script (policy_eco.py), 2026-11-08.
                       # 3: the army script aims missiles and the Trinity (labels now), the economy spends what it makes, and in the sim
                       # help for a factory still being built builds it, 2026-11-08.  4: the same games, a .zkr file a game, 2026-11-08.
                       # 5: the army script's group orders, recorded as the policy gives them (groups.GROUP_MARK), air, and a second
-                      # factory, 2026-11-08
+                      # factory, 2026-11-08.  6: the economy script's orders too, after the army script's for each seat, both
+                      # scripts looking every 6 slots, 2026-11-09 (docs/learned-policy/04-economy.md)
 
 
 class Recorder:
@@ -76,7 +78,13 @@ class Recorder:
         """This step's script orders over every seat, and where each seat's start."""
         env = self.env
         if env.army_orders is not None:
-            return env.army_orders
+            if env.eco_orders is None:
+                return env.army_orders
+            # Each seat's army-script orders, then its economy script's (data version 6).
+            (army, ao), (eco, eo) = env.army_orders, env.eco_orders
+            parts = [p for s in range(len(ao) - 1) for p in (army[ao[s]:ao[s + 1]], eco[eo[s]:eo[s + 1]])]
+            counts = np.diff(ao) + np.diff(eo)
+            return rf.join(parts, zksim.ORDER_DTYPE), np.concatenate(([0], np.cumsum(counts))).astype(np.int32)
         parts = [env.script_record.get(seat, self._empty) for seat in range(env.seat_count)]
         return rf.join(parts, zksim.ORDER_DTYPE), np.concatenate(([0], np.cumsum([len(p) for p in parts]))).astype(np.int32)
 
@@ -131,6 +139,17 @@ def read_game(path: pathlib.Path) -> list[Side]:
     return [(frames, orders, {"result": float(meta["result"][s]), "map": meta["map"], "script": meta["script"][s],
                               "variant": meta["variants"][s] if "variants" in meta else None})
             for s, (frames, orders) in enumerate(sides)]
+
+
+def read_side(path: pathlib.Path, side: int, until: int | None = None) -> Side:
+    """One side of a game, decoding only it and only as far as frame `until` (all of a .npz): what a cloning sample needs."""
+    path = pathlib.Path(path)
+    if path.suffix == ".npz":
+        return read_game(path)[0]
+    meta, sides = zkrecord.read(path, side=side, until=until)
+    frames, orders = sides[side]
+    return frames, orders, {"result": float(meta["result"][side]), "map": meta["map"], "script": meta["script"][side],
+                            "variant": meta["variants"][side] if "variants" in meta else None}
 
 
 def load(path: pathlib.Path, side: int = 0) -> Side:
@@ -244,7 +263,7 @@ def check(args: argparse.Namespace) -> None:
         results[info["result"]] += 1
         bundle = maps[info["map"]]
         for frame, o in zip(frames[::args.every], given[::args.every]):
-            t, d, m = labels(frame, o, bundle, table, enabled_kinds=se.KINDS)
+            t, d, m = labels(frame, o, bundle, table, enabled_kinds=se.KINDS, economy=True)
             kinds.update(int(k) for k in d.kind)
             grouped += int((d.group >= 0).sum())
             missed += m
@@ -259,7 +278,8 @@ def check(args: argparse.Namespace) -> None:
 
 def rf_name(kind: int) -> str:
     names = {rf.KEEP: "keep", rf.MOVE: "move", rf.FIGHT: "fight", rf.ATTACK_UNIT: "attack", rf.ATTACK_GROUND: "attack_ground", rf.STOP: "stop",
-             rf.MANUAL_FIRE: "manual_fire", rf.JUMP: "jump", rf.CLOAK_ON: "cloak_on", rf.CLOAK_OFF: "cloak_off", rf.PRODUCE: "produce"}
+             rf.MANUAL_FIRE: "manual_fire", rf.JUMP: "jump", rf.CLOAK_ON: "cloak_on", rf.CLOAK_OFF: "cloak_off", rf.PRODUCE: "produce",
+             rf.BUILD: "build", rf.ASSIST: "assist", rf.RECLAIM: "reclaim"}
     return names.get(kind, str(kind))
 
 

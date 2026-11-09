@@ -1,5 +1,6 @@
 """The behaviour-cloning recorder: whole games only, both sides, frames and orders in step, read back as they were (within the narrowing
 zkrecord.h describes), and labels read back from them."""
+import functools
 import sys
 from pathlib import Path
 
@@ -104,6 +105,56 @@ def test_a_game_reads_back_as_it_was_given_within_its_rounding(tmp_path):
                 assert np.array_equal(f["metal"], wf["metal"])
                 assert np.abs(f["x"] - wf["x"]).max(initial=0.0) <= map_w / 65535
     assert units_seen > 0
+
+
+def test_one_side_as_far_as_a_frame_reads_as_the_start_of_the_whole(tmp_path, monkeypatch):
+    """What a cloning sample reads (zkrecord.read's side and until), over chunks of 8 frames, so that it stops in the middle."""
+    monkeypatch.setattr(zkrecord, "Writer", functools.partial(zkrecord.Writer, chunk_frames=8))
+    _record(tmp_path, 1)
+    for path in sorted(tmp_path.glob("game-*.zkr"))[:2]:
+        _, whole = zkrecord.read(path)
+        for side in (0, 1):
+            frames, orders = whole[side]
+            for until in (1, 8, 9, 17, LIMIT):
+                _, part = zkrecord.read(path, side=side, until=until)
+                got, got_orders = part[side]
+                assert part[1 - side] == ([], [])
+                assert len(got) == min(LIMIT, -(-until // 8) * 8) == len(got_orders)
+                for a, b, o, p in zip(got, frames, got_orders, orders):
+                    assert a.units.tobytes() == b.units.tobytes() and a.features.tobytes() == b.features.tobytes()
+                    assert a.glob.tobytes() == b.glob.tobytes() and o.tobytes() == p.tobytes()
+            got, got_orders, info = cd.read_side(path, side, until=9)
+            assert len(got) == 16 and info["script"] == "army"
+
+
+def _same(a, b) -> bool:
+    if isinstance(a, dict):
+        return a.keys() == b.keys() and all(_same(a[k], b[k]) for k in a)
+    if isinstance(a, (list, tuple)):
+        return len(a) == len(b) and all(_same(x, y) for x, y in zip(a, b))
+    if hasattr(a, "__dataclass_fields__"):
+        return _same(vars(a), vars(b))
+    if hasattr(a, "shape"):
+        return a.shape == b.shape and bool((np.asarray(a.cpu() if hasattr(a, "cpu") else a) ==
+                                            np.asarray(b.cpu() if hasattr(b, "cpu") else b)).all())
+    return a == b
+
+
+def test_stretches_cut_from_one_read_are_those_read_one_at_a_time(tmp_path):
+    """A worker cuts a run of stretches from one decoding, each frame featurized once and shared with the next stretch's history:
+    each must be what reading that stretch alone gives, its own names dropped and nothing of another's."""
+    import policy_clone_train as ct
+    _record(tmp_path, 1)
+    maps = {f.name: b for _, b, f in se.pool()}
+    ct._setup(maps, max(b.regions for b in maps.values()), len(tables.table().names) + 1, False)
+    path = str(sorted(tmp_path.glob("game-*.zkr"))[0])
+    length, reach, seed = 4, 3, 11
+    run = ct._samples((path, 1, 2, 3, length, reach, seed, 1))
+    assert len(run) == 3
+    for i, sample in enumerate(run):
+        alone = ct._sample((path, 1, 2 + i * length, 1, length, reach, seed + i, 1))
+        assert sample["history"] == min(reach, 2 + i * length) and len(sample["counted"]) == length
+        assert _same(sample, alone), i
 
 
 def test_the_scripts_orders_read_back_as_labels(tmp_path):

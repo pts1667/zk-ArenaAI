@@ -84,8 +84,8 @@ def test_the_encoder_sees_true_names_and_the_actor_those_it_is_allowed(actor):
 
 def test_what_it_reads_changes_a_units_decision_but_not_its_key(actor):
     b = _batch(_items(1))
-    before = actor.context(b, torch.randn(1, actor.encoder.tokens, pl.D))
-    after = actor.context(b, torch.randn(1, actor.encoder.tokens, pl.D))
+    before = actor.context(b, torch.randn(1, actor.encoder.tokens, pl.SIZE.d))
+    after = actor.context(b, torch.randn(1, actor.encoder.tokens, pl.SIZE.d))
     kinds = [pm.each_unit_heads(actor, b, ctx)[0] for ctx in (before, after)]
     legal = kinds[0] > -1e8
     assert not torch.allclose(kinds[0][legal], kinds[1][legal])
@@ -100,7 +100,7 @@ def test_padding_changes_no_decision(actor):
     kind3 = pm.each_unit_heads(actor, both, _decided(actor, both, 3)[0])[0]
     c = items[0].controllable
     assert torch.allclose(kind[0, :c], kind3[0, :c], atol=1e-3)
-    anchor = [actor.anchor_logits(b, ctx, actor.plan(ctx, ctx.hu.new_zeros(len(b.ctrl_mask), 0, pl.D)), torch.zeros(len(b.ctrl_mask), 1, b.ctrl_mask.shape[1], dtype=torch.bool))
+    anchor = [actor.anchor_logits(b, ctx, actor.plan(ctx, ctx.hu.new_zeros(len(b.ctrl_mask), 0, pl.SIZE.d)), torch.zeros(len(b.ctrl_mask), 1, b.ctrl_mask.shape[1], dtype=torch.bool))
               for b, ctx in ((alone, _decided(actor, alone, 1)[0]), (both, _decided(actor, both, 3)[0]))]
     assert torch.allclose(anchor[0][0, 0, :c + 1], anchor[1][0, 0, :c + 1], atol=1e-3)
 
@@ -123,12 +123,12 @@ def _frames(actor, count: int, seed: int = 0) -> torch.Tensor:
 
 
 def _acts(count: int, seed: int = 1) -> torch.Tensor:
-    return torch.randn(1, count, pl.ACTION_TOKENS, pl.D, generator=torch.Generator().manual_seed(seed))
+    return torch.randn(1, count, pl.ACTION_TOKENS, pl.SIZE.d, generator=torch.Generator().manual_seed(seed))
 
 
 def test_each_layer_looks_back_eight_seconds_at_any_decision_rate(actor):
     assert pl.window_frames(1) == 17 and pl.window_frames(2) == 9
-    assert actor.reach == 2 * 16
+    assert actor.reach == actor.size.layers * 16
 
 
 def test_a_frame_reads_nothing_after_it(actor):
@@ -157,15 +157,17 @@ def test_a_frame_reads_back_as_far_as_its_reach_and_no_further(actor):
     for back, matters in ((count - 1 - actor.reach, True), (count - 2 - actor.reach, False), (0, False), (count - 2, True)):
         changed = frames.clone()
         changed[:, back] += 1.0
-        same = torch.allclose(newest, actor.sequence(changed, present, acts)[:, -1], atol=1e-5)
+        # Exactly: what's past the reach is masked out, so it changes nothing at all; at the reach, through every layer's
+        # attention, an untrained actor's change can be under any tolerance.
+        same = torch.equal(newest, actor.sequence(changed, present, acts)[:, -1])
         assert same != matters, back
     # What was done reaches no further.
     changed = acts.clone()
     changed[:, count - 2 - actor.reach] = _acts(1, seed=9)[:, 0]
-    assert torch.allclose(newest, actor.sequence(frames, present, changed)[:, -1], atol=1e-5)
+    assert torch.equal(newest, actor.sequence(frames, present, changed)[:, -1])
     changed = acts.clone()
     changed[:, count - 2] = _acts(1, seed=9)[:, 0]
-    assert not torch.allclose(newest, actor.sequence(frames, present, changed)[:, -1], atol=1e-5)
+    assert not torch.equal(newest, actor.sequence(frames, present, changed)[:, -1])
 
 
 def test_frames_from_before_the_game_read_alike_whatever_they_hold(actor):
@@ -186,12 +188,45 @@ def test_the_newest_frame_alone_reads_as_in_the_whole_sequence(actor):
     assert torch.allclose(whole, actor.sequence(frames, present, blank, newest_only=True)[:, -1], atol=1e-5)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="flex attention is for CUDA")
+def test_flex_attention_reads_and_learns_as_the_bias_does(actor):
+    """The time transformer by flex attention (a block mask and a score_mod) gives what the dense bias does, and the same gradients,
+    over more frames than it reaches, some from before the game, whole and newest only."""
+    actor = actor.cuda()
+    torch.manual_seed(3)
+    with torch.no_grad():
+        for block in actor.blocks:          # untrained, they're zeros, which would check nothing
+            block.age.normal_()
+            block.act_key.normal_()
+    count = actor.reach + 6
+    frames, acts = _frames(actor, count).cuda(), _acts(count).cuda()
+    present = torch.ones(1, count, dtype=torch.bool, device="cuda")
+    present[:, :3] = False
+
+    def run(flex: bool, newest_only: bool):
+        actor.flex = flex
+        actor.zero_grad()
+        out = actor.sequence(frames, present, acts, newest_only)
+        (out * torch.linspace(-1, 1, out.shape[-1], device="cuda")).sum().backward()
+        block = actor.blocks[0]
+        return out.detach(), block.age.grad.clone(), block.act_key.grad.clone(), block.q.weight.grad.clone()
+
+    tf32 = torch.backends.cuda.matmul.allow_tf32
+    torch.backends.cuda.matmul.allow_tf32 = False       # policy_train turns it on; its rounding differs by path, ~3e-3 here
+    try:
+        for newest_only in (False, True):
+            for dense, flex in zip(run(False, newest_only), run(True, newest_only)):
+                assert torch.allclose(dense, flex, rtol=1e-4, atol=1e-4), (newest_only, float((dense - flex).abs().max()))
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = tf32
+
+
 def test_the_age_bias_is_learned_and_nothing_outside_the_window_is_read(actor):
     block = actor.blocks[0]
     frame = torch.arange(20)
     plain = torch.zeros(20, dtype=torch.bool)
     bias = block.bias(frame, frame, plain, plain)
-    assert bias.shape == (pl.HEADS, 20, 20)
+    assert bias.shape == (actor.size.heads, 20, 20)
     assert torch.isinf(bias[:, 3, 4]).all() and torch.isinf(bias[:, 19, 19 - actor.window]).all()
     assert torch.isfinite(bias[:, 19, 19 - actor.window + 1]).all()
     # A frame's own action tokens: its latent tokens don't see them, they see its latent tokens.
@@ -201,6 +236,45 @@ def test_the_age_bias_is_learned_and_nothing_outside_the_window_is_read(actor):
     frames, present = _frames(actor, 4), torch.ones(1, 4, dtype=torch.bool)
     actor.sequence(frames, present, _acts(4))[:, -1].sum().backward()
     assert float(block.age.grad.abs().sum()) > 0.0 and float(block.act_key.grad.abs().sum()) > 0.0
+
+
+def test_the_age_bias_by_frame_is_the_age_bias_by_token_and_learns_the_same():
+    """`_age_bias` indexes a pair of frames at a time when it can; indexing every pair of tokens must give the same, and the same gradient."""
+    block = pl.TimeBlock(pl.SIZE.d, pl.HEADS, 5)
+    with torch.no_grad():
+        block.age.copy_(torch.randn_like(block.age))
+    frame = torch.arange(7).repeat_interleave(3)
+    newest = frame[-3:]
+    for q in (frame, newest):
+        fast = block._age_bias(q, frame)
+        slow = block.age[:, (q[:, None] - frame[None, :]).clamp(0, 4)]
+        assert torch.equal(fast, slow)
+        weights = torch.randn_like(fast)
+        grad_fast, = torch.autograd.grad((fast * weights).sum(), block.age)
+        grad_slow, = torch.autograd.grad((slow * weights).sum(), block.age)
+        assert torch.allclose(grad_fast, grad_slow, atol=1e-5)
+
+
+def test_the_bias_built_by_frames_is_the_bias_by_tokens_and_learns_the_same():
+    """`frame_bias`, which `sequence` uses because it compiles, against `bias` token by token: the same values and -inf, and the same
+    gradients to the age table and the action-key bias; for every frame's queries and for the newest's latent tokens alone."""
+    block = pl.TimeBlock(pl.SIZE.d, pl.HEADS, 5)
+    with torch.no_grad():
+        block.age.copy_(torch.randn_like(block.age))
+        block.act_key.copy_(torch.randn_like(block.act_key))
+    frames, per, tokens = torch.arange(7), 4, 3
+    is_act = torch.arange(per) >= tokens
+    frame, act = frames.repeat_interleave(per), is_act.repeat(len(frames))
+    for qf, qa, q in ((frames, is_act, slice(None)), (frames[-1:], is_act[:tokens], slice(len(frame) - per, len(frame) - 1))):
+        built = block.frame_bias(qf, frames, qa, is_act)
+        want = block.bias(frame[q], frame, act[q], act)
+        assert torch.equal(torch.isinf(built), torch.isinf(want))
+        finite = torch.isfinite(want)
+        assert torch.allclose(built[finite], want[finite])
+        weights = torch.randn_like(want).masked_fill(~finite, 0.0)
+        got = torch.autograd.grad((built.masked_fill(~finite, 0.0) * weights).sum(), (block.age, block.act_key))
+        expected = torch.autograd.grad((want.masked_fill(~finite, 0.0) * weights).sum(), (block.age, block.act_key))
+        assert all(torch.allclose(a, b, atol=1e-5) for a, b in zip(got, expected))
 
 
 def test_a_seat_keeps_its_frames_newest_first_and_forgets_the_oldest(actor):
@@ -235,7 +309,7 @@ def test_doing_nothing_reads_alike_whoever_did_it(actor):
     """Done at once is nothing done: the action tokens say only that."""
     b = _batch(_items(3))
     tokens = actor.action_tokens(b, _nothing(3))
-    assert tokens.shape == (3, pl.ACTION_TOKENS, pl.D)
+    assert tokens.shape == (3, pl.ACTION_TOKENS, pl.SIZE.d)
     assert torch.allclose(tokens[0], tokens[1], atol=1e-5) and torch.allclose(tokens[0], tokens[2], atol=1e-5)
 
 
@@ -266,21 +340,21 @@ def test_who_was_told_what_and_where_reaches_the_action_tokens_in_any_order(acto
 
 
 def test_a_pointer_score_from_place_depends_on_the_difference_alone(actor):
-    query = torch.zeros(1, 1, pl.D)
+    query = torch.zeros(1, 1, pl.SIZE.d)
     gain = torch.ones(1, 1, 2 * pl.BANDS)
     here, there = torch.tensor([[[0.2, -0.3]]]), torch.tensor([[[0.5, 0.1], [-0.7, 0.4]]])
-    keys = lambda at: torch.cat((torch.zeros(1, 2, pl.D), actor.code(at)), -1)  # noqa: E731
+    keys = lambda at: torch.cat((torch.zeros(1, 2, pl.SIZE.d), actor.code(at)), -1)  # noqa: E731
     first = actor._score(query, gain, actor.code(here), keys(there))
     moved = actor._score(query, gain, actor.code(here + 0.11), keys(there + 0.11))
     assert torch.allclose(first, moved, atol=1e-4)
 
 
 def test_a_pointer_score_from_place_is_highest_on_its_own_place(actor):
-    query = torch.zeros(1, 1, pl.D)
+    query = torch.zeros(1, 1, pl.SIZE.d)
     gain = torch.ones(1, 1, 2 * pl.BANDS)
     here = torch.tensor([[[0.2, -0.3]]])
     places = torch.tensor([[[0.2, -0.3], [0.21, -0.3], [0.3, -0.3], [-0.8, 0.9]]])
-    keys = torch.cat((torch.zeros(1, 4, pl.D), actor.code(places)), -1)
+    keys = torch.cat((torch.zeros(1, 4, pl.SIZE.d), actor.code(places)), -1)
     score = actor._score(query, gain, actor.code(here), keys)[0, 0]
     assert int(score.argmax()) == 0 and float(score[1]) > float(score[2]) > float(score[3])
 
@@ -288,7 +362,7 @@ def test_a_pointer_score_from_place_is_highest_on_its_own_place(actor):
 def test_a_target_a_little_further_gets_another_score_whatever_the_latents_say(actor):
     items = _items(1)
     b = _batch(items)
-    now = actor.sequence(actor.encoder(b).float()[:, None], torch.ones(1, 1, dtype=torch.bool), torch.zeros(1, 1, pl.ACTION_TOKENS, pl.D))[:, -1]
+    now = actor.sequence(actor.encoder(b).float()[:, None], torch.ones(1, 1, dtype=torch.bool), torch.zeros(1, 1, pl.ACTION_TOKENS, pl.SIZE.d))[:, -1]
     assert len(items[0].enemy_tokens) > 0
     enemy = pm.each_unit_heads(actor, b, actor.context(b, now))[2]
     moved = b.unit_x.clone()
@@ -316,7 +390,7 @@ def _sampled(actor, seed: int = 3, done: float | None = None):
 
 def test_it_starts_by_being_done_rather_than_picking_any_one_unit(actor):
     _, b, ctx, _ = _sampled(actor)
-    first = actor.anchor_logits(b, ctx, actor.plan(ctx, ctx.hu.new_zeros(3, 0, pl.D)), torch.zeros(3, 1, b.ctrl_mask.shape[1], dtype=torch.bool))[:, 0]
+    first = actor.anchor_logits(b, ctx, actor.plan(ctx, ctx.hu.new_zeros(3, 0, pl.SIZE.d)), torch.zeros(3, 1, b.ctrl_mask.shape[1], dtype=torch.bool))[:, 0]
     assert (first.argmax(-1) == 0).all()
 
 
@@ -343,7 +417,7 @@ def test_a_choice_scores_the_same_when_it_is_evaluated(actor, done):
     _, b, ctx, a = _sampled(actor, done=done)
     logp, entropy = pm.evaluate_actions(actor, b, ctx, a)
     assert torch.allclose(logp, a.logp, atol=1e-3)
-    assert set(entropy) == {"anchor", "kind", "region", "enemy", "fine", "produce", "group", "roles"}
+    assert set(entropy) == {"anchor", "kind", "region", "enemy", "fine", "produce", "place", "offset", "wreck", "group", "roles"}
 
 
 def test_a_scripts_actions_score_as_a_set(actor):

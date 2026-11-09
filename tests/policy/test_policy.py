@@ -111,19 +111,19 @@ def test_tensor_shapes_and_token_order(small_map, table):
                        {"name": None, "side": BLIP, "uid": 5, "x": 900.0, "hp_frac": np.nan},
                        {"name": "staticmex", "side": MEMORY, "uid": 6, "x": 1000.0, "ord_age": 300.0})
     t = run(units, small_map, table)
-    assert t.controllable == 1
+    assert t.controllable == 2
     assert sorted(t.uids.tolist()) == [1, 2, 3, 4, 5, 6]
     assert t.unit_x.shape == (6, fz.UNIT_DIM) and t.unit_name.shape == (6,)
     assert t.reg_x.shape == (small_map.regions, fz.REGION_DIM)
     n = 6 + small_map.regions + 0 + 1
     assert t.tok_kind.shape == (n,)
-    assert t.controllable == 1 and t.uids[0] == 1
+    assert sorted(t.uids[:2].tolist()) == [1, 2]
     kinds = {int(uid): int(k) for uid, k in zip(t.uids, t.tok_kind)}
     assert kinds == {1: fz.TK_SEEN, 2: fz.TK_SEEN, 3: fz.TK_SEEN, 4: fz.TK_SEEN, 5: fz.TK_BLIP, 6: fz.TK_MEMORY}
     assert t.unit_ally.shape == t.unit_player.shape == (6,)
     assert t.tok_kind[-1] == fz.TK_GLOBAL
-    assert t.kind_mask.shape == (1, rf.KIND_COUNT) and t.ptr_region.shape == (1, small_map.regions)
-    assert t.ptr_enemy.shape == (3, 1, 2)
+    assert t.kind_mask.shape == (2, rf.KIND_COUNT) and t.ptr_region.shape == (2, small_map.regions)
+    assert t.ptr_enemy.shape == (len(fz.ENEMY_POINTER_KINDS), 2, 2)
     assert np.isfinite(t.unit_x).all() and np.isfinite(t.reg_x).all() and np.isfinite(t.glob_x).all()
 
 
@@ -319,12 +319,12 @@ def test_stage_2_masks_off_construction(small_map, table):
     assert not run(make_units({"uid": 1}), small_map, table, enabled_kinds=(0, 1)).kind_mask[0, 2:].any()
 
 
-def test_only_finished_ground_combat_units_are_controllable(small_map, table):
+def test_only_finished_ground_combat_units_and_constructors_are_controllable(small_map, table):
     units = make_units({"uid": 1, "name": "cloakcon"}, {"uid": 2, "name": "staticmex"}, {"uid": 3, "name": "gunshipraid"},
                        {"uid": 4, "flags": rf.IN_LOS | rf.TYPE_KNOWN | rf.BEING_BUILT}, {"uid": 5, "flags": rf.IN_LOS | rf.TYPE_KNOWN | rf.RESERVED},
                        {"uid": 6})
     t = run(units, small_map, table)
-    assert t.controllable == 1 and t.uids[0] == 6
+    assert t.controllable == 2 and sorted(t.uids[:2].tolist()) == [1, 6]
 
 
 def test_every_unit_of_every_type_has_a_legal_kind_and_target(small_map, table):

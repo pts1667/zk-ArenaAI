@@ -1,15 +1,16 @@
 # The policy model
 
-How the learned policy works as of 2026-11-08: what it reads, how it reads it, and how it chooses orders.  The code is
+How the learned policy works as of 2026-11-09: what it reads, how it reads it, and how it chooses orders.  The code is
 `tools/policy_latent.py` (the actor), `tools/frame_vae.py` and `tools/frame_model.py` (the frozen frame encoder),
 `tools/policy_model.py` (batches, sampling, the critic) and `bots/zkbot/policy/featurize.py` (raw frame to tensors).  Results and
 the history behind each choice are in `docs/learned-policy/03-training.md` section 11.
 
 ## 1. The whole of it
 
-A decision is made every 15 game frames (2 a second).  The seat's raw frame becomes tokens; a frozen encoder squeezes them into 40
-latent tokens; the actor reads those latents together with the latents and actions of the frames before, over a sliding window in
-time.  It then gives its orders as a player does, one action after another, up to 16, until it chooses done: each action picks a
+A decision is made every 90 game frames (every 3 s): `decide_every` 6 of the sim's 15-frame slots, the rate the army script looks
+at, which the actor is cloned from (2026-11-09; it was every slot, 2 a second).  The actor reads only the frames it decides at.  The
+seat's raw frame becomes tokens; a frozen encoder squeezes them into 40 latent tokens; the actor reads those latents together with
+the latents and actions of the frames before, over a sliding window in time.  It then gives its orders as a player does, one action after another, up to 16, until it chooses done: each action picks a
 unit, its anchor, which reads the frame and seven heads choose its order, which may go as a group order to the units about it.
 Units no action picks keep what they're doing.  What was done is summarised into 4 action tokens, which later frames read.
 
@@ -20,8 +21,8 @@ flowchart LR
     TOK["tokens<br/>units · regions · sites ·<br/>features · global"]
     ENC["frame encoder<br/>(frozen, 1.65M)"]
     LAT["40 latent tokens<br/>x 32 numbers"]
-    TIME["time transformer<br/>2 layers, 8 s window"]
-    HIST[("kept history:<br/>32 frames of latents<br/>+ action tokens")]
+    TIME["time transformer<br/>2 layers, 4-frame window"]
+    HIST[("kept history:<br/>6 frames of latents<br/>+ action tokens")]
     PLAN["plan: the next action<br/>reads the frame and<br/>the actions before it"]
     ANC["anchor: a unit, or done"]
     READ["the anchor reads<br/>its frame's latents"]
@@ -40,14 +41,15 @@ flowchart LR
 
 | | |
 |---|---|
-| Width `D` | 128, 4 heads |
+| Size | `policy_latent.Size`, kept in each checkpoint: width `d` 256, 8 heads, 4 time layers, 4 plan layers (the user, 2026-11-09; it was 128, 4 heads, 2 and 2, now `SMALL`).  Diagrams and numbers below that say 128 or 2 layers are from then |
 | Latent tokens a frame | 40, of 32 numbers each, LayerNormed without weights |
 | Action tokens a frame | 4 (`ACTION_TOKENS`) |
-| Time layers | 2 (`LAYERS`) |
-| Window | 17 frames: 8 s at 2 decisions a second, the frame itself included |
-| Reach | 32 frames: each layer reaches 16 further back, so a decision depends on the 32 before it |
+| Decisions | every 3 s (`decide_every` 6; `window_frames` and the sim's `SimEnv(decide_every=)` take it) |
+| Window | 4 frames: `WINDOW_SECONDS` 8 at a decision every 3 s, rounded, the frame itself included (9 s back) |
+| Reach | 12 frames: each of the 4 layers reaches 3 further back, so a decision depends on the 12 before it (36 s) |
 | Actions a decision | up to 16 (`actions.SLOTS`), then done |
-| Parameters | 1,550,478 trained (the actor, of which 435,737 choose the actions in turn), 1,650,624 frozen (the encoder) |
+| Parameters | 10,537,808 trained, 1,650,624 frozen (the encoder).  At `SMALL`, 1,924,568 trained: 1,550,374 before the economy, of which 435,737 choose the actions in turn; 101,029 for a build's place and offset, the site keys and their action-token terms; 57,996 for reclaim's wreck pointer, the feature keys and its action-token term; 215,169 for the units' reading before the anchor is picked, their anchor keys and whether each is told anything |
+| Critic (PPO) | width 256, 4 layers of 8 heads: 3,221,769 parameters (was 128, 2 of 4: 430,473) |
 
 ## 2. What it reads: the featurizer
 
@@ -131,8 +133,8 @@ flowchart LR
 ### Who attends to whom
 
 Each `TimeBlock` is a pre-LayerNorm transformer block (attention, then a 4x MLP) with a learned bias on each head by how many
-frames back a key is (`age`, 17 values per head), and a learned bias per head for keys that are action tokens (`act_key`).  The
-mask is by frame, not by token:
+frames back a key is (`age`, one value per frame of the window, 4 per head), and a learned bias per head for keys that are action
+tokens (`act_key`).  The mask is by frame, not by token:
 
 | Query ↓ / key → | latents, earlier frame in window | actions, earlier frame in window | latents, same frame | actions, same frame | any later frame, or out of window |
 |---|---|---|---|---|---|
@@ -145,7 +147,7 @@ directions too.
 
 ```mermaid
 flowchart LR
-    subgraph past ["frames t-16 … t-1 (in the window)"]
+    subgraph past ["frames t-3 … t-1 (in the window)"]
         PL["latents"]
         PA["actions"]
     end
@@ -164,11 +166,20 @@ flowchart LR
 
 (Arrows run from key to query: what's read to what reads it.)
 
-With a window of 17 frames and 2 layers, a decision depends on exactly the 32 frames before it (`reach`).  In layer 1, frame t
-reads back to t-16 and frame t-16 to t-32.  In layer 2, frame t reads what t-16 took in.  Play keeps those 32 frames (section 7).
+With a window of 4 frames and 2 layers, a decision depends on exactly the 6 frames before it (`reach`).  In layer 1, frame t
+reads back to t-3 and frame t-3 to t-6.  In layer 2, frame t reads what t-3 took in.  Play keeps those 6 frames (section 7).
+
+At the 10M size (4 layers, a decision every 3 s: a window of 4 frames), a decision depends on the 12 frames before it.
 
 The attention is `F.scaled_dot_product_attention` with a dense float mask (age bias + action bias, `-inf` where unseen) of
-heads × queries × keys.
+heads × queries × keys.  The age bias is looked up a pair of frames at a time and spread over their tokens (`_age_bias`): looked up
+a pair of tokens at a time, its backward pass took 77% of a cloning step (`03-training.md` 11.20).
+
+In cloning on CUDA it's flex attention instead (`--attention flex`, `03-training.md` 11.21), the same function: a block mask of
+the window (`frame_mask`, a `Frames` layout) skips the ~93% of key blocks no query sees, and the biases ride in 18 dimensions
+appended to each head's queries and keys (`TimeBlock.bias_dims`): a query holds its frame's age bias for keys of each frame mod
+the window, then `act_key`; a key, its frame mod the window one-hot, then whether it's an action token.  Their dot product is the
+bias for every key in the window.  Play and PPO keep the dense mask.
 
 ## 5. From the sequence to orders: actions, one after another
 
@@ -191,10 +202,16 @@ and to the slots up to its own, then a 4x MLP.
 
 ### The anchor, or done
 
-The slot's output scores every controllable unit, `q_anchor(slot) · key` over the units' keys (section "Pointers" below), and done,
-`head_done(slot)`.  A unit may be picked if it may be told something other than keep, and no action before picked it.  Done starts
-3 nats up (`DONE_START`), so an untrained actor mostly does nothing.  After done, or 16 actions (`actions.SLOTS`), the decision is
-over.
+The slot's output scores every controllable unit, `q_anchor(slot) · anchor key`, and done, `head_done(slot)`.  A unit may be
+picked if it may be told something other than keep, and no action before picked it.  Done starts 3 nats up (`DONE_START`), so an
+untrained actor mostly does nothing.  After done, or 16 actions (`actions.SLOTS`), the decision is over.
+
+**Anchor keys know the frame** (`05-literature.md` P1, 2026-11-09).  Once a decision, before any unit is picked, every controllable
+unit reads the 40 latents with a cross-attention block of its own (`unit_read`, its query the unit's raw embedding `hu`), and its
+anchor key is `key_anchor` of that reading with its sine code (`Context.anchor_keys`).  Before, a unit's key was its own features
+alone, so "my region is threatened" couldn't reach whom to tell.  From the same reading, `head_ordered` gives each unit the logit
+that it's told anything at all this decision (`Context.ordered`): cloning learns it as a side loss (P2), a label for every unit at
+every decision; nothing samples from it.
 
 ### The anchor reads its frame
 
@@ -228,9 +245,12 @@ flowchart TB
     ME["me (each action's anchor)"]
     K["kind head<br/>linear → 21 kinds<br/>(illegal and keep masked)"]
     RG["region pointer<br/>(q_region(me) ‖ gain · own code) · region keys<br/>− softplus(route_scale) × route cost"]
-    EN["enemy pointers, one per kind:<br/>attack unit · attack ground · manual fire<br/>(q_enemy(me) ‖ gain · own code) · enemy keys"]
+    EN["target pointers, one per kind:<br/>attack unit · attack ground · manual fire · assist<br/>(q_enemy(me) ‖ gain · own code) · target keys"]
     FI["fine head<br/>MLP(me ‖ target key) → 9 options"]
-    PR["produce head<br/>q_type(me) · type keys of producible types"]
+    PR["produce head<br/>q_type(me) · type keys of producible types<br/>(what factories make and constructors build)"]
+    PL["place pointer (build)<br/>(q_place(me) ‖ gain · own code) · keys of<br/>our unit tokens, then the sites"]
+    OF["offset head (build)<br/>MLP(me ‖ place key) → 25 options"]
+    WR["wreck pointer (reclaim)<br/>(q_wreck(me) ‖ gain · own code) · feature keys"]
     GR["group head<br/>MLP(me + kind embedding) → alone or 10 radii"]
     RO["roles head<br/>MLP(me + kind + radius embeddings) → a logit per role"]
 
@@ -239,13 +259,17 @@ flowchart TB
     ME --> EN
     ME --> FI
     ME --> PR
+    ME --> PL
+    PL --> OF
+    ME --> WR
     ME --> GR
     GR --> RO
 ```
 
 * **Kind**: move, fight, attack unit, attack ground, stop, manual fire, jump, cloak on/off, produce, throw, push, pull, place
-  beacon, wait at beacon, ... (21 in all; the sim's games enable 14, `policy_sim_env.KINDS`).  Never keep: an action tells its unit
-  something, and a unit no action picks keeps.
+  beacon, wait at beacon, build, assist, reclaim, ... (21 in all; the sim's games enable 17 with keep, `policy_sim_env.KINDS`).
+  Never keep: an action tells its unit something, and a unit no action picks keeps.  Constructors and the commander are
+  controllable for build and assist, constructors for reclaim too (`docs/learned-policy/04-economy.md`).
 * **Pointers with place-aware keys**: a pointer's query ends in the anchor's own sine code, each band scaled by a gain it chooses
   (`gain_region`, `gain_enemy`).  Its dot product with a key's sine code is then a sum over bands of gain × cos(band × difference in
   place): a learned function of distance and direction, which a dot product of raw coordinates can't give.
@@ -253,7 +277,16 @@ flowchart TB
 * **Fine** (9 options): option 0 is the target itself; options 1-8 are the compass points around it.  For a region, these are at
   half its equivalent radius, with north towards the enemy; for attack ground, they are 200 elmos from the enemy target.  It reads
   the chosen target's key, so it's chosen after the target.
-* **Produce**: a factory's or silo's choice among producible types, scored against embeddings of their stats.
+* **Produce**: a factory's or silo's choice among producible types, scored against embeddings of their stats; a build's type is
+  the same head, over what the constructor can build (187 producible types: 127 made by factories and silos, 60 built).
+* **Assist** is the target pointer's fourth kind: one of our units being built, or a factory (`enemy_tokens` holds those own
+  tokens too).
+* **Place and offset** (build only): the place pointer chooses one of our unit tokens or a site, with the same place-aware keys;
+  the offset head then chooses where beside it, from its key: on it, or one of 8 compass points at 64, 128 or 256 elmos, north
+  towards the enemy.  The sim puts the building at the nearest place its footing fits (`SimEnv.place_build`), an extractor at
+  the nearest free spot.
+* **Wreck** (reclaim only): a pointer over the feature tokens (wrecks in sight), with keys from each feature's numbers and sine
+  code (`feat_in`, `key_feat`); the action's `place` field holds the chosen feature's index.
 * **Group** (move, fight and attack only): alone, or as a group order of one of 10 radii, 60 to 2,250 elmos
   (`bots/zkbot/policy/groups.py`): the sim then gives the order as well to every unit of the side of the chosen roles within that
   radius of the anchor.  It starts at alone (`ALONE_START`).
@@ -276,8 +309,12 @@ sequenceDiagram
     S-->>H: enemy (used only by those kinds)
     H->>S: fine logits from me ‖ chosen target's key
     S-->>H: fine (used only by kinds with a fine option)
-    H->>S: produce logits (masked by what it can make)
-    S-->>H: type (used only by produce)
+    H->>S: produce logits (masked by what it can make or build)
+    S-->>H: type (used only by produce and build)
+    H->>S: place logits, then offset logits from the chosen place's key
+    S-->>H: place and offset (used only by build)
+    H->>S: wreck logits over the feature tokens
+    S-->>H: wreck (used only by reclaim)
     H->>S: group logits from me and the kind
     S-->>H: alone or a radius (used only by move, fight, attack)
     H->>S: role logits from me, the kind and the radius
@@ -295,13 +332,14 @@ makes of each unit.
 
 ## 6. Action tokens: what was done
 
-What was done at a frame becomes that frame's 4 action tokens (`action_tokens`).  Only the policy's own choices go in:
-the economy script's and the opening's orders show only in later frames, as each unit's current order.
+What was done at a frame becomes that frame's 4 action tokens (`action_tokens`).  Only the policy's own choices go in (in cloning,
+both scripts' orders, which are the labels): the opening's orders, and the economy script's where it still runs on the policy's
+side, show only in later frames, as each unit's current order.
 
 ```mermaid
 flowchart LR
     subgraph each ["each action (not done)"]
-        E["kind embedding<br/>+ act_unit(anchor's hu)<br/>+ act_enemy(target key)<br/>+ act_region(region key)<br/>+ act_fine(option)<br/>+ act_type(type stats)<br/>+ act_group(radius) + act_roles(roles)"] --> G["GELU → act_out<br/>(action_vectors)"]
+        E["kind embedding<br/>+ act_unit(anchor's hu)<br/>+ act_enemy(target key)<br/>+ act_region(region key)<br/>+ act_fine(option)<br/>+ act_type(type stats)<br/>+ act_place(place key) + act_offset(option)<br/>+ act_wreck(feature key)<br/>+ act_group(radius) + act_roles(roles)"] --> G["GELU → act_out<br/>(action_vectors)"]
     end
     NOTH["learned 'nothing' vector<br/>(always there)"]
     Q4["4 learned queries<br/>+ act_count(log(1 + actions))"]
@@ -320,19 +358,19 @@ fixed-size, unordered summary.  The same action vectors are what the decoder rea
 
 ### In play: one decision at a time
 
-A seat keeps the 32 frames before the present, newest first: each frame's raw latents (40 × 32) and its 4 action tokens, flat
-(`record` numbers a frame).  `decide` runs the encoder on the new frame, lays out the 33 frames, and runs the sequence.  The first
+A seat keeps the 6 frames before the present, newest first: each frame's raw latents (40 × 32) and its 4 action tokens, flat
+(`record` numbers a frame).  `decide` runs the encoder on the new frame, lays out the 7 frames, and runs the sequence.  The first
 layer runs over every token.  The last runs only the newest frame's latent tokens as queries (`newest_only`).  The actions are then
 chosen in turn (`policy_model.sample_actions`), and `acted` writes their tokens into the newest frame's slot.
 
 ```mermaid
 sequenceDiagram
     participant Env as sim / engine
-    participant Seat as seat state (32 frames)
+    participant Seat as seat state (6 frames)
     participant Pol as actor
     Env->>Pol: featurized frame t
     Pol->>Pol: encoder → 40 latents
-    Seat->>Pol: frames t-32 … t-1 (latents + action tokens)
+    Seat->>Pol: frames t-6 … t-1 (latents + action tokens)
     Pol->>Pol: sequence (last layer: frame t's latents only)
     Pol->>Pol: actions in turn: plan, anchor, its heads
     Pol->>Env: orders
@@ -341,15 +379,18 @@ sequenceDiagram
 
 ### In training: a stretch in one pass
 
-Training takes a stretch of decisions with the 32 frames before it and runs the whole sequence at once.  Because the mask is
+Training takes a stretch of decisions with the 6 frames before it and runs the whole sequence at once.  Because the mask is
 causal by frame, every decision in the stretch sees exactly what it would have seen in play.
 
-* **Cloning** (`policy_clone_train.py`): stretches of 48 decisions from recorded script games (`policy_clone_data.py`).  The
-  script's orders become the labels (`actions.encode`), then actions in a random order, at most 16 (`actions.to_slots`), and the
-  action tokens are built from all of them.  The loss is the negative log-probability of each action, done included.  The script's
-  orders have no order of their own, so an action's anchor scores as any unit the script told something and no action before it
-  picked (`evaluate_actions`' `labelled`).  By default only decisions where the script looked count (every 6th).
-* **PPO** (`policy_train.py`): segments of 32 decisions from the sim, each started from the state kept at collection.  Each action
+* **Cloning** (`policy_clone_train.py`): stretches of 48 of the actor's decisions from recorded script games
+  (`policy_clone_data.py`).  Games are recorded every slot; the actor's decision j is recorded frame 6j (`--decide-every`), each one
+  where the script looked.  The script's orders become the labels (`actions.encode`), then actions in a random order, at most 16
+  (`actions.to_slots`), and the action tokens are built from all of them.  The loss is the negative log-probability of each action,
+  done included.  The script's orders have no order of their own, so an action's anchor scores as any unit the script told
+  something and no action before it picked (`evaluate_actions`' `labelled`).  A step's samples go through the encoder and into
+  action tokens together, one call each; a worker decodes only the side and the part of a game its sample needs.
+* **PPO** (`policy_train.py`): segments of 32 decisions from the sim, each started from the state kept at collection.  It must run
+  at the actor's rate, `--decide-every 6`; its default is still 1, and it doesn't yet start from a cloned actor.  Each action
   gets its own clipped ratio, averaged within a decision (done included), with one advantage per decision.  The **critic** is a separate network,
   never in the bot.  It is a 2-layer self-attention encoder over the privileged frame, including the enemy units the seat can't
   see, and reads the value off its global token.
@@ -372,12 +413,14 @@ flowchart LR
 
 ## 8. Where it stands
 
-* Cloning on `army-3` (11.9) was still learning after 3,000 steps.  An act's kind was right about a quarter of the time, with no
-  measurable difference with or without action tokens.  That was the form where every unit chose; actions in turn
-  (`03-training.md` 11.18) haven't been cloned beyond a smoke test.
+* Cloning with actions in turn on `army-5` (`03-training.md` 11.20): at a decision every slot (`clone-5`, stopped at 11,500 of
+  20,000 steps), the first unit picked was one the script told 68% of the time and the order's kind was right 99% of the time.
+  `clone-6`, at a decision every 3 s, cloned about 1,050 of the script's decisions a second where `clone-5` cloned 52, and reached
+  the same at 2,000 steps (anchor right 0.675, kind right 0.989); it was stopped there, as the policy is to run the economy too
+  (`docs/learned-policy/04-economy.md`).
 * Nothing plays in the engine yet.  The bot (`bots/zkbot`) hosts the policy but sends no commands, until a numpy forward of the
   actor and encoder, and the opening and economy script, are there.
 * Open questions, from the user:
-  * full attention over all past frames through summary tokens, in place of the 8 s window;
+  * full attention over all past frames through summary tokens, in place of the 9 s window;
   * FlexAttention, with one token per acting unit and causal attention along them in place of the 4 summary tokens.  Within a
     decision the actions now are such tokens (the decoder); between frames they're still the 4 summary tokens.

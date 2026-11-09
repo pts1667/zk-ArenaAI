@@ -33,7 +33,13 @@ HEAD_GAIN = 0.01             # an untrained head's weights: it says only what it
 KINDS_WITH_REGION, KINDS_WITH_FINE = fz.KINDS_WITH_REGION, fz.KINDS_WITH_FINE
 
 JOINED_FIELDS = ("unit_x", "unit_name", "unit_ally", "unit_player", "hidden_ally", "hidden_player", "unit_mask", "reg_x", "reg_mask", "site_x", "site_mask", "feat_x", "feat_mask", "glob_x", "tok_kind", "ctrl_mask", "kind_mask", "ptr_enemy",
-                 "enemy_tokens", "enemy_mask", "ptr_region", "ptr_jump", "ptr_wait", "ptr_produce", "route_bias", "hidden_x", "hidden_name", "hidden_mask")
+                 "enemy_tokens", "enemy_mask", "ptr_region", "ptr_jump", "ptr_wait", "ptr_produce", "route_bias", "hidden_x", "hidden_name", "hidden_mask",
+                 "places", "place_mask")
+HALF_FIELDS = ("unit_x", "reg_x", "route_bias", "hidden_x")    # 71% of a cloning sample's bytes, as float32
+# What only the heads read (and the anchor pointer, ctrl_mask): the frame encoder and the action tokens don't.  Cloning sends these for
+# the decisions it counts alone, as the critic's hidden units for none.
+HEAD_FIELDS = ("ctrl_mask", "kind_mask", "ptr_enemy", "ptr_region", "ptr_jump", "ptr_wait", "ptr_produce", "route_bias")
+CRITIC_FIELDS = ("hidden_x", "hidden_name", "hidden_mask", "hidden_ally", "hidden_player")
 
 
 @dataclass
@@ -53,7 +59,7 @@ class Batch:
     key_mask: object
     ctrl_mask: object       # B x C
     kind_mask: object       # B x C x KIND_COUNT
-    ptr_enemy: object       # B x 3 x C x E
+    ptr_enemy: object       # B x len(fz.ENEMY_POINTER_KINDS) x C x E
     enemy_tokens: object    # B x E
     enemy_mask: object      # B x E
     ptr_region: object      # B x C x R
@@ -69,13 +75,56 @@ class Batch:
     hidden_ally: object     # B x H
     hidden_player: object   # B x H
     true_name: object = None    # B x U: before this game's names were dropped, for an encoder trained on them
+    # Where a BUILD can be, B x P (padded where place_mask is false), in the order of a decision's place choice (actions.place_points):
+    # beside each of these unit tokens of ours, then each site, as -1 - its index.  So a decision's place index means the same in any
+    # batch, however its units and sites are padded.
+    places: object = None
+    place_mask: object = None
 
     def to(self, device: str, only: frozenset[str] | None = None) -> "Batch":
+        """Numpy arrays or tensors (pinned ones copy without waiting); a field sent as float16 (`half`) arrives as float32."""
         out = {}
         for name, value in self.__dict__.items():
-            wanted = value is not None and (only is None or name in only)
-            out[name] = torch.from_numpy(value).to(device, non_blocking=True) if wanted else None
+            if value is None or (only is not None and name not in only):
+                out[name] = None
+                continue
+            t = (value if isinstance(value, torch.Tensor) else torch.from_numpy(value)).to(device, non_blocking=True)
+            out[name] = t.float() if t.dtype == torch.float16 else t
         return Batch(**out)
+
+    def half(self) -> "Batch":
+        """The big float fields as float16, to send between processes at half the bytes (05-literature.md S2); `to` makes them
+        float32 again.  Positions lose up to 1/4,096 of the map's half-width."""
+        return replace(self, **{f: getattr(self, f).astype(np.float16) for f in HALF_FIELDS if getattr(self, f) is not None})
+
+    def rows(self, index: torch.Tensor) -> "Batch":
+        """These decisions of a batch on the device, padded as the batch is."""
+        return Batch(**{name: None if v is None else v.index_select(0, index) for name, v in self.__dict__.items()})
+
+    def without(self, names: tuple[str, ...]) -> "Batch":
+        return replace(self, **dict.fromkeys(names))
+
+    def split(self, rows: list[int]) -> tuple["Batch", "Batch"]:
+        """For cloning, in numpy: every frame as the encoder and the action tokens read it, and the `HEAD_FIELDS` of these rows alone.
+        `rows` of the first, on the device, `with_heads` the second, is what the heads read."""
+        heads = Batch(**{f: getattr(self, f)[rows] if f in HEAD_FIELDS else None for f in Batch.__dataclass_fields__})
+        return self.without(HEAD_FIELDS + CRITIC_FIELDS), heads
+
+    def with_heads(self, heads: "Batch") -> "Batch":
+        """These decisions with the `HEAD_FIELDS` of `heads` (the same decisions, on the device).  Their last dimension, regions or
+        enemy tokens, is padded out to this batch's where theirs were fewer."""
+        last = {"ptr_enemy": self.enemy_tokens.shape[1], "ptr_region": self.reg_x.shape[1], "ptr_jump": self.reg_x.shape[1],
+                "ptr_wait": self.reg_x.shape[1], "route_bias": self.reg_x.shape[1]}
+        out = {}
+        for name in HEAD_FIELDS:
+            v = getattr(heads, name)
+            width = last.get(name, v.shape[-1])
+            if width != v.shape[-1]:
+                wide = v.new_zeros(*v.shape[:-1], width)
+                wide[..., :v.shape[-1]] = v
+                v = wide
+            out[name] = v
+        return replace(self, **out)
 
 
 def collate(items: list[fz.Tensors], regions: int = 0) -> Batch:
@@ -112,7 +161,10 @@ def collate(items: list[fz.Tensors], regions: int = 0) -> Batch:
     key_mask[:, -2:] = True
     ctrl_mask = np.zeros((b, c), bool)
     kind_mask = np.zeros((b, c, rf.KIND_COUNT), bool)
-    ptr_enemy = np.zeros((b, 3, c, e), bool)
+    ptr_enemy = np.zeros((b, len(fz.ENEMY_POINTER_KINDS), c, e), bool)
+    p = max(max(len(t.place_tokens) + len(t.site_x) for t in items), 1)
+    places = np.zeros((b, p), np.int64)
+    place_mask = np.zeros((b, p), bool)
     enemy_tokens = np.zeros((b, e), np.int64)
     enemy_mask = np.zeros((b, e), bool)
     ptr_region = np.zeros((b, c, r), bool)
@@ -151,19 +203,55 @@ def collate(items: list[fz.Tensors], regions: int = 0) -> Batch:
         nh = len(t.hidden_x)
         hidden_x[i, :nh], hidden_name[i, :nh], hidden_mask[i, :nh] = t.hidden_x, t.hidden_name, True
         hidden_ally[i, :nh], hidden_player[i, :nh] = t.hidden_ally, t.hidden_player
+        n_place = len(t.place_tokens) + ns
+        places[i, :n_place], place_mask[i, :n_place] = np.concatenate((t.place_tokens, -1 - np.arange(ns))), True
     return Batch(unit_x, unit_name, unit_mask, reg_x, reg_mask, site_x, site_mask, feat_x, feat_mask, glob_x, tok_kind, key_mask,
                  ctrl_mask, kind_mask, ptr_enemy, enemy_tokens, enemy_mask, ptr_region, ptr_jump, ptr_wait, ptr_produce, route_bias, hidden_x, hidden_name, hidden_mask,
-                 unit_ally, unit_player, hidden_ally, hidden_player, true_name)
+                 unit_ally, unit_player, hidden_ally, hidden_player, true_name, places=places, place_mask=place_mask)
 
 
-def join(batches: list[Batch]) -> Batch:
-    """Every decision of these batches as one.  Each token group is padded on its own, so the groups still line up."""
+def stage(arrays: list[np.ndarray], device: str) -> list[torch.Tensor]:
+    """These arrays on the device, in one copy: packed into one pinned buffer, sent without waiting, and viewed there.  A copy from
+    pageable memory waits for the GPU's queue, so a step's hundreds of small copies made the host wait at each (2026-11-09)."""
+    if not str(device).startswith("cuda"):
+        return [torch.from_numpy(np.ascontiguousarray(a)).to(device) for a in arrays]
+    offsets, at = [], 0
+    for a in arrays:
+        offsets.append(at)
+        at += -(-a.nbytes // 16) * 16       # each starts on 16 bytes, so that any dtype can view it
+    host = torch.empty(max(at, 16), dtype=torch.uint8, pin_memory=True)
+    flat = host.numpy()
+    for a, o in zip(arrays, offsets):
+        flat[o:o + a.nbytes] = np.ascontiguousarray(a).reshape(-1).view(np.uint8)
+    there = host.to(device, non_blocking=True)
+    return [there[o:o + a.nbytes].view(torch.from_numpy(a[:0].reshape(-1)).dtype).view(a.shape) for a, o in zip(arrays, offsets)]
+
+
+def join(batches: list[Batch], device: str | None = None) -> Batch:
+    """Every decision of these batches as one.  Each token group is padded on its own, so the groups still line up.  True names
+    (what the frame encoder reads, apart from the names the actor may read) are kept if every batch has them.
+
+    device: joined there, as tensors: each batch's own arrays are copied over, and the padding between them is made there.  A
+    cloning step's frames padded to its biggest on the host were ~180 MB, mostly padding, zeroed and copied (05-literature.md S2)."""
     out: dict[str, object] = {name: None for name in Batch.__dataclass_fields__}
-    for name in JOINED_FIELDS:
+    names = all(getattr(b, "true_name", None) is not None for b in batches)
+    fields = {}
+    for name in JOINED_FIELDS + (("true_name",) if names else ()):
         parts = [getattr(b, name) for b in batches]
+        if all(p is None for p in parts):       # a field left out (`HEAD_FIELDS`, `CRITIC_FIELDS`)
+            continue
         if name == "tok_kind":      # the critic reads the units' only
             parts = [p[:, :b.unit_x.shape[1]] for p, b in zip(parts, batches)]
-        whole = np.zeros((sum(len(p) for p in parts), *np.max([p.shape[1:] for p in parts], axis=0)), parts[0].dtype)
+        fields[name] = parts
+    if device is not None:      # every field's parts in one copy
+        sent = iter(stage([p for parts in fields.values() for p in parts], device))
+    for name, parts in fields.items():
+        shape = tuple(int(s) for s in (sum(len(p) for p in parts), *np.max([p.shape[1:] for p in parts], axis=0)))
+        if device is not None:
+            whole = torch.zeros(shape, dtype=torch.from_numpy(parts[0][:0]).dtype, device=device)
+            parts = [next(sent) for _ in parts]
+        else:
+            whole = np.zeros(shape, parts[0].dtype)
         at = 0
         for p in parts:
             whole[(slice(at, at + len(p)), *map(slice, p.shape[1:]))] = p
@@ -196,9 +284,24 @@ class Block(nn.Module):
         return h + self.ff2(F.gelu(self.ff1(self.ln2(h)), approximate="tanh"))
 
 
+_KIND_SETS: dict[tuple, torch.Tensor] = {}
+
+
+def kind_in(kind: torch.Tensor, kinds: tuple[int, ...]) -> torch.Tensor:
+    """Whether each kind is one of these: a lookup in a table kept on the device, as `torch.isin` against a tensor made each call
+    copied it there each time, and every such copy made the host wait for the GPU."""
+    key = (tuple(kinds), str(kind.device))
+    table = _KIND_SETS.get(key)
+    if table is None:
+        table = torch.zeros(rf.KIND_COUNT, dtype=torch.bool)
+        table[list(kinds)] = True
+        table = _KIND_SETS[key] = table.to(kind.device)
+    return table[kind.clamp(0, rf.KIND_COUNT - 1)] & (kind >= 0)
+
+
 def region_legal(b: Batch, scores: torch.Tensor, kind: torch.Tensor) -> torch.Tensor:
     """The region scores, with what each unit's kind can't go to taken out."""
-    reach = torch.isin(kind, torch.tensor((rf.JUMP, rf.THROW), device=kind.device))[:, :, None]
+    reach = kind_in(kind, (rf.JUMP, rf.THROW))[:, :, None]
     legal = torch.where(reach, b.ptr_jump, torch.where((kind == rf.WAIT_AT_BEACON)[:, :, None], b.ptr_wait, b.ptr_region))
     return scores.masked_fill(~legal, ILLEGAL)
 
@@ -220,13 +323,15 @@ def _sample(logits: torch.Tensor) -> torch.Tensor:
 
 
 class Critic(nn.Module):
-    """A separate encoder over the privileged frame.  Never in the bot."""
-    D = 128
-    LAYERS = 2
+    """A separate encoder over the privileged frame.  Never in the bot.  Its size grew with the actor's (the user, 2026-11-09): it was
+    width 128, 2 layers of 4 heads."""
+    D = 256
+    LAYERS = 4
+    HEADS = 8
 
-    def __init__(self, vocabulary: int):
+    def __init__(self, vocabulary: int, d: int = D, layers: int = LAYERS, heads: int = HEADS):
         super().__init__()
-        d = self.D
+        self.size = {"d": d, "layers": layers, "heads": heads}
         self.name_embed = nn.Embedding(vocabulary, 8)
         self.kind_embed = nn.Embedding(fz.TOKEN_KINDS, d)
         self.ally_embed = nn.Embedding(fz.MAX_ALLY_TEAMS + 1, 4)
@@ -236,7 +341,7 @@ class Critic(nn.Module):
         self.site_in = nn.Linear(fz.SITE_DIM, d)
         self.feat_in = nn.Linear(fz.FEATURE_DIM, d)
         self.glob_in = nn.Linear(fz.GLOBAL_DIM, d)
-        self.blocks = nn.ModuleList(Block(d, 4) for _ in range(self.LAYERS))
+        self.blocks = nn.ModuleList(Block(d, heads) for _ in range(layers))
         self.lnf = nn.LayerNorm(d)
         self.value = nn.Linear(d, 1)
         nn.init.zeros_(self.value.weight)
@@ -270,12 +375,15 @@ class Actions:
     produce: torch.Tensor
     group: torch.Tensor     # index into groups.GROUP_RADII, -1 alone or unused
     roles: torch.Tensor     # the group's roles as bits, 0 if none
+    place: torch.Tensor     # a BUILD's: what it's beside (Batch.places); a RECLAIM's: which feature token; -1 unused
+    offset: torch.Tensor    # a BUILD's: where beside it, of fz.PLACE_OFFSETS; -1 unused
     logp: torch.Tensor
 
 
 def actions_from(fields: dict, device: str) -> Actions:
     """From numpy arrays of `actions.SLOT_FIELDS` (and logp, or zeros), each B x K."""
-    t = {f: torch.as_tensor(np.asarray(fields[f]), dtype=torch.int64, device=device) for f in act.SLOT_FIELDS}
+    sent = stage([np.asarray(fields[f], dtype=np.int64) for f in act.SLOT_FIELDS], device)     # in one copy
+    t = dict(zip(act.SLOT_FIELDS, sent))
     logp = torch.as_tensor(np.asarray(fields["logp"]), dtype=torch.float32, device=device) if "logp" in fields else torch.zeros(t["anchor"].shape, device=device)
     return Actions(**t, logp=logp)
 
@@ -303,7 +411,7 @@ def _bits_entropy(logits: torch.Tensor, legal: torch.Tensor) -> torch.Tensor:
 
 
 def _groupable(kind: torch.Tensor, on: torch.Tensor) -> torch.Tensor:
-    return torch.isin(kind, torch.tensor(gr.GROUP_KINDS, device=kind.device)) & on
+    return kind_in(kind, gr.GROUP_KINDS) & on
 
 
 def acting_kinds(kind_mask: torch.Tensor) -> torch.Tensor:
@@ -332,46 +440,67 @@ def per_action(b: Batch, anchor: torch.Tensor) -> Batch:
                    unit_x=take(b.unit_x))
 
 
-def _choices(actor: nn.Module, v: Batch, me: torch.Tensor, keys: torch.Tensor, reg_h: torch.Tensor, given: Actions | None = None):
+def _choices(actor: nn.Module, v: Batch, me: torch.Tensor, ctx, given: Actions | None = None):
     """For each action, given its anchor (`per_action`'s v, and what the anchor read, me): a kind, and then what the kind needs.
     Sampled, or with `given`, those scored.  Returns the choices, each action's log-probability of them, and each head's entropy with
-    the actions it applies to."""
+    the actions it applies to.  ctx: the decision's `Context` (keys, reg_h, site_h)."""
     def choose(logits: torch.Tensor, field: str) -> torch.Tensor:
         return _sample(logits) if given is None else getattr(given, field).clamp_min(0)
 
-    kind_l, region_l, enemy_l, enemy_h, produce_l = actor.heads(v, me, keys, reg_h)
+    def choose_where(logits: torch.Tensor, field: str, uses: torch.Tensor) -> torch.Tensor:
+        """A field that means something else for another kind (place: a BUILD's place, a RECLAIM's feature token): given, it's
+        read only where this kind uses it, so that another kind's index can't run past these logits."""
+        return _sample(logits) if given is None else torch.where(uses, getattr(given, field), 0).clamp_min(0)
+
+    reg_h = ctx.reg_h
+    kind_l, region_l, enemy_l, enemy_h, produce_l, place_l, place_h, wreck_l = actor.heads(v, me, ctx)
     on = v.ctrl_mask
     kind = choose(kind_l, "kind")
     logp = _pick(kind_l, kind)
     ent = {"kind": (_masked_entropy(kind_l), on & (v.kind_mask.sum(-1) > 1))}
-    uses_region = torch.isin(kind, torch.tensor(KINDS_WITH_REGION, device=kind.device)) & on
+    uses_region = kind_in(kind, KINDS_WITH_REGION) & on
     region_l = region_legal(v, region_l, kind)
     region = choose(region_l, "region")
     logp = logp + uses_region * _pick(region_l, region)
     ent["region"] = (_masked_entropy(region_l), uses_region)
     width = reg_h.shape[-1]
     target = torch.gather(reg_h, 1, region[:, :, None].expand(-1, -1, width))
-    # The enemy head per kind: only a kind with an enemy pointer uses one.
+    # The enemy head per kind: only a kind with an enemy pointer uses one.  Every pointer kind is scored whether any action has it or
+    # not: asking first made the host wait for the GPU, four times a call.  A row of another kind counts for nothing (here is 0, and
+    # its logits are finite where masked).
     enemy = torch.full_like(kind, -1)
     enemy_entropy = torch.zeros_like(logp)
     for slot, k in enumerate(fz.ENEMY_POINTER_KINDS):
         here = (kind == k) & on
-        if here.any():
-            choice = choose(enemy_l[:, slot], "enemy")
-            logp = logp + here * _pick(enemy_l[:, slot], choice)
-            enemy = torch.where(here, choice, enemy)
-            enemy_entropy = torch.where(here, _masked_entropy(enemy_l[:, slot]), enemy_entropy)
-            target = torch.where(here[:, :, None], torch.gather(enemy_h, 1, choice[:, :, None].expand(-1, -1, width)), target)
+        choice = choose(enemy_l[:, slot], "enemy")
+        logp = logp + here * _pick(enemy_l[:, slot], choice)
+        enemy = torch.where(here, choice, enemy)
+        enemy_entropy = torch.where(here, _masked_entropy(enemy_l[:, slot]), enemy_entropy)
+        target = torch.where(here[:, :, None], torch.gather(enemy_h, 1, choice[:, :, None].expand(-1, -1, width)), target)
     ent["enemy"] = (enemy_entropy, enemy >= 0)
     fine_l = actor.fine(me, target)
     fine = choose(fine_l, "fine")
-    uses_fine = torch.isin(kind, torch.tensor(KINDS_WITH_FINE, device=kind.device)) & on
+    uses_fine = kind_in(kind, KINDS_WITH_FINE) & on
     logp = logp + uses_fine * _pick(fine_l, fine)
     ent["fine"] = (_masked_entropy(fine_l), uses_fine)
     produce = choose(produce_l, "produce")
-    uses_produce = (kind == rf.PRODUCE) & on
+    uses_produce = ((kind == rf.PRODUCE) | (kind == rf.BUILD)) & on      # what a factory makes, or a constructor starts
     logp = logp + uses_produce * _pick(produce_l, produce)
     ent["produce"] = (_masked_entropy(produce_l), uses_produce)
+    # A BUILD's place: beside which of our units or sites, then where beside it.
+    builds = (kind == rf.BUILD) & on
+    place = choose_where(place_l, "place", builds)
+    logp = logp + builds * _pick(place_l, place)
+    ent["place"] = (_masked_entropy(place_l), builds)
+    offset_l = actor.offset(me, torch.gather(place_h, 1, place[:, :, None].expand(-1, -1, place_h.shape[-1])))
+    offset = choose_where(offset_l, "offset", builds)
+    logp = logp + builds * _pick(offset_l, offset)
+    ent["offset"] = (_masked_entropy(offset_l), builds)
+    # A RECLAIM's feature token, in the same field.
+    reclaims = (kind == rf.RECLAIM) & on
+    wreck = choose_where(wreck_l, "place", reclaims)
+    logp = logp + reclaims * _pick(wreck_l, wreck)
+    ent["wreck"] = (_masked_entropy(wreck_l), reclaims)
     # Alone or as a group order, and then the group's roles.
     groupable = _groupable(kind, on)
     group_l = actor.group(me, kind)
@@ -390,7 +519,8 @@ def _choices(actor: nn.Module, v: Batch, me: torch.Tensor, keys: torch.Tensor, r
     ent["roles"] = (_bits_entropy(roles_l, legal), in_group)
     roles = torch.where(in_group, (bits.long() << torch.arange(bits.shape[-1], device=bits.device)).sum(-1), 0)
     out = {"kind": torch.where(on, kind, rf.KEEP), "enemy": enemy, "region": region.masked_fill(~uses_region, -1),
-           "fine": fine.masked_fill(~uses_fine, -1), "produce": produce.masked_fill(~uses_produce, -1), "group": group, "roles": roles}
+           "fine": fine.masked_fill(~uses_fine, -1), "produce": produce.masked_fill(~uses_produce, -1), "group": group, "roles": roles,
+           "place": torch.where(builds, place, torch.where(reclaims, wreck, -1)), "offset": offset.masked_fill(~builds, -1)}
     return out, logp.masked_fill(~on, 0.0), ent
 
 
@@ -415,7 +545,7 @@ def sample_actions(actor: nn.Module, b: Batch, ctx, slots: int = act.SLOTS) -> A
         pick = _sample(anchor_l)
         anchor = torch.where(going[:, None], pick - 1, -1)
         lp = _pick(anchor_l, pick).masked_fill(~going[:, None], 0.0)
-        choice, lp_rest, _ = _choices(actor, per_action(b, anchor), actor.reading(ctx, anchor, h), ctx.keys, ctx.reg_h)
+        choice, lp_rest, _ = _choices(actor, per_action(b, anchor), actor.reading(ctx, anchor, h), ctx)
         out["anchor"][:, k] = anchor[:, 0]
         for f, value in choice.items():
             out[f][:, k] = value[:, 0]
@@ -448,7 +578,7 @@ def evaluate_actions(actor: nn.Module, b: Batch, ctx, a: Actions, labelled: torc
         logp = torch.where(a.anchor >= 0, anywhere, logp)
     valid = chosen(a)
     ent = {"anchor": (_masked_entropy(anchor_l), valid)}
-    _, rest, more = _choices(actor, per_action(b, a.anchor), actor.reading(ctx, a.anchor, h), ctx.keys, ctx.reg_h, given=a)
+    _, rest, more = _choices(actor, per_action(b, a.anchor), actor.reading(ctx, a.anchor, h), ctx, given=a)
     ent.update(more)
     return (logp + rest).masked_fill(~valid, 0.0), ent
 
@@ -458,7 +588,7 @@ def teacher_logits(actor: nn.Module, b: Batch, ctx, a: Actions) -> tuple[torch.T
     `evaluate_actions` scores them: for measuring what cloning has learned."""
     h = actor.plan(ctx, actor.action_vectors(b, ctx, a)[:, :-1])
     anchor_l = actor.anchor_logits(b, ctx, h, _taken_before(a.anchor, b.ctrl_mask.shape[1]))
-    return anchor_l, actor.heads(per_action(b, a.anchor), actor.reading(ctx, a.anchor, h), ctx.keys, ctx.reg_h)[0]
+    return anchor_l, actor.heads(per_action(b, a.anchor), actor.reading(ctx, a.anchor, h), ctx)[0]
 
 
 def each_unit_heads(actor: nn.Module, b: Batch, ctx):
@@ -466,4 +596,4 @@ def each_unit_heads(actor: nn.Module, b: Batch, ctx):
     For looking at what the policy makes of each unit."""
     anchor = torch.arange(b.ctrl_mask.shape[1], device=b.ctrl_mask.device).expand(b.ctrl_mask.shape).masked_fill(~b.ctrl_mask, -1)
     h = actor.plan(ctx, ctx.hu.new_zeros(len(anchor), 0, ctx.hu.shape[-1])).expand(-1, anchor.shape[1], -1)
-    return actor.heads(per_action(b, anchor), actor.reading(ctx, anchor, h), ctx.keys, ctx.reg_h)
+    return actor.heads(per_action(b, anchor), actor.reading(ctx, anchor, h), ctx)

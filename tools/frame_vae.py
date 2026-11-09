@@ -197,17 +197,21 @@ def question_cost(q: Questions, a: Answers) -> tuple[torch.Tensor, torch.Tensor]
 
 class Optimisers:
     """AdamW, and Muon for the weight matrices of hidden layers if `muon_lr` is set.  Muon makes a matrix's momentum orthogonal, which means nothing for other shapes, and as
-    its authors do, it leaves alone embeddings, learned queries and the layers giving answers."""
+    its authors do, it leaves alone embeddings, learned queries and the layers giving answers: `answers(name, layer)`, by default those
+    named `..._out`.  Only what's trained (requires_grad) is optimised: the actor's frozen encoder isn't."""
 
-    def __init__(self, model: nn.Module, cfg: TrainConfig):
-        hidden = {id(m.weight) for name, m in model.named_modules() if isinstance(m, nn.Linear) and not name.endswith("_out")} if cfg.muon_lr > 0.0 else set()
-        decay = [p for p in model.parameters() if p.dim() > 1 and id(p) not in hidden]
-        plain = [p for p in model.parameters() if p.dim() <= 1]
+    def __init__(self, model: nn.Module, cfg, answers=None):
+        answers = answers or (lambda name, m: name.endswith("_out"))
+        hidden = ({id(m.weight) for name, m in model.named_modules() if isinstance(m, nn.Linear) and m.weight.requires_grad and not answers(name, m)}
+                  if cfg.muon_lr > 0.0 else set())
+        trained = [p for p in model.parameters() if p.requires_grad]
+        decay = [p for p in trained if p.dim() > 1 and id(p) not in hidden]
+        plain = [p for p in trained if p.dim() <= 1]
         self.parts = {"adam": torch.optim.AdamW([{"params": decay, "weight_decay": cfg.weight_decay}, {"params": plain, "weight_decay": 0.0}], lr=cfg.lr)}
         for group in self.parts["adam"].param_groups:
             group["scale"] = 1.0
         if hidden:
-            self.parts["muon"] = torch.optim.Muon([p for p in model.parameters() if id(p) in hidden], lr=cfg.muon_lr, weight_decay=cfg.weight_decay)
+            self.parts["muon"] = torch.optim.Muon([p for p in trained if id(p) in hidden], lr=cfg.muon_lr, weight_decay=cfg.weight_decay)
             for group in self.parts["muon"].param_groups:
                 group["scale"] = cfg.muon_lr / cfg.lr
 
@@ -576,8 +580,8 @@ def save_vae(path: pathlib.Path, model: FrameVae, step: int) -> None:
 
 def load_vae(path: pathlib.Path, device: str = "cpu") -> FrameVae:
     saved = torch.load(path, map_location=device, weights_only=True)
-    if saved["feature_version"] != fz.FEATURE_VERSION:
-        raise ValueError(f"{path}: feature version {saved['feature_version']}, this code uses {fz.FEATURE_VERSION}")
+    if saved["feature_version"] not in fz.ENCODER_FEATURE_VERSIONS:
+        raise ValueError(f"{path}: feature version {saved['feature_version']}, this code's encoder reads {fz.ENCODER_FEATURE_VERSIONS}")
     model = FrameVae(VaeConfig(**saved["cfg"]), EncoderConfig(**saved["encoder_cfg"]), tables.table())
     model.load_state_dict(saved["model"])
     return model.to(device).eval()

@@ -248,8 +248,16 @@ def _split(a: np.ndarray, counts: np.ndarray) -> list[np.ndarray]:
     return np.split(a, np.cumsum(counts)[:-1]) if len(counts) else []
 
 
-def read(path: str | os.PathLike) -> tuple[dict, list[tuple[list[rawframe.Frame], list[np.ndarray]]]]:
-    """A file's meta, and for side 0 and side 1 its frames and the orders given at each."""
+def _packed(dtype) -> int:
+    """Bytes a record of `dtype` takes in a file's planes, which have no padding."""
+    dtype = np.dtype(dtype)
+    return dtype.itemsize if dtype.names is None else sum(_packed(dtype[name]) for name in dtype.names)
+
+
+def read(path: str | os.PathLike, side: int | None = None, until: int | None = None) -> tuple[dict, list[tuple[list[rawframe.Frame], list[np.ndarray]]]]:
+    """A file's meta, and for side 0 and side 1 its frames and the orders given at each.  side: only that one's (the other's are
+    empty); until: only the frames before it, at least (records are deltas along the game, so a frame needs all before it, and
+    reading stops after the chunk that holds frame until - 1)."""
     c = _Cursor(pathlib.Path(path).read_bytes())
     if c.take(8) != MAGIC:
         raise ValueError(f"{path}: not a zkrecord file")
@@ -259,30 +267,38 @@ def read(path: str | os.PathLike) -> tuple[dict, list[tuple[list[rawframe.Frame]
     sites = np.frombuffer(_unzstd(c.take(int(c.array("<u4", 1)[0]))), rawframe.SITE_DTYPE, n_sites).copy()
     parts: list[dict[str, list]] = [{k: [] for k in ("units", "features", "orders", "globs", "unit_back", "feature_back", "unit_counts",
                                                      "feature_counts", "order_counts")} for _ in range(2)]
+    read_frames = 0
     for _ in range(chunks):
+        if until is not None and read_frames >= until:
+            break
         k = _Cursor(_unzstd(c.take(int(c.array("<u4", 1)[0]))))
         n = int(k.array("<i4", 1)[0])
-        for side in parts:
+        read_frames += n
+        for s, part in enumerate(parts):
             counts = [k.array("<i4", n) for _ in range(3)]
-            for name, v in zip(("unit_counts", "feature_counts", "order_counts"), counts):
-                side[name].append(v)
-            side["globs"].append(np.stack([k.planes("<u4", n) for _ in range(GLOBALS)], axis=1))
             units, feats, orders = (int(v.sum()) for v in counts)
-            side["unit_back"].append(k.planes("<i4", units))
-            side["units"].append(k.planes(NARROW_UNIT, units))
-            side["feature_back"].append(k.planes("<i4", feats))
-            side["features"].append(k.planes(NARROW_FEATURE, feats))
-            side["orders"].append(k.planes(zksim.ORDER_DTYPE, orders))
+            if side is not None and s != side:
+                k.take(4 * GLOBALS * n + (4 + _packed(NARROW_UNIT)) * units + (4 + _packed(NARROW_FEATURE)) * feats
+                       + _packed(zksim.ORDER_DTYPE) * orders)
+                continue
+            for name, v in zip(("unit_counts", "feature_counts", "order_counts"), counts):
+                part[name].append(v)
+            part["globs"].append(np.stack([k.planes("<u4", n) for _ in range(GLOBALS)], axis=1))
+            part["unit_back"].append(k.planes("<i4", units))
+            part["units"].append(k.planes(NARROW_UNIT, units))
+            part["feature_back"].append(k.planes("<i4", feats))
+            part["features"].append(k.planes(NARROW_FEATURE, feats))
+            part["orders"].append(k.planes(zksim.ORDER_DTYPE, orders))
     out = []
-    for side in parts:
-        cat = {name: np.concatenate(v) if v else None for name, v in side.items()}
+    for part in parts:
+        cat = {name: np.concatenate(v) if v else None for name, v in part.items()}
         if cat["unit_counts"] is None:
             out.append(([], []))
             continue
         globs = (np.cumsum(cat["globs"].astype(np.uint64), axis=0).astype(np.uint32)).view(np.float32)
         units = _wide_units(_undelta(cat["units"], _chains(cat["unit_back"])), map_w, map_h, y_lo, y_hi)
         feats = _wide_features(_undelta(cat["features"], _chains(cat["feature_back"])), map_w, map_h)
-        assert len(cat["unit_counts"]) == frames
+        assert len(cat["unit_counts"]) == (frames if until is None else min(frames, read_frames))
         fr = [rawframe.Frame(u, sites, g, f)
               for u, g, f in zip(_split(units, cat["unit_counts"]), globs, _split(feats, cat["feature_counts"]))]
         out.append((fr, _split(cat["orders"], cat["order_counts"])))

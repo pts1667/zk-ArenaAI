@@ -40,7 +40,7 @@ import policy_model as pm  # noqa: E402
 from zkbot.policy import actions as act, bundle as bd, featurize as fz, rawframe as rf, tables  # noqa: E402
 
 torch.backends.cuda.matmul.allow_tf32 = True
-HEADS = ("anchor", "kind", "region", "enemy", "fine", "produce", "group", "roles")
+HEADS = ("anchor", "kind", "region", "enemy", "fine", "produce", "place", "offset", "wreck", "group", "roles")
 NAME_DROPOUT = 0.3
 ENTROPY_FLOOR = 0.3         # of a head's maximum
 ENTROPY_BASE = 0.01
@@ -53,7 +53,11 @@ class Config:
     decisions: int = 2_000_000
     iteration: int = 8192           # decisions collected per iteration
     games: int = 64
-    passes: int = 2
+    # Each sample learnt from once: OpenAI Five found reuse of 2-3 can halve learning, and kept it near 1 (05-literature.md S5).
+    passes: int = 1
+    # Evaluation games are played by an exponential moving average of the weights, updated each optimizer step (0: the weights
+    # themselves); it plays better than the weights it follows (Generals.io, 2606.23348).
+    ema: float = 0.99
     segment: int = 32
     # Decisions x padded tokens in a minibatch, which is what its memory follows.
     token_budget: int = 165_000
@@ -154,6 +158,8 @@ class Step:
     produce: np.ndarray
     group: np.ndarray
     roles: np.ndarray
+    place: np.ndarray
+    offset: np.ndarray
     logp: np.ndarray
     value: float = 0.0
     reward: float = 0.0
@@ -209,7 +215,7 @@ def _drop_names(t: fz.Tensors, names: np.ndarray) -> None:
 def _worker_chunk(chunk: list[tuple[rf.Frame, int]], state: dict | None = None) -> list[fz.Tensors]:
     """In a worker process, `state` is the process's own; in this one, each DataWorkers passes its own."""
     w = _WORKER if state is None else state
-    return [fz.featurize(f, w["bundles"][key], w["table"], enabled_kinds=w["kinds"], privileged=True) for f, key in chunk]
+    return [fz.featurize(f, w["bundles"][key], w["table"], enabled_kinds=w["kinds"], privileged=True, economy=True) for f, key in chunk]
 
 
 def _worker_batch(work: tuple[list[tuple[rf.Frame, int, np.ndarray]], int], state: dict | None = None) -> pm.Batch:
@@ -330,6 +336,7 @@ class Learner:
         self.self_play = SelfPlay(cfg.self_play_at, cfg.self_play_holds_below, cfg.self_play_per_iteration)
         self.autocast = torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda")
         self.player = Player(self.actor, self.critic, workers, device)
+        self.ema = self.frozen_player(workers) if cfg.ema > 0.0 else None
         if device == "cuda":
             # It empties its cache at this limit, and fails rather than spills.
             torch.cuda.set_per_process_memory_fraction(gpu_fraction(cfg.gpu_share, cfg.gpu_runs, torch.cuda.mem_get_info()[1]))
@@ -352,6 +359,19 @@ class Learner:
         for mine, theirs in ((self.actor, player.actor), (self.critic, player.critic)):
             for a, b in zip(theirs.parameters(), mine.parameters()):
                 a.copy_(b)
+
+    @torch.no_grad()
+    def ema_step(self) -> None:
+        """The moving average a step nearer the weights, in what's trained."""
+        if self.ema is None:
+            return
+        pairs = [(e, w) for mine, theirs in ((self.actor, self.ema.actor), (self.critic, self.ema.critic))
+                 for e, w in zip(theirs.parameters(), mine.parameters()) if w.requires_grad]
+        torch._foreach_lerp_([e for e, _ in pairs], [w for _, w in pairs], 1.0 - self.cfg.ema)
+
+    @property
+    def evaluator(self) -> Player:
+        return self.ema if self.ema is not None else self.player
 
     def _minibatches(self, segments: list[Segment], rng: np.random.Generator) -> list[list[Segment]]:
         """Whole segments up to the token budget, near-equal sizes together so padding stays small.  Sizes are jittered, so a
@@ -451,6 +471,7 @@ class Learner:
                 self._loss(batch, clip, note).backward()
                 grad = torch.nn.utils.clip_grad_norm_(self.trained, cfg.grad_clip)
                 self.optimizer.step()
+                self.ema_step()
                 note("grad_norm", float(grad))
                 if between is not None:
                     between()
@@ -459,7 +480,7 @@ class Learner:
     def adjust_entropy(self, metrics: dict[str, float]) -> None:
         """Keeps each head above a share of its maximum, so none collapses."""
         maxima = {"anchor": math.log(4.0), "kind": math.log(4.0), "region": math.log(4.0), "enemy": math.log(8.0), "fine": math.log(fz.FINE_OPTIONS), "produce": math.log(4.0),
-                  "group": math.log(4.0), "roles": math.log(2.0)}
+                  "place": math.log(8.0), "offset": math.log(fz.PLACE_OFFSETS), "wreck": math.log(4.0), "group": math.log(4.0), "roles": math.log(2.0)}
         for h in HEADS:
             e = metrics.get(f"entropy_{h}")
             if e is None:
@@ -477,7 +498,9 @@ class Learner:
             stale.unlink()
         name = f"it-{self.iteration:06d}.pt"
         temp = directory / (name + ".tmp")
-        torch.save({"actor": self.actor.state_dict(), "critic": self.critic.state_dict(), "optimizer": self.optimizer.state_dict(),
+        ema = {"ema_actor": self.ema.actor.state_dict(), "ema_critic": self.ema.critic.state_dict()} if self.ema is not None else {}
+        torch.save({"actor": self.actor.state_dict(), "critic": self.critic.state_dict(), "optimizer": self.optimizer.state_dict(), **ema,
+                    "size": asdict(self.actor.size), "critic_size": self.critic.size,
                     "iteration": self.iteration, "decisions": self.decisions, "entropy_coef": self.entropy_coef, "self_play": asdict(self.self_play)}, temp)
         os.replace(temp, directory / name)
         marker = self.run / "latest.json.tmp"
@@ -492,6 +515,9 @@ class Learner:
         self.actor.load_state_dict(state["actor"])
         self.critic.load_state_dict(state["critic"])
         self.optimizer.load_state_dict(state["optimizer"])
+        if self.ema is not None:
+            self.ema.actor.load_state_dict(state.get("ema_actor", state["actor"]))
+            self.ema.critic.load_state_dict(state.get("ema_critic", state["critic"]))
         self.iteration, self.decisions = state["iteration"], state["decisions"]
         self.entropy_coef = state["entropy_coef"]
         if "self_play" in state:
@@ -669,8 +695,9 @@ def _close(tr: Trajectory, segments: list[Segment]) -> None:
 
 @torch.no_grad()
 def evaluate(learner: Learner, make_env, opponent: str, games: int, seed: int) -> dict[str, float]:
-    """The current policy against a script, sampled as in training.  Each game slot counts its first game only: the games that
-    end soonest would otherwise count most, and those are not a fair sample."""
+    """The current policy (the moving average of its weights, `Config.ema`) against a script, sampled as in training.  Each game
+    slot counts its first game only: the games that end soonest would otherwise count most, and those are not a fair sample."""
+    player = learner.evaluator
     env = make_env(games, seed, modes=[opponent])
     env.begin()
     seats = Seats(env.seat_count, learner.device, learner.actor)
@@ -684,7 +711,7 @@ def evaluate(learner: Learner, make_env, opponent: str, games: int, seed: int) -
         else:
             frames = [(env.frame(seat), env.bundle_of(seat), names) for seat in acting]
             index = torch.as_tensor(acting, device=learner.device)
-            items, out, _, new_history, new_seen = learner.act(frames, seats.history[index], seats.seen[index])
+            items, out, _, new_history, new_seen = player.act(frames, seats.history[index], seats.seen[index])
             for k, seat in enumerate(acting):
                 t = items[k]
                 d = act.to_decision(act.Slots(*(out[h][k] for h in act.SLOT_FIELDS)), t.controllable)
@@ -876,6 +903,7 @@ def main() -> None:
     ap.add_argument("--games", type=int, default=Config.games)
     ap.add_argument("--iteration", type=int, default=Config.iteration)
     ap.add_argument("--passes", type=int, default=Config.passes)
+    ap.add_argument("--ema", type=float, default=Config.ema, help="decay of the weights' moving average that plays the tests; 0: the weights")
     ap.add_argument("--segment", type=int, default=Config.segment)
     ap.add_argument("--token-budget", type=int, default=Config.token_budget)
     ap.add_argument("--concurrent", action=argparse.BooleanOptionalAction, default=Config.concurrent, help="collect the next iteration during this one's training")
@@ -893,7 +921,7 @@ def main() -> None:
     args = ap.parse_args()
     import policy_sim_env
 
-    cfg = Config(seed=args.seed, decisions=args.decisions, games=args.games, iteration=args.iteration, passes=args.passes,
+    cfg = Config(seed=args.seed, decisions=args.decisions, games=args.games, iteration=args.iteration, passes=args.passes, ema=args.ema,
                  segment=args.segment, token_budget=args.token_budget, data_workers=args.workers, concurrent=args.concurrent,
                  decide_every=args.decide_every, hours=args.hours, eval_every=args.eval_every, gpu_runs=args.gpu_runs, empty_cache=args.empty_cache,
                  latent_encoder=args.latent_encoder, enabled_kinds=policy_sim_env.KINDS)     # what the sim obeys

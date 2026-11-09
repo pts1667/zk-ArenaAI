@@ -347,8 +347,8 @@ def learning_rate(cfg: TrainConfig, step: int) -> float:
 def collection(data: pathlib.Path) -> tuple[dict, list[pathlib.Path], list[int], dict[str, list[int]], tuple[np.ndarray, np.ndarray]]:
     """What tools/frame_data.py collect wrote: its manifest, shards, maps nothing fits on (tools/frame_world.py held_out_maps), groups of maps to report on, and how games ended."""
     manifest = json.loads((data / "manifest.json").read_text(encoding="utf8"))
-    if manifest.get("feature_version") != fz.FEATURE_VERSION:
-        raise ValueError(f"{data}: frames of feature version {manifest.get('feature_version')}, this code uses {fz.FEATURE_VERSION}: collect them again")
+    if manifest.get("feature_version") not in fz.ENCODER_FEATURE_VERSIONS:
+        raise ValueError(f"{data}: frames of feature version {manifest.get('feature_version')}, this code's encoder reads {fz.ENCODER_FEATURE_VERSIONS}: collect them again")
     groups = {"real": [m for m, k in enumerate(manifest["kinds"]) if k == "real"], "made": [m for m, k in enumerate(manifest["kinds"]) if k == "made"], "wet": [m for m, w in enumerate(manifest["water"]) if w >= 0.03]}
     with np.load(data / "outcomes.npz") as ends:
         outcomes = (ends["game"], ends["result"])

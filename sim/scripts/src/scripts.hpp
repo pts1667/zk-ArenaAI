@@ -15,7 +15,7 @@ namespace zks {
 using Rec = zk::UnitRecord;
 
 // Order kinds, as rawframe.py and the sim number them.
-enum { K_MOVE = 1, K_FIGHT = 2, K_ATTACK_UNIT = 3, K_MANUAL_FIRE = 6, K_BUILD = 10, K_ASSIST = 11, K_PRODUCE = 14 };
+enum { K_MOVE = 1, K_FIGHT = 2, K_ATTACK_UNIT = 3, K_MANUAL_FIRE = 6, K_BUILD = 10, K_ASSIST = 11, K_RECLAIM = 13, K_PRODUCE = 14 };
 // policy_script.py fighter states
 enum { S_NEW = 0, S_WAITING = 1, S_SENT = 2, S_RETREATING = 3 };
 // Roles the scripts tell apart, in ROLE_ORDER first (policy_mix.py)
@@ -137,6 +137,8 @@ struct Ctx {
     double seconds;
     bool army_due, eco_due;
     bool groups;                 // zks_step_args.group_orders
+    const zk::FeatureRecord* features = nullptr;   // what the seat sees to reclaim
+    int feature_n = 0;
 };
 
 struct Job {
@@ -168,6 +170,7 @@ struct Seat {
     std::vector<uint8_t> born;          // ArmyScript.seen: uids the mix has counted
     std::vector<uint8_t> patrol;
     std::vector<int64_t> helps;         // Economy.helps: INT64_MIN when absent
+    std::vector<int64_t> reclaims;      // the feature it was last sent to reclaim: INT64_MIN when absent
     std::vector<uint8_t> noted;         // Economy.finished, a bit a category
     std::vector<int32_t> stamp;         // the call that last saw this uid among its own
     std::vector<int32_t> fighter_of;    // index into the call's fighters, where the raider stamp matches
@@ -269,6 +272,8 @@ struct Seat {
     Job radar_job(const Ctx& c, int i, Pass& pass, int by_class, P2 by_at);
     Job link_job(const Ctx& c, int i, const GridOf& grid, Pass& pass);
     Job spot_job(const Ctx& c, int i, Pass& pass);
+    bool unsafe(P2 p, float army_reach) const;
+    Job reclaim_job(const Ctx& c, int i, Pass& pass, double reach);
 };
 
 }  // namespace zks

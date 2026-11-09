@@ -1,7 +1,7 @@
 """The simulator as an environment for tools/policy_train.py, with the same interface as the toy's.
 
 A game starts from a commander in each of two of the map's start boxes.  Both sides play the opening of policy_opening.py by rule,
-so what the policy controls is the raiders it produces.  On the other side, the army script (C++, sim/scripts) controls the fighters and the factory, and the economy script (also C++) runs every side's constructors.  The kinds the policy has are those the sim obeys for fighting units; S-M7 adds the rest.
+so what the policy controls is what it produces, and its constructors.  On the other side, the army script (C++, sim/scripts) controls the fighters and the factory, and the economy script (also C++) runs every side's constructors: the policy's too, for now (docs/learned-policy/04-economy.md), so on its side both tell them.  The kinds the policy has are those the sim obeys (`KINDS`), BUILD and ASSIST among them; a BUILD goes where it fits (`place_build`).
 
 What each script ordered at each decision is in `script_record`, and its production choices are readable with `script_production`.
 
@@ -31,7 +31,9 @@ from policy_script import ScriptData  # noqa: E402
 import policy_variants as pv  # noqa: E402
 
 KINDS = (rf.KEEP, rf.MOVE, rf.FIGHT, rf.ATTACK_UNIT, rf.MANUAL_FIRE, rf.JUMP, rf.CLOAK_ON, rf.CLOAK_OFF,
-         rf.PRODUCE, rf.THROW, rf.PUSH, rf.PULL, rf.PLACE_BEACON, rf.WAIT_AT_BEACON)
+         rf.PRODUCE, rf.THROW, rf.PUSH, rf.PULL, rf.PLACE_BEACON, rf.WAIT_AT_BEACON, rf.BUILD, rf.ASSIST, rf.RECLAIM)
+BUILD_SPREADS = (16.0, 32.0, 64.0, 128.0)     # elmos: how far round a BUILD's point a place is looked for, nearest first
+BUILD_TRIES = 8
 TICKS_PER_DECISION = 3
 TIME_LIMIT_DECISIONS = 2400         # 20 minutes
 VALUE_CONSTANT = 1000.0
@@ -167,8 +169,8 @@ def sim_orders(orders: list) -> np.ndarray:
             kind = zksim.ORDER_PLACE_BEACON
         elif kind == rf.WAIT_AT_BEACON:
             kind = zksim.ORDER_WAIT_AT_BEACON
-        elif kind == rf.PRODUCE:
-            target = cat.index[table.names[target]]
+        elif kind == rf.PRODUCE or kind == rf.BUILD:
+            target = cat.index.get(table.names[target], -1)
         out[i] = (o.uid, kind, o.x, o.z, target)
         i += 1
         if o.radius > 0.0:
@@ -212,7 +214,7 @@ def policy_orders(rows: np.ndarray) -> list:
             kind = rf.PLACE_BEACON
         elif kind == zksim.ORDER_WAIT_AT_BEACON:
             kind = rf.WAIT_AT_BEACON
-        elif kind == zksim.ORDER_PRODUCE:
+        elif kind == zksim.ORDER_PRODUCE or kind == zksim.ORDER_BUILD:
             target = table.names.index(cat.units[target]["name"])
         out.append(actions.Order(int(o["unit"]), kind, float(o["x"]), float(o["z"]), target))
     return out
@@ -283,6 +285,8 @@ class SimEnv:
         self.script_record: dict[int, np.ndarray] = {}      # seat -> the orders its script gave this decision, as the sim takes them
         # The same with the C++ scripts, over every seat: (orders, where each seat's start).  None with a subclass's own scripts.
         self.army_orders: tuple[np.ndarray, np.ndarray] | None = None
+        # The C++ economy script's orders this decision, the same way: labels for cloning the economy (04-economy.md).
+        self.eco_orders: tuple[np.ndarray, np.ndarray] | None = None
         # Whether the C++ army script sends what it can as group orders (capi.h zk_group_rec), which play exactly as the same orders
         # sent unit by unit.  They're in army_orders, as the policy would give them (policy_orders).
         self.group_orders = True
@@ -295,6 +299,7 @@ class SimEnv:
         self.time_limit = TIME_LIMIT_DECISIONS // decide_every
         self.early_end = EARLY_END_DECISIONS // decide_every
         self.script_every = max(1, SCRIPT_EVERY // decide_every)
+        self.eco_every = max(1, ECO_EVERY // decide_every)
         self.rng = np.random.default_rng(seed)
         self.seed_stream = np.random.SeedSequence(seed)
         self.batch = zksim.Batch(catalog(), games, threads=threads)
@@ -439,6 +444,58 @@ class SimEnv:
     def give_orders(self, seat: int, orders: list) -> None:
         self.pending[seat] = orders
 
+    def place_build(self, seat: int, row: int, x: float, z: float) -> tuple[float, float] | None:
+        """Where a BUILD of this type-table row, told to (x, z), goes: an extractor on the free spot nearest the point; anything else
+        at the nearest place to it that its footing fits, clear of our structures and of every metal spot (as the economy script
+        keeps clear, eco.cpp `_taken`).  None if the sim can't build the type (no catalog record, a geothermal vent's) or it fits
+        nowhere."""
+        ed = self.eco_data
+        if row >= len(ed.catalog_row) or ed.catalog_row[row] < 0 or ed.needs_place[row] or row not in ed.footing:
+            return None
+        f = self.frame(seat)
+        if ed.extractor[row]:
+            free = f.sites[f.sites["status"] == rf.SITE_FREE]
+            if not len(free):
+                return None
+            k = int(np.argmin(np.hypot(free["x"] - x, free["z"] - z)))
+            return float(free["x"][k]), float(free["z"][k])
+        own = f.units[f.units["player"] == seat % 2]
+        rows = self.table.rows(own["def_id"])
+        still = ~self.table.mobile[rows]
+        spots = np.asarray(self.bundle_of(seat).spot_list, np.float32).reshape(-1, 3)
+        taken = np.concatenate((np.stack((own["x"][still], own["z"][still], ed.radius[rows[still]]), 1),
+                                np.stack((spots[:, 0], spots[:, 1], np.full(len(spots), ed.radius[ed.extractor].max())), 1)))
+        ground, footing = self.grounds[id(self.bundle_of(seat))], ed.footing[row]
+
+        def fits(px: float, pz: float) -> bool:
+            return ground.fits(px, pz, footing) and bool((np.hypot(taken[:, 0] - px, taken[:, 1] - pz) >= taken[:, 2] + footing.radius).all())
+
+        # The point itself if it fits, else the nearest that does, looking further out a ring at a time.
+        if fits(x, z):
+            return x, z
+        for spread in BUILD_SPREADS:
+            for _ in range(BUILD_TRIES):
+                px, pz = x + float(self.rng.normal(0.0, spread)), z + float(self.rng.normal(0.0, spread))
+                if fits(px, pz):
+                    return px, pz
+        return ground.site(self.rng, footing, x, z, taken)
+
+    def _placed(self, seat: int, rows: np.ndarray) -> np.ndarray:
+        """The policy's BUILD orders put where they fit (`place_build`), and those that fit nowhere dropped.  rows: `sim_orders`'."""
+        build = np.flatnonzero(rows["kind"] == zksim.ORDER_BUILD)
+        if not len(build):
+            return rows
+        keep = np.ones(len(rows), bool)
+        names = catalog().units
+        for i in build:
+            target = int(rows["target"][i])
+            at = None if target < 0 else self.place_build(seat, self.table.names.index(names[target]["name"]), float(rows["x"][i]), float(rows["z"][i]))
+            if at is None:
+                keep[i] = False
+            else:
+                rows["x"][i], rows["z"][i] = at
+        return rows[keep]
+
     def script_orders(self, g: int, side: int) -> np.ndarray:
         """A subclass's own script's orders for this side (`own_scripts`)."""
         if self.decisions[g] % self.script_every:
@@ -475,7 +532,7 @@ class SimEnv:
                 seat = g * 2 + side
                 orders = self.pending.pop(seat, None)
                 if orders is not None:
-                    part, grouped = split_groups(sim_orders(orders))
+                    part, grouped = split_groups(self._placed(seat, sim_orders(orders)))
                     pre.append(part)
                     pre_counts[seat] = len(part)
                     policy_groups[g].append(grouped)
@@ -490,10 +547,11 @@ class SimEnv:
         join = lambda parts, counts: (np.concatenate(parts) if parts else np.zeros(0, zksim.ORDER_DTYPE),  # noqa: E731
                                       np.concatenate(([0], np.cumsum(counts))).astype(np.int32))
         orders, offsets, army, army_offsets, groups, group_offsets = self.cpp.step(
-            self.batch, self.decisions, flags, busy, self.ticks, self.script_every, ECO_EVERY, pre=join(pre, pre_counts) if pre else None,
+            self.batch, self.decisions, flags, busy, self.ticks, self.script_every, self.eco_every, pre=join(pre, pre_counts) if pre else None,
             post=join(post, post_counts) if post else None, group_orders=self.group_orders)
         self.script_record = {int(s): army[army_offsets[s]:army_offsets[s + 1]] for s in np.flatnonzero(flags)}
         self.army_orders = (army, army_offsets)
+        self.eco_orders = self.cpp.eco_orders(self.count)
         if any(len(p) for parts in policy_groups for p in parts):      # the policy's group orders join the scripts'
             whole = [np.concatenate([groups[group_offsets[g]:group_offsets[g + 1]], *policy_groups[g]]) for g in range(self.count)]
             groups = np.concatenate(whole)
