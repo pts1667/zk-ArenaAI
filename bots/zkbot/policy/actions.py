@@ -21,8 +21,8 @@ THROW_SHORT = 0.98      # of its reach at most, or it'd walk off to get in range
 
 FIELDS = ("kind", "enemy", "region", "fine", "produce", "group", "roles", "place", "offset")
 SLOT_FIELDS = ("anchor",) + FIELDS
-SLOTS = 16              # actions a decision at most.  The army script's looks gave more than 16 in 0.3% of them, 1.1% of its
-                        # orders (03-training.md 11.18)
+SLOTS = 16              # actions a decision at most.  The two scripts' looks give more than 16 in 1.1% of them, 2.3% of their
+                        # orders (03-training.md, "Script data")
 UNSET = {"anchor": -1, "kind": rf.KEEP, "enemy": -1, "region": -1, "fine": -1, "produce": -1, "group": -1, "roles": 0, "place": -1, "offset": -1}
 
 

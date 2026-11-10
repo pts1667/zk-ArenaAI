@@ -1,5 +1,5 @@
 """A cloned actor playing the army script in the sim: how often it wins, and how its economy and army grow beside the script's
-(05-literature.md C8).  With --record, its games are kept for DAgger (P3): every frame it saw, with what the scripts would have
+(04-literature.md C8).  With --record, its games are kept for DAgger (P3): every frame it saw, with what the scripts would have
 told it there (they only advise its side), as policy_clone_data records the scripts' own games.
 
     ~/zkml/bin/python tools/policy_clone_eval.py --actor /mnt/d/zk-learned/runs/clone-7/actor.pt --maps /mnt/d/zk-learned/maps --out RESULT.json

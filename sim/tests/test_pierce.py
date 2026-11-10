@@ -1,4 +1,4 @@
-"""Shots that don't stop at what they hit (noExplode).  Measured against a game in 01-simulator.md section 8.16."""
+"""Shots that don't stop at what they hit (noExplode).  Measured against a game (01-simulator.md, "Validation")."""
 from __future__ import annotations
 
 import pathlib

@@ -55,7 +55,7 @@ from frame_model import CrossBlock  # noqa: E402
 from frame_vae import LatentEncoder, load_vae  # noqa: E402
 from zkbot.policy import actions as act, featurize as fz, groups as gr, rawframe as rf, tables  # noqa: E402
 
-ENCODER = "/mnt/d/zk-learned/runs/encoder-big/final/vae-last.pt"     # the frozen frame encoder it reads (03-training.md 11.17)
+ENCODER = "/mnt/d/zk-learned/runs/encoder-big/final/vae-last.pt"     # the frozen frame encoder it reads (03-training.md, "The frame encoder")
 HEADS = 4                   # a lone TimeBlock's, in tests
 BANDS = 6                   # as the encoder's: the finest wave is 1/16 of the map's -1..1
 CODE = 4 * BANDS            # sin and cos of each of x and z
@@ -152,7 +152,7 @@ class TimeBlock(nn.Module):
     def _age_bias(self, query_frame: torch.Tensor, key_frame: torch.Tensor) -> torch.Tensor:
         """heads x Q x K: the learned bias by how many frames back.  When each frame's tokens come together and as many of them, as in
         `sequence`, it's indexed a pair of frames at a time and spread to their tokens: indexed a pair of tokens at a time, backward put
-        millions of gradients one by one into a table of a few dozen, which took 77% of a cloning step's GPU time (03-training 11.20)."""
+        millions of gradients one by one into a table of a few dozen, which took 77% of a cloning step's GPU time (03-training.md, "Speed")."""
         last = self.age.shape[1] - 1
         qf, qn = torch.unique_consecutive(query_frame, return_counts=True)
         kf, kn = torch.unique_consecutive(key_frame, return_counts=True)
@@ -267,7 +267,7 @@ class LatentActor(nn.Module):
         self.latent_in = nn.Linear(encoder.latent, self.d)
         self.slots = nn.Parameter(torch.randn(encoder.tokens, self.d) / math.sqrt(self.d))     # which latent token this is
         self.before = nn.Parameter(torch.randn(encoder.tokens, self.d) / math.sqrt(self.d))    # a frame from before the game began
-        # The strategy the side plays (05-literature.md P8, C5; `policy_clone_data.side_z`), added to every frame's latent tokens.
+        # The strategy the side plays (04-literature.md P8, C5; `policy_clone_data.side_z`), added to every frame's latent tokens.
         # Zero at first, and an unknown z is all zeros: so an actor trained without it plays as it did.
         # Made without drawing from the generator, so that every other weight is drawn as before it was added.
         with torch.random.fork_rng(devices=[]):
@@ -286,7 +286,7 @@ class LatentActor(nn.Module):
         self.unit_in1 = nn.Linear(self.d, self.d)
         self.reg_in = nn.Linear(fz.REGION_DIM + CODE, self.d)
         self.read_unit = CrossBlock(self.d, size.heads)
-        # Whom to tell (05-literature.md P1, P2): every controllable unit reads the frame once a decision, before any is picked, so
+        # Whom to tell (04-literature.md P1, P2): every controllable unit reads the frame once a decision, before any is picked, so
         # that its key as an anchor knows what's around it; and from that, whether it's told anything at all.
         self.unit_read = CrossBlock(self.d, size.heads)
         self.key_anchor = nn.Linear(self.d, self.d)
@@ -312,7 +312,7 @@ class LatentActor(nn.Module):
         self.register_buffer("produce_stats", torch.from_numpy(table.stats[table.producible].copy()), persistent=False)
         self.fine0 = nn.Linear(self.d + self.key, self.d)
         self.fine1 = nn.Linear(self.d, fz.FINE_OPTIONS)
-        # A BUILD's place (docs/learned-policy/04-economy.md): beside one of our units or a site, keyed as regions are, then where
+        # A BUILD's place (02-policy.md, "Where an action points"): beside one of our units or a site, keyed as regions are, then where
         # beside it, read from that place's key as fine is from its target's.
         self.site_in = nn.Linear(fz.SITE_DIM + CODE, self.d)
         self.key_site = nn.Linear(self.d, self.d)
@@ -608,7 +608,7 @@ def compile_for_cloning(actor: LatentActor, mode: str, flex: bool = True) -> Non
     """torch.compile the time transformer (`sequence`), whose shapes in cloning are the same every step: samples x (reach + length)
     frames x tokens.  "reduce-overhead" replays it as CUDA graphs too.  With flex, its attention is flex attention, which skips the
     blocks of keys out of the window instead of scoring every pair.  Not for play or PPO, whose shapes change with every batch:
-    compiling there gained nothing and once hung (03-training.md 10.3)."""
+    compiling there gained nothing and once hung (03-training.md, "Dead ends")."""
     actor.flex = flex
     if mode != "none":
         actor.sequence = torch.compile(actor.sequence, mode=mode, dynamic=False)

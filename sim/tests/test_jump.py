@@ -1,4 +1,4 @@
-"""Jumping, digging in and Blastwing's bomb.  Measured against a game in 01-simulator.md section 8.14."""
+"""Jumping, digging in and Blastwing's bomb.  Measured against a game (01-simulator.md, "Validation")."""
 from __future__ import annotations
 
 import math

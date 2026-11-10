@@ -116,7 +116,7 @@ class TypeTable:
                 if roster:
                     makers[row[name]] = roster
         # What a BUILD can start, and which constructor can start which: its build options (the commander's too).  The type head
-        # scores both kinds of choice over `producible` (docs/learned-policy/04-economy.md).  What the sim can't place (a geothermal
+        # scores both kinds of choice over `producible` (02-policy.md, "Where an action points").  What the sim can't place (a geothermal
         # vent's generator) it drops.
         builders = {}
         for name in names:

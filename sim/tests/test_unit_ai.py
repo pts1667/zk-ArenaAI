@@ -1,5 +1,5 @@
 """What units do on their own: a fight order's search and leash, idle units, hold position, fire states, the tactical AI, overkill and bait
-prevention, shooting at radar, and overheating.  Measured against a game in 01-simulator.md section 8.12."""
+prevention, shooting at radar, and overheating.  Measured against a game (01-simulator.md, "Validation")."""
 from __future__ import annotations
 
 import pathlib
@@ -460,7 +460,7 @@ def test_on_fire_at_will_a_bomb_goes_off_when_something_comes_into_reach():
 
 
 def test_on_fire_at_will_it_doesnt_matter_which_way_the_enemy_is_going():
-    """A game's Limpet went off for a Knight standing still and for one walking away (01-simulator.md 8.13)."""
+    """A game's Limpet went off for a Knight standing still and for one walking away (01-simulator.md, "Validation")."""
     for target in (lambda w: _walking(w, 100.0, 2000.0), lambda w: dummy(w, "cloakassault", 0.0, 100.0, TOUGH)):
         w = world()
         b = _bomb(w, fire_at_will=True)

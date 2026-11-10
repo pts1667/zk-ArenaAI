@@ -1,8 +1,8 @@
 """The economy script's tables.  The script is C++ (sim/scripts/src/eco.cpp, through policy_scripts_cpp.py), and its numbers
 are there; this is what it does.
 
-It runs for every side of a `SimEnv` game, the policy's as well, for now: the policy may tell its constructors too (BUILD, ASSIST, RECLAIM),
-and until a seat can have the script off (docs/learned-policy/04-economy.md) both give them orders.  Its orders are kept each
+It runs for every side of a `SimEnv` game, the policy's as well: the policy may tell its constructors too (BUILD, ASSIST, RECLAIM),
+and both give them orders, unless the seat runs its own economy (`SimEnv.policy_economy_share`): then the script only advises.  Its orders are kept each
 decision (`SimEnv.eco_orders`) and recorded after the army script's, for the policy to learn the economy from (policy_clone_data.py).  Constructors come from the factory: the army
 script builds them (policy_mix.py), and so may the policy.  Once the opening is over the commander is one of them, though it takes
 no extractor farther than COMMANDER_REACH from the base.  It has to be: builders are paid first come, first served, as in the

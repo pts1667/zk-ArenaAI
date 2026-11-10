@@ -41,7 +41,7 @@ DATA_VERSION = 6      # 1: the army script with the opening's economy only.  2: 
                       # help for a factory still being built builds it, 2026-11-08.  4: the same games, a .zkr file a game, 2026-11-08.
                       # 5: the army script's group orders, recorded as the policy gives them (groups.GROUP_MARK), air, and a second
                       # factory, 2026-11-08.  6: the economy script's orders too, after the army script's for each seat, both
-                      # scripts looking every 6 slots, 2026-11-09 (docs/learned-policy/04-economy.md)
+                      # scripts looking every 6 slots, 2026-11-09 (03-training.md, "Script data")
 
 
 class Recorder:
@@ -196,7 +196,7 @@ def sides(data: pathlib.Path) -> list[tuple[str, int, int]]:
     return [s for s in out if s[2]]
 
 
-# A side's strategy, z (05-literature.md P8, C5): what the actor is told it's playing, as AlphaStar's statistic.  Z_DIM numbers:
+# A side's strategy, z (04-literature.md P8, C5): what the actor is told it's playing, as AlphaStar's statistic.  Z_DIM numbers:
 # whether the knobs are known, whether the counts are, the army script's knobs (policy_variants.py: the role weights and commit,
 # gather and patience in log, patrol_share and retreat_below about the standard's), its preset (rush, turtle, skirmish; none is the
 # standard), and how many of each of Z_CATEGORIES the side had finished at Z_MINUTES, log1p / 3.  A game over before a minute

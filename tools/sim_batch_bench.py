@@ -3,7 +3,7 @@
   ~/zkml/bin/python tools/sim_batch_bench.py --games 256 --units 200            # 400 units a game, 16 threads
   ZKSIM_LIB=~/zksim/build-prof/libzksim.so ~/zkml/bin/python tools/sim_batch_bench.py --games 16 --threads 1
 
-The budget is 03-training.md section 2.6: 0.5 ms of wall time per game decision at 400 units with 16 threads, 2x allowed.
+The budget (03-training.md, "Speed"): 0.5 ms of wall time per game decision at 400 units with 16 threads, 2x allowed.
 With a profiling build it also prints each phase's share, fog included.
 """
 from __future__ import annotations

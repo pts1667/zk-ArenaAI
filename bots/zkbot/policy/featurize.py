@@ -25,10 +25,9 @@ from . import rawframe as rf
 from .bundle import PASS_CELL, Bundle
 from .tables import TYPE_DIM, TypeTable
 
-FEATURE_VERSION = 6          # what a saved encoder or actor was trained to read: raise it with any change to the tensors' meaning
-                             # 6: constructors are controllable, BUILD, ASSIST and RECLAIM, own tokens to assist among the targets (2026-11-09)
-ENCODER_FEATURE_VERSIONS = (5, 6)   # those an encoder reads alike: 6 changed only the actor's tensors and which unit tokens come first,
-                                    # and the encoder doesn't depend on the tokens' order (each token's features are as they were)
+FEATURE_VERSION = 7          # what a saved encoder or actor was trained to read: raise it with any change to the tensors' meaning
+                             # 7: ids sized for free-for-all, 64 players and 8 allyteams, so an unknown id reads 64 and 8 (2026-11-10)
+ENCODER_FEATURE_VERSIONS = (7,)     # those an encoder reads alike
 
 CAP_CONTROLLABLE, CAP_UNITS, CAP_HIDDEN = 256, 592, 64
 CAP_SITES = 24
@@ -40,8 +39,8 @@ LEAST_COST = kernels.LEAST_COST
 if kernels.PASS_CELL != PASS_CELL:
     raise ImportError("bundle.PASS_CELL changed: update featurize_kernels' copy")
 
-# Rows of the id embeddings, as well as one for an unknown id.
-MAX_ALLY_TEAMS, MAX_PLAYERS = 16, 32
+# Rows of the id embeddings, as well as one for an unknown id: enough for free-for-all games (Recoil's teams are players).
+MAX_ALLY_TEAMS, MAX_PLAYERS = 8, 64
 
 # Token kinds.
 # TK_MEMORY_STATE is the last token of a collated batch (tools/policy_model.py), which the actors read as nothing in particular;
@@ -54,7 +53,7 @@ COMMIT_DECISIONS = 6
 DECISION_FRAMES = 15
 STAGE2_KINDS = (*range(10), rf.PRODUCE, rf.THROW, rf.PUSH, rf.PULL, rf.PLACE_BEACON, rf.WAIT_AT_BEACON)
 
-ECONOMY_KINDS = (rf.BUILD, rf.ASSIST, rf.RECLAIM)      # a constructor's (docs/learned-policy/04-economy.md)
+ECONOMY_KINDS = (rf.BUILD, rf.ASSIST, rf.RECLAIM)      # a constructor's (02-policy.md, "Kinds")
 # A RECLAIM points at one of the feature tokens (wrecks and the like in sight, `feat_ids`), with the same field a BUILD's place has.
 
 # The kinds that point at a target token, in the order of `ptr_enemy`: the first three at an enemy's, ASSIST at one of our own.
@@ -66,7 +65,7 @@ KINDS_WITH_REGION = (rf.MOVE, rf.FIGHT, rf.JUMP, rf.THROW, rf.PLACE_BEACON, rf.W
 KINDS_WITH_FINE = (rf.MOVE, rf.FIGHT, rf.JUMP, rf.ATTACK_GROUND, rf.THROW, rf.PLACE_BEACON)
 # A BUILD is a type (the produce head) at a place: beside one of our unit tokens or a metal site (`place_tokens`, then the sites),
 # on it or at one of 8 compass points on each ring, north towards the enemy as for fine points; whoever obeys it finds the nearest
-# place there the type fits.  On the script's own builds this lands within 30 elmos 9 times in 10 (04-economy.md, step 1).
+# place there the type fits.  On the economy script's builds this lands p50 19 elmos from its place, 99% within 150 (02-policy.md).
 PLACE_RINGS = (64.0, 128.0, 256.0)
 PLACE_OFFSETS = 1 + 8 * len(PLACE_RINGS)
 

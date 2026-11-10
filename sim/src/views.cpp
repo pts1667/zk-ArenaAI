@@ -358,7 +358,7 @@ int World::emit_features(int s, FeatureRecord* out, int cap) {
 }
 
 void World::side_stats(int s, float* out) const {
-    // The reward's tracked value (03-training.md 1.3): cost x build progress, real units only.
+    // The reward's tracked value (03-training.md, "Reward"): cost x build progress, real units only.
     float value = 0.0f;
     int units = 0;
     for (int u = 0; u < count(); ++u) {

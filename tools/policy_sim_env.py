@@ -1,7 +1,7 @@
 """The simulator as an environment for tools/policy_train.py, with the same interface as the toy's.
 
 A game starts from a commander in each of two of the map's start boxes.  Both sides play the opening of policy_opening.py by rule,
-so what the policy controls is what it produces, and its constructors.  On the other side, the army script (C++, sim/scripts) controls the fighters and the factory, and the economy script (also C++) runs every side's constructors: the policy's too, for now (docs/learned-policy/04-economy.md), so on its side both tell them.  The kinds the policy has are those the sim obeys (`KINDS`), BUILD and ASSIST among them; a BUILD goes where it fits (`place_build`).
+so what the policy controls is what it produces, and its constructors.  On the other side, the army script (C++, sim/scripts) controls the fighters and the factory, and the economy script (also C++) runs every side's constructors: the policy's too, so on its side both tell them, unless it runs its own economy (`policy_economy_share`).  The kinds the policy has are those the sim obeys (`KINDS`), BUILD and ASSIST among them; a BUILD goes where it fits (`place_build`).
 
 What each script ordered at each decision is in `script_record`, and its production choices are readable with `script_production`.
 
@@ -45,7 +45,7 @@ MOST_COST = 600.0
 EARLY_END_DECISIONS = 240           # 2 minutes: from then on, a side this far ahead in metal value has won
 EARLY_END_RATIO = 2.5
 EARLY_END_LEAD = 10000.0            # and this much ahead in metal, so that a small game isn't called on a few raiders
-# 03-training.md section 3.  Other exported maps stay out of training: playing pads every seat to the map with the most regions.
+# 01-simulator.md, "Data".  Other exported maps stay out of training: playing pads every seat to the map with the most regions.
 TRAINING_MAPS = ("agalta_v1_0", "faultline_v1_0", "frostycove_v1_13", "red_comet_remake_1_7", "titanduel_2_2")
 
 AT_THE_START_POINT = 0.5             # of starts: where our bot and a player who doesn't choose start.  The rest are anywhere in the box.
@@ -225,7 +225,7 @@ def army_types(table: tables.TypeTable) -> dict[str, np.ndarray]:
     """Ground and water fighters of ordinary cost, by the data rather than by name.  Ships need a sea this start doesn't look for."""
     if not _TYPES:
         cat = catalog()
-        # The factory roster of 00-overview, not every def there is: no chickens, and no test units.
+        # The factories' rosters (`bot_catalog.roster`), not every def there is: no chickens, and no test units.
         built = {n for r, f in enumerate(table.names) if table.factory[r] for n in bot_catalog.roster(f)}
         rows = [r for r, name in enumerate(table.names) if name in cat.index and name in built and table.combat[r] and table.mobile[r] and not table.air[r]
                 and table.can_hit_ground[r] and table.cost[r] <= MOST_COST and table.move_class[r] != bd.MOVE_CLASSES.index("ship") and modelled(cat, name)]
@@ -283,13 +283,13 @@ class SimEnv:
         # sim plays as the cloning data was recorded and the policy decides when the scripts look (policy_clone_eval).
         self.act_every = 1
         # The army script runs for the policy's seats too, only advising: its orders are labels (`army_orders`) and aren't carried out.
-        # For learning from what it would have done in the policy's games (DAgger, PPO's cloning loss; 05-literature.md P3, P7).
+        # For learning from what it would have done in the policy's games (DAgger, PPO's cloning loss; 04-literature.md P3, P7).
         self.advise = False
         # Of games starting from now on, the share where the policy's seats run their own economy: the economy script only advises
         # them (its orders in `eco_orders` alone).  In the rest it builds for them as before, after the policy's orders.
         self.policy_economy_share = 0.0
         self.policy_economy = np.zeros(games, bool)
-        # A small zero-sum reward for income (metal, as `_raw` is for value), on top of the value balance: 05-literature.md C7.
+        # A small zero-sum reward for income (metal, as `_raw` is for value), on top of the value balance: 04-literature.md C7.
         self.income_weight = 0.0
         self.last_income = np.zeros(games)
         self.income_delta = np.zeros(games)
@@ -300,7 +300,7 @@ class SimEnv:
         self.script_record: dict[int, np.ndarray] = {}      # seat -> the orders its script gave this decision, as the sim takes them
         # The same with the C++ scripts, over every seat: (orders, where each seat's start).  None with a subclass's own scripts.
         self.army_orders: tuple[np.ndarray, np.ndarray] | None = None
-        # The C++ economy script's orders this decision, the same way: labels for cloning the economy (04-economy.md).
+        # The C++ economy script's orders this decision, the same way: labels for cloning the economy (03-training.md, "Script data").
         self.eco_orders: tuple[np.ndarray, np.ndarray] | None = None
         # Whether the C++ army script sends what it can as group orders (capi.h zk_group_rec), which play exactly as the same orders
         # sent unit by unit.  They're in army_orders, as the policy would give them (policy_orders).

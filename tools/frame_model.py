@@ -3,7 +3,7 @@ frame_vae.py trains), shards of collected frames, and linear probes of what a la
 
 The encoder reads tokens as the policy's are padded, so `FrameEncoder` takes a `policy_model.Batch` as it stands, or a
 `FrameBatch` from `collate_frames`.  Data: tools/frame_data.py.  (A LeJEPA-trained encoder, frame_jepa.py, was tried first and
-removed on 2026-11-08: `03-training.md` 11.2 to 11.4.)
+removed on 2026-11-08: 03-training.md, "Dead ends".)
 """
 from __future__ import annotations
 

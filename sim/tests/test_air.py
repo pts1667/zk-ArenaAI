@@ -1,5 +1,5 @@
 """Aircraft: planes turning in a circle, bombers' sorties and rearming, strafing gunships, and what lands when idle.  The engine's
-numbers are from tools/sim_engine.py air (03-training.md 11.14)."""
+numbers are from tools/sim_engine.py air (01-simulator.md, "Aircraft")."""
 from __future__ import annotations
 
 import math

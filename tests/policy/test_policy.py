@@ -169,7 +169,7 @@ def test_rays_see_walls_and_enemies(small_map, table):
     assert not t.unit_x[0, fz._R + 16:fz._R + 24].any()
 
 
-# Masks: one hand-made frame for each row of 02-policy.md section 4.1.
+# Masks: one hand-made frame for each row of 02-policy.md, "Kinds".
 def kinds_of(units, small_map, table, **kw):
     t = run(units, small_map, table, **kw)
     return t, {k for k in range(rf.KIND_COUNT) if t.kind_mask[0, k]}

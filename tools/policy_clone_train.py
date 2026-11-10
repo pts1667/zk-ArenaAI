@@ -19,7 +19,7 @@ orders to, and isn't taught an order among them that isn't there.  A unit the sc
                   between it does nothing because it isn't looking, not because it chose to.  --all-decisions counts them all.
   --decide-every  recorded decisions between the actor's (SCRIPT_EVERY by default: 3 s): it reads only those frames, as it
                   would play at that rate, so a stretch of 48 is 48 looks.  At 1 it read every frame, 6 for each look it learnt
-                  from, and cloned about 50 looks a second (03-training.md 11.20).
+                  from, and cloned about 50 looks a second (03-training.md, "Speed").
 
 The checkpoint holds the actor's weights and this run's settings.
 """
@@ -118,7 +118,7 @@ def _cut(frame, orders: list, decisions: int, start: int, length: int, reach: in
         # This stretch's names, on a copy: a frame may be another stretch's too.
         tensors.append(replace(t, true_name=t.unit_name, unit_name=names[t.unit_name]))
     # Every frame as the encoder and the action tokens read it; and only for the counted decisions, what the heads alone read.  The
-    # heads' batch is those rows of the frames', picked out on the GPU (05-literature.md S2): sending both whole was twice the bytes.
+    # heads' batch is those rows of the frames', picked out on the GPU (04-literature.md S2): sending both whole was twice the bytes.
     seen, heads = pm.collate(tensors, regions=_W["regions"]).half().split([start - first + j for j in counted])
     return {"seen": seen, "heads": heads, "history": start - first, "length": end - start, "counted": counted, "missed": missed, "cut": cut,
             "orders": int(sum(len(orders[j * every]) for j in range(start, end))), "labelled": labelled,
@@ -240,13 +240,13 @@ def forward(actor: policy_latent.LatentActor, samples: list[dict], device: str, 
     """The counted decisions, their labels (actions), which units the script told something, and each action's log-probability; with
     measuring, also each action's anchor and kind logits.  blind: the actor isn't shown what was done (its action tokens are all
     zeros), to measure what they're worth.  z: B x Z_DIM, each sample's strategy (`z_tensor`), or None.  act_dropout: the share of
-    frames whose action tokens are zeros, as if nothing had been done (05-literature.md P4)."""
+    frames whose action tokens are zeros, as if nothing had been done (04-literature.md P4)."""
     reach, tokens, latent = actor.reach, actor.encoder.tokens, actor.encoder.latent
     longest = max(s["length"] for s in samples)
     frames = torch.zeros(len(samples), reach + longest, tokens, latent, device=device)
     present = torch.zeros(len(samples), reach + longest, dtype=torch.bool, device=device)
     # Every sample's frames at once, through the encoder and into action tokens: one call each, not one a sample, as the main
-    # process making a step's thousands of small calls was what held it up (03-training 11.20).
+    # process making a step's thousands of small calls was what held it up (03-training.md, "Speed").
     sizes = [s["history"] + s["length"] for s in samples]
     phase = torch.profiler.record_function      # each part's time, under the profiler
     with phase("clone.join"):
@@ -287,7 +287,7 @@ def forward(actor: policy_latent.LatentActor, samples: list[dict], device: str, 
 
 
 def ordered_loss(whole: pm.Batch, labelled: torch.Tensor, ordered: torch.Tensor) -> torch.Tensor:
-    """05-literature.md P2: for every unit an action could pick, whether the script told it anything this decision; a label for
+    """04-literature.md P2: for every unit an action could pick, whether the script told it anything this decision; a label for
     every unit at every decision, where the anchor's softmax gives one an action.  Mean over those units."""
     legal = pm.anchors_legal(whole)
     bce = F.binary_cross_entropy_with_logits(ordered, labelled.float(), reduction="none")
@@ -341,7 +341,7 @@ ECONOMY_KINDS = (rf.BUILD, rf.ASSIST, rf.RECLAIM)
 
 
 def action_weights(a: pm.Actions, economy_weight: float) -> torch.Tensor:
-    """Each label's weight in the loss: 1, or economy_weight for an economy action (05-literature.md C4).  Done is 1."""
+    """Each label's weight in the loss: 1, or economy_weight for an economy action (04-literature.md C4).  Done is 1."""
     w = pm.chosen(a).float()
     if economy_weight != 1.0:
         eco = (a.anchor >= 0) & torch.isin(a.kind, torch.tensor(ECONOMY_KINDS, device=a.kind.device))

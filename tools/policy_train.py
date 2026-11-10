@@ -1,10 +1,10 @@
-"""The PPO trainer (docs/learned-policy/03-training.md section 1), for the actor on latents (tools/policy_latent.py) in the sim.  In WSL:
+"""The PPO trainer (docs/learned-policy/03-training.md, "PPO"), for the actor on latents (tools/policy_latent.py) in the sim.  In WSL:
 
   ~/zkml/bin/python tools/policy_train.py --run /mnt/d/zk-learned/runs/NAME --decisions 2000000
   ~/zkml/bin/python tools/policy_train.py --run ... --check-repro       # one iteration twice, compared
   ~/zkml/bin/python tools/policy_train.py --run ... --check-kill        # killed while saving, the checkpoint still loads
 
-Rollouts keep raw frames, not tensors, and featurize per minibatch.  A segment is 32 decisions.  Each unit gets its own clipped
+Rollouts keep raw frames, not tensors, and featurize per minibatch.  A segment is 32 decisions.  Each action gets its own clipped
 ratio, averaged within a decision, with one advantage per decision.  The actor reads frames in order, so it takes each segment in
 one forward pass, from the latents kept at collection and those of the frames before it, which the segment stores as its start.
 (The first actor, recurrent over every token, was trained step by step; it went on 2026-11-08 with the toy game it was tested on.)
@@ -53,7 +53,7 @@ class Config:
     decisions: int = 2_000_000
     iteration: int = 8192           # decisions collected per iteration
     games: int = 64
-    # Each sample learnt from once: OpenAI Five found reuse of 2-3 can halve learning, and kept it near 1 (05-literature.md S5).
+    # Each sample learnt from once: OpenAI Five found reuse of 2-3 can halve learning, and kept it near 1 (04-literature.md S5).
     passes: int = 1
     # Evaluation games are played by an exponential moving average of the weights, updated each optimizer step (0: the weights
     # themselves); it plays better than the weights it follows (Generals.io, 2606.23348).
@@ -85,8 +85,8 @@ class Config:
     self_play_per_iteration: float = 0.01   # share of new games added each iteration: 100 iterations from none to all
     latent_encoder: str = policy_latent.ENCODER     # the trained frame encoder whose latents the actor reads
     diversity: float = 0.05         # a finished unit of a type the policy rarely makes is worth up to this (policy_sim_env._diversity;
-                                    # 03-training.md 11.19): about a 300-metal unit's loss mid-game
-    # PPO from a cloned actor (05-literature.md P7, C6, C7).
+                                    # 03-training.md, "Reward"): about a 300-metal unit's loss mid-game
+    # PPO from a cloned actor (04-literature.md P7, C6, C7).
     init: str = ""                  # a cloning checkpoint (policy_clone_train's actor.pt): the actor starts as it, at its size
     maps: str = ""                  # a map pool (tools/map_gen.py), its held-out maps left out; "" for the five training maps
     variants: bool = False          # each side's army script draws its knobs (policy_variants.py)
@@ -134,7 +134,7 @@ def memory_tokens(tokens: int) -> float:
 
 
 def beta(progress: float) -> float:
-    """How much of the reward is the final result: 03-training.md section 1.3."""
+    """How much of the reward is the final result: 03-training.md, "Reward"."""
     if progress < 0.1:
         return 0.0
     return min(0.9, 0.9 * (progress - 0.1) / 0.5)
@@ -990,7 +990,7 @@ def train(cfg: Config, run: pathlib.Path, make_env, device: str = "cuda") -> Non
 
 
 def check_repro(cfg: Config, run: pathlib.Path, make_env) -> None:
-    """The same iteration twice from the same seed: 03-training.md section 7."""
+    """The same iteration twice from the same seed: 03-training.md, "Checkpoints and stopping"."""
     # Plain GPU scatter adds accumulate in no fixed order, and Adam magnifies the rounding on near-zero gradients.
     torch.use_deterministic_algorithms(True, warn_only=True)
     sums = []

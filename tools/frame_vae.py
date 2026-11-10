@@ -1,7 +1,7 @@
 """A frame VAE: compresses what a seat sees into a few small latent tokens, for the actor to read in place of its tokens.
 
 It asks the latent to give back what's where, through a small decoder (LeJEPA, which asked a frame's latent to match the same frame with units dropped, taught it
-to leave that out, and was removed on 2026-11-08: 03-training.md 11.2 to 11.4):
+to leave that out, and was removed on 2026-11-08: 03-training.md, "Dead ends"):
 
     python tools/frame_vae.py train --data /mnt/d/zk-learned/frames/NAME --run /mnt/d/zk-learned/runs/NAME
 

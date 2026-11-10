@@ -3,7 +3,7 @@
   python tools/sim_battery.py engine                 # Windows: runs the engine headless, 5-10 min
   ~/zkml/bin/python tools/sim_battery.py compare     # WSL: runs the sim, compares, writes the report
 
-Thresholds are those of docs/learned-policy/01-simulator.md section 5.2.  The scenarios are built
+Each check's threshold is its `limit`; the last result is in 01-simulator.md, "Validation".  The scenarios are built
 from the map file alone, so both sides get the same ones.  Output goes to results/simbattery/.
 """
 from __future__ import annotations

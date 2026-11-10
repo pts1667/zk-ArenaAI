@@ -93,7 +93,7 @@ class Batch:
         return Batch(**out)
 
     def half(self) -> "Batch":
-        """The big float fields as float16, to send between processes at half the bytes (05-literature.md S2); `to` makes them
+        """The big float fields as float16, to send between processes at half the bytes (04-literature.md S2); `to` makes them
         float32 again.  Positions lose up to 1/4,096 of the map's half-width."""
         return replace(self, **{f: getattr(self, f).astype(np.float16) for f in HALF_FIELDS if getattr(self, f) is not None})
 
@@ -232,7 +232,7 @@ def join(batches: list[Batch], device: str | None = None) -> Batch:
     (what the frame encoder reads, apart from the names the actor may read) are kept if every batch has them.
 
     device: joined there, as tensors: each batch's own arrays are copied over, and the padding between them is made there.  A
-    cloning step's frames padded to its biggest on the host were ~180 MB, mostly padding, zeroed and copied (05-literature.md S2)."""
+    cloning step's frames padded to its biggest on the host were ~180 MB, mostly padding, zeroed and copied (04-literature.md S2)."""
     out: dict[str, object] = {name: None for name in Batch.__dataclass_fields__}
     names = all(getattr(b, "true_name", None) is not None for b in batches)
     fields = {}
@@ -335,7 +335,7 @@ class Critic(nn.Module):
 
     def __init__(self, vocabulary: int, d: int = D, layers: int = LAYERS, heads: int = HEADS, bins: int = 0, span: float = 3.0):
         """bins: above 0, the value is a distribution over that many values evenly from -span to span, trained by HL-Gauss
-        (`hl_gauss`; 05-literature.md C6), and the value is its mean; else one number."""
+        (`hl_gauss`; 04-literature.md P7), and the value is its mean; else one number."""
         super().__init__()
         self.size = {"d": d, "layers": layers, "heads": heads, **({"bins": bins, "span": span} if bins else {})}
         self.bins = bins

@@ -1,5 +1,5 @@
 // Resources and construction: income, overdrive through pylon grids, upkeep, build steps that stall without resources, assisting,
-// factories that repeat a type, and a side's free first factory.  Reclaim is in wrecks.cpp.  Not here yet: repair (01-simulator.md 8.9).
+// factories that repeat a type, and a side's free first factory.  Reclaim is in wrecks.cpp.  Not here yet: repair (01-simulator.md, "Known gaps").
 #include <algorithm>
 #include <cmath>
 

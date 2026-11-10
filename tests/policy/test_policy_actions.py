@@ -34,7 +34,7 @@ def legal(t, i=0):
 def test_order_memory_keeps_its_width_when_the_policy_gains_kinds():
     """Frames on disk and encoders trained on them have 16 slots."""
     assert rf.ORDER_SLOTS == 16 and rf.KIND_COUNT > rf.ORDER_SLOTS
-    assert fz.UNIT_DIM == 127 and fz.FEATURE_VERSION == 6
+    assert fz.UNIT_DIM == 127 and fz.FEATURE_VERSION == 7
 
 
 def test_the_facts_come_from_the_generated_data(table):
@@ -532,7 +532,7 @@ def test_a_build_place_means_the_same_in_any_batch(sim, table, encoder_path):
 
 
 def test_decisions_score_the_same_picked_out_of_a_bigger_batch(sim, table, encoder_path):
-    """Cloning picks the counted decisions' rows out of the batch of all a stretch's frames (05-literature.md S2): padded for more
+    """Cloning picks the counted decisions' rows out of the batch of all a stretch's frames (04-literature.md S2): padded for more
     units, sites and regions than theirs, they must score as a batch of their own does; and sent as float16, nearly so."""
     torch = pytest.importorskip("torch")
     import policy_model as pm

@@ -234,7 +234,8 @@ def test_the_age_bias_is_learned_and_nothing_outside_the_window_is_read(actor):
     own = block.bias(two, two, act, act)
     assert torch.isinf(own[:, 0, 1]).all() and torch.isfinite(own[:, 1, 0]).all()
     frames, present = _frames(actor, 4), torch.ones(1, 4, dtype=torch.bool)
-    actor.sequence(frames, present, _acts(4))[:, -1].sum().backward()
+    out = actor.sequence(frames, present, _acts(4))[:, -1]
+    (out * torch.randn_like(out)).sum().backward()      # not a plain sum: that of a LayerNorm's output is 0 whatever goes in
     assert float(block.age.grad.abs().sum()) > 0.0 and float(block.act_key.grad.abs().sum()) > 0.0
 
 

@@ -34,8 +34,8 @@ MAX_MOUNTS = 8
 MOVE_CLASS_NAMES = ("kbot", "tank", "spider", "amph", "hover", "ship")
 MIN_SEGMENT_CELLS = 64               # smaller pieces join a neighbour
 MIN_BORDER_CELLS = 8                 # 128 elmos; a narrower gap keeps two segments apart
-# Merging neighbours by height and slope is off: it gives fewer segments, but worse routes and arrival
-# (docs/learned-policy/01-simulator.md 8.6).  The flags are there to repeat that sweep.
+# Merging neighbours by height and slope is off: a sweep gave fewer segments, but worse routes and arrival.
+# The flags are there to repeat that sweep.
 HEIGHT_BAND = 0.0                    # elmos; the most a merged segment's pieces differ in mean height
 SLOPE_BAND = 0.0                     # engine slope; the steepest mean border that merges
 SPIDER_MIN_SLOPE = 0.6               # maxSlope in the moveDef; kbots are 0.41, all-terrain 0.97
@@ -55,7 +55,7 @@ COMMANDER_ECON = (4.0, 6.0)
 U_MOBILE, U_AIR, U_ARMED, U_FIREPROOF, U_FACTORY, U_PLOPPABLE, U_COMMANDER = 1, 2, 4, 8, 16, 32, 64
 U_FLOATS, U_MISSILE, U_NEUTRAL, U_PLANE, U_LANDS, U_STRAFES = 8192, 16384, 32768, 65536, 131072, 262144
 # Planes: frames a half turn takes, and the share of top speed held through it.  `tools/sim_engine.py air`, a move order
-# straight behind (03-training.md 11.14).  The engine's flight model is 3D with rudder, elevator and bank; the sim's is a
+# straight behind (01-simulator.md, "Aircraft").  The engine's flight model is 3D with rudder, elevator and bank; the sim's is a
 # turn at a fixed rate, so these are what it's fitted to.  A plane not here turns as the median one.
 PLANE_TURNS = {"planefighter": (72, 0.59), "planeheavyfighter": (56, 0.84), "planesupport": (50, 0.85), "bomberprec": (54, 0.63),
                "bomberriot": (64, 0.71), "bomberdisarm": (102, 0.85), "bomberassault": (176, 0.89), "bomberheavy": (90, 0.78),
@@ -65,7 +65,7 @@ STRAFE_SHARE = 0.8         # of its combat range, where a strafing gunship circl
 STRAFE_GRIP = 0.37         # its speed round that circle is as if it could turn with this much of its acceleration, at most top speed
 REAMMO_DRAIN = 10.0        # unit_refuel_pad_handler.lua DEFAULT_REAMMO_DRAIN, energy a second
 PAD_BP = 2.5               # ... DEFAULT_REPAIR_BP
-RUN_SHOT_FRAMES = 1.0      # bomberdisarm.lua: a bolt each Sleep(35), which is a frame (the engine run, 03-training.md 11.14)
+RUN_SHOT_FRAMES = 1.0      # bomberdisarm.lua: a bolt each Sleep(35), which is a frame (the engine run; 01-simulator.md, "Aircraft")
 THERMITE_START_SHARE = 0.05   # of its end dps: an area here can't start at nothing, so it ramps from this to keep the same total
 # weapon_impulse.lua: GRAVITY_BASELINE, and what a unit gets of an impulse by how it moves.
 IMPULSE_BASELINE, IMPULSE_PLANE, IMPULSE_GUNSHIP, IMPULSE_GROUND = 120.0, 0.022, 0.004, 0.0036
@@ -84,7 +84,7 @@ DISARM_TARGETING = {"shieldarty_emp_rocket": (200.0, 0.4), "shipscout_missile": 
 DEFAULT_BURN_RANDOM = 0.3
 # A shot off up or down in the game misses, where the sim's scatter is sideways only.  It matters for a Stardust, with its 9 degrees of it: at the rate
 # its heat allows the game gave 0.97 of the sim's damage at 150 elmos on a Knight and 0.54 at 400 on a Glaive, and 0.81 over those eight cases
-# (01-simulator.md 8.12).  This is a mean over ranges and sizes, not the falloff.
+# (01-simulator.md, "Known gaps").  This is a mean over ranges and sizes, not the falloff.
 SCATTER_DAMAGE = {"turretriot_turretriot_weapon": 0.8}
 LANDING_SUFFIX = "_landing"
 BURROW_SPEED, BURROW_SPEED_AIR = 0.05, 3.5

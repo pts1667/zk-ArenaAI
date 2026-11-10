@@ -1,5 +1,5 @@
 """What shields stop, what charging them costs and how they share charge: CheckShieldCollisions, TraceRayShields,
-unit_shield_charge.lua and unit_shield_link.lua.  Measured against a game in 01-simulator.md section 8.11."""
+unit_shield_charge.lua and unit_shield_link.lua.  Measured against a game (01-simulator.md, "Validation")."""
 from __future__ import annotations
 
 import pathlib

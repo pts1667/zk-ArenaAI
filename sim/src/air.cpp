@@ -4,7 +4,7 @@
 // carry a salvo, then fly to a pad, rearm and repair there (unit_bomber_command.lua, unit_refuel_pad_handler.lua).
 //
 // The engine's plane is 3D, with rudder, elevator and bank (StrafeAirMoveType.cpp).  This one turns at a fixed rate and slows
-// in a hard turn, both fitted to the engine (tools/sim_engine.py air, 03-training.md 11.14).
+// in a hard turn, both fitted to the engine (tools/sim_engine.py air; 01-simulator.md, "Aircraft").
 #include <algorithm>
 #include <cmath>
 

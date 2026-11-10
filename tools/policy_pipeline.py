@@ -3,7 +3,7 @@
     ~/zkml/bin/python tools/policy_pipeline.py --root /mnt/d/zk-learned/runs/full-1 --train-encoder
     ~/zkml/bin/python tools/policy_pipeline.py --root /mnt/d/zk-learned/runs/full-1 --dry-run     # the commands, nothing run
 
-Each stage is one of the tools' own commands (HANDOFF.md section 4), run one at a time, so no two load the map pool at once and
+Each stage is one of the tools' own commands (HANDOFF.md, "Running"), run one at a time, so no two load the map pool at once and
 each hands the GPU back when it ends.  Its output goes to ROOT/logs/STAGE.out.  ROOT/pipeline.json lists the stages done, so the
 same command again carries on from the first that isn't; --redo STAGE runs that one and every one after it again.  The encoder
 (frame_vae) and PPO resume from their own checkpoints; a cloning stage starts over, its old log.jsonl kept beside the new one.
@@ -13,7 +13,7 @@ ROOT/ppo) stops that training at its next report, and the pipeline with it, that
 
 The stages:
   frames       with --train-encoder, if --frames has no manifest.json: frame_data.py collect, pool5's recipe (1M frames each of
-               the frame games, scenarios and the C++ scripts' games; 03-training.md 11.17)
+               the frame games, scenarios and the C++ scripts' games; 03-training.md, "Frame data")
   encoder      with --train-encoder: frame_vae.py train with encoder-big's settings, 25,000 steps, to ROOT/encoder
   zindex       the cloning data's z.npz, if it has none
   clone        policy_clone_train.py with clone-8's settings (z, the economy at 2.5, the last 10% on winners), to ROOT/clone
@@ -23,8 +23,8 @@ The stages:
   zindex-N     z.npz over every round's games
   dagger-N     policy_clone_train.py --init the last clone: half its samples from ROOT/dagger, half from --data, to ROOT/dagger-N
   eval         the last clone against the army script, z from its variant: ROOT/evals/final.json
-  ppo          policy_train.py --init the last clone, --z variant, --fine-sim, with the PPO smoke run's flags (03-training.md
-               11.22) at a run's size, to ROOT/ppo
+  ppo          policy_train.py --init the last clone, --z variant, --fine-sim, with the PPO smoke run's flags (03-training.md,
+               "From a clone") at a run's size, to ROOT/ppo
 
 --clone-args, --dagger-args and --ppo-args are added at the end of those commands, so they override what's set here.
 """
@@ -43,16 +43,16 @@ from dataclasses import dataclass, field
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 TOOLS = ROOT / "tools"
 
-# encoder-big's (03-training.md 11.17).
+# encoder-big's (03-training.md, "The frame encoder").
 ENCODER_FLAGS = ["--autoencoder", "--region-pool", "32", "--two-part", "--questions", "--muon-lr", "0.008", "--queries", "40",
                  "--d", "144", "--rounds", "3"]
-# pool5's (03-training.md 11.17).
+# pool5's (03-training.md, "Frame data").
 FRAMES_FLAGS = ["--script-frames", "1000000", "--scenario-frames", "1000000", "--army-frames", "1000000", "--games", "256",
                 "--workers", "8"]
-# clone-8's (03-training.md 11.22), at the actor's decision every 3 s.
+# clone-8's (03-training.md, "Cloning"), at the actor's decision every 3 s.
 CLONE_FLAGS = ["--decide-every", "6", "--samples", "8", "--accumulate", "8", "--workers", "15", "--z", "--z-dropout", "0.2",
                "--economy-weight", "2.5"]
-# The PPO smoke run's (03-training.md 11.22): a learning rate of 1e-4 drifted from the clone too far; a token budget of 165,000
+# The PPO smoke run's (03-training.md, "From a clone"): a learning rate of 1e-4 drifted from the clone too far; a token budget of 165,000
 # didn't fit in 85% of the card.
 PPO_FLAGS = ["--variants", "--z", "variant", "--fine-sim", "--decide-every", "6", "--segment", "16", "--token-budget", "40000",
              "--no-concurrent", "--critic-bins", "51", "--critic-span", "1.5", "--kl-start", "0.5", "--kl-end", "0.1",

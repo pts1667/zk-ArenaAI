@@ -196,4 +196,5 @@ def test_who_owns_a_unit_reaches_the_actor(small_map, table, actor):
     swapped = teams()
     swapped["ally_team"][swapped["uid"] == 30] = 3
     other = _kinds(actor, fz.featurize(make_frame(swapped), small_map, table))
-    assert not np.allclose(base, other)
+    # One enemy's allyteam moves an untrained actor's kinds by about 2e-6, inside allclose's default tolerance: ask that it moves at all.
+    assert np.abs(base - other).max() > 1e-7

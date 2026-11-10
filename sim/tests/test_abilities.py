@@ -1,4 +1,4 @@
-"""What some units do to others: grids that run weapons, pushing and pulling, throwing, silos and teleporting.  Measured against a game in 01-simulator.md section 8.17."""
+"""What some units do to others: grids that run weapons, pushing and pulling, throwing, silos and teleporting.  Measured against a game (01-simulator.md, "Validation")."""
 from __future__ import annotations
 
 import math

@@ -4,7 +4,7 @@ The sim and the live bot both produce this, and the featurizer reads nothing els
 of the schema.  sim/include/zksim/rawframe.hpp is generated from it (`python tools/policy_schema.py`) and a test
 compares the two.  It holds only what the live bot can really supply: no facing, weapon reload or pending shots.
 
-Three additions to docs/learned-policy/02-policy.md section 2.2, all because a stateless featurizer needs them: the
+Three additions to the first schema (docs/learned-policy/02-policy.md, "The raw frame"), all because a stateless featurizer needs them: the
 flags DAMAGED (for the commit lock) and RESERVED (units kept from the policy: none since the rules bot went), and `ord_age` on a remembered structure, which
 says how long ago it was seen.  Later, the flag JUMP_READY: an own unit's jump is charged, as its rules param says.
 For a PRODUCE, `ord_target` is the def id of what the factory or silo makes, not a unit.
@@ -32,7 +32,7 @@ BEING_BUILT, CLOAKED, PARALYZED, IN_LOS, IDLE, TYPE_KNOWN, DAMAGED, RESERVED, JU
 SITE_FREE, SITE_OURS, SITE_ENEMY, SITE_BUILDING = 0, 1, 2, 3
 _SITE_STATUS = {"free": SITE_FREE, "ours": SITE_OURS, "enemy": SITE_ENEMY, "building": SITE_BUILDING}
 
-# Order kinds: 02-policy.md section 4.1.
+# Order kinds: 02-policy.md, "Kinds".
 KEEP, MOVE, FIGHT, ATTACK_UNIT, ATTACK_GROUND, STOP, MANUAL_FIRE, JUMP, CLOAK_ON, CLOAK_OFF = range(10)
 BUILD, ASSIST, REPAIR, RECLAIM, PRODUCE, RESERVED_KIND = range(10, 16)
 ORDER_SLOTS = 16        # of a token's order memory, in which an order's kind is one of those above: the frames and encoders made so far have these
