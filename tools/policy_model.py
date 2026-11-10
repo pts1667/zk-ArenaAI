@@ -567,36 +567,60 @@ def _taken_before(anchor: torch.Tensor, units: int) -> torch.Tensor:
     return (torch.cumsum(hot.long(), 1) - hot.long()) > 0
 
 
+@dataclass
+class Sampling:
+    """A decision's actions part-way through being chosen (`sample_steps`).  Each step writes its slot of each in place, so that
+    the steps can be split among CUDA graphs that read and write the same memory (policy_graphs.py)."""
+    out: dict[str, torch.Tensor]    # actions.SLOT_FIELDS, B x slots
+    logp: torch.Tensor              # B x slots
+    taken: torch.Tensor             # B x C: the units picked so far
+    going: torch.Tensor             # B: not yet done
+    vectors: torch.Tensor           # B x slots x D: the actions so far (`action_vectors`), the first k filled
+
+    def actions(self) -> Actions:
+        return Actions(**self.out, logp=self.logp)
+
+
+def start_sampling(b: Batch, ctx, slots: int = act.SLOTS) -> Sampling:
+    count, units = b.ctrl_mask.shape
+    device = b.ctrl_mask.device
+    return Sampling({f: torch.full((count, slots), act.UNSET[f], dtype=torch.long, device=device) for f in act.SLOT_FIELDS},
+                    torch.zeros(count, slots, device=device), torch.zeros(count, units, dtype=torch.bool, device=device),
+                    torch.ones(count, dtype=torch.bool, device=device), ctx.hu.new_zeros(count, slots, ctx.hu.shape[-1]))
+
+
+def sample_steps(actor: nn.Module, b: Batch, ctx, s: Sampling, steps: range) -> None:
+    """The actions of these slots, one after another, each reading those before it.  A decision already done stays done: past
+    done a step changes nothing."""
+    units = b.ctrl_mask.shape[1]
+    for k in steps:
+        h = actor.plan(ctx, s.vectors[:, :k])[:, -1:]
+        anchor_l = actor.anchor_logits(b, ctx, h, s.taken[:, None])
+        pick = _sample(anchor_l)
+        anchor = torch.where(s.going[:, None], pick - 1, -1)
+        lp = _pick(anchor_l, pick).masked_fill(~s.going[:, None], 0.0)
+        choice, lp_rest, _ = _choices(actor, per_action(b, anchor), actor.reading(ctx, anchor, h), ctx)
+        s.out["anchor"][:, k] = anchor[:, 0]
+        for f, value in choice.items():
+            s.out[f][:, k] = value[:, 0]
+        s.logp[:, k] = (lp + lp_rest)[:, 0]
+        this = Actions(anchor, **choice, logp=lp)
+        s.vectors[:, k] = actor.action_vectors(b, ctx, this)[:, 0].to(s.vectors.dtype)
+        s.taken |= F.one_hot(anchor[:, 0].clamp_min(0), units).bool() & (anchor >= 0)
+        s.going &= anchor[:, 0] >= 0
+
+
 def sample_actions(actor: nn.Module, b: Batch, ctx, slots: int = act.SLOTS, every_slot: bool = False) -> Actions:
     """A decision's actions, one after another, each reading those before it, until done or `slots` of them.
 
-    every_slot: all `slots` steps, never asking the GPU whether every decision is done, as a CUDA graph can't ask
-    (policy_graphs.py).  Past done a step changes nothing, so the actions are the same, given the same random numbers."""
-    count, units = b.ctrl_mask.shape
-    device = b.ctrl_mask.device
-    out = {f: torch.full((count, slots), act.UNSET[f], dtype=torch.long, device=device) for f in act.SLOT_FIELDS}
-    logp = torch.zeros(count, slots, device=device)
-    taken = torch.zeros(count, units, dtype=torch.bool, device=device)
-    going = torch.ones(count, dtype=torch.bool, device=device)
-    vectors = ctx.hu.new_zeros(count, 0, ctx.hu.shape[-1])
+    every_slot: all `slots` steps, never asking the GPU whether every decision is done.  Past done a step changes nothing, so the
+    actions are the same, given the same random numbers."""
+    s = start_sampling(b, ctx, slots)
     for k in range(slots):
-        h = actor.plan(ctx, vectors)[:, -1:]
-        anchor_l = actor.anchor_logits(b, ctx, h, taken[:, None])
-        pick = _sample(anchor_l)
-        anchor = torch.where(going[:, None], pick - 1, -1)
-        lp = _pick(anchor_l, pick).masked_fill(~going[:, None], 0.0)
-        choice, lp_rest, _ = _choices(actor, per_action(b, anchor), actor.reading(ctx, anchor, h), ctx)
-        out["anchor"][:, k] = anchor[:, 0]
-        for f, value in choice.items():
-            out[f][:, k] = value[:, 0]
-        logp[:, k] = (lp + lp_rest)[:, 0]
-        this = Actions(anchor, **choice, logp=lp)
-        vectors = torch.cat((vectors, actor.action_vectors(b, ctx, this).to(vectors.dtype)), 1)
-        taken = taken | (F.one_hot(anchor[:, 0].clamp_min(0), units).bool() & (anchor >= 0))
-        going = going & (anchor[:, 0] >= 0)
-        if not every_slot and not going.any():
+        sample_steps(actor, b, ctx, s, range(k, k + 1))
+        if not every_slot and not s.going.any():
             break
-    return Actions(**out, logp=logp)
+    return s.actions()
 
 
 def evaluate_actions(actor: nn.Module, b: Batch, ctx, a: Actions, labelled: torch.Tensor | None = None) -> tuple[torch.Tensor, dict[str, tuple[torch.Tensor, torch.Tensor]]]:

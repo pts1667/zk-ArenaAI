@@ -250,8 +250,13 @@ For side A against side B at decision t:
 ### The update
 
 * **Segments** are 32 decisions.  Each runs in one forward pass from the frames kept at collection.
-* **Clipping**: each action, done included, has its own clipped ratio, averaged within the decision.  There's one advantage per
-  decision.
+* **The policy loss is SPO's** (Simple Policy Optimization, `docs/research/simple-policy-optimization.md`; the user,
+  2026-11-10), in place of PPO's clip: each ratio r scores r A - |A| (r - 1)^2 / (2 eps).  That's greatest at r = 1 + sign(A)
+  eps, and pulls every ratio back toward it, where the clip left a ratio past 1 ± eps with no gradient at all.  eps falls from
+  0.15 to 0.1 over the run, as the clip did.  Each action, done included, has its own ratio, averaged within the decision,
+  and there's one advantage per decision.  `clip_fraction` is still the share of ratios outside 1 ± eps, and
+  `ratio_deviation` the mean of |r - 1|, the paper's measure.  Dual-clip went with the clip: it capped the loss of a ratio
+  far past the region, which is the gradient SPO keeps.  Not yet compared with PPO in a run.
 * **Entropy**: a bonus per head (0.01), raised for any head below 30% of its maximum entropy (`--entropy-floor`; 0 from a
   clone).
 * **One pass** over each sample (`passes` 1).  An EMA of the weights (0.99) plays the tests and is saved.
@@ -266,9 +271,15 @@ For side A against side B at decision t:
 
 `--init RUN/actor.pt` starts the actor as the clone, at its size, and keeps a frozen copy:
 
-* `--kl-start` / `--kl-end`: an annealed k3 KL to the clone.
-* `--clone-weight`: a cloning loss on what the scripts advise on the actor's own frames (`SimEnv.advise`).
-* `--dual-clip 3` and `--critic-warmup` iterations with the actor frozen.
+* `--kl-start`: a k3 KL to the clone, at this weight at iteration 0.  `--kl-fade` takes its share down by iteration: by
+  default to 20% at iteration 100 and to nothing at 500, linear between (the user, 2026-11-10).  At 0 the clone's forward
+  pass is skipped.  Before, it fell linearly over the run's decisions from 0.5 to 0.1, and in `full-1` was still 0.48 at
+  iteration 88: weighed, the KL was about 0.14 of the loss, against the policy gradient's 0.002-0.004.
+* `--clone-weight`: a cloning loss on what the scripts advise on the actor's own frames (`SimEnv.advise`): DAgger alongside
+  PPO.  It fades as the KL does (`--clone-fade`, the same points by default; the user, 2026-11-10), and at 0 isn't
+  computed.  Kept whole, it was 0.5 x about 2.4 of `full-1`'s loss.  The army script stops advising once the weight is 0
+  for this iteration and the next (the next is when concurrent collection trains), and never advises in tests.
+* `--critic-warmup` iterations with the actor frozen.
 * `--economy-start` / `--economy-end`: the share of games where the policy runs its own economy.
 * `--fine-sim --decide-every 6`: the sim steps every slot and the actor decides every 6th, as cloning's data was recorded.
 * `--variants --z variant`: each seat is told its side's knobs and preset, with the counts unknown.  Each step keeps its z, and
@@ -276,9 +287,10 @@ For side A against side B at decision t:
 
 **The smoke run** (16 games, 3 iterations of 512 decisions, from `clone-7`): at a learning rate of 1e-4 the actor drifted too far
 from the clone.  At 1e-5 the KL to the clone went from 0.003 to 0.023, PPO's own KL per iteration stayed at 0.005-0.008, and 10%
-of ratios clipped.  The pipeline's PPO flags are this run's: lr 1e-5 to 3e-6, KL 0.5 to 0.1, cloning loss 0.5, dual clip 3, 51
-bins over ±1.5, economy share 0.25 to 1, income 0.5, token budget 40,000, not concurrent; and since `full-1`, the critic at
-3e-4 alone for 10 iterations.
+of ratios clipped.  The pipeline's PPO flags are this run's: lr 1e-5 to 3e-6, KL 0.5, cloning loss 0.5, 51 bins over ±1.5,
+economy share 0.25 to 1, income 0.5, token budget 40,000, not concurrent; since `full-1`, the critic at 3e-4 alone for 10
+iterations; and since 2026-11-10 the KL and the cloning loss fading by iteration, and SPO's loss in place of the clip and
+dual clip 3, as above.
 
 ### Opponents
 
@@ -311,10 +323,18 @@ every seat that decides.
   slot count, which the scripts and the opening go by, runs as before.  Unaligned, games drifted into all 6 phases, and the
   sampler ran on 79% of slots at 13.6 seats each.
 * **CUDA graphs** (`tools/policy_graphs.py`, on unless `--no-graphs`, or `--concurrent` in this process): the whole round's
-  forward pass (encoder, time transformer, all 16 action steps, critic, action tokens) is captured once per padded shape and
+  forward pass (encoder, time transformer, action steps, critic, action tokens) is captured once per padded shape and
   replayed.  Eager, its thousands of small kernels took about 0.25 s a round from one core, whatever the batch.  Shapes pad
   to a ladder of widths, and each width only grows: padded per batch, a new shape came one round in five.  Padding changes
   no decision's own outputs.  The graph reads the weights where they are, so it follows training.
+* **The action steps stop** at the first of steps 4, 6, 8, 10, 12 and 14 where every decision of the round is done: a graph
+  for the decision and its first 4 steps, one for each 2 steps after, and one to end the round, with the host asking between
+  them whether any decision is still going.  With `full-1`'s PPO actor at iteration 88, a decision took 3.2 steps on average,
+  but the longest of a round of 64 took 14 at the median, and 1.3% of decisions took all 16.  A step costs about 1 ms
+  however few its decisions (hundreds of small kernels), 1.6 ms at 64, beside 41 ms for the decision itself.  So the steps
+  come to about 21 ms a round instead of 25 at 64 decisions, and 12 instead of 19 at 16, a collector's share.  Stepping only
+  the decisions still going after each cut came to 17 and 11 ms, but it needed a graph for each count of them: 4 collectors
+  then held 1.8 GB more of the card, outside PyTorch's count and each one's cap.
 * **Collector processes** (`tools/policy_collectors.py`, `--collectors N`): each plays its share of the games and of the
   tests, with its own copy of the nets and its own graphs.  They fork before the GPU is touched, after the map pool is
   loaded, and share its maps.  Weights reach them through shared memory before each collection, checked by a checksum.
@@ -348,8 +368,12 @@ every seat that decides.
 
   * With a test every 20 iterations that's 78, 136 and 151 a second: graphs give 1.75x, collectors 1.9x.
   * **The GPU is now the limit**: Task Manager shows it 80-100% busy.  4 collectors not concurrent collected more slowly than
-    one process, and concurrent ones slow training from 10-17 s an iteration to 18-27 s.  Every graph runs all 16 action
-    steps, where a decision averages about 2 actions: that's the next saving.
+    one process, and concurrent ones slow training from 10-17 s an iteration to 18-27 s.
+  * **Stopping the action steps** (above), from `full-1`'s PPO actor at iteration 88 with 4 concurrent collectors, means
+    over iterations 2-20: 186 decisions a second against 175 running all 16 steps, with the card's peak the same (8.9 GB).
+    Collection went from 14.3 s an iteration to 12.4, and training, sharing the GPU, from 23.3 s to 22.0.  Training is now
+    the longer of the two, so a faster collection gains little more here.  In this process the GPU is about a quarter of
+    a round, the sim most of the rest: there the saving should be about 2% (not measured).
   * **Memory**: the learner reserves about 4.9 GB to train, 7.1 GB with its own graphs; a collector of 16 games 0.59 GB.
   * Concurrent, the update reads data played by weights two updates old.  Its explained variance grew more slowly than in
     this process (0.004 against 0.05 by iteration 11), within what separates runs: eager `full-1` had 0.0035 there.

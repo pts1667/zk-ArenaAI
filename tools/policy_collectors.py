@@ -93,6 +93,7 @@ class Shell:
         self.evaluator = self.player        # with the tests' weights loaded
         self.progress = 0.0
         self.economy_share = 0.0
+        self.advising = False
 
 
 class _Serving:
@@ -132,11 +133,11 @@ class _Serving:
     def _memory(self) -> dict[str, float]:
         return {"collector_reserved_gb": torch.cuda.max_memory_reserved() / 2**30} if self.device == "cuda" else {}
 
-    def collect(self, want: int, progress: float, economy: float, self_play: float) -> None:
+    def collect(self, want: int, progress: float, economy: float, self_play: float, advising: bool) -> None:
         began = time.perf_counter()
         self.play.read(self.nets)
         weights = fingerprint(self.nets)
-        self.shell.progress, self.shell.economy_share = progress, economy
+        self.shell.progress, self.shell.economy_share, self.shell.advising = progress, economy, advising
         env = self.collector.env
         env.policy_economy_share, env.self_play_share = economy, self_play
         segments, tally = self.collector.collect_tally(want)
@@ -234,7 +235,8 @@ class Collectors:
         self.play.write(nets)
         self.sent_weights = fingerprint(nets)
         for k, part in enumerate(split(want, self.count)):
-            self._send(k, ("collect", {"want": part, "progress": learner.progress, "economy": learner.economy_share, "self_play": learner.self_play.share}))
+            self._send(k, ("collect", {"want": part, "progress": learner.progress, "economy": learner.economy_share, "self_play": learner.self_play.share,
+                                       "advising": learner.advising}))
         self.collecting, self.sent = True, time.perf_counter()
 
     def result(self) -> tuple[list[pt.Segment], dict[str, float], float]:

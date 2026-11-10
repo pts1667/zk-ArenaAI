@@ -20,7 +20,7 @@ NeurIPS page.
 | P4 | Check for copying past actions | `--blind`, `--act-dropout` | blind is worse everywhere (NLL 2.84 to 3.12): no dropout needed |
 | P5 | Width | `--size small` against the default | the small actor is worse held out, and the gap widens |
 | P6 | Finish on winners; lower temperature in play | `--finish-winners`, `--temperature` | in `clone-8`; T 0.8 changes nothing measurable |
-| P7 | The cloning-to-PPO recipe: critic warm-up, KL to the clone, cloning loss, dual clip, HL-Gauss | `policy_train.py --init` | smoke run only |
+| P7 | The cloning-to-PPO recipe: critic warm-up, KL to the clone, cloning loss, dual clip, HL-Gauss | `policy_train.py --init` | `full-1`; dual clip gone with SPO's loss (2026-11-10) |
 | P8, C5 | A strategy z | `--z`, `zindex` | 0.03 nats held out.  Told its variant in play, the best economy of six evals, within the noise |
 | C4 | Economy labels, weighted | `--economy-weight` | at 2.5: builds 7.81 to 7.56 nats, fights 4.44 to 4.67 |
 | C6 | The policy taking over the economy | `--economy-start` / `--economy-end` | not yet in a full run |
@@ -40,8 +40,11 @@ The papers behind these:
 * **Cloning to RL**:
   * a KL to the clone: AlphaStar, SCC, VPT (2206.11795) and piKL (2112.07544, 2210.05492);
   * a cloning loss kept in RL: 2402.02868 and Kickstarting (1803.03835);
-  * dual clip: 1912.09729;
+  * dual clip: 1912.09729, until SPO's loss replaced the clip;
   * HL-Gauss: 2403.03950;
+* **The policy loss**: Simple Policy Optimization (2401.16025, `docs/research/simple-policy-optimization.md`): a quadratic
+  penalty on the ratio's distance from 1 in place of the clip, which kept ratios near 0.1-0.2 from 1 in deep nets where
+  PPO's ran to the hundreds.
   * RAISocketAI (2402.08112) went from 71% with cloning to 88% with PPO after it, in about 72 GPU-days.
 * **z**: AlphaStar, SCC, MGG (2110.14221).
 

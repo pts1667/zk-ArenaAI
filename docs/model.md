@@ -429,9 +429,11 @@ frame, so every decision in the stretch sees exactly what it would have seen in 
 * **PPO** (`policy_train.py`):
   * Segments of 32 decisions from the sim, each started from the state kept at collection.  It runs at the actor's rate,
     `--decide-every 6`, with `--fine-sim` (the sim steps every slot, as the data was recorded).
-  * `--init` starts it from a cloning checkpoint, with a frozen copy for an annealed KL to it and a cloning loss on the
-    scripts' advice.  `--z variant` tells the actor its side's knobs, kept on each step so the update reads what play did.
-  * Each action gets its own clipped ratio, averaged within a decision (done included), with one advantage per decision.
+  * `--init` starts it from a cloning checkpoint, with a frozen copy for a KL to it and a cloning loss on the scripts'
+    advice, both fading by iteration.  `--z variant` tells the actor its side's knobs, kept on each step so the update reads
+    what play did.
+  * The policy loss is Simple Policy Optimization's (SPO), not PPO's clip.  Each action gets its own ratio, averaged within a
+    decision (done included), with one advantage per decision.
   * The **critic** is a separate network, never in the bot: a self-attention encoder over the privileged frame, including the
     enemy units the seat can't see.  It reads the value off its global token.
 

@@ -140,3 +140,19 @@ def test_runs_sharing_the_card_stay_inside_their_share():
 def test_too_many_runs_for_the_card_is_an_error():
     with pytest.raises(ValueError):
         pt.gpu_fraction(0.85, 40, 12 * 2**30)
+
+
+def test_spo_is_greatest_at_the_edge_of_the_trust_region_and_pulls_back_from_past_it():
+    """Where PPO's clip gives a ratio past 1 + eps no gradient at all."""
+    eps = 0.2
+    for adv, best in ((1.0, 1.2), (-1.0, 0.8)):
+        r = torch.tensor([best, 1.0, 1.0 + 3 * (best - 1.0)], requires_grad=True)
+        pt.spo_objective(r, torch.tensor(adv), eps).sum().backward()
+        at_best, inside, past = r.grad.tolist()
+        assert at_best == pytest.approx(0.0, abs=1e-6)
+        assert inside * (best - 1.0) > 0 and past * (best - 1.0) < 0      # toward the edge, from either side
+
+
+def test_the_kl_to_the_clone_and_the_cloning_loss_fade_to_a_fifth_by_iteration_100_and_to_nothing_by_500():
+    for fade in (pt.Config.kl_fade, pt.Config.clone_fade):
+        assert [pt.fade_share(i, fade) for i in (0, 50, 100, 300, 500, 2000)] == pytest.approx([1.0, 0.6, 0.2, 0.1, 0.0, 0.0])

@@ -26,7 +26,16 @@ simulator (`sim/`): first by cloning scripted players, then DAgger, then PPO.
   * PPO reached 22-31% test wins by iteration 88 (360,552 decisions), with explained variance 0.94, when the user stopped it.
     It's not marked done: delete `full-1/ppo/stop` and run the pipeline's command again to resume.
 * **PPO plays as CUDA graphs** (`policy_graphs.py`), optionally with collector processes (`policy_collectors.py`): 158 and 178
-  decisions a second against 92 eager.  The GPU is now the limit.
+  decisions a second against 92 eager.  The GPU is now the limit.  A round's action steps stop at the first cut where every
+  decision is done: 6% more with 4 concurrent collectors (186 against 175 from `full-1`'s PPO actor), and no more memory.
+* **The KL to the clone and the cloning loss fade by iteration** (`--kl-fade`, `--clone-fade`, the user, 2026-11-10): from
+  their weights at iteration 0 to 20% at 100 and nothing at 500.  The KL had fallen over the run's decisions instead, and was
+  still 0.48 at iteration 88 of `full-1`, about 0.14 of the loss against the policy gradient's 0.003; the cloning loss, kept
+  at 0.5, was about 1.2.  Resumed, `full-1` goes on at 0.15 for each.  Once the cloning loss is gone the army script stops
+  advising, and it never advises in tests.
+* **The policy loss is SPO's** (Simple Policy Optimization, the user, 2026-11-10) in place of PPO's clip, and dual-clip is
+  gone (`--dual-clip` no longer exists).  The stage and its directory are still called PPO.  Checked by a unit test of the
+  objective and a short CPU run, not yet in a real run against PPO.
 
 ## Invalid since 2026-11-10 (FEATURE_VERSION 7)
 
@@ -122,8 +131,9 @@ README.md has the rules for engine games: headless at max speed, windowed only w
 
 ## Next
 
-1. **PPO's speed, next**: every graph runs all 16 action steps, where a decision averages about 2 actions.  Sampling in chunks of
-   steps that stop once every decision is done should cut most of the GPU's work, now the limit.
+1. **PPO's speed, next**: with concurrent collectors, training (about 22 s an iteration) is now longer than collecting (12 s).
+   In a round's replay the decision itself (encoder, time transformer, critic: 41 ms at 64 decisions) is the bigger part; a
+   step is about 1 ms of small kernels, which fusing (`torch.compile` of a step, now the shapes are fixed) could shrink.
 2. **`full-1`'s PPO** (the user decides when): resume it, which now plays as graphs at about 1.75x.  Whether to also run
    `--collectors 4 --concurrent` (about 10% more, on data two updates old) is the user's call; the pipeline runs not concurrent.
 3. **The stall in expansion** survived DAgger.  Whether PPO's economy share (the policy running its own economy in more games)

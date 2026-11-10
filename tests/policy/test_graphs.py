@@ -166,6 +166,17 @@ def test_a_graph_decides_as_the_plain_forward_pass_and_follows_the_weights(encod
         critic.value.bias += 1.0        # in place, as an optimizer step is
     moved = graphs.forward(items, history, seen)[1]
     assert np.allclose(moved, value + 1.0, atol=2e-2)
+    # A round's steps stop at the first cut where every decision is done; each chunk reads what the one before left.
+    many = _items(12, 8)
+    for bias in (20.0, -20.0):
+        with torch.no_grad():
+            actor.head_done.bias[0] = bias
+        before = graphs.steps
+        out = graphs.forward(many, *actor.initial_state(12, 0, "cuda"))[0]
+        need = int(np.minimum((out["anchor"] >= 0).sum(1) + 1, act.SLOTS).max())       # the longest decision's steps, done included
+        assert graphs.steps - before == min(c for c in graphs.cuts if c >= need), need
+    assert need > graphs.cuts[0]
+    check(many, *actor.initial_state(12, 0, "cuda"))
 
 
 @pytest.mark.skipif(not CUDA, reason="needs CUDA")

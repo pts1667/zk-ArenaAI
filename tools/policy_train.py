@@ -70,8 +70,10 @@ class Config:
     # The critic's rate at the start, falling as the actor's does; 0: the actor's.  A clone's actor wants a small rate, and a new
     # critic at it learns nothing: at 1e-5 its explained variance stayed at 0.0000 for 19 iterations (full-1, 2026-11-10).
     critic_lr: float = 0.0
-    clip_start: float = 0.15
-    clip_end: float = 0.1
+    # SPO's eps, the ratio's trust region 1 +- eps (Learner._update_loss), at the start and at the end, linear between.  PPO's
+    # clip had these until 2026-11-10.
+    epsilon_start: float = 0.15
+    epsilon_end: float = 0.1
     gae: float = 0.95
     value_weight: float = 0.5
     grad_clip: float = 0.5
@@ -99,10 +101,14 @@ class Config:
     entropy_floor: float = 0.3      # ENTROPY_FLOOR: a head below this share of its maximum entropy gets more bonus.  A clone's heads
                                     # all are, so from a clone it's 0, and the KL to the clone keeps its spread instead
     critic_warmup: int = 0          # iterations at the start where only the critic learns: the actor stays as it was
-    kl_start: float = 0.0           # the weight of the KL to the frozen clone (`init`), at the start
-    kl_end: float = 0.0             # and at the end, linear between: annealed but kept
-    clone_weight: float = 0.0       # the cloning loss on what the scripts advise on its own frames (policy_sim_env.advise)
-    dual_clip: float = 0.0          # dual-clip PPO's c (3 in Ye et al. 2020): a bad action's loss at most c x |advantage|; 0 off
+    kl_start: float = 0.0           # the weight of the KL to the frozen clone (`init`), at iteration 0
+    # Its share of that by iteration, linear between and the last after: from 100% to 20% by iteration 100 and gone by 500.  Linear
+    # in the run's decisions to a kept 0.2 of it, as before (2026-11-10), it was still 0.48 at iteration 88 of 1.85M decisions:
+    # weighed, about 0.14 to the policy gradient's 0.003 (the user).
+    kl_fade: tuple[tuple[int, float], ...] = ((0, 1.0), (100, 0.2), (500, 0.0))
+    clone_weight: float = 0.0       # the cloning loss on what the scripts advise on its own frames (policy_sim_env.advise), at iteration 0
+    # Its share of that by iteration, as the KL's (the user, 2026-11-10).  Kept whole, it was 0.5 x about 2.4 of `full-1`'s loss.
+    clone_fade: tuple[tuple[int, float], ...] = ((0, 1.0), (100, 0.2), (500, 0.0))
     economy_start: float = 0.0      # the share of games where the policy runs its own economy, at the start
     economy_end: float = 0.0        # and at the end, linear between
     income_weight: float = 0.0      # a zero-sum income reward (policy_sim_env.reward), faded by beta as the rest of the shaping
@@ -151,6 +157,18 @@ def collector_bytes(cfg: "Config") -> float:
 def memory_tokens(tokens: int) -> float:
     """What a padded frame of this many tokens costs in training's memory, in tokens of a small one."""
     return tokens * (1.0 + tokens / PAIR_TOKENS)
+
+
+def spo_objective(ratio: torch.Tensor, adv: torch.Tensor, eps: float) -> torch.Tensor:
+    """Simple Policy Optimization's, to maximise for each sample: r A - |A| (r - 1)^2 / (2 eps)."""
+    return ratio * adv - adv.abs() / (2.0 * eps) * (ratio - 1.0).square()
+
+
+def fade_share(iteration: int, fade: tuple[tuple[int, float], ...]) -> float:
+    """The share of a weight left at this iteration (Config.kl_fade, clone_fade): linear between fade's (iteration, share)
+    points, and the last point's after it."""
+    at, share = zip(*fade)
+    return float(np.interp(iteration, at, share))
 
 
 def beta(progress: float) -> float:
@@ -387,7 +405,7 @@ class Learner:
         if state is not None:
             missing, unexpected = self.actor.load_state_dict(state["actor"], strict=False)
             assert not unexpected and all(k.startswith("z_in.") for k in missing), (missing, unexpected)
-            if cfg.kl_start or cfg.kl_end:
+            if cfg.kl_start:
                 self.reference = copy.deepcopy(self.actor).eval()
                 for p in self.reference.parameters():
                     p.requires_grad_(False)
@@ -467,7 +485,7 @@ class Learner:
             batches.append(current)
         return [batches[int(k)] for k in rng.permutation(len(batches))]
 
-    def _loss(self, batch: list[Segment], clip: float, note) -> torch.Tensor:
+    def _loss(self, batch: list[Segment], eps: float, note) -> torch.Tensor:
         """Every decision of each segment in one forward pass, from the latents it was played with."""
         device = self.device
         steps = [step for seg in batch for step in seg.steps]
@@ -483,7 +501,6 @@ class Learner:
         latents = torch.as_tensor(latents, device=device)
         # A segment is one game's, so its first step's z is all of its steps'.
         z = None if steps[0].z is None else torch.as_tensor(np.stack([seg.steps[0].z for seg in batch]), device=device)
-        cfg = self.cfg
         with self.autocast:
             a = _stored_actions(steps, device)
             acted = self.actor.segment_actions(whole, a, lengths)
@@ -492,7 +509,8 @@ class Learner:
             logp, entropy = pm.evaluate_actions(self.actor, whole, ctx, a)
             value = self.critic(whole, logits=True)
             extra = torch.zeros((), device=device)
-            if self.reference is not None:
+            coef = self.kl_weight
+            if self.reference is not None and coef > 0.0:
                 # KL(policy || clone) on the actions taken, as k3 = r - 1 - log r with r = clone / policy: never below 0.
                 with torch.no_grad():
                     ref = self.reference
@@ -501,20 +519,23 @@ class Learner:
                 w = pm.chosen(a).float()
                 log_r = (ref_logp.float() - logp).clamp(-20.0, 20.0)
                 kl = ((log_r.exp() - 1.0 - log_r) * w).sum() / w.sum().clamp_min(1.0)
-                coef = cfg.kl_start + (cfg.kl_end - cfg.kl_start) * self.progress
                 extra = extra + coef * kl
                 note("kl_clone", float(kl.detach()))
-            if cfg.clone_weight and any(s.label is not None for s in steps):
+            clone_weight = self.clone_weight
+            if clone_weight > 0.0 and any(s.label is not None for s in steps):
                 lab, labelled, has = _label_actions(steps, whole.ctrl_mask.shape[1], device)
                 lab_logp, _ = pm.evaluate_actions(self.actor, whole, ctx, lab, labelled)
                 w = pm.chosen(lab).float() * has[:, None]
                 clone = -(w * lab_logp).sum() / w.sum().clamp_min(1.0)
-                extra = extra + cfg.clone_weight * clone
+                extra = extra + clone_weight * clone
                 note("loss_clone", float(clone.detach()))
-        return self._ppo_loss(steps, a, logp, entropy, value, clip, note) + extra
+        return self._update_loss(steps, a, logp, entropy, value, eps, note) + extra
 
-    def _ppo_loss(self, steps: list[Step], a: pm.Actions, logp: torch.Tensor, entropy: dict, value: torch.Tensor, clip: float, note) -> torch.Tensor:
-        """Each action's own clipped ratio, averaged over the decision's actions, done included; one advantage a decision."""
+    def _update_loss(self, steps: list[Step], a: pm.Actions, logp: torch.Tensor, entropy: dict, value: torch.Tensor, eps: float, note) -> torch.Tensor:
+        """Simple Policy Optimization's policy loss (Xie et al., docs/research/simple-policy-optimization.md), with the value and
+        entropy terms.  Each action's own ratio r scores r A - |A| (r - 1)^2 / (2 eps): greatest at r = 1 + sign(A) eps, and
+        pulling every ratio back toward that, where PPO's clip left those past it with no gradient.  Averaged over the
+        decision's actions, done included; one advantage a decision."""
         cfg, device = self.cfg, self.device
         decisions = len(steps)
         advantages = np.array([s.advantage for s in steps], np.float32)
@@ -523,18 +544,18 @@ class Learner:
         old = a.logp
         weights = pm.chosen(a).float()
         ratio = (logp - old).clamp(-20.0, 20.0).exp()
-        per_action = -torch.min(ratio * adv[:, None], ratio.clamp(1.0 - clip, 1.0 + clip) * adv[:, None])
-        if cfg.dual_clip:
-            # Dual-clip: where the advantage is negative, a ratio far above 1 costs at most dual_clip x |advantage|.
-            per_action = torch.where(adv[:, None] < 0, torch.min(per_action, -cfg.dual_clip * adv[:, None]), per_action)
+        per_action = -spo_objective(ratio, adv[:, None], eps)
         count = weights.sum(-1)
         has = count > 0
         pg = torch.zeros((), device=device)
         if has.any():
             pg = ((per_action * weights).sum(-1)[has] / count[has]).sum() / decisions
             with torch.no_grad():
-                note("kl", float(((old - logp) * weights).sum() / weights.sum()), float(weights.sum()))
-                note("clip_fraction", float((((ratio - 1.0).abs() > clip).float() * weights).sum() / weights.sum()), float(weights.sum()))
+                total = float(weights.sum())
+                deviation = (ratio - 1.0).abs()
+                note("kl", float(((old - logp) * weights).sum()) / total, total)
+                note("clip_fraction", float(((deviation > eps).float() * weights).sum()) / total, total)     # outside 1 +- eps
+                note("ratio_deviation", float((deviation * weights).sum()) / total, total)
         if self.critic.bins:
             value_loss = self.critic.hl_gauss(value, ret).sum() / decisions
         else:
@@ -551,6 +572,22 @@ class Learner:
         note("minibatch_decisions", decisions)
         return pg + cfg.value_weight * value_loss - entropy_loss
 
+    @property
+    def kl_weight(self) -> float:
+        """The KL to the clone's weight this iteration (Config.kl_fade)."""
+        return self.cfg.kl_start * fade_share(self.iteration, self.cfg.kl_fade) if self.reference is not None else 0.0
+
+    @property
+    def clone_weight(self) -> float:
+        """The cloning loss's weight this iteration (Config.clone_fade)."""
+        return self.cfg.clone_weight * fade_share(self.iteration, self.cfg.clone_fade)
+
+    @property
+    def advising(self) -> bool:
+        """Whether the scripts should advise in what's collected now: while the cloning loss has weight this iteration or the next,
+        which is when what's collected concurrently trains."""
+        return self.cfg.clone_weight > 0.0 and max(fade_share(self.iteration + k, self.cfg.clone_fade) for k in (0, 1)) > 0.0
+
     def set_rates(self) -> None:
         """The actor's rate on its schedule, or 0 while the critic warms up; the critic's scaled as the actor's falls."""
         cfg = self.cfg
@@ -562,7 +599,7 @@ class Learner:
         """between: called after each optimizer step, the moments when the weights are whole."""
         cfg = self.cfg
         p = self.progress
-        clip = cfg.clip_start + (cfg.clip_end - cfg.clip_start) * p
+        eps = cfg.epsilon_start + (cfg.epsilon_end - cfg.epsilon_start) * p
         self.set_rates()
         totals: dict[str, float] = {}
         counts: dict[str, float] = {}
@@ -574,14 +611,19 @@ class Learner:
         for _ in range(cfg.passes):
             for batch in self._minibatches(segments, rng):
                 self.optimizer.zero_grad(set_to_none=True)
-                self._loss(batch, clip, note).backward()
+                self._loss(batch, eps, note).backward()
                 grad = torch.nn.utils.clip_grad_norm_(self.trained, cfg.grad_clip)
                 self.optimizer.step()
                 self.ema_step()
                 note("grad_norm", float(grad))
                 if between is not None:
                     between()
-        return {k: totals[k] / max(counts[k], 1e-9) for k in totals}
+        out = {k: totals[k] / max(counts[k], 1e-9) for k in totals}
+        if self.reference is not None:
+            out["kl_weight"] = self.kl_weight
+        if self.cfg.clone_weight:
+            out["clone_weight"] = self.clone_weight
+        return out
 
     def adjust_entropy(self, metrics: dict[str, float]) -> None:
         """Keeps each head above a share of its maximum, so none collapses."""
@@ -750,6 +792,7 @@ class Collector:
     def collect_tally(self, want: int) -> tuple[list[Segment], "Tally"]:
         """`collect`, with what it counted as a `Tally`, which several collectors' add up."""
         learner, env, cfg, seats, current = self.learner, self.env, self.learner.cfg, self.seats, self.current
+        env.advise = learner.advising       # the army script's advice, for the cloning loss while it has any weight
         stored = 0
         finished: list[Trajectory] = []
         segments: list[Segment] = []
@@ -864,6 +907,8 @@ class Tally:
             metrics[f"wins_{mode}"] = float(np.mean(results))
             metrics[f"games_{mode}"] = len(results)
         metrics.update(self.graphs)
+        if self.graphs.get("graph_replays"):
+            metrics["graph_steps_a_round"] = self.graphs["graph_steps"] / self.graphs["graph_replays"]
         return metrics
 
 
@@ -893,6 +938,7 @@ def evaluate(learner: Learner, make_env, opponent: str, games: int, seed: int, r
     player = learner.evaluator
     env = make_env(games, seed, modes=[opponent])
     env.policy_economy_share = learner.economy_share
+    env.advise = False          # no cloning loss learns from a test
     env.begin()
     if replays is not None:
         import policy_replay
@@ -1176,10 +1222,12 @@ def main() -> None:
     ap.add_argument("--critic-span", type=float, default=Config.critic_span)
     ap.add_argument("--entropy-floor", type=float, default=Config.entropy_floor, help="0 from a clone: no head's bonus rises")
     ap.add_argument("--critic-warmup", type=int, default=0, help="iterations where only the critic learns")
-    ap.add_argument("--kl-start", type=float, default=0.0, help="the KL to the frozen clone's weight at the start")
-    ap.add_argument("--kl-end", type=float, default=0.0, help="and at the end")
-    ap.add_argument("--clone-weight", type=float, default=0.0, help="the cloning loss on the scripts' advice (they then advise)")
-    ap.add_argument("--dual-clip", type=float, default=0.0, help="dual-clip PPO's c; 0 off")
+    ap.add_argument("--kl-start", type=float, default=0.0, help="the KL to the frozen clone's weight at iteration 0")
+    ap.add_argument("--kl-fade", nargs="+", default=[f"{i}:{s:g}" for i, s in Config.kl_fade], metavar="ITERATION:SHARE",
+                    help="its share of that by iteration, linear between, the last after (default: %(default)s)")
+    ap.add_argument("--clone-weight", type=float, default=0.0, help="the cloning loss on the scripts' advice (they then advise), at iteration 0")
+    ap.add_argument("--clone-fade", nargs="+", default=[f"{i}:{s:g}" for i, s in Config.clone_fade], metavar="ITERATION:SHARE",
+                    help="its share of that by iteration, as --kl-fade (default: %(default)s)")
     ap.add_argument("--economy-start", type=float, default=0.0, help="share of games where the policy runs its own economy, at the start")
     ap.add_argument("--economy-end", type=float, default=0.0, help="and at the end")
     ap.add_argument("--income-weight", type=float, default=0.0, help="the zero-sum income reward's weight")
@@ -1200,6 +1248,11 @@ def main() -> None:
     args = ap.parse_args()
     if args.z == "variant" and not args.variants:
         ap.error("--z variant needs --variants: without them there are no knobs to tell")
+    fades = {}
+    for name in ("kl_fade", "clone_fade"):
+        fade = fades[name] = tuple((int(i), float(s)) for i, s in (point.split(":") for point in getattr(args, name)))
+        if any(a[0] >= b[0] for a, b in zip(fade, fade[1:])):
+            ap.error(f"--{name.replace('_', '-')}'s iterations must rise")
     import policy_sim_env
 
     cfg = Config(seed=args.seed, decisions=args.decisions, games=args.games, iteration=args.iteration, passes=args.passes, ema=args.ema,
@@ -1207,8 +1260,8 @@ def main() -> None:
                  decide_every=args.decide_every, hours=args.hours, eval_every=args.eval_every, gpu_runs=args.gpu_runs, empty_cache=args.empty_cache,
                  latent_encoder=args.latent_encoder, enabled_kinds=policy_sim_env.KINDS,     # what the sim obeys
                  init=args.init, maps=args.maps, variants=args.variants, lr_start=args.lr_start, lr_end=args.lr_end, critic_lr=args.critic_lr,
-                 critic_bins=args.critic_bins, critic_span=args.critic_span, entropy_floor=args.entropy_floor, critic_warmup=args.critic_warmup, kl_start=args.kl_start, kl_end=args.kl_end,
-                 clone_weight=args.clone_weight, dual_clip=args.dual_clip, economy_start=args.economy_start, economy_end=args.economy_end,
+                 critic_bins=args.critic_bins, critic_span=args.critic_span, entropy_floor=args.entropy_floor, critic_warmup=args.critic_warmup, kl_start=args.kl_start, **fades,
+                 clone_weight=args.clone_weight, economy_start=args.economy_start, economy_end=args.economy_end,
                  income_weight=args.income_weight, diversity=args.diversity, fine_sim=args.fine_sim, z=args.z,
                  replay_hours=args.replay_hours, replay_games=args.replay_games, replays=args.replays, graphs=args.graphs,
                  collectors=args.collectors, collector_gb=args.collector_gb)
