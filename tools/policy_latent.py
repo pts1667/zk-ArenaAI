@@ -373,8 +373,10 @@ class LatentActor(nn.Module):
         Returns B x F x tokens x D, what each frame's latent tokens hold after reading those before; with newest_only, B x 1 x tokens x D."""
         count, tokens, acts = frames.shape[1], frames.shape[2], acted.shape[2]
         state = torch.where(present[..., None, None], self.latent_in(frames) + self.slots, self.before.to(frames.dtype))
-        if z is not None:
-            state = state + self.z_in(z.to(self.z_in.weight.dtype))[:, None, None, :].to(state.dtype)
+        # None is an unknown z, which cloning shows as all zeros: z_in's bias, learnt with the rest, still reaches every token.
+        # (Leaving it out, as before 2026-11-10, gave a z-trained actor told nothing a state it had never been trained on.)
+        added = self.z_in.bias[None] if z is None else self.z_in(z.to(self.z_in.weight.dtype))
+        state = state + added[:, None, None, :].to(state.dtype)
         done = torch.where(present[..., None, None], acted.to(state.dtype) + self.act_slots, self.act_before.to(state.dtype))
         per = tokens + acts
         h = torch.cat((state, done), 2).flatten(1, 2)

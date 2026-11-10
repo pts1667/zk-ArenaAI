@@ -671,7 +671,11 @@ def main() -> None:
     t.add_argument("--d", type=int, default=_encoder_config().d, help="the encoder's width")
     t.add_argument("--rounds", type=int, default=_encoder_config().rounds, help="the encoder's")
     t.add_argument("--device", default=None)
+    t.add_argument("--gpu-memory", type=float, default=0.85, help="share of the GPU's memory this may use before it fails")
     args = parser.parse_args()
+    if (args.device or ("cuda" if torch.cuda.is_available() else "cpu")).startswith("cuda"):
+        # Past the card's memory, the Windows driver spills into system RAM rather than failing: fail instead.
+        torch.cuda.set_per_process_memory_fraction(args.gpu_memory)
     train(args.data, args.run, TrainConfig(steps=args.steps, batch=args.batch, hours=args.hours, probe_every=args.probe_every, seed=args.seed, muon_lr=args.muon_lr),
           VaeConfig(latent=args.latent, beta=args.beta, decoder_d=args.decoder_d, variational=not args.autoencoder, two_part=args.two_part, questions=args.questions, question_weight=args.question_weight),
           replace(_encoder_config(), queries=args.queries, d=args.d, rounds=args.rounds, region_pool=args.region_pool), device=args.device)

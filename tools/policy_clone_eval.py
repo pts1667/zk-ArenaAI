@@ -114,11 +114,14 @@ def main() -> None:
                     help="what the actor is told of its strategy: nothing, or its side's knobs (the counts unknown)")
     ap.add_argument("--record", help="keep the games here for DAgger: the actor's frames with the scripts' advice as orders")
     ap.add_argument("--record-games", type=int, default=0, help="with --record, play on until this many games are kept (default --games)")
+    ap.add_argument("--record-prefix", default="game-dagger",
+                    help="the kept games' file names start with this (it must start with game-), so that rounds can share a directory")
     ap.add_argument("--workers", type=int, default=12)
     ap.add_argument("--decide-every", type=int, default=se.SCRIPT_EVERY, help="for a PPO checkpoint, which doesn't say")
     ap.add_argument("--encoder", default=policy_latent.ENCODER)
     ap.add_argument("--gpu-memory", type=float, default=0.85)
     args = ap.parse_args()
+    assert args.record_prefix.startswith("game-"), "policy_clone_data.sides lists only game-*"
     began = time.perf_counter()
     state = torch.load(args.actor, map_location="cpu", weights_only=False)
     decide_every = int(state["config"]["decide_every"]) if "config" in state else args.decide_every     # PPO's has none
@@ -134,7 +137,7 @@ def main() -> None:
     pm.TEMPERATURE = args.temperature
     player = pt.Player(actor, None, workers, device)
     env.begin()
-    rec = cd.Recorder(env, pathlib.Path(args.record), "game-dagger") if args.record else None
+    rec = cd.Recorder(env, pathlib.Path(args.record), args.record_prefix) if args.record else None
     seats = pt.Seats(env.seat_count, device, actor)
     names = np.arange(vocabulary, dtype=np.int32)
     notes = Notes(env)

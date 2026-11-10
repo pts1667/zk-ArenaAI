@@ -1974,3 +1974,52 @@ Each eval took 4.5-6 minutes for ~25,650 decisions; 41 to 46 of the 64 games rea
 Both timed with a cloning run on the GPU beside them.  Decoding is now a worker's largest part (0.67 ms a decision), then labels (`actions.encode`, `to_slots`, ~0.2 ms).  numba's cache knows only the file it compiled, not the modules whose numbers it froze in, so the kernels hold rawframe's numbers as literals checked on import, and take the type stats' width from the array.  A recursive function loaded from that cache crashed (a segfault on the first call), so numpy's pairwise sum runs on a stack of its own.
 
 **Tests:** `sim/tests` and `tests`, 668 passed (3.4 minutes).  New: z reads as nothing until it's learned, and then as the strategy; the scripts only advise a label seat, and the economy script only where the policy runs its economy; z's layout and dropout; the economy's weights; HL-Gauss; the kernels' mean is numpy's to the bit; a copied bundle with new arrays is packed anew.
+
+### 11.23 A whole run in one command, z in PPO, and an unknown z as cloning showed it (2026-11-10)
+
+The user: `clone-8` told its variant is the best of 11.22's evals (5 wins in 64, where the others had 1 to 3, and the best economy); write a script for a whole run, with the option of training the encoder first, then 10,000 steps of cloning, DAgger rounds and PPO.  No testing for now.
+
+**`tools/policy_pipeline.py`** runs these stages in order, each with settings that were already used:
+
+| Stage | What | Settings from |
+|---|---|---|
+| `frames` | with `--train-encoder`, if `--frames` (by default `ROOT/frames`) has no `manifest.json`: `frame_data.py collect`, 1M frames each of the frame games, scenarios and the C++ scripts' games | `pool5` (11.17) |
+| `encoder` | with `--train-encoder`: `frame_vae.py train`, 25,000 steps, to `ROOT/encoder`; every later stage reads its `vae-last.pt` (otherwise `--encoder`, by default `policy_latent.ENCODER`) | `encoder-big` (11.17) |
+| `zindex` | the data's `z.npz`, if it has none (`army-6` has one) | |
+| `clone` | `policy_clone_train.py` on `--data` (`army-6`), 10,000 steps (one cosine schedule), held out and saved every 500 | `clone-8` (11.22): `--z --z-dropout 0.2 --economy-weight 2.5 --finish-winners 0.1`, lr 6e-4, Muon 0.008 |
+| `record-N` | the last clone plays the army script with `--z variant`, the scripts advising it, until 256 of its games are kept (`--dagger-games`).  Its first 64 are its closed-loop eval, in `evals/record-N.json` | P3 |
+| `zindex-N` | `z.npz` over every round's games | |
+| `dagger-N` | 500 steps from the last clone, half of its samples from every round's games so far and half from `army-6`; lr 2e-4, Muon 0.003 | P3 |
+| `eval` | the last clone, `--z variant`, 64 games: `evals/final.json` | C8 |
+| `ppo` | `policy_train.py --init` the last clone, `--z variant`, 64 games, 4,096 decisions an iteration, 2M decisions (`--ppo-hours` caps it in time), the critic alone for its first 5 iterations | the smoke run (11.22): lr 1e-5 to 3e-6, KL 0.5 to 0.1, cloning loss 0.5, dual clip 3, HL-Gauss 51 bins, economy share 0.25 to 1, income 0.5, token budget 40,000, not concurrent |
+
+`--dagger-rounds` is 2 by default.  `--clone-args`, `--dagger-args` and `--ppo-args` go at the end of those commands, so they override what's set.
+
+**How it runs.**
+* **One stage at a time.** Each stage is the tool's own command, in a process of its own, run one after another: no two load the map pool at once, and each hands back the GPU when it ends.
+* **Logs and state.** Output goes to `ROOT/logs/STAGE.out`, and `ROOT/pipeline.json` lists the stages done with each one's time and exit code.
+* **Carrying on.** The same command again carries on from the first stage not done.  `--redo STAGE` runs that stage and every one after it again.  `--dry-run` prints the commands.
+* **Restarts.** The encoder and PPO resume from their own checkpoints.  A cloning stage starts over, setting its old `log.jsonl` aside.  A round recorded again first deletes its own games.
+* **Stopping.** A `stop` file in `ROOT` halts it once the running stage ends.  One in `ROOT/encoder` or `ROOT/ppo` stops that training at its next report, and the pipeline with it, the stage not marked done.
+* **DAgger aggregates.** Every round records into `ROOT/dagger` under a prefix of its own (`policy_clone_eval.py --record-prefix game-daggerN`), so each fine-tuning draws from all the rounds' games.
+
+**Times, from earlier runs, not measured on this script.**
+* **Cloning:** at `clone-7`'s rate (1,000 steps in 44 minutes) the 10,000 steps take about 7 hours.  The numba featurize may make that less; that isn't measured.
+* **A DAgger round:** about 45 minutes.  An eval of 64 games took 5 minutes, so recording 256 games takes about 20, and 500 steps of fine-tuning about 22.
+* **The encoder:** `encoder-big` trained in 82 minutes, after the collection.
+* **PPO:** its rate in the fine sim isn't known yet.
+
+**The encoder's retrain** is meant for the ids' new sizes (64 players, 8 allyteams).  That change to `featurize.MAX_PLAYERS` and `MAX_ALLY_TEAMS` isn't made here, so make it before a run with `--train-encoder`.  Frames are stored featurized, ids included, so `frames/pool5` can't serve after it; let the pipeline collect new frames.
+
+**An unknown z.**
+* **The bug.** Cloning with `--z` gives every sample a z, all zeros where it's dropped, and `z_in` adds its learnt bias to those as to any z.  But play with `--z none` and the held-out "z unknown" measure passed no z at all (None), which skipped `z_in` altogether.  That was a state the z-trained actor had never been shown.
+* **The fix.** None now adds `z_in`'s bias, the same as zeros.  An actor trained without z has a zero bias, so it plays as before.
+* **What it touches.** These were measured before the fix, so not as cloning meant them: `clone-8`'s z-unknown NLL (2.886 in 11.22) and its evals at T 1.0 and 0.8 without z.  The z-variant eval and every held-out measure with z are unaffected.  None of them was run again.
+
+**z in PPO.** `policy_train.py --z variant` (it needs `--variants`) works like `policy_clone_eval.py --z variant`.
+* **In play.** Each acting seat is told its side's knobs and preset, the counts unknown (`seat_z`).
+* **In the update.** Each step keeps its z, and the update reads each segment's z; so does the frozen clone for the KL.  A segment is one game's, so its first step's z is all of its steps'.
+
+**Also:** `frame_vae.py train --gpu-memory`, 0.85 by default, as the other trainers have.
+
+**Checked:** the changed files compile, and `--dry-run` printed the stages' commands as set out above.  The flags were checked against each tool's own.  No tests were run and nothing was trained: the user left testing for now.

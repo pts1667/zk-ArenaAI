@@ -104,6 +104,8 @@ class Config:
     income_weight: float = 0.0      # a zero-sum income reward (policy_sim_env.reward), faded by beta as the rest of the shaping
     fine_sim: bool = False          # the sim steps every slot and the policy decides every decide_every of them, as the cloning
                                     # data was recorded: a clone played so had 6 extractors at 10 minutes, and 1 at decide_every 6
+    z: str = "none"                 # "variant": the actor is told its side's army-script knobs as z (the counts unknown), as
+                                    # policy_clone_eval --z variant; "none": z unknown
 
 
 # A big frame costs more memory per token than a small one.  Fitted on the first actor, whose attention was over every pair of
@@ -186,6 +188,7 @@ class Step:
     latents: np.ndarray | None = None   # tokens x latent: this frame's, as the actor read it
     label: dict | None = None           # what the scripts advised here, as slots (actions.SLOT_FIELDS), when they advise
     labelled: np.ndarray | None = None  # which controllable units the advice told something
+    z: np.ndarray | None = None         # the side's strategy as the actor was told it (Config.z), the same all game
 
 
 @dataclass
@@ -448,11 +451,13 @@ class Learner:
         history = torch.as_tensor(np.stack([seg.history for seg in batch]), device=device)
         seen = torch.as_tensor(np.stack([seg.seen for seg in batch]), device=device)
         latents = torch.as_tensor(latents, device=device)
+        # A segment is one game's, so its first step's z is all of its steps'.
+        z = None if steps[0].z is None else torch.as_tensor(np.stack([seg.steps[0].z for seg in batch]), device=device)
         cfg = self.cfg
         with self.autocast:
             a = _stored_actions(steps, device)
             acted = self.actor.segment_actions(whole, a, lengths)
-            now = self.actor.segments(history, seen, latents, lengths, acted)
+            now = self.actor.segments(history, seen, latents, lengths, acted, z)
             ctx = self.actor.context(whole, now)
             logp, entropy = pm.evaluate_actions(self.actor, whole, ctx, a)
             value = self.critic(whole, logits=True)
@@ -461,7 +466,7 @@ class Learner:
                 # KL(policy || clone) on the actions taken, as k3 = r - 1 - log r with r = clone / policy: never below 0.
                 with torch.no_grad():
                     ref = self.reference
-                    ref_now = ref.segments(history, seen, latents, lengths, ref.segment_actions(whole, a, lengths))
+                    ref_now = ref.segments(history, seen, latents, lengths, ref.segment_actions(whole, a, lengths), z)
                     ref_logp, _ = pm.evaluate_actions(ref, whole, ref.context(whole, ref_now), a)
                 w = pm.chosen(a).float()
                 log_r = (ref_logp.float() - logp).clamp(-20.0, 20.0)
@@ -630,6 +635,18 @@ def _label_actions(steps: list[Step], units: int, device: str) -> tuple[pm.Actio
     return pm.actions_from(fields, device), torch.as_tensor(labelled, device=device), torch.as_tensor(has, device=device)
 
 
+def seat_z(env, seats: list[int], how: str) -> np.ndarray | None:
+    """seats x Z_DIM, what each seat's actor is told of its strategy (Config.z), or None for nothing."""
+    if how == "none" or not seats:
+        return None
+    import policy_clone_data as cd
+    return np.stack([cd.variant_z(None if env.styles[s // 2] is None else env.styles[s // 2][s % 2]) for s in seats])
+
+
+def _z_tensor(z: np.ndarray | None, device: str) -> torch.Tensor | None:
+    return None if z is None else torch.as_tensor(z, device=device)
+
+
 def _stored_actions(steps: list[Step], device: str) -> pm.Actions:
     """The actions the decisions were played with, and their log-probabilities then."""
     return pm.actions_from({f: np.stack([getattr(s, f) for s in steps]) for f in act.SLOT_FIELDS + ("logp",)}, device)
@@ -713,12 +730,14 @@ class Collector:
                         self._open(seat)
                 frames = [(env.frame(seat), env.bundle_of(seat), current[seat].names) for seat in acting]
                 index = torch.as_tensor(acting, device=learner.device)
-                items, out, value, new_history, new_seen = self.player.act(frames, seats.history[index], seats.seen[index])
+                told = seat_z(env, acting, cfg.z)
+                items, out, value, new_history, new_seen = self.player.act(frames, seats.history[index], seats.seen[index], _z_tensor(told, learner.device))
                 for k, seat in enumerate(acting):
                     t = items[k]
                     raw = frames[k][0]
                     step = Step(rf.Frame(raw.units.copy(), raw.sites.copy(), raw.glob.copy(), raw.features.copy()),
                                 *(out[h][k].copy() for h in act.SLOT_FIELDS + ("logp",)), float(value[k]))
+                    step.z = None if told is None else told[k]
                     picked = step.anchor >= 0
                     masked_out += int((~t.kind_mask[step.anchor[picked], step.kind[picked]]).sum())
                     kind_counts += np.bincount(step.kind[picked], minlength=rf.KIND_COUNT)
@@ -757,7 +776,7 @@ class Collector:
         if acting:
             frames = [(env.frame(seat), env.bundle_of(seat), current[seat].names) for seat in acting]
             index = torch.as_tensor(acting, device=learner.device)
-            _, _, value, _, _ = self.player.act(frames, seats.history[index], seats.seen[index])
+            _, _, value, _, _ = self.player.act(frames, seats.history[index], seats.seen[index], _z_tensor(seat_z(env, acting, cfg.z), learner.device))
             for k, seat in enumerate(acting):
                 tr = current[seat]
                 tr.bootstrap = float(value[k])
@@ -815,7 +834,8 @@ def evaluate(learner: Learner, make_env, opponent: str, games: int, seed: int) -
         else:
             frames = [(env.frame(seat), env.bundle_of(seat), names) for seat in acting]
             index = torch.as_tensor(acting, device=learner.device)
-            items, out, _, new_history, new_seen = player.act(frames, seats.history[index], seats.seen[index])
+            told = _z_tensor(seat_z(env, acting, learner.cfg.z), learner.device)
+            items, out, _, new_history, new_seen = player.act(frames, seats.history[index], seats.seen[index], told)
             for k, seat in enumerate(acting):
                 t = items[k]
                 d = act.to_decision(act.Slots(*(out[h][k] for h in act.SLOT_FIELDS)), t.controllable)
@@ -1058,10 +1078,14 @@ def main() -> None:
     ap.add_argument("--income-weight", type=float, default=0.0, help="the zero-sum income reward's weight")
     ap.add_argument("--diversity", type=float, default=Config.diversity)
     ap.add_argument("--fine-sim", action="store_true", help="the sim steps every slot, the policy decides every --decide-every")
+    ap.add_argument("--z", choices=("none", "variant"), default=Config.z,
+                    help="what the actor is told of its strategy: nothing, or its side's army-script knobs (needs --variants)")
     ap.add_argument("--check-repro", action="store_true")
     ap.add_argument("--check-kill", action="store_true")
     ap.add_argument("--save-forever", action="store_true", help=argparse.SUPPRESS)
     args = ap.parse_args()
+    if args.z == "variant" and not args.variants:
+        ap.error("--z variant needs --variants: without them there are no knobs to tell")
     import policy_sim_env
 
     cfg = Config(seed=args.seed, decisions=args.decisions, games=args.games, iteration=args.iteration, passes=args.passes, ema=args.ema,
@@ -1071,7 +1095,7 @@ def main() -> None:
                  init=args.init, maps=args.maps, variants=args.variants, lr_start=args.lr_start, lr_end=args.lr_end,
                  critic_bins=args.critic_bins, critic_span=args.critic_span, entropy_floor=args.entropy_floor, critic_warmup=args.critic_warmup, kl_start=args.kl_start, kl_end=args.kl_end,
                  clone_weight=args.clone_weight, dual_clip=args.dual_clip, economy_start=args.economy_start, economy_end=args.economy_end,
-                 income_weight=args.income_weight, diversity=args.diversity, fine_sim=args.fine_sim)
+                 income_weight=args.income_weight, diversity=args.diversity, fine_sim=args.fine_sim, z=args.z)
     if args.kinds:
         cfg.enabled_kinds = tuple(int(k) for k in args.kinds.split(","))
     run = pathlib.Path(args.run)

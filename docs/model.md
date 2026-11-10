@@ -135,7 +135,9 @@ flowchart LR
 * **A strategy, z** (optional; `05-literature.md` P8): 32 numbers for the side, added through `z_in` to every token of every frame.
   Two flags say what's known; then the army script's role weights and knobs, its preset, and in hindsight the side's extractors,
   energy, factories, defences and army at minutes 3, 6 and 10 (`policy_clone_data.Z_*`).  `z_in` starts at zero, so a z changes
-  nothing until it's learned, and an unknown z (zeros) is trained for by dropping it in a share of samples (`--z-dropout`).
+  nothing until it's learned, and an unknown z (zeros) is trained for by dropping it in a share of samples (`--z-dropout`).  No z
+  (None) is the same as zeros: `z_in`'s bias is added either way.  In play and PPO, `--z variant` tells the actor its side's
+  knobs and preset, the counts unknown.
 
 ### Who attends to whom
 
@@ -399,7 +401,7 @@ causal by frame, every decision in the stretch sees exactly what it would have s
 * **PPO** (`policy_train.py`): segments of 32 decisions from the sim, each started from the state kept at collection.  It must run
   at the actor's rate, `--decide-every 6`, with `--fine-sim` (the sim steps every slot, as the data was recorded); `--init` starts
   it from a cloning checkpoint, with a frozen copy for an annealed KL to it and a cloning loss on the scripts' advice (`03-training.md`
-  11.22).  Each action
+  11.22); `--z variant` tells the actor its side's knobs, kept on each step so the update reads what play did.  Each action
   gets its own clipped ratio, averaged within a decision (done included), with one advantage per decision.  The **critic** is a separate network,
   never in the bot.  It is a 2-layer self-attention encoder over the privileged frame, including the enemy units the seat can't
   see, and reads the value off its global token.
@@ -415,10 +417,17 @@ flowchart LR
     subgraph rl ["RL"]
         SIM["sim games<br/>policy_sim_env.py"] --> PPO["policy_train.py<br/>actor + critic"]
     end
+    subgraph dagger ["DAgger rounds"]
+        DR["the clone plays, the scripts advise<br/>policy_clone_eval.py --record"] --> DT["fine-tuning<br/>policy_clone_train.py --mix --init"]
+    end
     E --> CT
     E --> PPO
-    CT -- "--init" --> PPO
+    CT -- "--init" --> DR
+    DT -- "next round" --> DR
+    DT -- "--init" --> PPO
 ```
+
+`tools/policy_pipeline.py` runs all of it in order, one stage at a time, and carries on where it left off (`03-training.md` 11.23).
 
 ## 8. Where it stands
 
@@ -426,7 +435,8 @@ flowchart LR
   kind right 0.938, NLL of actions 2.84.  In the sim against the army script (`policy_clone_eval.py`, 64 games) it wins 3% and
   draws 17%: it keeps up for 3 minutes, then stops expanding (a third of the script's extractors at minute 10).  `clone-8` (z,
   economy weight 2.5, finishing on winners) is even with it held out; the small actor is worse on every measure held out.  In
-  play all of them, at temperature 1.0 or 0.8 and with z or without, win 2-5% and stall the same way.
+  play all of them, at temperature 1.0 or 0.8 and with z or without, win 2-5% and stall the same way.  The user takes `clone-8`
+  told its variant as the setting to go on with: `policy_pipeline.py` clones that way for 10,000 steps, then DAgger, then PPO.
 * Cloning with actions in turn on `army-5` (`03-training.md` 11.20): at a decision every slot (`clone-5`, stopped at 11,500 of
   20,000 steps), the first unit picked was one the script told 68% of the time and the order's kind was right 99% of the time.
   `clone-6`, at a decision every 3 s, cloned about 1,050 of the script's decisions a second where `clone-5` cloned 52, and reached

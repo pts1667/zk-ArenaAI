@@ -1,6 +1,6 @@
 # HANDOFF: zk-ArenaAI, the learned policy
 
-Updated 2026-11-09.  Branch `learned-policy-plan`.  Repo: `C:/Users/Thoma/Documents/sources/zk-ArenaAI`.
+Updated 2026-11-10.  Branch `learned-policy-plan`.  Repo: `C:/Users/Thoma/Documents/sources/zk-ArenaAI`.
 
 This file is the current state only.  How things got here is in git history and in `docs/learned-policy/`, whose numbered
 sections (`03-training.md` 11.x for the latest work) hold every result with its numbers.
@@ -31,6 +31,8 @@ A Zero-K AI that beats CircuitAI, now pursued as a Pluto-style learned policy: a
   (`tools/policy_clone_data.py`), its orders as actions in a random order, each anchor scored as any unit still to be told.
   The army and economy scripts both, on `army-6`: `clone-7` is the baseline, `clone-8` adds a strategy z and weights the
   economy (`03-training.md` 11.21, 11.22).  `tools/policy_clone_eval.py` plays a clone against the script in the sim.
+* **A whole run is one command** (`tools/policy_pipeline.py`, 11.23): the encoder (optional), 10,000 steps of cloning as
+  `clone-8`, DAgger rounds, an eval, then PPO from the last clone, all with z from the variant.  Not run yet.
 * **PPO's reward** has Pluto's diversity bonus as well (11.19): zero-sum, for finished units of types the policy rarely makes.
 * **Recording** is C++ (`sim/record/`, `libzkrecord.so`, through `sim/py/zkrecord.py`): straight from the batch's arrays, a
   `.zkr` file a game, both sides, narrowed and compressed (192 bytes a decision against the npz's 516).  Data version 5 (group
@@ -98,7 +100,7 @@ A Zero-K AI that beats CircuitAI, now pursued as a Pluto-style learned policy: a
     (the encoder, batches, shards, probes), `frame_vae.py` (its training).
   * The policy: `policy_model.py` (batches, heads' sampling, the critic), `policy_latent.py` (the actor), `policy_train.py` (PPO),
     `policy_clone_data.py` (recording, `check`, `zindex`), `policy_clone_train.py`, `policy_clone_eval.py` (a clone against
-    the script in the sim; DAgger's recording), `policy_golden.py`.
+    the script in the sim; DAgger's recording), `policy_pipeline.py` (a whole run, stage after stage), `policy_golden.py`.
 * `tests/policy/`, `tests/test_*.py`, `sim/tests/`: offline tests; nothing needs the engine.
 * `zk-startup.ps1`, `zk-maps.ps1`, `maps.md`, `README.md`: the workspace template for running engine games.
 
@@ -116,7 +118,11 @@ In WSL, from the repo (`cd /mnt/c/Users/Thoma/Documents/sources/zk-ArenaAI`), wi
     ~/zkml/bin/python tools/policy_clone_eval.py --actor /mnt/d/zk-learned/runs/clone-7/actor.pt --maps /mnt/d/zk-learned/maps \
         --games 64 --workers 12 --out RESULT.json     # against the script; --record DIR keeps its games for DAgger
     ~/zkml/bin/python tools/policy_train.py --run /mnt/d/zk-learned/runs/NAME        # the encoder is policy_latent.ENCODER
-        # from a clone: --init RUN/actor.pt --fine-sim --decide-every 6, and 11.22's flags (KL, cloning loss, critic)
+        # from a clone: --init RUN/actor.pt --fine-sim --decide-every 6 --variants --z variant, and 11.22's flags
+    ~/zkml/bin/python tools/policy_pipeline.py --root /mnt/d/zk-learned/runs/NAME [--train-encoder] [--dry-run]
+        # all of it: encoder, clone, DAgger rounds, eval, PPO; the same command again carries on (11.23)
+
+To stop the pipeline, create a file named `stop` in its root: it halts once the running stage ends.
 
 To stop a PPO run, create a file named `stop` in its directory; the same command resumes from its last checkpoint.
 
@@ -128,6 +134,12 @@ README.md has the template's rules for engine games (headless, max speed; window
 
 Latest first; each item's numbers are in the section named.
 
+* **A whole run in one command** (`03-training.md` 11.23, 2026-11-10): `policy_pipeline.py`, stages run one at a time with
+  what earlier runs used: `pool5`'s collection and `encoder-big`'s training (with `--train-encoder`), `clone-8`'s cloning for
+  10,000 steps, two DAgger rounds into one directory (256 games each, then 500 steps), an eval, and PPO with the smoke run's
+  flags.  z from the variant throughout, the user's pick from the evals: PPO has `--z variant` now.  A bug fixed on the way: a
+  z-trained actor told no z skipped `z_in` entirely, where cloning's unknown z (zeros) gets `z_in`'s bias; `clone-8`'s
+  z-unknown NLL and its evals without z were measured so, and not re-run.  Only compiled and dry-run; no tests (the user).
 * **P3-P8, C1 and C4-C8 against `clone-7`** (`03-training.md` 11.22, 2026-11-09): `clone-8` (z, economy weight 2.5, the last
   10% of steps on winners) is even with `clone-7` held out: builds and reclaims better, fights and done worse; z is worth 0.03
   nats.  The small actor (`clone-7s`) is worse on every measure.  Blind (no action tokens) is worse everywhere, so no action
@@ -227,14 +239,14 @@ Latest first; each item's numbers are in the section named.
   1,000 steps is enough for the baseline; a whole cosine schedule of them, not a longer run cut short), about 40 minutes; output
   in `runs/clone-7/train.out`, rows in `log.jsonl` (appended to: clear it before rerunning a run).  Its start read 83,820
   files' headers over /mnt/d, about 3 minutes; now 7 s, from the dataset's `sides.npz`.
-* **DAgger, a round** (P3): the better of `clone-7` and `clone-8` plays 256 games recorded with the scripts' advice
-  (`policy_clone_eval.py --record /mnt/d/zk-learned/clone/dagger-1`), then 500 steps of fine-tuning on half those and half
-  `army-6` (`--mix --mix-share 0.5 --init`), then the same eval.  On the current encoder.
-* **The encoder retrained from scratch** (the user, later; ~1 hour last time), for the unit allyteam and team fields, its id
-  embeddings sized for FFA: 64 players and 8 allyteams (`featurize.MAX_PLAYERS` 32 and `MAX_ALLY_TEAMS` 16 now).  The actor's
-  embeddings are sized from the same constants, so every clone is redone on it.
-* **PPO from the clone** waits for that: `policy_train.py --init` takes the clone stage's last output (after DAgger), not the
-  base clone.  The smoke run's settings are in 11.22.
+* **The whole run** (`policy_pipeline.py`, 11.23; the user starts it): with `--train-encoder` for the encoder's retrain from
+  scratch, for the unit allyteam and team fields, its id embeddings sized for FFA: 64 players and 8 allyteams.  Set
+  `featurize.MAX_PLAYERS` (32 now) and `MAX_ALLY_TEAMS` (16 now) first: the actor's and critic's embeddings are sized from the
+  same constants, so every older encoder and clone stops loading, and frames are stored featurized, so `pool5` can't serve and
+  the pipeline collects new frames (about 37 GB at `pool4`'s size a frame).  Then cloning (about 7 hours at `clone-7`'s rate), two
+  DAgger rounds (about 45 minutes each), an eval, and PPO from the last DAgger round's actor.
+* **PPO's settings** are the smoke run's (11.22) at a run's size; its rate in the fine sim and whether 2M decisions is the right
+  length are unknown until it runs (`--ppo-hours` caps it).
 * Cloning's decisions a second with the numba featurize (not measured yet), and where the closed-loop actor's economy stalls.
 * The user's open questions on the actor:
   * one token per action between frames too, in place of the 4 summary tokens (within a decision the actions are such tokens now);
