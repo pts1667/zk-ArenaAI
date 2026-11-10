@@ -306,6 +306,7 @@ class SimEnv:
         # sent unit by unit.  They're in army_orders, as the policy would give them (policy_orders).
         self.group_orders = True
         self.outcomes: list[dict] = []                      # every side of every finished game, for a measurement to take and clear
+        self.capture = None     # a policy_replay.Capture, told of every step: a test's games kept for the dashboard
         self.opening = Opening(catalog(), decide_every) if units is None else None
         self.seats: list[tuple[Seat, Seat] | None] = [None] * games
         self.scripts: list[tuple[object, object] | None] = [None] * games     # a subclass's own scripts: `own_scripts`
@@ -688,6 +689,8 @@ class SimEnv:
                 self.outcomes.append({**facts, "kind": "policy" if self._is_policy(seat) else self.script_kinds[g][side],
                                       "made": self._made(g, side)})
             self._replace.append(g)
+        if self.capture is not None:
+            self.capture.after_step(self)
 
     def _game_facts(self, g: int, side: int, won: bool, lost: bool) -> dict:
         """A finished game as seen from one side, for the record of a test."""

@@ -106,6 +106,9 @@ class Config:
                                     # data was recorded: a clone played so had 6 extractors at 10 minutes, and 1 at decide_every 6
     z: str = "none"                 # "variant": the actor is told its side's army-script knobs as z (the counts unknown), as
                                     # policy_clone_eval --z variant; "none": z unknown
+    replay_hours: float = 0.0       # every this many hours, replay_games games against the script, kept for the dashboard's viewer
+    replay_games: int = 4           # (policy_replay.py) in `replays`, or the run's replays/; 0 hours for none
+    replays: str = ""
 
 
 # A big frame costs more memory per token than a small one.  Fitted on the first actor, whose attention was over every pair of
@@ -816,13 +819,17 @@ def _close(tr: Trajectory, segments: list[Segment]) -> None:
 
 
 @torch.no_grad()
-def evaluate(learner: Learner, make_env, opponent: str, games: int, seed: int) -> dict[str, float]:
+def evaluate(learner: Learner, make_env, opponent: str, games: int, seed: int, replays: dict | None = None) -> dict[str, float]:
     """The current policy (the moving average of its weights, `Config.ema`) against a script, sampled as in training.  Each game
-    slot counts its first game only: the games that end soonest would otherwise count most, and those are not a fair sample."""
+    slot counts its first game only: the games that end soonest would otherwise count most, and those are not a fair sample.
+    replays: policy_replay.Capture's arguments, to keep every game for the dashboard."""
     player = learner.evaluator
     env = make_env(games, seed, modes=[opponent])
     env.policy_economy_share = learner.economy_share
     env.begin()
+    if replays is not None:
+        import policy_replay
+        env.capture = policy_replay.Capture(env, games=games, **replays)
     seats = Seats(env.seat_count, learner.device, learner.actor)
     names = np.arange(learner.vocabulary, dtype=np.int32)
     results: dict[int, float] = {}
@@ -930,7 +937,7 @@ def train(cfg: Config, run: pathlib.Path, make_env, device: str = "cuda") -> Non
     ahead: Ahead | None = None
     collect_s = train_s = 0.0
     log = (run / "metrics.jsonl").open("a")
-    began = time.perf_counter()
+    began = last_replays = time.perf_counter()
     env.self_play_share = learner.self_play.share
     while learner.decisions < cfg.decisions:
         learner.economy_share = cfg.economy_start + (cfg.economy_end - cfg.economy_start) * learner.progress
@@ -972,6 +979,14 @@ def train(cfg: Config, run: pathlib.Path, make_env, device: str = "cuda") -> Non
                     tests.write(json.dumps({"iteration": learner.iteration, "decisions": learner.decisions, "opponent": opponent, "games": result["records"]}) + "\n")
                 if opponent == "fight":
                     learner.self_play.note_test(result["win_rate"], learner.iteration)
+        if cfg.replay_hours and time.perf_counter() - last_replays >= cfg.replay_hours * 3600.0:
+            tested = time.perf_counter()
+            hours = (tested - began) / 3600.0
+            result = evaluate(learner, make_env, "fight", cfg.replay_games, cfg.seed * 1000 + learner.iteration + 500, replays={
+                "out": cfg.replays or run / "replays", "stage": "ppo", "label": "PPO against the army script",
+                "prefix": f"it{learner.iteration:05d}-", "info": {"iteration": learner.iteration, "decisions": learner.decisions, "hours": round(hours, 2)}})
+            metrics["replays_win_rate"], metrics["replays_seconds"] = result["win_rate"], time.perf_counter() - tested
+            last_replays = time.perf_counter()
         env.self_play_share = metrics["self_play_share"] = learner.self_play.advance()
         if learner.iteration % cfg.checkpoint_every == 0:
             learner.save()
@@ -1080,6 +1095,10 @@ def main() -> None:
     ap.add_argument("--fine-sim", action="store_true", help="the sim steps every slot, the policy decides every --decide-every")
     ap.add_argument("--z", choices=("none", "variant"), default=Config.z,
                     help="what the actor is told of its strategy: nothing, or its side's army-script knobs (needs --variants)")
+    ap.add_argument("--replay-hours", type=float, default=Config.replay_hours,
+                    help="every this many hours, --replay-games games against the script kept for the dashboard; 0 for none")
+    ap.add_argument("--replay-games", type=int, default=Config.replay_games)
+    ap.add_argument("--replays", default="", help="where they go (default RUN/replays)")
     ap.add_argument("--check-repro", action="store_true")
     ap.add_argument("--check-kill", action="store_true")
     ap.add_argument("--save-forever", action="store_true", help=argparse.SUPPRESS)
@@ -1095,7 +1114,8 @@ def main() -> None:
                  init=args.init, maps=args.maps, variants=args.variants, lr_start=args.lr_start, lr_end=args.lr_end,
                  critic_bins=args.critic_bins, critic_span=args.critic_span, entropy_floor=args.entropy_floor, critic_warmup=args.critic_warmup, kl_start=args.kl_start, kl_end=args.kl_end,
                  clone_weight=args.clone_weight, dual_clip=args.dual_clip, economy_start=args.economy_start, economy_end=args.economy_end,
-                 income_weight=args.income_weight, diversity=args.diversity, fine_sim=args.fine_sim, z=args.z)
+                 income_weight=args.income_weight, diversity=args.diversity, fine_sim=args.fine_sim, z=args.z,
+                 replay_hours=args.replay_hours, replay_games=args.replay_games, replays=args.replays)
     if args.kinds:
         cfg.enabled_kinds = tuple(int(k) for k in args.kinds.split(","))
     run = pathlib.Path(args.run)

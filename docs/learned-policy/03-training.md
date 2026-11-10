@@ -30,12 +30,20 @@ a process of its own.  So no two stages load the map pool at once, and each hand
   `ROOT/ppo` stops that training at its next report, and the pipeline with it.
 * **DAgger rounds** all record into `ROOT/dagger`, each under its own prefix (`--record-prefix game-daggerN`), so each
   fine-tuning draws from every round so far.
+* **Dashboard**: while it runs, the pipeline serves a page at `http://localhost:8765` (`--port`, 0 for none), which Windows
+  reaches through WSL's localhost forwarding.  It shows the stages, the log as it's written (server-sent events; the
+  pipeline's own lines are in `ROOT/logs/pipeline.out`), each stage's results and charts, and replays.  The tests keep their
+  first 4 games for it (`--replay-games`), and PPO plays 4 more against the army script every hour (`--replay-hours`), all
+  in `ROOT/replays/STAGE`.  The page dies with the pipeline; `tools/policy_dashboard.py --root ROOT` serves it again, during
+  the run or after.  Server: `tools/policy_dashboard.py` (its docstring lists the endpoints); page and viewer:
+  `tools/dashboard/`; replay format: `tools/policy_replay.py`.  Unit icons come from `../Zero-K` (`--zero-k`), map pictures
+  from the minimaps in the archives in `zero-k-portable/maps` (`--map-archives`), or for a made map from its heights.
 * **Expected times**: the encoder about 82 minutes after the collection; cloning about 7 hours (at `clone-7`'s rate, before
   numba); a DAgger round about 45 minutes; PPO's rate in the fine sim is unknown.  None of this was measured on the pipeline
   itself.
 
 **Until a new encoder exists, run with `--train-encoder`.**  `FEATURE_VERSION` 7 (64 players, 8 allyteams) made `encoder-big`,
-every clone and `frames/pool5` unloadable, so the pipeline has to collect fresh frames (about 37 GB at `pool4`'s size a frame).
+every clone and `frames/pool5` unloadable, so the pipeline has to collect fresh frames (about 51 GB, as `pool5`, the same recipe, took).
 
 ## Frame data (`tools/frame_data.py`)
 

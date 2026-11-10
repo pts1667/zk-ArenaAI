@@ -14,6 +14,7 @@ checkpoint, when the scripts look: so its games are recorded as the scripts' wer
 
 Each game slot counts its first game only, as policy_train.evaluate: the games that end soonest would otherwise count most.
 At minutes 3, 6 and 10 of those games it notes each side's metal income, finished extractors and value (zksim stats).
+With --replays, the first --replay-games of them are kept there for the dashboard's viewer (policy_replay.py).
 """
 from __future__ import annotations
 
@@ -120,6 +121,9 @@ def main() -> None:
     ap.add_argument("--decide-every", type=int, default=se.SCRIPT_EVERY, help="for a PPO checkpoint, which doesn't say")
     ap.add_argument("--encoder", default=policy_latent.ENCODER)
     ap.add_argument("--gpu-memory", type=float, default=0.85)
+    ap.add_argument("--replays", help="keep the first --replay-games games here, for the dashboard (policy_replay.py)")
+    ap.add_argument("--replay-games", type=int, default=4)
+    ap.add_argument("--replay-label", help="what the dashboard calls them (default: the actor's directory against the script)")
     args = ap.parse_args()
     assert args.record_prefix.startswith("game-"), "policy_clone_data.sides lists only game-*"
     began = time.perf_counter()
@@ -138,6 +142,11 @@ def main() -> None:
     player = pt.Player(actor, None, workers, device)
     env.begin()
     rec = cd.Recorder(env, pathlib.Path(args.record), args.record_prefix) if args.record else None
+    if args.replays:
+        import policy_replay
+        replays = pathlib.Path(args.replays)
+        env.capture = policy_replay.Capture(env, replays, min(args.replay_games, args.games), replays.name,
+                                            args.replay_label or f"{pathlib.Path(args.actor).parent.name} against the army script")
     seats = pt.Seats(env.seat_count, device, actor)
     names = np.arange(vocabulary, dtype=np.int32)
     notes = Notes(env)

@@ -11,6 +11,11 @@ same command again carries on from the first that isn't; --redo STAGE runs that 
 A `stop` file in ROOT halts the pipeline once the running stage ends.  One in a training's own directory (ROOT/encoder,
 ROOT/ppo) stops that training at its next report, and the pipeline with it, that stage not marked done.
 
+While it runs it serves a dashboard at http://localhost:8765 (--port; 0 for none): the stages, the log as it comes (the
+pipeline's own in ROOT/logs/pipeline.out), each stage's results, and replays of test games, which the tests keep in
+ROOT/replays/STAGE: 4 games of each closed-loop test (record-N, eval) and 4 every hour of PPO (--replay-games, --replay-hours).
+It ends with the pipeline; tools/policy_dashboard.py --root ROOT serves it again, during the run or after.
+
 The stages:
   frames       with --train-encoder, if --frames has no manifest.json: frame_data.py collect, pool5's recipe (1M frames each of
                the frame games, scenarios and the C++ scripts' games; 03-training.md, "Frame data")
@@ -103,6 +108,22 @@ def drop_round(directory: pathlib.Path, prefix: str):
     return run, f"delete {directory}/{prefix}-* if any"
 
 
+def replays(args: argparse.Namespace, stage: str, actor: pathlib.Path) -> list:
+    """A closed-loop test's flags to keep its first games for the dashboard."""
+    if not args.replay_games:
+        return []
+    return ["--replays", args.root / "replays" / stage, "--replay-games", args.replay_games,
+            "--replay-label", f"{actor.parent.name} against the army script"]
+
+
+def drop_replays(directory: pathlib.Path):
+    """A test run again replaces its replays, rather than listing them twice."""
+    def run() -> None:
+        for p in [*directory.glob("*.json.gz"), directory / "index.jsonl"]:
+            p.unlink(missing_ok=True)
+    return run, f"delete {directory}'s replays if any"
+
+
 def stages(args: argparse.Namespace) -> list[Stage]:
     root = args.root
     out: list[Stage] = []
@@ -131,8 +152,9 @@ def stages(args: argparse.Namespace) -> list[Stage]:
         prefix = f"game-dagger{r}"
         out.append(Stage(f"record-{r}", tool("policy_clone_eval.py", "--actor", last, "--maps", args.maps, "--encoder", encoder,
                                              "--games", 64, "--record-games", args.dagger_games, "--workers", 12, "--z", "variant",
-                                             "--record", dagger, "--record-prefix", prefix, "--out", evals / f"record-{r}.json"),
-                         before=[drop_round(dagger, prefix)]))
+                                             "--record", dagger, "--record-prefix", prefix, "--out", evals / f"record-{r}.json",
+                                             *replays(args, f"record-{r}", last)),
+                         before=[drop_round(dagger, prefix), drop_replays(root / "replays" / f"record-{r}")]))
         out.append(Stage(f"zindex-{r}", tool("policy_clone_data.py", "zindex", "--data", dagger, "--workers", 15)))
         run = root / f"dagger-{r}"
         out.append(Stage(f"dagger-{r}", tool("policy_clone_train.py", "--data", data, "--mix", dagger, "--mix-share", args.dagger_share,
@@ -142,13 +164,15 @@ def stages(args: argparse.Namespace) -> list[Stage]:
                          before=[set_aside(run / "log.jsonl")]))
         last = run / "actor.pt"
     out.append(Stage("eval", tool("policy_clone_eval.py", "--actor", last, "--maps", args.maps, "--encoder", encoder, "--games", 64,
-                                  "--workers", 12, "--z", "variant", "--out", evals / "final.json")))
+                                  "--workers", 12, "--z", "variant", "--out", evals / "final.json", *replays(args, "eval", last)),
+                     before=[drop_replays(root / "replays" / "eval")]))
     if args.ppo:
         ppo = root / "ppo"
         out.append(Stage("ppo", tool("policy_train.py", "--run", ppo, "--init", last, "--latent-encoder", encoder, "--maps", args.maps,
                                      "--games", args.ppo_games, "--iteration", args.ppo_iteration, "--decisions", args.ppo_decisions,
-                                     "--hours", args.ppo_hours, "--critic-warmup", args.ppo_critic_warmup, *PPO_FLAGS,
-                                     *shlex.split(args.ppo_args)), own=ppo))
+                                     "--hours", args.ppo_hours, "--critic-warmup", args.ppo_critic_warmup,
+                                     "--replays", root / "replays" / "ppo", "--replay-hours", args.replay_hours if args.replay_games else 0,
+                                     "--replay-games", args.replay_games, *PPO_FLAGS, *shlex.split(args.ppo_args)), own=ppo))
     return out
 
 
@@ -201,6 +225,13 @@ def main() -> None:
     ap.add_argument("--clone-args", default="", help="more flags for the clone stage, last so they win")
     ap.add_argument("--dagger-args", default="", help="more flags for each DAgger fine-tuning")
     ap.add_argument("--ppo-args", default="", help="more flags for PPO")
+    ap.add_argument("--replay-games", type=int, default=4, help="games kept for the dashboard from each test, and each --replay-hours "
+                    "of PPO; 0 for none")
+    ap.add_argument("--replay-hours", type=float, default=1.0)
+    ap.add_argument("--port", type=int, default=8765, help="the dashboard's (tools/policy_dashboard.py); 0 for none")
+    ap.add_argument("--host", default="127.0.0.1", help="where the dashboard listens: 0.0.0.0 for other machines too")
+    ap.add_argument("--map-archives", help="the maps' archives (.sd7, .sdz), for the dashboard's map pictures (default its own)")
+    ap.add_argument("--zero-k", help="Zero-K's repository, for the dashboard's unit icons (default ../Zero-K)")
     ap.add_argument("--redo", help="run this stage and every one after it again")
     ap.add_argument("--dry-run", action="store_true", help="print the stages' commands and what's done; run nothing")
     args = ap.parse_args()
@@ -228,7 +259,22 @@ def main() -> None:
     state.data["done"] = [n for n in names if n in done]
     state.data["plan"] = names
     state.data["args"] = {k: str(v) for k, v in vars(args).items()}
+    state.data.pop("current", None)
     state.save()
+    said = open(args.root / "logs" / "pipeline.out", "a")
+
+    def say(text: str) -> None:
+        print(text, flush=True)
+        said.write(text + "\n")
+        said.flush()
+    if args.port:
+        try:
+            import policy_dashboard
+            extra = {k: v for k, v in (("archives", args.map_archives), ("zero_k", args.zero_k)) if v}
+            board = policy_dashboard.Dashboard(args.root, args.host, args.port, maps=args.maps, **extra).start()
+            say(f"dashboard: {board.url}")
+        except OSError as e:        # the port taken, say: the run goes on without it
+            say(f"no dashboard on port {args.port}: {e}")
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join([str(ROOT / "bots"), str(TOOLS), str(ROOT / "sim" / "py")] +
                                         ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
@@ -236,32 +282,35 @@ def main() -> None:
         if s.name in done:
             continue
         if (args.root / "stop").exists():
-            print(f"stopped before {s.name}: {args.root / 'stop'} is there", flush=True)
+            say(f"stopped before {s.name}: {args.root / 'stop'} is there")
             return
         for run, _ in s.before:
             run()
         log = args.root / "logs" / f"{s.name}.out"
         free = available_gb()
         began = time.time()
-        print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {s.name}: {shlex.join(s.argv)}"
-              + (f"  [{free:.0f} GB free]" if free is not None else ""), flush=True)
+        say(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {s.name}: {shlex.join(s.argv)}" + (f"  [{free:.0f} GB free]" if free is not None else ""))
+        state.data["current"] = {"stage": s.name, "began": began, "pid": os.getpid()}
+        state.save()
         with open(log, "a") as f:
             f.write(f"\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} {shlex.join(s.argv)}\n")
             f.flush()
             code = subprocess.run(s.argv, stdout=f, stderr=subprocess.STDOUT, cwd=ROOT, env=env).returncode
         seconds = round(time.time() - began)
+        state.data.pop("current", None)
         state.data["runs"].append({"stage": s.name, "began": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(began)),
                                    "seconds": seconds, "exit": code})
         state.save()
         if code != 0:
-            sys.exit(f"{s.name} failed (exit {code}) after {seconds} s: see {log}")
+            say(f"{s.name} failed (exit {code}) after {seconds} s: see {log}")
+            sys.exit(1)
         if s.own is not None and (s.own / "stop").exists():
-            print(f"{s.name} was stopped by {s.own / 'stop'}: not marked done; remove the file and run again to go on", flush=True)
+            say(f"{s.name} was stopped by {s.own / 'stop'}: not marked done; remove the file and run again to go on")
             return
         state.data["done"].append(s.name)
         state.save()
-        print(f"{s.name} done in {seconds / 60:.1f} minutes", flush=True)
-    print(f"all done: {args.root}", flush=True)
+        say(f"{s.name} done in {seconds / 60:.1f} minutes")
+    say(f"all done: {args.root}")
 
 
 if __name__ == "__main__":

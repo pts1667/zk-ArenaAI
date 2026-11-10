@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Training run</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="https://cdn.simplecss.org/simple.min.css">
+<link rel="stylesheet" href="/static/style.css">
+<script src="https://unpkg.com/htmx.org@2.0.4/dist/htmx.min.js"></script>
+<script src="https://unpkg.com/htmx-ext-sse@2.2.2/sse.js"></script>
+<script src="/static/charts.js" defer></script>
+<script src="/static/viewer.js" defer></script>
+<script src="/static/app.js" defer></script>
+</head>
+<body hx-ext="sse" sse-connect="/events">
+<header>
+  <p class="brand">Training run</p>
+  <div id="run-status" class="run-status"><span class="pill">loading…</span></div>
+  <nav><a href="#overview">Stages</a><a href="#log-section">Log</a><a href="#results-section">Results</a><a href="#replays-section">Replays</a></nav>
+  <span id="conn" class="conn" title="Live updates from the server"><i></i><span>connecting</span></span>
+</header>
+<main>
+  <section id="overview">
+    <div class="top-grid">
+      <div>
+        <h2>Stages</h2>
+        <div id="stages" class="stages-box" hx-get="/fragment/stages" hx-trigger="load, sse:stages"></div>
+      </div>
+      <div class="log-panel" id="log-section">
+        <div class="log-head"><h2>Log</h2><div class="chips" id="log-chips"></div>
+          <input class="find" id="log-find" type="search" placeholder="find in the log" aria-label="Find in the log"></div>
+        <div id="log" class="log" sse-swap="log" hx-swap="beforeend"></div>
+        <button type="button" class="log-new" id="log-new" hidden>↓ new lines</button>
+      </div>
+    </div>
+  </section>
+  <section id="results-section">
+    <div class="section-head"><h2>Results</h2><span class="dim">the latest stage first</span></div>
+    <div id="results" hx-get="/fragment/results" hx-trigger="load"></div>
+  </section>
+  <section id="replays-section">
+    <div class="section-head"><h2>Replays</h2><span class="dim">4 games after each closed-loop test and every hour of PPO · click one to watch it</span></div>
+    <div id="replays" hx-get="/fragment/replays" hx-trigger="load, sse:replays"></div>
+  </section>
+</main>
+<div id="viewer" class="viewer" hidden></div>
+</body>
+</html>

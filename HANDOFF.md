@@ -20,17 +20,19 @@ simulator (`sim/`): first by cloning scripted players, then DAgger, then PPO.
   the army script in the sim, every clone wins 2-5%: each keeps up for 3 minutes, then stops expanding.  DAgger is the next
   step, and is built.
 * **One command runs everything** (`tools/policy_pipeline.py`): encoder, 10,000 steps of cloning as `clone-8` with z from the
-  variant, two DAgger rounds, an eval, PPO.  Not run yet; the user starts it.
+  variant, two DAgger rounds, an eval, PPO.  Not run yet; the user starts it.  While it runs it serves a dashboard at
+  `http://localhost:8765`: the log as it's written, each stage's results, and replays of test games (4 after each test, 4 every
+  hour of PPO).
 
 ## Invalid since 2026-11-10 (FEATURE_VERSION 7)
 
 The id tables were resized for free-for-all (`featurize.MAX_PLAYERS` 64, `MAX_ALLY_TEAMS` 8).  So:
 
 * `runs/encoder-big` and every clone (`clone-7`, `clone-8`, `clone-7s`, and older) no longer load;
-* `frames/pool4` and `pool5` are stored featurized, and are rejected.
+* `frames/pool4` and `pool5` were stored featurized, so they were rejected too; they're deleted.
 
 The recorded games (`clone/army-6`, its `z.npz`) are raw and still good.  **The pipeline must run with `--train-encoder`** until a
-new encoder exists.  It collects fresh frames into `ROOT/frames` (about 37 GB).
+new encoder exists.  It collects fresh frames into `ROOT/frames` (about 51 GB, as `pool5` took; D: has 228 GB free).
 
 ## Environment
 
@@ -45,7 +47,7 @@ new encoder exists.  It collects fresh frames into `ROOT/frames` (about 37 GB).
   `libzkscripts.so` and `libzkrecord.so` (`ZKSIM_LIB` overrides).  The recorder needs `libzstd-dev`.  Rebuild after any change
   under `sim/`.
 * **`sim/data/maps`** is gitignored: after a pull, `python tools/sim_data.py maps`.
-* **Data on D:**, outside git, under `/mnt/d/zk-learned` (153 GB free on 2026-11-10):
+* **Data on D:**, outside git, under `/mnt/d/zk-learned` (228 GB free on 2026-11-10):
 
   | Path | What |
   |---|---|
@@ -53,8 +55,10 @@ new encoder exists.  It collects fresh frames into `ROOT/frames` (about 37 GB).
   | `clone/army-6` | what's cloned: 83,820 script games with variants, 300.6M decisions, 105 GB, data version 6, with `z.npz` and `sides.npz` |
   | `clone/army-6-test` | about 1,000 games of the same, for `check` and smoke runs |
   | `evals/` | the six closed-loop evals of `clone-7`, `clone-8` and `clone-7s` |
-  | `frames/pool4`, `pool5` | 25 GB and 51 GB of encoder frames; invalid since feature version 7 |
+  | `frames/` | encoder frames: only `smoke-run` now (`pool4` and `pool5` deleted) |
   | `runs/` | every training run (5.3 GB); since feature version 7 none of the encoders or actors load |
+  | `dashboard-demo/` | a made-up run directory: earlier runs' logs and 10 replays, for working on the dashboard |
+  | `dashboard-cache/` | the dashboard's map pictures and icons, made once |
 
 ## Layout
 
@@ -75,7 +79,9 @@ new encoder exists.  It collects fresh frames into `ROOT/frames` (about 37 GB).
     `policy_mix.py`, `policy_script.py`);
   * frames and the encoder: `frame_world.py`, `frame_data.py`, `frame_model.py`, `frame_vae.py`;
   * the policy: `policy_model.py`, `policy_latent.py`, `policy_clone_data.py`, `policy_clone_train.py`, `policy_clone_eval.py`,
-    `policy_train.py`, `policy_pipeline.py`, `policy_golden.py`.
+    `policy_train.py`, `policy_pipeline.py`, `policy_golden.py`;
+  * the run's dashboard: `policy_dashboard.py` (server), `dashboard/` (page, replay viewer), `policy_replay.py` (test games
+    kept for it).
 * **Tests**: `tests/policy/`, `tests/test_*.py`, `sim/tests/`.  None needs the engine.
 * **Engine games**: `zk-startup.ps1`, `zk-maps.ps1`, `maps.md`, `README.md`.
 
@@ -85,7 +91,10 @@ In WSL, from `/mnt/c/Users/Thoma/Documents/sources/zk-ArenaAI`, with `PYTHONPATH
 
     ~/zkml/bin/python -m pytest -q sim/tests tests                     # about 3 minutes; all pass
     ~/zkml/bin/python tools/policy_pipeline.py --root /mnt/d/zk-learned/runs/NAME --train-encoder [--dry-run]
-        # everything, stage by stage; the same command again carries on.  A `stop` file in ROOT halts it after the running stage
+        # everything, stage by stage; the same command again carries on.  A `stop` file in ROOT halts it after the running stage.
+        # While it runs: the dashboard at http://localhost:8765 (log, results, replays)
+    ~/zkml/bin/python tools/policy_dashboard.py --root /mnt/d/zk-learned/runs/NAME     # the dashboard alone, during a run or after
+    ~/zkml/bin/python tools/policy_replay.py demo --out DIR     # replays of the army scripts' games, for the viewer
     ~/zkml/bin/python tools/policy_clone_train.py --data /mnt/d/zk-learned/clone/army-6 --maps /mnt/d/zk-learned/maps \
         --run /mnt/d/zk-learned/runs/NAME --decide-every 6 --samples 8 --accumulate 8 --lr 6e-4 --muon-lr 0.008 --workers 15 \
         --steps 10000 --z --z-dropout 0.2 --economy-weight 2.5 --finish-winners 0.1 --encoder ENCODER/vae-last.pt
@@ -104,8 +113,9 @@ README.md has the rules for engine games: headless at max speed, windowed only w
 
 ## Next
 
-1. **The whole run** (the user starts it): `policy_pipeline.py --train-encoder`.  Before it, the user may want to delete the
-   invalid frames and runs (`frames/pool4`, `pool5`, and the runs they don't want to keep).
+1. **The whole run** (the user starts it): `policy_pipeline.py --train-encoder`, watched on its dashboard.  Before it, the user
+   may want to delete the runs that no longer load and that they don't want to keep (`runs/clone-*`, `encoder-*`), and
+   `runs/replay-check` (a plumbing test of the replays: an untrained encoder, a 2-step clone and a tiny PPO).
 2. **After it**: whether DAgger fixes the stall in expansion (`evals/record-N.json` and `final.json` against the clone's
    2-5%).  Then PPO's rate in the fine sim, and whether 2M decisions is the right length (`--ppo-hours` caps it).
 3. **Not yet measured**: cloning's rate with the numba featurize.
@@ -122,6 +132,10 @@ README.md has the rules for engine games: headless at max speed, windowed only w
   itself at 85% of the card (`--gpu-memory`): past the card, the Windows driver spills into system RAM instead of failing.
 * **`pkill -f` / `pgrep -f` from `wsl bash -c '...'`** match that shell too, whose command line holds the pattern.  Write the
   pattern as `[p]olicy_train`.  A `kill -STOP` that way stopped the shell itself.
+* **A background process started by `wsl bash -lc 'nohup X &'`** dies when that call returns.  `setsid nohup X > LOG 2>&1 <
+  /dev/null &` outlives it.
+* **The dashboard's port**: a standalone `policy_dashboard.py` left on 8765 makes the pipeline run without its own (it says so
+  and carries on).  Stop it before a launch, or give the pipeline another `--port`.
 * **Engine games**: never start one, or kill engine processes, while the user is playing.  Check
   `tasklist | grep -i "spring\|zero-k"` first.
 * **`set_settings`** at game start can make the engine exit, so the host sends it after frame 2.  A sync-mode client that stops

@@ -19,7 +19,8 @@ current state and next steps.  This folder is the reference: what's there and wh
                                                                |
     army + economy scripts playing each other --> recorded games --> cloning --> DAgger rounds --> PPO --> engine (not built)
 
-`tools/policy_pipeline.py` runs all of it, one stage at a time (03-training.md, "The pipeline").
+`tools/policy_pipeline.py` runs all of it, one stage at a time, and serves a dashboard of the run at `http://localhost:8765`: its
+log, each stage's results, and replays of test games (03-training.md, "The pipeline").
 
 ## Where it stands
 
