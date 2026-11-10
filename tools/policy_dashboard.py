@@ -718,7 +718,8 @@ class Handler(BaseHTTPRequestHandler):
         path = self.app.run.root / "replays" / parts[0] / parts[1]
         if not path.is_file():
             return self._missing()
-        self._send(path.read_bytes(), "application/json", extra={"Content-Encoding": "gzip", "Cache-Control": "max-age=86400"})
+        # no-cache: a replay can be mended in place (policy_replay.py repair), and a day's cache kept the wrong one
+        self._send(path.read_bytes(), "application/json", extra={"Content-Encoding": "gzip", "Cache-Control": "no-cache"})
 
     def _events(self) -> None:
         after = self.headers.get("Last-Event-ID")

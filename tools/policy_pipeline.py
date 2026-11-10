@@ -58,11 +58,11 @@ FRAMES_FLAGS = ["--script-frames", "1000000", "--scenario-frames", "1000000", "-
 CLONE_FLAGS = ["--decide-every", "6", "--samples", "8", "--accumulate", "8", "--workers", "15", "--z", "--z-dropout", "0.2",
                "--economy-weight", "2.5"]
 # The PPO smoke run's (03-training.md, "From a clone"): a learning rate of 1e-4 drifted from the clone too far; a token budget of 165,000
-# didn't fit in 85% of the card.
+# didn't fit in 85% of the card.  The new critic learns at 3e-4, as every earlier critic did: at the actor's 1e-5 it learned nothing.
 PPO_FLAGS = ["--variants", "--z", "variant", "--fine-sim", "--decide-every", "6", "--segment", "16", "--token-budget", "40000",
              "--no-concurrent", "--critic-bins", "51", "--critic-span", "1.5", "--kl-start", "0.5", "--kl-end", "0.1",
              "--clone-weight", "0.5", "--dual-clip", "3", "--economy-start", "0.25", "--economy-end", "1", "--income-weight", "0.5",
-             "--lr-start", "1e-5", "--lr-end", "3e-6", "--entropy-floor", "0"]
+             "--lr-start", "1e-5", "--lr-end", "3e-6", "--critic-lr", "3e-4", "--entropy-floor", "0"]
 
 
 @dataclass
@@ -221,7 +221,7 @@ def main() -> None:
     ap.add_argument("--ppo-iteration", type=int, default=4096, help="decisions collected an iteration")
     ap.add_argument("--ppo-decisions", type=int, default=2_000_000)
     ap.add_argument("--ppo-hours", type=float, default=0.0, help="stop PPO after this long as well; 0 for no limit")
-    ap.add_argument("--ppo-critic-warmup", type=int, default=5, help="iterations where only the new critic learns")
+    ap.add_argument("--ppo-critic-warmup", type=int, default=10, help="iterations where only the new critic learns")
     ap.add_argument("--clone-args", default="", help="more flags for the clone stage, last so they win")
     ap.add_argument("--dagger-args", default="", help="more flags for each DAgger fine-tuning")
     ap.add_argument("--ppo-args", default="", help="more flags for PPO")

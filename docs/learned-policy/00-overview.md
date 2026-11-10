@@ -24,9 +24,11 @@ log, each stage's results, and replays of test games (03-training.md, "The pipel
 
 ## Where it stands
 
-* **Built and run:** the sim and its scripts, frame collection and the frame encoder, recording script games, cloning, and the
-  closed-loop eval of a clone against the script.
-* **Built, not yet run at scale:** DAgger and PPO from a clone (smoke runs only).
+* **Built and run:** the sim and its scripts, frame collection and the frame encoder, recording script games, cloning, the
+  closed-loop eval of a clone against the script, and the whole pipeline once (`full-1`, 2026-11-10): DAgger took the clone from
+  5% to 13% wins against the army script, and 88 iterations of PPO to 22-31% (03-training.md, "DAgger" and "What the earlier
+  runs showed").  The clone's stall in expansion is still there after DAgger.
+* **PPO plays as CUDA graphs**, optionally in collector processes: about 1.75-1.9x the eager rate (03-training.md, "Speed").
 * **Not built:** play in the engine.  `bots/zkbot` hosts the policy and sends no commands.  It still needs a CPU forward of the
   encoder and actor, the opening and the economy script on the engine side, and decoded orders sent as commands.
 * **Unvalidated:** the sim's fights.  The replay gate failed and the user waived it (2026-11-05; 01-simulator.md, "Validation").

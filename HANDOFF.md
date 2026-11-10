@@ -16,13 +16,17 @@ simulator (`sim/`): first by cloning scripted players, then DAgger, then PPO.
   share of PPO games).  The C++ army script, or the policy, runs their fighters, factories, missiles and the Trinity.
 * **The actor** (`tools/policy_latent.py`, 10.5M parameters) reads a frozen frame encoder's 40 latent tokens a frame, over a
   window of 4 frames in each of 4 layers.  It decides every 3 s, as actions one after another: a unit, then its order.
-* **Cloning works open-loop and stalls in play.**  Held out, `clone-8` picks a unit the scripts told 86% of the time.  Against
-  the army script in the sim, every clone wins 2-5%: each keeps up for 3 minutes, then stops expanding.  DAgger is the next
-  step, and is built.
-* **One command runs everything** (`tools/policy_pipeline.py`): encoder, 10,000 steps of cloning as `clone-8` with z from the
-  variant, two DAgger rounds, an eval, PPO.  Not run yet; the user starts it.  While it runs it serves a dashboard at
-  `http://localhost:8765`: the log as it's written, each stage's results, and replays of test games (4 after each test, 4 every
-  hour of PPO).
+* **One command runs everything** (`tools/policy_pipeline.py`): frames, encoder, 10,000 steps of cloning as `clone-8` with z
+  from the variant, two DAgger rounds, an eval, PPO.  While it runs it serves a dashboard at `http://localhost:8765`: the log as
+  it's written, each stage's results, and replays of test games (4 after each test, 4 every hour of PPO).
+* **`runs/full-1` is its first whole run** (2026-11-10), against the army script, told its variant:
+  * the clone picks a unit the scripts told 91% of the time held out, and wins 5% in play;
+  * DAgger took it to 13% in one round, the second adding nothing.  The stall in expansion stays: at 6 minutes it has about
+    half the script's extractors;
+  * PPO reached 22-31% test wins by iteration 88 (360,552 decisions), with explained variance 0.94, when the user stopped it.
+    It's not marked done: delete `full-1/ppo/stop` and run the pipeline's command again to resume.
+* **PPO plays as CUDA graphs** (`policy_graphs.py`), optionally with collector processes (`policy_collectors.py`): 158 and 178
+  decisions a second against 92 eager.  The GPU is now the limit.
 
 ## Invalid since 2026-11-10 (FEATURE_VERSION 7)
 
@@ -31,8 +35,9 @@ The id tables were resized for free-for-all (`featurize.MAX_PLAYERS` 64, `MAX_AL
 * `runs/encoder-big` and every clone (`clone-7`, `clone-8`, `clone-7s`, and older) no longer load;
 * `frames/pool4` and `pool5` were stored featurized, so they were rejected too; they're deleted.
 
-The recorded games (`clone/army-6`, its `z.npz`) are raw and still good.  **The pipeline must run with `--train-encoder`** until a
-new encoder exists.  It collects fresh frames into `ROOT/frames` (about 51 GB, as `pool5` took; D: has 228 GB free).
+The recorded games (`clone/army-6`, its `z.npz`) are raw and still good.  **`runs/full-1/encoder/vae-last.pt` is the new
+encoder** (recon R² 0.95).  A pipeline run gives it with `--encoder` instead of `--train-encoder`, which would collect 51 GB of
+frames and train another.  `policy_latent.ENCODER` still names `encoder-big`.
 
 ## Environment
 
@@ -47,7 +52,7 @@ new encoder exists.  It collects fresh frames into `ROOT/frames` (about 51 GB, a
   `libzkscripts.so` and `libzkrecord.so` (`ZKSIM_LIB` overrides).  The recorder needs `libzstd-dev`.  Rebuild after any change
   under `sim/`.
 * **`sim/data/maps`** is gitignored: after a pull, `python tools/sim_data.py maps`.
-* **Data on D:**, outside git, under `/mnt/d/zk-learned` (228 GB free on 2026-11-10):
+* **Data on D:**, outside git, under `/mnt/d/zk-learned` (174 GB free on 2026-11-10):
 
   | Path | What |
   |---|---|
@@ -56,7 +61,8 @@ new encoder exists.  It collects fresh frames into `ROOT/frames` (about 51 GB, a
   | `clone/army-6-test` | about 1,000 games of the same, for `check` and smoke runs |
   | `evals/` | the six closed-loop evals of `clone-7`, `clone-8` and `clone-7s` |
   | `frames/` | encoder frames: only `smoke-run` now (`pool4` and `pool5` deleted) |
-  | `runs/` | every training run (5.3 GB); since feature version 7 none of the encoders or actors load |
+  | `runs/full-1` | the first whole pipeline run: its frames (51 GB), encoder, clone, DAgger games (530 MB) and rounds, evals, PPO (1.4 GB), replays |
+  | `runs/` | every other training run; of those, since feature version 7 none of the encoders or actors load.  `ppo-rate`, `ppo-profile`, `ppo-aligned` and `ppo-collectors-*` are scratch timing runs |
   | `dashboard-demo/` | a made-up run directory: earlier runs' logs and 10 replays, for working on the dashboard |
   | `dashboard-cache/` | the dashboard's map pictures and icons, made once |
 
@@ -80,6 +86,7 @@ new encoder exists.  It collects fresh frames into `ROOT/frames` (about 51 GB, a
   * frames and the encoder: `frame_world.py`, `frame_data.py`, `frame_model.py`, `frame_vae.py`;
   * the policy: `policy_model.py`, `policy_latent.py`, `policy_clone_data.py`, `policy_clone_train.py`, `policy_clone_eval.py`,
     `policy_train.py`, `policy_pipeline.py`, `policy_golden.py`;
+  * PPO's play: `policy_graphs.py` (each round as a CUDA graph), `policy_collectors.py` (collector processes);
   * the run's dashboard: `policy_dashboard.py` (server), `dashboard/` (page, replay viewer), `policy_replay.py` (test games
     kept for it).
 * **Tests**: `tests/policy/`, `tests/test_*.py`, `sim/tests/`.  None needs the engine.
@@ -95,14 +102,16 @@ In WSL, from `/mnt/c/Users/Thoma/Documents/sources/zk-ArenaAI`, with `PYTHONPATH
         # While it runs: the dashboard at http://localhost:8765 (log, results, replays)
     ~/zkml/bin/python tools/policy_dashboard.py --root /mnt/d/zk-learned/runs/NAME     # the dashboard alone, during a run or after
     ~/zkml/bin/python tools/policy_replay.py demo --out DIR     # replays of the army scripts' games, for the viewer
+    ~/zkml/bin/python tools/policy_replay.py repair DIR...      # replays written before format 2, with the right units' names
     ~/zkml/bin/python tools/policy_clone_train.py --data /mnt/d/zk-learned/clone/army-6 --maps /mnt/d/zk-learned/maps \
         --run /mnt/d/zk-learned/runs/NAME --decide-every 6 --samples 8 --accumulate 8 --lr 6e-4 --muon-lr 0.008 --workers 15 \
         --steps 10000 --z --z-dropout 0.2 --economy-weight 2.5 --finish-winners 0.1 --encoder ENCODER/vae-last.pt
     ~/zkml/bin/python tools/policy_clone_eval.py --actor RUN/actor.pt --maps /mnt/d/zk-learned/maps --games 64 --workers 12 \
         --z variant --encoder ENCODER/vae-last.pt --out RESULT.json   # against the army script; --record DIR keeps its games
 
-Recording, `check` and `zindex` are in 03-training.md, "Script data"; PPO's flags in "PPO".  A `stop` file in a PPO run's
-directory ends it at its next report, and the same command resumes it.
+Recording, `check` and `zindex` are in 03-training.md, "Script data"; PPO's flags in "PPO", and how it plays (aligned
+decisions, graphs, `--collectors N`, `--concurrent`) in "Playing".  A `stop` file in a PPO run's directory ends it at its next
+report, and the same command resumes it.
 
 `--encoder` is needed by every tool that loads an actor until `policy_latent.ENCODER` names a new encoder: its default is
 `encoder-big`, which no longer loads.
@@ -113,12 +122,12 @@ README.md has the rules for engine games: headless at max speed, windowed only w
 
 ## Next
 
-1. **The whole run** (the user starts it): `policy_pipeline.py --train-encoder`, watched on its dashboard.  Before it, the user
-   may want to delete the runs that no longer load and that they don't want to keep (`runs/clone-*`, `encoder-*`), and
-   `runs/replay-check` (a plumbing test of the replays: an untrained encoder, a 2-step clone and a tiny PPO).
-2. **After it**: whether DAgger fixes the stall in expansion (`evals/record-N.json` and `final.json` against the clone's
-   2-5%).  Then PPO's rate in the fine sim, and whether 2M decisions is the right length (`--ppo-hours` caps it).
-3. **Not yet measured**: cloning's rate with the numba featurize.
+1. **PPO's speed, next**: every graph runs all 16 action steps, where a decision averages about 2 actions.  Sampling in chunks of
+   steps that stop once every decision is done should cut most of the GPU's work, now the limit.
+2. **`full-1`'s PPO** (the user decides when): resume it, which now plays as graphs at about 1.75x.  Whether to also run
+   `--collectors 4 --concurrent` (about 10% more, on data two updates old) is the user's call; the pipeline runs not concurrent.
+3. **The stall in expansion** survived DAgger.  Whether PPO's economy share (the policy running its own economy in more games)
+   moves the extractor count is the thing to watch in its tests.
 4. **The engine hand-off**:
    * a numpy forward of the actor and encoder for the bot;
    * decoded orders sent as commands;
@@ -130,6 +139,12 @@ README.md has the rules for engine games: headless at max speed, windowed only w
 
 * **Memory**: check `wsl free -g` before a launch.  Never run two jobs that load the map pool at once.  Every GPU trainer caps
   itself at 85% of the card (`--gpu-memory`): past the card, the Windows driver spills into system RAM instead of failing.
+  With collectors, the learner's cap leaves each `--collector-gb` plus about 0.4 GB of CUDA's own.
+* **Forking with torch**: a child forked after the parent ran a parallel CPU op hangs at its first one (OpenMP), so collectors
+  set one thread first.  A parent that has started CUDA can't fork children that use it: the trainer forks its collectors
+  before the learner touches the GPU, and a test of them on CUDA runs the trainer in a fresh process.
+* **Pinned memory in WSL**: a collector's 20 MB `cuMemHostAlloc` failed as out of memory with 7 GB of the card free.  The
+  graphs' inputs aren't pinned.
 * **`pkill -f` / `pgrep -f` from `wsl bash -c '...'`** match that shell too, whose command line holds the pattern.  Write the
   pattern as `[p]olicy_train`.  A `kill -STOP` that way stopped the shell itself.
 * **A background process started by `wsl bash -lc 'nohup X &'`** dies when that call returns.  `setsid nohup X > LOG 2>&1 <

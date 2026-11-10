@@ -3,9 +3,10 @@ each written as gzipped JSON with a line in its directory's index.jsonl.  Set as
 after every step, so a test's loop needs nothing more.
 
     ~/zkml/bin/python tools/policy_replay.py demo --maps /mnt/d/zk-learned/maps --out DIR     # the army scripts against each other
+    ~/zkml/bin/python tools/policy_replay.py repair DIR...      # name format 1's units again (FORMAT)
 
 A replay holds every unit of both sides, from each side's own records (so what neither side sees is there too):
-  {"format": 1, "stage", "label", "slot", "map": {"slug", "width", "height"}, "step_seconds", "every",
+  {"format": 2, "stage", "label", "slot", "map": {"slug", "width", "height"}, "step_seconds", "every",
    "sides": [{"name", "variant", "factory", "value"}, ...], "result": {"winner": 0, 1 or null, "how", "seconds"},
    "spots": [[x, z, income], ...], "defs": {"def id": {"name", "cost"}}, "unit_fields": UNIT_FIELDS, "side_fields": SIDE_FIELDS,
    "frames": [{"t": seconds, "units": [the unit fields, a unit after another], "sides": [[side 0's], [side 1's]],
@@ -29,7 +30,9 @@ sys.path[:0] = [str(ROOT / "tools"), str(ROOT / "bots"), str(ROOT / "sim" / "py"
 import zksim  # noqa: E402
 from zkbot.policy import rawframe as rf  # noqa: E402
 
-FORMAT = 1
+# 2: "defs" names each engine def id (1 up) by the catalog record holding it.  Format 1 took the catalog's list from 0, so it named
+# each def as the next unit (a metal extractor as a missile silo); `repair` names them again from the ids in the frames.
+FORMAT = 2
 # hp and build are percent; flags: 1 cloaked, 2 paralyzed; order is rawframe's kind (-1 none), to the point (tx, tz) or the unit
 # `target` (-1 none).
 UNIT_FIELDS = ("uid", "def", "side", "x", "z", "hp", "build", "flags", "order", "tx", "tz", "target")
@@ -37,16 +40,48 @@ SIDE_FIELDS = ("metal", "metal_income", "energy_income", "value", "units")
 FEATURE_EVERY = 10
 
 
+def by_def() -> dict[int, dict]:
+    """The catalog's records by their engine def id."""
+    return {int(u["def_id"]): u for u in json.loads((zksim.DATA / "catalog.json").read_text("utf8"))["units"]}
+
+
+def named(defs, records: dict[int, dict]) -> dict[str, dict]:
+    return {str(d): {"name": records[d]["name"], "cost": records[d]["cost"]} for d in sorted(defs) if d in records}
+
+
+def save(path: pathlib.Path, replay: dict) -> None:
+    temp = path.with_name(path.name + ".tmp")
+    with gzip.open(temp, "wt", compresslevel=6) as f:
+        json.dump(replay, f, separators=(",", ":"))
+    os.replace(temp, path)
+
+
+def repair(paths) -> list[pathlib.Path]:
+    """Names format 1's defs again, from the def ids in each replay's frames; replays already at FORMAT are left alone."""
+    records, mended = by_def(), []
+    for path in paths:
+        with gzip.open(path, "rb") as f:
+            if not f.read(16).startswith(b'{"format":1,'):
+                continue
+        with gzip.open(path, "rt") as f:
+            replay = json.load(f)
+        n, at = len(replay["unit_fields"]), replay["unit_fields"].index("def")
+        used = {u[i] for frame in replay["frames"] for u in (frame["units"],) for i in range(at, len(u), n)}
+        replay["defs"], replay["format"] = named(used, records), FORMAT
+        save(path, replay)
+        mended.append(path)
+    return mended
+
+
 class Capture:
     """Records the first game of each of the env's first `games` slots, from now (after `env.begin()`), and writes each as it ends."""
 
     def __init__(self, env, out: pathlib.Path | str, games: int, stage: str, label: str, sides: tuple[str, str] = ("policy", "army script"),
                  prefix: str = "", info: dict | None = None, every: float = 1.0):
-        import policy_sim_env
         self.out = pathlib.Path(out)
         self.out.mkdir(parents=True, exist_ok=True)
         self.stage, self.label, self.sides, self.prefix, self.info = stage, label, sides, prefix, dict(info or {})
-        self.names = policy_sim_env.catalog().units
+        self.records = by_def()
         self.slugs = {id(b): f.name for _, b, f in env.maps}
         self.step_seconds = env.ticks * zksim.TICK_FRAMES / zksim.FRAMES_PER_SECOND
         self.every = max(1, round(every / self.step_seconds))
@@ -112,14 +147,11 @@ class Capture:
                       for s in (0, 1)],
             "result": {"winner": winner, "how": facts[0]["how"], "seconds": facts[0]["seconds"]},
             "spots": np.round(bundle.spot_list, 2).tolist(),
-            "defs": {str(d): {"name": self.names[d]["name"], "cost": self.names[d]["cost"]} for d in sorted(defs) if 0 <= d < len(self.names)},
+            "defs": named(defs, self.records),
             "unit_fields": UNIT_FIELDS, "side_fields": SIDE_FIELDS, "frames": frames,
         }
         path = self.out / f"{name}.json.gz"
-        temp = path.with_name(path.name + ".tmp")
-        with gzip.open(temp, "wt", compresslevel=6) as f:
-            json.dump(replay, f, separators=(",", ":"))
-        os.replace(temp, path)
+        save(path, replay)
         line = {"file": path.name, "stage": self.stage, "label": self.label, "slot": g, "map": replay["map"]["slug"],
                 "winner": winner, "how": facts[0]["how"], "seconds": facts[0]["seconds"], "sides": replay["sides"],
                 "frames": len(frames), "bytes": path.stat().st_size, "written": time.strftime("%Y-%m-%d %H:%M:%S"), **self.info}
@@ -163,8 +195,14 @@ def main() -> None:
     d.add_argument("--seed", type=int, default=1)
     d.add_argument("--stage", default="demo")
     d.add_argument("--label", default="army script against army script")
+    r = sub.add_parser("repair", help="name format 1's units again, in these directories' replays")
+    r.add_argument("dirs", nargs="+")
     args = ap.parse_args()
-    demo(args)
+    if args.command == "demo":
+        demo(args)
+    else:
+        mended = repair(p for d in args.dirs for p in sorted(pathlib.Path(d).rglob("*.json.gz")))
+        print(f"{len(mended)} replays named again" + "".join(f"\n  {p}" for p in mended))
 
 
 if __name__ == "__main__":

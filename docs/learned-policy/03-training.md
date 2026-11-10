@@ -18,7 +18,7 @@ a process of its own.  So no two stages load the map pool at once, and each hand
 | `zindex-N` | `z.npz` over every round's games | |
 | `dagger-N` | 500 steps from the last clone, half the samples from every round's games and half from `army-6`; lr 2e-4, Muon 0.003 | DAgger |
 | `eval` | the last clone, 64 games: `evals/final.json` | |
-| `ppo` | `policy_train.py --init` the last clone, 64 games, 4,096 decisions an iteration, 2M decisions (`--ppo-hours` caps it), the critic alone for 5 iterations | the PPO smoke run |
+| `ppo` | `policy_train.py --init` the last clone, 64 games, 4,096 decisions an iteration, 2M decisions (`--ppo-decisions`; `--ppo-hours` caps it), the critic alone for 10 iterations at its own rate | the PPO smoke run, `full-1` |
 
 * **Options**: `--dagger-rounds` (2).  `--clone-args`, `--dagger-args` and `--ppo-args` go at the end of their commands, so they
   override what's set.
@@ -38,9 +38,11 @@ a process of its own.  So no two stages load the map pool at once, and each hand
   the run or after.  Server: `tools/policy_dashboard.py` (its docstring lists the endpoints); page and viewer:
   `tools/dashboard/`; replay format: `tools/policy_replay.py`.  Unit icons come from `../Zero-K` (`--zero-k`), map pictures
   from the minimaps in the archives in `zero-k-portable/maps` (`--map-archives`), or for a made map from its heights.
-* **Expected times**: the encoder about 82 minutes after the collection; cloning about 7 hours (at `clone-7`'s rate, before
-  numba); a DAgger round about 45 minutes; PPO's rate in the fine sim is unknown.  None of this was measured on the pipeline
-  itself.
+* **Replays before format 2** named each unit after the def one past its own, so the viewer showed the wrong icons (missile
+  silos for extractors, and so on).  `policy_replay.py repair DIR...` rewrites them from their def ids, and leaves format 2 alone.
+  The dashboard serves replays uncached, so a repaired one shows at once.
+* **Times** (`full-1`, 2026-11-10): frames 15 minutes, the encoder 74, cloning 6.2 hours (1,528 decisions a second), each round
+  25-32 minutes of recording and 18 of fine-tuning, the eval 7.  PPO: see "Speed".
 
 **Until a new encoder exists, run with `--train-encoder`.**  `FEATURE_VERSION` 7 (64 players, 8 allyteams) made `encoder-big`,
 every clone and `frames/pool5` unloadable, so the pipeline has to collect fresh frames (about 51 GB, as `pool5`, the same recipe, took).
@@ -209,7 +211,19 @@ with variants on both sides.  Each slot's first game counts.
 `policy_clone_eval.py --record DIR --record-prefix game-daggerN` keeps the clone's games, recorded as the scripts' are.  On the
 clone's side the scripts only advise: libzkscripts' label seats get the army script's orders, and the economy script's where the
 policy runs its economy, as labels that are never sent.  `policy_clone_train.py --mix DIR --mix-share 0.5 --init RUN/actor.pt`
-fine-tunes on them mixed with the original data.  Built and tested; no round has been run yet.
+fine-tunes on them mixed with the original data.
+
+**In `full-1`** (2026-11-10), each eval 64 games against the army script, told its variant:
+
+| Actor | Wins / draws / losses | Extractors at 6 min (script's) | Ended by lead / time / elimination |
+|---|---|---|---|
+| clone (10,000 steps) | 5% / 19% / 77% | 4.1 (9.7) | 49 / 12 / 3 |
+| after round 1 | 13% / 28% / 59% | 4.7 (9.0) | 44 / 18 / 2 |
+| after round 2 | 13% / 23% / 64% | 4.8 (8.8) | 49 / 15 / 0 |
+
+* **DAgger helped once**: wins went from 3 to 8 of 64 and losses from 49 to 38.  The second round added nothing.
+* **It didn't fix the stall in expansion**: at 6 minutes the actor has about half the script's extractors, as every clone did.
+* Held out, the clone picks a unit the scripts told 91% of the time, and the right kind 97%.
 
 ## PPO (`tools/policy_train.py`)
 
@@ -242,7 +256,9 @@ For side A against side B at decision t:
   clone).
 * **One pass** over each sample (`passes` 1).  An EMA of the weights (0.99) plays the tests and is saved.
 * **The critic** is a separate network over the privileged frame, with the enemies the seat can't see.  It's never in the bot.
-  With `--critic-bins` its value is a distribution over bins from -span to span, trained by HL-Gauss.
+  With `--critic-bins` its value is a distribution over bins from -span to span, trained by HL-Gauss.  `--critic-lr` gives it a
+  rate of its own, falling in step with the actor's: at the actor's 1e-5 a new critic learned nothing (explained variance
+  0.0000 for 19 iterations in `full-1`).  The pipeline gives it 3e-4.
 * **Minibatches** are filled to a token budget (`--token-budget`): 40,000 fits the 10M actor in 85% of the card, where 165,000
   didn't.
 
@@ -261,7 +277,8 @@ For side A against side B at decision t:
 **The smoke run** (16 games, 3 iterations of 512 decisions, from `clone-7`): at a learning rate of 1e-4 the actor drifted too far
 from the clone.  At 1e-5 the KL to the clone went from 0.003 to 0.023, PPO's own KL per iteration stayed at 0.005-0.008, and 10%
 of ratios clipped.  The pipeline's PPO flags are this run's: lr 1e-5 to 3e-6, KL 0.5 to 0.1, cloning loss 0.5, dual clip 3, 51
-bins over ±1.5, economy share 0.25 to 1, income 0.5, token budget 40,000, not concurrent.
+bins over ±1.5, economy share 0.25 to 1, income 0.5, token budget 40,000, not concurrent; and since `full-1`, the critic at
+3e-4 alone for 10 iterations.
 
 ### Opponents
 
@@ -284,6 +301,26 @@ The test stays against the script throughout, so it stays comparable.
 * Before torch starts, the allocator is set to `expandable_segments` with `garbage_collection_threshold:0.8`, and the cache is
   emptied after each iteration.  Reserved memory had grown by fragmentation until the card spilled.
 
+### Playing
+
+A decision round is the sim stepping, the scripts and featurizing on the CPU, and one forward pass of the actor and critic over
+every seat that decides.
+
+* **Aligned decisions** (`SimEnv.align`, on with `--fine-sim`): every game starts on a slot `--decide-every` divides, so all
+  seats decide together, in one pass.  A game that ends between such slots waits, untouched, for the next.  Each game's own
+  slot count, which the scripts and the opening go by, runs as before.  Unaligned, games drifted into all 6 phases, and the
+  sampler ran on 79% of slots at 13.6 seats each.
+* **CUDA graphs** (`tools/policy_graphs.py`, on unless `--no-graphs`, or `--concurrent` in this process): the whole round's
+  forward pass (encoder, time transformer, all 16 action steps, critic, action tokens) is captured once per padded shape and
+  replayed.  Eager, its thousands of small kernels took about 0.25 s a round from one core, whatever the batch.  Shapes pad
+  to a ladder of widths, and each width only grows: padded per batch, a new shape came one round in five.  Padding changes
+  no decision's own outputs.  The graph reads the weights where they are, so it follows training.
+* **Collector processes** (`tools/policy_collectors.py`, `--collectors N`): each plays its share of the games and of the
+  tests, with its own copy of the nets and its own graphs.  They fork before the GPU is touched, after the map pool is
+  loaded, and share its maps.  Weights reach them through shared memory before each collection, checked by a checksum.
+  Each may hold `--collector-gb` (0.75) of the card, which the learner's own limit leaves room for.  With `--concurrent` they
+  collect the next iteration while this one trains.
+
 ## Speed
 
 * **Cloning** runs at 1,326-1,462 decisions a second with 15 workers.  The GPU alone would take 2,450: 157 ms for 8 stretches
@@ -293,19 +330,49 @@ The test stays against the script throughout, so it stays comparable.
   * the main process needs most of a core to issue a step's kernels, and shares the 8 cores with the workers;
   * `/mnt/d` is about 15% slower than WSL's own disk.
   
-  Cloning's rate with numba hasn't been measured.
+  With numba, `full-1`'s cloning ran at 1,528 a second.
 * **What made cloning 18x faster** (52 to about 950 decisions a second):
   * deciding every 3 s, not every slot;
   * decoding only the side and the part of a game a sample needs;
   * indexing the age bias by frame (its backward had been 77% of the GPU's time);
   * one encoder call a step over all the samples' frames.
-* **PPO** collection was limited by one thread issuing small calls, not by the GPU or the sim (measured on the 1M actor).  The
-  sim's own rates are in 01-simulator.md, "The batch".
+* **PPO** at the pipeline's settings, from `full-1`'s `dagger-2`, all 64 games starting together (2026-11-10).  Rates are means
+  over iterations 2-11, the tests apart:
+
+  | | Decisions a second | 64-game test | Card at peak |
+  |---|---|---|---|
+  | Eager, unaligned (`full-1`'s first 35 iterations) | about 33 | 373-422 s | |
+  | Eager, aligned | 92 | 162 s | about 5 GB |
+  | Graphs, in this process (the default) | 158 | 83-86 s | 9.5 GB |
+  | Graphs, 4 collectors, `--concurrent` | 178 | 81-89 s | 8.9 GB |
+
+  * With a test every 20 iterations that's 78, 136 and 151 a second: graphs give 1.75x, collectors 1.9x.
+  * **The GPU is now the limit**: Task Manager shows it 80-100% busy.  4 collectors not concurrent collected more slowly than
+    one process, and concurrent ones slow training from 10-17 s an iteration to 18-27 s.  Every graph runs all 16 action
+    steps, where a decision averages about 2 actions: that's the next saving.
+  * **Memory**: the learner reserves about 4.9 GB to train, 7.1 GB with its own graphs; a collector of 16 games 0.59 GB.
+  * Concurrent, the update reads data played by weights two updates old.  Its explained variance grew more slowly than in
+    this process (0.004 against 0.05 by iteration 11), within what separates runs: eager `full-1` had 0.0035 there.
+
+  The sim's own rates are in 01-simulator.md, "The batch".
 * **The sim's budget** was 0.5 ms of wall time per game decision at 400 units on 16 threads, 2x allowed
   (`tools/sim_batch_bench.py`).  It measured 0.34 ms.
 
 ## What the earlier runs showed
 
+* **`full-1`** (2026-11-10), the first whole pipeline: its DAgger rounds are in "DAgger".  PPO from `dagger-2` was stopped by the
+  user at iteration 88 (360,552 decisions), eager throughout, still against the script only:
+
+  | Iteration | Test wins / draws / losses | Explained variance |
+  |---|---|---|
+  | 20 | 16% / 27% / 58% | 0.34 |
+  | 40 | 31% / 19% / 50% | 0.80 |
+  | 60 | 22% / 27% / 52% | 0.93 |
+  | 80 | 27% / 23% / 50% | 0.96 |
+
+  From 13% wins after DAgger to 22-31%.  The first attempt, with the critic at the actor's rate, is kept in `full-1/ppo-critic-1e-5`.
+  In a `record-2` game the actor rushed a singularity reactor to win on the metal ratio; by minute 10 it had won anyway, so the
+  rule was left alone.
 * **RL from scratch didn't learn.**  These runs were against the raider-only script, with an earlier actor:
   * `selfplay-6h` (7.2M decisions): 25% test wins in the first half and 28% in the second;
   * `latent-1` and `latent-2` (2M each): 13-15% early, 21-23% late.

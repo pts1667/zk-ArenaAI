@@ -35,6 +35,7 @@ import torch  # noqa: E402
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT / "bots"))
+import policy_graphs  # noqa: E402
 import policy_latent  # noqa: E402
 import policy_model as pm  # noqa: E402
 from zkbot.policy import actions as act, bundle as bd, featurize as fz, rawframe as rf, tables  # noqa: E402
@@ -66,6 +67,9 @@ class Config:
     empty_cache: bool = True        # hand back what the allocator holds after each iteration
     lr_start: float = 3e-4
     lr_end: float = 1e-4
+    # The critic's rate at the start, falling as the actor's does; 0: the actor's.  A clone's actor wants a small rate, and a new
+    # critic at it learns nothing: at 1e-5 its explained variance stayed at 0.0000 for 19 iterations (full-1, 2026-11-10).
+    critic_lr: float = 0.0
     clip_start: float = 0.15
     clip_end: float = 0.1
     gae: float = 0.95
@@ -109,6 +113,13 @@ class Config:
     replay_hours: float = 0.0       # every this many hours, replay_games games against the script, kept for the dashboard's viewer
     replay_games: int = 4           # (policy_replay.py) in `replays`, or the run's replays/; 0 hours for none
     replays: str = ""
+    graphs: bool = True             # play each forward pass as a CUDA graph (policy_graphs.py); not while collecting concurrently in
+                                    # this process, where a second thread would use the GPU during a capture
+    collectors: int = 0             # processes that play the games, each its share of them, and the tests (policy_collectors.py);
+                                    # 0: this process plays
+    collector_gb: float = 0.75      # the GPU memory each collector may hold, out of gpu_share.  The learner's training needs about
+                                    # 4.5 GB of the rest (at 4 x 1.5 it had 2.6 GB, and ran out); a collector of 16 games ran out at
+                                    # 0.5 (2026-11-10)
 
 
 # A big frame costs more memory per token than a small one.  Fitted on the first actor, whose attention was over every pair of
@@ -123,12 +134,18 @@ UNIT_TOKENS = fz.CAP_UNITS + fz.CAP_HIDDEN
 PROCESS_OVERHEAD = 400 * 2**20
 
 
-def gpu_fraction(share: float, runs: int, card_bytes: int) -> float:
-    """One run's limit, as a fraction of the card, when `runs` trainings share `share` of it."""
-    fraction = (share - (runs - 1) * PROCESS_OVERHEAD / card_bytes) / runs
+def gpu_fraction(share: float, runs: int, card_bytes: int, others: float = 0.0) -> float:
+    """One run's limit, as a fraction of the card, when `runs` trainings share `share` of it.  others: bytes the run's own collector
+    processes hold, their overhead included (`collector_bytes`)."""
+    fraction = (share - (runs - 1) * PROCESS_OVERHEAD / card_bytes) / runs - others / card_bytes
     if fraction <= 0.0:
         raise ValueError(f"{runs} runs don't fit in {share} of a {card_bytes / 2**30:.1f} GB card")
     return fraction
+
+
+def collector_bytes(cfg: "Config") -> float:
+    """What a run's collector processes hold of the card in all."""
+    return cfg.collectors * (cfg.collector_gb * 2**30 + PROCESS_OVERHEAD)
 
 
 def memory_tokens(tokens: int) -> float:
@@ -286,8 +303,12 @@ class DataWorkers:
             self.pool.join()
 
 
-def _act_slices(items: list[fz.Tensors]) -> list[slice]:
-    """Seats in order, cut where the next would take a forward pass's padded pairs over the limit."""
+def _act_slices(items: list[fz.Tensors], graphed: bool = False) -> list[slice]:
+    """Seats in order, cut where the next would take a forward pass's padded pairs over the limit.  graphed: all at once, as a
+    graph pads every batch to the widest yet (policy_graphs.py), and this actor's attention keeps no table of pairs: 64 seats of
+    up to 1,000 tokens each are a few hundred MB."""
+    if graphed:
+        return [slice(0, len(items))]
     out, start, most = [], 0, 0
     for i, t in enumerate(items):
         tokens = len(t.unit_x) + len(t.reg_x) + len(t.site_x) + len(t.feat_x) + 2
@@ -310,13 +331,15 @@ def _stack_padded(parts: list[np.ndarray]) -> np.ndarray:
 
 
 class Player:
-    """Chooses actions: the learner's own nets, or a frozen copy while the learner goes on training."""
+    """Chooses actions: the learner's own nets, or a frozen copy while the learner goes on training.  graphs: each forward pass a
+    CUDA graph's replay (policy_graphs.py), on CUDA; one thread only."""
 
-    def __init__(self, actor: policy_latent.LatentActor, critic: pm.Critic, workers: DataWorkers, device: str):
+    def __init__(self, actor: policy_latent.LatentActor, critic: pm.Critic, workers: DataWorkers, device: str, graphs: bool = False):
         self.actor, self.critic, self.workers = actor, critic, workers
         # Its own: an autocast object keeps state between enter and exit, and two threads may each be inside one.
         self.autocast = torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda")
         self.device = device
+        self.graphs = policy_graphs.Graphs(actor, critic) if graphs and str(device).startswith("cuda") else None
 
     def _features(self, items: list[tuple[rf.Frame, bd.Bundle, np.ndarray]]) -> list[fz.Tensors]:
         out = self.workers.map([(f, b) for f, b, _ in items])
@@ -326,6 +349,8 @@ class Player:
 
     @torch.no_grad()
     def _forward(self, items: list[fz.Tensors], history: torch.Tensor, seen: torch.Tensor, z: torch.Tensor | None = None):
+        if self.graphs is not None:
+            return self.graphs.forward(items, history, seen, z)
         b = pm.collate(items).to(self.device)
         with self.autocast:
             ctx, new_history, new_seen, keep = self.actor.decide(b, history, seen, z)
@@ -340,7 +365,7 @@ class Player:
         """Forward passes for many games, as few as fit the memory.  Returns tensors, numpy actions, values and the new state.
         z: each seat's strategy (policy_latent.Z_DIM), or None."""
         items = self._features(frames)
-        parts = [self._forward(items[s], history[s], seen[s], None if z is None else z[s]) for s in _act_slices(items)]
+        parts = [self._forward(items[s], history[s], seen[s], None if z is None else z[s]) for s in _act_slices(items, self.graphs is not None)]
         if len(parts) == 1:
             return (items, *parts[0])
         out = {k: _stack_padded([p[0][k] for p in parts]) for k in parts[0][0]}
@@ -371,18 +396,20 @@ class Learner:
         critic_params = [p for p in self.critic.parameters() if p.requires_grad]
         self.trained = actor_params + critic_params
         # Two groups, so that the critic can learn alone at first (critic_warmup).
-        self.optimizer = torch.optim.Adam([{"params": actor_params}, {"params": critic_params}], lr=cfg.lr_start, eps=cfg.adam_eps)
+        self.optimizer = torch.optim.Adam([{"params": actor_params}, {"params": critic_params, "lr": cfg.critic_lr or cfg.lr_start}],
+                                          lr=cfg.lr_start, eps=cfg.adam_eps)
         self.economy_share = cfg.economy_start
         self.decisions = 0
         self.iteration = 0
         self.entropy_coef = {h: ENTROPY_BASE for h in HEADS}
         self.self_play = SelfPlay(cfg.self_play_at, cfg.self_play_holds_below, cfg.self_play_per_iteration)
         self.autocast = torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda")
-        self.player = Player(self.actor, self.critic, workers, device)
-        self.ema = self.frozen_player(workers) if cfg.ema > 0.0 else None
+        self.graphs = cfg.graphs and not cfg.concurrent
+        self.player = Player(self.actor, self.critic, workers, device, self.graphs)
+        self.ema = self.frozen_player(workers, self.graphs) if cfg.ema > 0.0 else None
         if device == "cuda":
             # It empties its cache at this limit, and fails rather than spills.
-            torch.cuda.set_per_process_memory_fraction(gpu_fraction(cfg.gpu_share, cfg.gpu_runs, torch.cuda.mem_get_info()[1]))
+            torch.cuda.set_per_process_memory_fraction(gpu_fraction(cfg.gpu_share, cfg.gpu_runs, torch.cuda.mem_get_info()[1], collector_bytes(cfg)))
 
     @property
     def progress(self) -> float:
@@ -391,11 +418,11 @@ class Learner:
     def act(self, frames: list[tuple[rf.Frame, bd.Bundle, np.ndarray]], history: torch.Tensor, seen: torch.Tensor):
         return self.player.act(frames, history, seen)
 
-    def frozen_player(self, workers: DataWorkers) -> Player:
+    def frozen_player(self, workers: DataWorkers, graphs: bool = False) -> Player:
         actor, critic = copy.deepcopy(self.actor), copy.deepcopy(self.critic)
         for p in list(actor.parameters()) + list(critic.parameters()):
             p.requires_grad_(False)
-        return Player(actor, critic, workers, self.device)
+        return Player(actor, critic, workers, self.device, graphs)
 
     @torch.no_grad()
     def copy_weights_to(self, player: Player) -> None:
@@ -524,16 +551,19 @@ class Learner:
         note("minibatch_decisions", decisions)
         return pg + cfg.value_weight * value_loss - entropy_loss
 
+    def set_rates(self) -> None:
+        """The actor's rate on its schedule, or 0 while the critic warms up; the critic's scaled as the actor's falls."""
+        cfg = self.cfg
+        lr = cfg.lr_start + (cfg.lr_end - cfg.lr_start) * self.progress
+        self.optimizer.param_groups[0]["lr"] = 0.0 if self.iteration < cfg.critic_warmup else lr
+        self.optimizer.param_groups[1]["lr"] = cfg.critic_lr * lr / cfg.lr_start if cfg.critic_lr else lr
+
     def train(self, segments: list[Segment], rng: np.random.Generator, between=None) -> dict[str, float]:
         """between: called after each optimizer step, the moments when the weights are whole."""
         cfg = self.cfg
         p = self.progress
         clip = cfg.clip_start + (cfg.clip_end - cfg.clip_start) * p
-        lr = cfg.lr_start + (cfg.lr_end - cfg.lr_start) * p
-        for group in self.optimizer.param_groups:
-            group["lr"] = lr
-        if self.iteration < cfg.critic_warmup:
-            self.optimizer.param_groups[0]["lr"] = 0.0      # the actor's
+        self.set_rates()
         totals: dict[str, float] = {}
         counts: dict[str, float] = {}
 
@@ -714,6 +744,11 @@ class Collector:
 
     def collect(self, want: int) -> tuple[list[Segment], dict[str, float]]:
         """Until `want` decisions of the learning policy are stored."""
+        segments, tally = self.collect_tally(want)
+        return segments, tally.metrics()
+
+    def collect_tally(self, want: int) -> tuple[list[Segment], "Tally"]:
+        """`collect`, with what it counted as a `Tally`, which several collectors' add up."""
         learner, env, cfg, seats, current = self.learner, self.env, self.learner.cfg, self.seats, self.current
         stored = 0
         finished: list[Trajectory] = []
@@ -788,16 +823,48 @@ class Collector:
                 self._carry_on(seat)
         # The same horizon in game time whatever the decision rate.
         _, values, returns = finish(finished, cfg.gae ** cfg.decide_every)
-        v, r = np.array(values), np.array(returns)
+        graphs = self.player.graphs.stats() if self.player.graphs is not None else {}
+        return segments, Tally(stored, masked_out, actions, bonus, kind_counts, wins, np.array(values), np.array(returns), graphs)
+
+
+@dataclass
+class Tally:
+    """What a collection counted, before it's metrics: several collectors' add up (`merge`)."""
+    stored: int
+    masked_out: int
+    actions: int
+    bonus: float
+    kind_counts: np.ndarray
+    wins: dict[str, list[float]]
+    values: np.ndarray
+    returns: np.ndarray
+    graphs: dict[str, float]        # policy_graphs.Graphs.stats, so far
+
+    @staticmethod
+    def merge(tallies: list["Tally"]) -> "Tally":
+        wins: dict[str, list[float]] = {}
+        graphs: dict[str, float] = {}
+        for t in tallies:
+            for mode, results in t.wins.items():
+                wins.setdefault(mode, []).extend(results)
+            for k, v in t.graphs.items():
+                graphs[k] = graphs.get(k, 0) + v
+        return Tally(sum(t.stored for t in tallies), sum(t.masked_out for t in tallies), sum(t.actions for t in tallies),
+                     sum(t.bonus for t in tallies), np.sum([t.kind_counts for t in tallies], 0), wins,
+                     np.concatenate([t.values for t in tallies]), np.concatenate([t.returns for t in tallies]), graphs)
+
+    def metrics(self) -> dict[str, float]:
+        v, r, stored = self.values, self.returns, self.stored
         explained = 1.0 - float(np.var(r - v)) / max(float(np.var(r)), 1e-8)
-        metrics = {"explained_variance": explained, "masked_out": masked_out, "decisions": stored, "actions_a_decision": actions / max(stored, 1),
-                   "diversity_a_decision": bonus / max(stored, 1), "return_min": float(r.min()), "return_max": float(r.max())}
-        total = max(int(kind_counts.sum()), 1)
-        metrics.update({f"share_kind{k}": float(kind_counts[k]) / total for k in range(rf.KIND_COUNT) if kind_counts[k]})
-        for mode, results in wins.items():
+        metrics = {"explained_variance": explained, "masked_out": self.masked_out, "decisions": stored, "actions_a_decision": self.actions / max(stored, 1),
+                   "diversity_a_decision": self.bonus / max(stored, 1), "return_min": float(r.min()), "return_max": float(r.max())}
+        total = max(int(self.kind_counts.sum()), 1)
+        metrics.update({f"share_kind{k}": float(self.kind_counts[k]) / total for k in range(rf.KIND_COUNT) if self.kind_counts[k]})
+        for mode, results in self.wins.items():
             metrics[f"wins_{mode}"] = float(np.mean(results))
             metrics[f"games_{mode}"] = len(results)
-        return segments, metrics
+        metrics.update(self.graphs)
+        return metrics
 
 
 def _kept(history: torch.Tensor, seen: torch.Tensor) -> tuple[np.ndarray, np.ndarray]:
@@ -865,8 +932,9 @@ _MAP_POOLS: dict = {}
 
 
 def make_sim(games: int, seed: int, modes: list[str] | None = None, decide_every: int = 1, maps: str = "", variants: bool = False,
-             advise: bool = False, income_weight: float = 0.0, fine_sim: bool = False):
-    """maps: a map pool, loaded once and shared, its held-out maps left out; "" for the five training maps."""
+             advise: bool = False, income_weight: float = 0.0, fine_sim: bool = False, threads: int = 16):
+    """maps: a map pool, loaded once and shared, its held-out maps left out; "" for the five training maps.  threads: the sim's
+    and the C++ scripts' each."""
     import policy_sim_env
 
     pool = weights = None
@@ -879,10 +947,11 @@ def make_sim(games: int, seed: int, modes: list[str] | None = None, decide_every
             policy_sim_env.share_maps(loaded)
             _MAP_POOLS[maps] = (loaded, w / w.sum())
         pool, weights = _MAP_POOLS[maps]
-    env = policy_sim_env.SimEnv(games, seed, modes or ["fight"], decide_every=1 if fine_sim else decide_every, maps=pool, weights=weights,
-                                variants=variants)
+    env = policy_sim_env.SimEnv(games, seed, modes or ["fight"], threads=threads, decide_every=1 if fine_sim else decide_every, maps=pool,
+                                weights=weights, variants=variants)
     env.advise, env.income_weight = advise, income_weight
     env.act_every = decide_every if fine_sim else 1
+    env.align = env.act_every > 1           # every seat decides on the same slots: one forward pass a decision (SimEnv.align)
     return env
 
 
@@ -923,17 +992,28 @@ class Ahead:
 def train(cfg: Config, run: pathlib.Path, make_env, device: str = "cuda") -> None:
     run.mkdir(parents=True, exist_ok=True)
     (run / "config.json").write_text(json.dumps(asdict(cfg), indent=1))
-    env = make_env(cfg.games, cfg.seed)
+    # With collector processes this one plays nothing: one game's env is enough for the map pool's bundles, and with no threads of
+    # its own it has none running when they fork.
+    env = make_env(1, cfg.seed, threads=1) if cfg.collectors else make_env(cfg.games, cfg.seed)
     # Separate pools: training queues a minibatch's chunks at once, and collection mustn't wait behind them.  Both before the GPU.
     workers = DataWorkers(cfg.data_workers, env.bundles(), cfg.enabled_kinds)
-    act_workers = DataWorkers(cfg.data_workers, env.bundles(), cfg.enabled_kinds) if cfg.concurrent else None
+    act_workers = DataWorkers(cfg.data_workers, env.bundles(), cfg.enabled_kinds) if cfg.concurrent and not cfg.collectors else None
+    remote = None
+    if cfg.collectors:
+        import policy_collectors
+        remote = policy_collectors.Collectors(cfg, make_env, env.bundles())     # forked before the GPU, as the workers are
     learner = Learner(cfg, run, workers, device)
     if learner.resume():
         print(f"resumed at iteration {learner.iteration}, {learner.decisions} decisions", flush=True)
-        env = make_env(cfg.games, cfg.seed + learner.iteration)
+        if remote is None:
+            env = make_env(cfg.games, cfg.seed + learner.iteration)
     rng = np.random.default_rng(cfg.seed + learner.iteration)
-    collector = Collector(learner, env, np.random.default_rng((cfg.seed, learner.iteration)))
-    frozen = learner.frozen_player(act_workers) if cfg.concurrent else None
+    learner.economy_share = cfg.economy_start + (cfg.economy_end - cfg.economy_start) * learner.progress
+    if remote is None:
+        collector = Collector(learner, env, np.random.default_rng((cfg.seed, learner.iteration)))
+    else:
+        remote.start(learner, cfg.seed + learner.iteration, device)
+    frozen = learner.frozen_player(act_workers) if act_workers else None
     ahead: Ahead | None = None
     collect_s = train_s = 0.0
     log = (run / "metrics.jsonl").open("a")
@@ -943,13 +1023,19 @@ def train(cfg: Config, run: pathlib.Path, make_env, device: str = "cuda") -> Non
         learner.economy_share = cfg.economy_start + (cfg.economy_end - cfg.economy_start) * learner.progress
         env.policy_economy_share = learner.economy_share
         t0 = time.perf_counter()
-        if ahead is None:
+        if remote is not None:
+            if not remote.collecting:
+                remote.collect(learner, cfg.iteration)
+            segments, metrics, collect_s = remote.result()
+            if cfg.concurrent:      # the next iteration's, by the weights before this one's update, while it trains
+                remote.collect(learner, cfg.iteration)
+        elif ahead is None:
             segments, metrics = collector.collect(cfg.iteration)
             collect_s = time.perf_counter() - t0
         else:
             segments, metrics, collect_s = ahead.join()
         t1 = time.perf_counter()
-        if cfg.concurrent:
+        if cfg.concurrent and remote is None:
             collector.player = frozen
             ahead = Ahead(collector, frozen, cfg.iteration, max(0.0, train_s - collect_s))
         metrics.update(learner.train(segments, rng, between=ahead.tick if ahead else None))
@@ -966,12 +1052,15 @@ def train(cfg: Config, run: pathlib.Path, make_env, device: str = "cuda") -> Non
                        collect_rate=metrics["decisions"] / max(collect_s, 1e-9), train_rate=metrics["decisions"] * cfg.passes / train_s,
                        overall_rate=metrics["decisions"] / (t2 - t0), game_minutes=learner.decisions * cfg.decide_every / 120.0,
                        beta=beta(learner.progress), entropy_coef=dict(learner.entropy_coef))
+        if device == "cuda":        # the most this process's allocator has held, for sizing gpu_share's parts
+            metrics["learner_reserved_gb"] = torch.cuda.max_memory_reserved() / 2**30
         if metrics["masked_out"]:
             raise RuntimeError(f"{metrics['masked_out']} chosen actions were outside their mask")
+        test = remote.evaluate if remote is not None else functools.partial(evaluate, make_env=make_env)
         if learner.iteration % cfg.eval_every == 0:
             for opponent in env.eval_opponents:
                 tested = time.perf_counter()
-                result = evaluate(learner, make_env, opponent, cfg.eval_games, cfg.seed * 1000 + learner.iteration)
+                result = test(learner, opponent=opponent, games=cfg.eval_games, seed=cfg.seed * 1000 + learner.iteration)
                 metrics[f"eval_{opponent}"] = result["win_rate"]
                 metrics[f"eval_{opponent}_draws"], metrics[f"eval_{opponent}_losses"] = result["draw_rate"], result["loss_rate"]
                 metrics[f"eval_{opponent}_seconds"] = time.perf_counter() - tested
@@ -982,7 +1071,7 @@ def train(cfg: Config, run: pathlib.Path, make_env, device: str = "cuda") -> Non
         if cfg.replay_hours and time.perf_counter() - last_replays >= cfg.replay_hours * 3600.0:
             tested = time.perf_counter()
             hours = (tested - began) / 3600.0
-            result = evaluate(learner, make_env, "fight", cfg.replay_games, cfg.seed * 1000 + learner.iteration + 500, replays={
+            result = test(learner, opponent="fight", games=cfg.replay_games, seed=cfg.seed * 1000 + learner.iteration + 500, replays={
                 "out": cfg.replays or run / "replays", "stage": "ppo", "label": "PPO against the army script",
                 "prefix": f"it{learner.iteration:05d}-", "info": {"iteration": learner.iteration, "decisions": learner.decisions, "hours": round(hours, 2)}})
             metrics["replays_win_rate"], metrics["replays_seconds"] = result["win_rate"], time.perf_counter() - tested
@@ -1002,6 +1091,8 @@ def train(cfg: Config, run: pathlib.Path, make_env, device: str = "cuda") -> Non
     workers.close()
     if act_workers:
         act_workers.close()
+    if remote is not None:
+        remote.close()
 
 
 def check_repro(cfg: Config, run: pathlib.Path, make_env) -> None:
@@ -1080,6 +1171,7 @@ def main() -> None:
     ap.add_argument("--variants", action="store_true", help="each side's army script draws its knobs (policy_variants.py)")
     ap.add_argument("--lr-start", type=float, default=Config.lr_start)
     ap.add_argument("--lr-end", type=float, default=Config.lr_end)
+    ap.add_argument("--critic-lr", type=float, default=Config.critic_lr, help="the critic's rate at the start, scaled as the actor's falls; 0: the actor's")
     ap.add_argument("--critic-bins", type=int, default=0, help="HL-Gauss bins for the critic (C6); 0 for one number")
     ap.add_argument("--critic-span", type=float, default=Config.critic_span)
     ap.add_argument("--entropy-floor", type=float, default=Config.entropy_floor, help="0 from a clone: no head's bonus rises")
@@ -1099,6 +1191,9 @@ def main() -> None:
                     help="every this many hours, --replay-games games against the script kept for the dashboard; 0 for none")
     ap.add_argument("--replay-games", type=int, default=Config.replay_games)
     ap.add_argument("--replays", default="", help="where they go (default RUN/replays)")
+    ap.add_argument("--graphs", action=argparse.BooleanOptionalAction, default=Config.graphs, help="play each forward pass as a CUDA graph")
+    ap.add_argument("--collectors", type=int, default=Config.collectors, help="processes that play the games and the tests; 0: this one")
+    ap.add_argument("--collector-gb", type=float, default=Config.collector_gb, help="the GPU memory each collector may hold")
     ap.add_argument("--check-repro", action="store_true")
     ap.add_argument("--check-kill", action="store_true")
     ap.add_argument("--save-forever", action="store_true", help=argparse.SUPPRESS)
@@ -1111,11 +1206,12 @@ def main() -> None:
                  segment=args.segment, token_budget=args.token_budget, data_workers=args.workers, concurrent=args.concurrent,
                  decide_every=args.decide_every, hours=args.hours, eval_every=args.eval_every, gpu_runs=args.gpu_runs, empty_cache=args.empty_cache,
                  latent_encoder=args.latent_encoder, enabled_kinds=policy_sim_env.KINDS,     # what the sim obeys
-                 init=args.init, maps=args.maps, variants=args.variants, lr_start=args.lr_start, lr_end=args.lr_end,
+                 init=args.init, maps=args.maps, variants=args.variants, lr_start=args.lr_start, lr_end=args.lr_end, critic_lr=args.critic_lr,
                  critic_bins=args.critic_bins, critic_span=args.critic_span, entropy_floor=args.entropy_floor, critic_warmup=args.critic_warmup, kl_start=args.kl_start, kl_end=args.kl_end,
                  clone_weight=args.clone_weight, dual_clip=args.dual_clip, economy_start=args.economy_start, economy_end=args.economy_end,
                  income_weight=args.income_weight, diversity=args.diversity, fine_sim=args.fine_sim, z=args.z,
-                 replay_hours=args.replay_hours, replay_games=args.replay_games, replays=args.replays)
+                 replay_hours=args.replay_hours, replay_games=args.replay_games, replays=args.replays, graphs=args.graphs,
+                 collectors=args.collectors, collector_gb=args.collector_gb)
     if args.kinds:
         cfg.enabled_kinds = tuple(int(k) for k in args.kinds.split(","))
     run = pathlib.Path(args.run)

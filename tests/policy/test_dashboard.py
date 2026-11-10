@@ -102,3 +102,18 @@ def test_capture_keeps_each_slots_first_game(tmp_path):
     assert set(units[:, 2]) == {0, 1}           # both sides' units
     assert {str(d) for d in units[:, 1]} <= set(replay["defs"])
     assert "features" in replay["frames"][0] and "features" in replay["frames"][-1]
+    from zkbot import units as zu
+    seen = {int(d) for f in replay["frames"] for d in np.array(f["units"]).reshape(-1, n)[:, 1]}
+    assert {d: replay["defs"][str(d)]["name"] for d in seen} == {d: zu.BY_ID[d]["name"] for d in seen}     # the engine's own ids
+
+
+def test_repair_names_format_ones_units_by_their_engine_ids(tmp_path):
+    from zkbot import units as zu
+    mex, wind = (next(int(k) for k, v in zu.BY_ID.items() if v["name"] == name) for name in ("staticmex", "energywind"))
+    old = {"format": 1, "unit_fields": list(pr.UNIT_FIELDS), "frames": [{"t": 0.0, "units": [7, mex, 0] + [0] * 9 + [8, wind, 1] + [0] * 9}],
+           "defs": {str(mex): {"name": "staticmissilesilo", "cost": 1220.0}, str(wind): {"name": "factoryamph", "cost": 711.7}}}
+    path = tmp_path / "game0.json.gz"
+    pr.save(path, old)
+    assert pr.repair([path]) == [path] and pr.repair([path]) == []          # once: then it's at FORMAT
+    replay = json.loads(gzip.decompress(path.read_bytes()))
+    assert replay["format"] == pr.FORMAT and {k: v["name"] for k, v in replay["defs"].items()} == {str(mex): "staticmex", str(wind): "energywind"}

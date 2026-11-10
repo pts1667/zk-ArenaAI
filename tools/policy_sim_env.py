@@ -282,6 +282,14 @@ class SimEnv:
         # The policy decides every this many of the sim's decisions, which step in between: at decide_every 1 and act_every 6, the
         # sim plays as the cloning data was recorded and the policy decides when the scripts look (policy_clone_eval).
         self.act_every = 1
+        # Every game starts on a slot that act_every divides, so that all the policy's seats decide together: one forward pass a
+        # decision rather than one for each of act_every phases, each of which costs a sequential sampling loop (sample_actions) about
+        # the same whatever its batch (2026-11-10: 89% of PPO's collection, at 13.6 seats a pass).  A game that ends between such
+        # slots waits, ended and untouched, for the next to start afresh: so each game's own count, which its scripts and opening go
+        # by, is as before.  The diversity bonus is then counted once a decision, at the last slot it covers.
+        self.align = False
+        self.slot = 0                       # steps since begin
+        self.waiting = np.zeros(games, bool)    # ended, waiting for such a slot to start afresh
         # The army script runs for the policy's seats too, only advising: its orders are labels (`army_orders`) and aren't carried out.
         # For learning from what it would have done in the policy's games (DAgger, PPO's cloning loss; 04-literature.md P3, P7).
         self.advise = False
@@ -453,7 +461,8 @@ class SimEnv:
 
     def policy_seats_to_act(self) -> list[int]:
         """The policy's seats that decide now: every `act_every` decisions of their game."""
-        return [s for s in range(self.seat_count) if self._is_policy(s) and self.decisions[s // 2] % self.act_every == 0]
+        return [s for s in range(self.seat_count)
+                if self._is_policy(s) and self.decisions[s // 2] % self.act_every == 0 and not self.waiting[s // 2]]
 
     def bundle_of(self, seat: int) -> bd.Bundle:
         return self.bundle[seat // 2]
@@ -641,7 +650,10 @@ class SimEnv:
         self.bonus[:] = 0.0
         if not self.diversity:
             return
-        self.made *= DIVERSITY_DECAY
+        window = self.act_every if self.align else 1
+        if self.slot % window:
+            return
+        self.made *= DIVERSITY_DECAY ** window
         for g in range(self.count):
             for side in (0, 1):
                 u = self.batch.records[g, side, :int(self.batch.counts[g, side])]
@@ -661,6 +673,7 @@ class SimEnv:
 
     def _after_step(self) -> None:
         self.decisions += 1
+        self.slot += 1
         raw = self._raw()
         self.delta = raw - self.last_raw
         self.last_raw = raw
@@ -676,7 +689,7 @@ class SimEnv:
         late = self.decisions >= self.early_end
         wins_a = (alive_a & ~alive_b) | (late & _far_ahead(value_a, value_b))
         wins_b = (alive_b & ~alive_a) | (late & _far_ahead(value_b, value_a))
-        for g in np.flatnonzero(~(alive_a & alive_b) | wins_a | wins_b | (self.decisions >= self.time_limit)):
+        for g in np.flatnonzero((~(alive_a & alive_b) | wins_a | wins_b | (self.decisions >= self.time_limit)) & ~self.waiting):
             g = int(g)
             won_a, won_b = bool(wins_a[g]), bool(wins_b[g])
             self.result[g] = 1.0 if won_a else (-1.0 if won_b else 0.0)
@@ -716,12 +729,18 @@ class SimEnv:
         return float(sign * ((1.0 - beta) * shaped + beta * self.result[g]))
 
     def finished_seats(self) -> list[tuple[int, str, float]]:
-        """Seats whose game just ended.  The call also starts those games afresh, so read the reward first."""
+        """Seats whose game just ended.  The call also starts those games afresh, so read the reward first; with `align`, they start
+        at the next slot that act_every divides, and wait ended till then."""
         out = self.done
-        for g in self._replace:
-            self._reset(g)
-            self.batch.refresh(g)
-            self.last_raw[g] = self._raw()[g]
-            self.last_income[g] = self._income()[g]
+        if self._replace:
+            self.waiting[self._replace] = True
+        if not self.align or self.slot % self.act_every == 0:
+            for g in np.flatnonzero(self.waiting):
+                g = int(g)
+                self._reset(g)
+                self.batch.refresh(g)
+                self.last_raw[g] = self._raw()[g]
+                self.last_income[g] = self._income()[g]
+            self.waiting[:] = False
         self._replace, self.done = [], []
         return out

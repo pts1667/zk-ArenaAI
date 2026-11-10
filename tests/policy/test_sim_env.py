@@ -353,6 +353,30 @@ def test_nothing_on_either_side_is_no_lead():
     assert np.all(env.result == 0.0)
 
 
+def test_aligned_games_all_decide_on_the_same_slots_and_an_ended_one_waits_for_the_next():
+    """SimEnv.align: games ending between decision slots (here at their 9th step, every 6 slots a decision) start afresh only on the
+    next decision slot, so every live game's own count, which its scripts go by, stays on the same slots as the others'."""
+    env = se.SimEnv(3, 4, ["fight"], threads=2)
+    env.act_every, env.align, env.diversity, env.time_limit = 6, True, 1.0, 9
+    env.begin()
+    policy = [s for s in range(env.seat_count) if env._is_policy(s)]
+    waited = restarted = 0
+    for _ in range(60):
+        acting = env.policy_seats_to_act()
+        live = [s for s in policy if not env.waiting[s // 2]]
+        assert acting == (live if env.slot % 6 == 0 else [])
+        assert all(env.decisions[s // 2] % 6 == env.slot % 6 for s in live)
+        for seat in acting:
+            env.give_orders(seat, [])
+        env.step(0.0)
+        assert not env.bonus.any() or env.slot % 6 == 0          # counted once a decision
+        env.finished_seats()
+        waited += int(env.waiting.any())
+        restarted += int((env.decisions == 0).any())
+    assert waited and restarted        # games ended at slot 9 (mod 6: 3), waited, and started afresh at 12
+    assert env.slot == 60 and (env.decisions[~env.waiting] % 6 == env.slot % 6).all()
+
+
 def test_finished_units_of_rare_types_earn_a_zero_sum_bonus_and_the_first_units_none():
     """policy_sim_env._diversity, after Pluto's: what a side finishes is worth more the rarer its type among what the policy makes,
     nothing for a type it makes as often as most; the units a side starts with are none of it; and the reward stays zero-sum."""

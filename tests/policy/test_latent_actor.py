@@ -476,6 +476,20 @@ def test_the_optimiser_holds_only_what_trains(tmp_path, encoder_path):
     assert id(learner.actor.latent_in.weight) in held and id(learner.critic.value.weight) in held
 
 
+def test_the_critic_learns_at_its_own_rate_falling_as_the_actors_does(tmp_path, encoder_path):
+    cfg = replace(_config(encoder_path), lr_start=1e-5, lr_end=3e-6, critic_lr=3e-4, critic_warmup=2, decisions=1000)
+    learner = pt.Learner(cfg, tmp_path, pt.DataWorkers(0, [sim_frames(1)[1]], cfg.enabled_kinds), "cpu")
+    actor, critic = learner.optimizer.param_groups
+    learner.set_rates()
+    assert actor["lr"] == 0.0 and critic["lr"] == pytest.approx(3e-4)       # warming up: the critic alone
+    learner.iteration, learner.decisions = 2, 500
+    learner.set_rates()
+    assert actor["lr"] == pytest.approx(6.5e-6) and critic["lr"] == pytest.approx(3e-4 * 0.65)
+    plain = pt.Learner(replace(cfg, critic_lr=0.0, critic_warmup=0), tmp_path, learner.workers, "cpu")
+    plain.set_rates()
+    assert [g["lr"] for g in plain.optimizer.param_groups] == pytest.approx([1e-5, 1e-5])
+
+
 def test_a_frozen_player_copies_the_actor_and_its_encoder(tmp_path, encoder_path):
     cfg = _config(encoder_path)
     workers = pt.DataWorkers(0, [sim_frames(1)[1]], cfg.enabled_kinds)

@@ -127,16 +127,30 @@ class Batch:
         return replace(self, **out)
 
 
-def collate(items: list[fz.Tensors], regions: int = 0) -> Batch:
-    """regions: pad to at least this many, so batches of one map's decisions line up."""
-    b = len(items)
-    u = max(max(len(t.unit_x) for t in items), 1)
-    r = max(max(len(t.reg_x) for t in items), 1, regions)
-    s = max(max(len(t.site_x) for t in items), 1)
-    f = max(max(len(t.feat_x) for t in items), 1)
-    c = max(max(t.controllable for t in items), 1)
-    e = max(max(len(t.enemy_tokens) for t in items), 1)
-    h = max(max(len(t.hidden_x) for t in items), 1)
+WIDTHS = ("u", "r", "s", "f", "c", "e", "h", "p")      # a batch's padded widths: units, regions, sites, features, controllable, enemy
+                                                        # tokens, hidden units, places
+
+
+def widths(items: list[fz.Tensors]) -> dict[str, int]:
+    """The widths `collate` pads these to, each at least 1."""
+    return {"u": max(max(len(t.unit_x) for t in items), 1), "r": max(max(len(t.reg_x) for t in items), 1),
+            "s": max(max(len(t.site_x) for t in items), 1), "f": max(max(len(t.feat_x) for t in items), 1),
+            "c": max(max(t.controllable for t in items), 1), "e": max(max(len(t.enemy_tokens) for t in items), 1),
+            "h": max(max(len(t.hidden_x) for t in items), 1), "p": max(max(len(t.place_tokens) + len(t.site_x) for t in items), 1)}
+
+
+def collate(items: list[fz.Tensors], regions: int = 0, sizes: dict[str, int] | None = None, rows: int = 0) -> Batch:
+    """regions: pad to at least this many, so batches of one map's decisions line up.  sizes: pad each group to at least these
+    `WIDTHS`; rows: pad to this many decisions, the rest no frame at all (masked out but for the global token).  Padding changes
+    nothing a decision's own outputs are, as every reader masks it: a CUDA graph of a fixed shape plays any batch that fits
+    (policy_graphs.py)."""
+    b = max(len(items), rows)
+    w = widths(items)
+    w["r"] = max(w["r"], regions)
+    if sizes is not None:
+        w = {k: max(v, sizes.get(k, 0)) for k, v in w.items()}
+        w["u"] = max(w["u"], w["c"])        # the controllable units are the first unit tokens
+    u, r, s, f, c, e, h, p = (w[k] for k in WIDTHS)
     n = u + r + s + f + 2
     unit_x = np.zeros((b, u, fz.UNIT_DIM), np.float32)
     unit_name = np.zeros((b, u), np.int64)
@@ -162,7 +176,6 @@ def collate(items: list[fz.Tensors], regions: int = 0) -> Batch:
     ctrl_mask = np.zeros((b, c), bool)
     kind_mask = np.zeros((b, c, rf.KIND_COUNT), bool)
     ptr_enemy = np.zeros((b, len(fz.ENEMY_POINTER_KINDS), c, e), bool)
-    p = max(max(len(t.place_tokens) + len(t.site_x) for t in items), 1)
     places = np.zeros((b, p), np.int64)
     place_mask = np.zeros((b, p), bool)
     enemy_tokens = np.zeros((b, e), np.int64)
@@ -554,8 +567,11 @@ def _taken_before(anchor: torch.Tensor, units: int) -> torch.Tensor:
     return (torch.cumsum(hot.long(), 1) - hot.long()) > 0
 
 
-def sample_actions(actor: nn.Module, b: Batch, ctx, slots: int = act.SLOTS) -> Actions:
-    """A decision's actions, one after another, each reading those before it, until done or `slots` of them."""
+def sample_actions(actor: nn.Module, b: Batch, ctx, slots: int = act.SLOTS, every_slot: bool = False) -> Actions:
+    """A decision's actions, one after another, each reading those before it, until done or `slots` of them.
+
+    every_slot: all `slots` steps, never asking the GPU whether every decision is done, as a CUDA graph can't ask
+    (policy_graphs.py).  Past done a step changes nothing, so the actions are the same, given the same random numbers."""
     count, units = b.ctrl_mask.shape
     device = b.ctrl_mask.device
     out = {f: torch.full((count, slots), act.UNSET[f], dtype=torch.long, device=device) for f in act.SLOT_FIELDS}
@@ -578,7 +594,7 @@ def sample_actions(actor: nn.Module, b: Batch, ctx, slots: int = act.SLOTS) -> A
         vectors = torch.cat((vectors, actor.action_vectors(b, ctx, this).to(vectors.dtype)), 1)
         taken = taken | (F.one_hot(anchor[:, 0].clamp_min(0), units).bool() & (anchor >= 0))
         going = going & (anchor[:, 0] >= 0)
-        if not going.any():
+        if not every_slot and not going.any():
             break
     return Actions(**out, logp=logp)
 
