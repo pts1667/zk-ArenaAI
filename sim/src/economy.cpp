@@ -287,6 +287,7 @@ void World::run_builder(int u) {
             if (!helps_factory) order[i] = ZK_ORDER_NONE;
             return;
         }
+        if (helps_factory && plate_off(t)) return;
         if (within(u, x[size_t(t)], z[size_t(t)], reach_of(u, type_of(t).footprint_radius))) {
             advance_frame(u, f);
             show_for_action(u);
@@ -294,9 +295,55 @@ void World::run_builder(int u) {
     }
 }
 
+// A factory plate builds only while a finished factory of its type and side is within its build range, and not stunned or
+// disarmed (unit_factory_plate.lua).  Off, it makes nothing, and helping it does nothing.
+bool World::plate_off(int u) const {
+    const int parent = type_of(u).plate_parent;
+    if (parent < 0) return false;
+    const float reach = type_of(u).build_range;
+    for (const int f : builders)
+        if (type[size_t(f)] == parent && alive[size_t(f)] && side[size_t(f)] == side[size_t(u)] && build[size_t(f)] >= 1.0f &&
+            !stunned(f) && !disarmed(f) && std::hypot(x[size_t(f)] - x[size_t(u)], z[size_t(f)] - z[size_t(u)]) <= reach)
+            return false;
+    return true;
+}
+
+// An idle caretaker (a builder that can't move and isn't a factory) helps what's in its reach, as Zero-K's default widget has it
+// patrol (unit_auto_patrol_nanos.lua): the nearest factory of its side that's building, else the nearest frame of its side.  It
+// has no order, so it chooses again each tick.  There's no repair to do, and it doesn't reclaim.
+void World::run_caretaker(int u) {
+    const size_t i = size_t(u);
+    int best = -1;
+    float bd = 0.0f;
+    for (const int f : builders) {
+        const size_t k = size_t(f);
+        if (!(type_of(f).flags & ZK_U_FACTORY) || !alive[k] || side[k] != side[i] || build[k] < 1.0f || work_on[k] < 0 ||
+            !alive[size_t(work_on[k])] || plate_off(f) || !within(u, x[k], z[k], reach_of(u, type_of(f).footprint_radius)))
+            continue;
+        const float d = std::hypot(x[k] - x[i], z[k] - z[i]);
+        if (best < 0 || d < bd) best = f, bd = d;
+    }
+    if (best >= 0) {
+        advance_frame(u, work_on[size_t(best)]);
+        show_for_action(u);
+        return;
+    }
+    for (int f = 0; f < count(); ++f) {
+        const size_t k = size_t(f);
+        if (f == u || !alive[k] || side[k] != side[i] || build[k] >= 1.0f || !within(u, x[k], z[k], reach_of(u, type_of(f).footprint_radius)))
+            continue;
+        const float d = std::hypot(x[k] - x[i], z[k] - z[i]);
+        if (best < 0 || d < bd) best = f, bd = d;
+    }
+    if (best >= 0) {
+        advance_frame(u, best);
+        show_for_action(u);
+    }
+}
+
 void World::run_factory(int u) {
     const size_t i = size_t(u);
-    if (produces[i] < 0) return;
+    if (produces[i] < 0 || plate_off(u)) return;
     int f = work_on[i];
     if (f >= 0 && (!alive[size_t(f)] || build[size_t(f)] >= 1.0f)) f = work_on[i] = -1;
     if (f < 0) {
@@ -338,6 +385,7 @@ void World::run_economy() {
         const int u = builders[k];
         if (!active(u) || !alive[size_t(u)] || power_off(u)) continue;
         if (type_of(u).flags & ZK_U_FACTORY) run_factory(u);
+        else if (!(type_of(u).flags & ZK_U_MOBILE) && order[size_t(u)] == ZK_ORDER_NONE) run_caretaker(u);
         else run_builder(u);
     }
 }

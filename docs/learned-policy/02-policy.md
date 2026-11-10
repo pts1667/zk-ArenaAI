@@ -83,6 +83,12 @@ order may go as a group order to the units around its anchor.
 **Controllable**: own mobile units with weapons, factories, silos' missiles, the Trinity, switches (Newton, Sumo), constructors,
 and the commander once the opening is over (`featurize._select`, `table.acts_in_place`, `table.constructor`).
 
+* **Factory plates** are factories in the type table (`specials.json`'s `plates`, from the dump's `child_of_factory`), though the
+  engine's def says they aren't: a plate can be told what to PRODUCE and be helped, as in the sim.  Its type stats keep the
+  def's flag.  FEATURE_VERSION stayed at 7 (2026-11-10): no recorded game or frame had held a plate.
+* **Caretakers** can't be told anything (they've nothing to build), and need nothing: the sim has an idle one help what's
+  being built in its reach, as Zero-K's default widget does.
+
 ### Kinds
 
 21 kinds (`rawframe.KIND_COUNT`).  The sim obeys the 17 in `policy_sim_env.KINDS`, keep among them.  The engine commands are
@@ -145,3 +151,4 @@ target was lost, or it's idle.  This keeps orders steady.
 * A thrower's reload isn't visible live, so it always counts as ready.  `PULLING` is never set live, since the bot would have to
   remember what it told a switch.
 * Live and archive heights on a water map.
+* Caretakers: the AI gets no widgets, so the bot has to give its own the patrol order Zero-K's default widget gives a player's.

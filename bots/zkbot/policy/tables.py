@@ -81,7 +81,9 @@ class TypeTable:
         # Some weapons (torpedoes, gravity guns) show no DPS in the dump: an armed unit with none for air can hit the ground.
         self.can_hit_ground[row] = armed and (dps_g > 0.0 or dps_a <= 0.0)
         self.can_hit_air[row] = armed and dps_a > 0.0
-        self.builder[row], self.factory[row], self.combat[row] = builder, factory, units.is_combat(d)
+        # A factory plate is a factory here, as in the sim: it makes its factory's roster, and can be helped.  The engine's def
+        # says it isn't, and its stats (below) keep what the def says.
+        self.builder[row], self.factory[row], self.combat[row] = builder, factory or name in catalog.SPECIALS.get("plates", {}), units.is_combat(d)
         self.manualfire[row], self.jump[row], self.cloak[row] = "manualfire" in tags, "jump" in tags, "cloak" in tags
         role = catalog.infer_role(name)
         v = [

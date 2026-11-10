@@ -513,6 +513,8 @@ private:
     void overdrive_side(int s);
     void run_builder(int u);
     void run_factory(int u);
+    bool plate_off(int u) const;
+    void run_caretaker(int u);
     void advance_frame(int builder, int frame_unit);
     int place_frame(int t, int s, float px, float pz, float head);
     int place_frame_only(int t, int s, float px, float pz, float head);

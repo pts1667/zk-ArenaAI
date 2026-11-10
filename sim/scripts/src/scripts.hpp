@@ -51,6 +51,7 @@ struct Data {
     std::vector<float> cost, range, energy, pylon, needs_link, radius;
     std::vector<int8_t> move_class;
     std::vector<int32_t> catalog_row, role, footing, best_missile, generators, option_offsets, options, menu, row_of_catalog;
+    std::vector<int32_t> plate_of;     // a factory row's plate row, -1 for none
     std::vector<int8_t> kind;           // R_* of a row's role, -1 for any other
     std::vector<int8_t> special_of;     // X_* of a row, -1 for none
     std::vector<uint8_t> air_plant;     // a factory whose fighters fly: the army script has its own mix for those
@@ -59,6 +60,7 @@ struct Data {
     int role_ids[10] = {};
     int special[7] = {};
     int second_factories[3] = {};
+    int caretaker = -1;
     double group_radii[ZKS_GROUP_RADII] = {};
     double cerberus_reach = 0.0, missile_reach = 0.0;
     float extractor_radius = 24.0f;
@@ -172,6 +174,7 @@ struct Seat {
     std::vector<uint8_t> patrol;
     std::vector<int64_t> helps;         // Economy.helps: INT64_MIN when absent
     std::vector<int64_t> reclaims;      // the feature it was last sent to reclaim: INT64_MIN when absent
+    std::vector<int32_t> builds;        // the row it was last sent to build, -1 when absent: a frame doesn't say (World::order)
     std::vector<uint8_t> noted;         // Economy.finished, a bit a category
     std::vector<int32_t> stamp;         // the call that last saw this uid among its own
     std::vector<int32_t> fighter_of;    // index into the call's fighters, where the raider stamp matches
@@ -268,7 +271,8 @@ struct Seat {
               int by_class, P2 by_at, bool use_by);
     Job job(const Ctx& c, int i, const GridOf& grid, bool has_project, int prow, P2 pat, Pass& pass, double income);
     Job energy_job(const Ctx& c, int i, const GridOf& grid, Pass& pass, double income, const std::vector<int>& being, bool force);
-    Job factory_job(const Ctx& c, int i, Pass& pass, double income, int by_class, P2 by_at);
+    Job production_job(const Ctx& c, int i, Pass& pass, double income, int by_class, P2 by_at);
+    int told_to_build(size_t j) const;      // the row an own unit was sent to BUILD and still is, -1 for none
     Job second_factory_job(const Ctx& c, int i, const GridOf& grid, Pass& pass, double income, int by_class, P2 by_at);
     Job radar_job(const Ctx& c, int i, Pass& pass, int by_class, P2 by_at);
     Job link_job(const Ctx& c, int i, const GridOf& grid, Pass& pass);

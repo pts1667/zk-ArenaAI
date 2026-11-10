@@ -19,7 +19,7 @@
 extern "C" {
 #endif
 
-#define ZKS_ABI_VERSION 7
+#define ZKS_ABI_VERSION 8
 #define ZKS_MOVE_CLASSES 6
 #define ZKS_ROLE_KNOBS 7             /* raid, riot, assault, skirm, arty, aa, snipe: the roles ROLE_ORDER of policy_mix.py has */
 #define ZKS_GROUP_RADII 10           /* zkbot.policy.groups.GROUP_RADII */
@@ -71,12 +71,14 @@ typedef struct {
     const int32_t* options;
     int n_roles;
     const int32_t* menu;            /* rows x n_roles: Mix.menu of a factory row, -1 where there's none */
+    const int32_t* plate_of;        /* a factory row's plate row (the catalog's plate_parent, EcoData.plate_of), -1 for none */
     /* Role indices, -1 where the table has none: raid, riot, assault, skirm, arty, aa, snipe, scout, builder, bomb */
     int32_t role_ids[10];
     /* Special rows, -1 where absent: staticarty, turretantiheavy, staticmissilesilo, staticnuke, energyfusion, energypylon, staticradar */
     int32_t special[7];
     /* What the second factory may be, -1 where absent: factoryplane, factorygunship, striderhub */
     int32_t second_factories[3];
+    int32_t caretaker;              /* staticcon's row, -1 where absent */
     /* The radii a group order may have, ascending (zkbot.policy.groups.GROUP_RADII).  Role bits are `role` indices. */
     double group_radii[ZKS_GROUP_RADII];
     double cerberus_reach;          /* EcoData.reach["staticarty"] */

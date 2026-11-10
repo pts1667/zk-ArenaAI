@@ -460,7 +460,7 @@ def _unit_record(u: dict, weapon_index: dict[str, int], weapons_by_id: dict[int,
         "throw_radius": float(custom.get("thrower_gather") or 0.0),
         "teleport_rate": float(custom.get("teleporter_throughput") or 0.0) / FRAMES,
         "beacon_frames": float(custom.get("teleporter_beacon_spawn_time") or 0.0) * BEACON_SECONDS_PER_SPAWN_TIME * FRAMES,
-        "missile_pads": int(custom.get("missile_silo_capacity") or 0), "beacon_type": 0,
+        "missile_pads": int(custom.get("missile_silo_capacity") or 0), "beacon_type": 0, "plate_parent": -1,
         "cruise_height": float(u.get("wantedHeight") or 0.0) if air else 0.0,
         "vertical_speed": float(u.get("verticalSpeed") or 0.0) if air else 0.0,
         "turn_speed": speed * held if plane else 0.0,
@@ -515,7 +515,7 @@ def _air_idle(units: list[dict], raw_units: dict[str, dict]) -> None:
 
 
 def _link_abilities(units: list[dict], raw_units: dict[str, dict]) -> None:
-    """What one unit's def says of another: a silo of its missiles, and a teleporter of its beacon."""
+    """What one unit's def says of another: a silo of its missiles, a teleporter of its beacon, and a factory plate of its factory."""
     index = {u["name"]: i for i, u in enumerate(units)}
     by_id = {int(u["id"]): u["name"] for u in raw_units.values()}
     for u in units:
@@ -528,12 +528,15 @@ def _link_abilities(units: list[dict], raw_units: dict[str, dict]) -> None:
         if beacon:
             u["beacon_type"] = index[beacon]
             units[index[beacon]]["flags"] |= U_NEUTRAL
+        parent = custom.get("child_of_factory")
+        if parent in index:
+            u["plate_parent"] = index[parent]
 
 
 def _specials(units: list[dict], weapons: list[dict], raw_units: dict[str, dict]) -> dict:
     """What the policy's masks need to know of the few units that do something other than walk and shoot.  The bot can't read the sim's catalog."""
     by_id = {int(u["id"]): u["name"] for u in raw_units.values()}
-    out: dict = {"throwers": {}, "switches": [], "teleporters": {}, "silos": {}}
+    out: dict = {"throwers": {}, "switches": [], "teleporters": {}, "silos": {}, "plates": {}}
     for u in units:
         mounts = [weapons[m] for m in u["mount_weapon"]]
         impulses = [w["impulse"] for w in mounts]
@@ -543,6 +546,8 @@ def _specials(units: list[dict], weapons: list[dict], raw_units: dict[str, dict]
             out["switches"].append(u["name"])
         if u["teleport_rate"] > 0.0:
             out["teleporters"][u["name"]] = units[u["beacon_type"]]["name"]
+        if u["plate_parent"] >= 0:
+            out["plates"][u["name"]] = units[u["plate_parent"]]["name"]
         if u["missile_pads"] > 0:
             out["silos"][u["name"]] = sorted(by_id[int(o)] for o in (raw_units[u["name"]].get("buildOptions") or {}).values())
     return out

@@ -35,7 +35,20 @@ simulator (`sim/`): first by cloning scripted players, then DAgger, then PPO.
   advising, and it never advises in tests.
 * **The policy loss is SPO's** (Simple Policy Optimization, the user, 2026-11-10) in place of PPO's clip, and dual-clip is
   gone (`--dual-clip` no longer exists).  The stage and its directory are still called PPO.  Checked by a unit test of the
-  objective and a short CPU run, not yet in a real run against PPO.
+  objective, a short CPU run, and `spo-1` below.
+* **`runs/spo-1`** (2026-11-10, the user's): SPO and the fades from `full-1`'s DAgger actor, as `full-1`'s PPO began, with
+  `--collectors 4 --concurrent` (156 decisions a second with tests).  The user stopped it at iteration 140 (573,440 of 4.3M
+  decisions, `ppo/ckpt/it-000140.pt`), with test wins of 12-28% and no trend (03-training.md, "What the earlier runs showed").
+  Its clone, DAgger rounds and evals are links into `full-1` (don't `--redo` them there).  It played the scripts as they were
+  before the economy change below; resumed, it would play the new ones.
+* **The economy script's factories** (the user, 2026-11-10).  It used to spend floating metal on copies of its first factory, 3
+  by minute 10 and up to 6.  Now it builds one plate beside the factory, then caretakers in reach of both.  The second factory
+  comes at 40 metal a second (the user's rule), at a median of 7.6 minutes in the sim, and there's no third.  Two more
+  constructors are made while metal floats.  On 48 games, a side's value at 19 minutes went from 27,800 to 31,700.
+  * The sim now models plates (`unit_factory_plate.lua`: they build only near their factory) and idle caretakers (they help what's
+    being built in their reach, as Zero-K's default widget has them patrol).  01-simulator.md, "Economy" and "The economy script".
+  * Plates are factories in the policy's type table (masks only; FEATURE_VERSION stays 7, since no data held one).
+  * `clone/army-6` was recorded by the old scripts, so a clone of it learns factory copies: new recordings are needed first.
 
 ## Invalid since 2026-11-10 (FEATURE_VERSION 7)
 
@@ -134,19 +147,26 @@ README.md has the rules for engine games: headless at max speed, windowed only w
 1. **PPO's speed, next**: with concurrent collectors, training (about 22 s an iteration) is now longer than collecting (12 s).
    In a round's replay the decision itself (encoder, time transformer, critic: 41 ms at 64 decisions) is the bigger part; a
    step is about 1 ms of small kernels, which fusing (`torch.compile` of a step, now the shapes are fixed) could shrink.
-2. **`full-1`'s PPO** (the user decides when): resume it, which now plays as graphs at about 1.75x.  Whether to also run
-   `--collectors 4 --concurrent` (about 10% more, on data two updates old) is the user's call; the pipeline runs not concurrent.
-3. **The stall in expansion** survived DAgger.  Whether PPO's economy share (the policy running its own economy in more games)
+2. **More variety before the next whole run** (the user, 2026-11-10; in progress, none of it in the tree yet): team games,
+   several alliances, free-for-all with up to 8 players and chicken defense, each on the maps that support it (`maps.json`);
+   a generator for Violet Rampart, whose terrain is made at game start; a small reward for winning sooner; and the lead rule
+   (2.5x the value) drawn per game, from 90% of games at PPO's iteration 0 to none at 100.
+3. **Then run the pipeline again whole**: record the scripts' games with the new economy (plates, caretakers, the second
+   factory at 40 metal a second) and the new kinds of game, train an encoder on frames of them, clone, DAgger, PPO.
+   `clone/army-6` teaches factory copies.
+4. **The stall in expansion** survived DAgger.  Whether PPO's economy share (the policy running its own economy in more games)
    moves the extractor count is the thing to watch in its tests.
-4. **The engine hand-off**:
+5. **The engine hand-off**:
    * a numpy forward of the actor and encoder for the bot;
    * decoded orders sent as commands;
    * the opening and the economy script in the engine;
    * the checks listed in 02-policy.md, "Not yet checked live".
-5. **The user's open questions** (`docs/model.md`, "Open questions").
+6. **The user's open questions** (`docs/model.md`, "Open questions").
 
 ## Traps
 
+* **Leftover build directories**: `~/zksim/build` is the one in use (libzksim ABI 18, libzkscripts ABI 8, rebuilt
+  2026-11-10).  `~/zksim/build-next`, `build-head` and the other `build-*` beside it are leftovers of comparisons, safe to delete.
 * **Memory**: check `wsl free -g` before a launch.  Never run two jobs that load the map pool at once.  Every GPU trainer caps
   itself at 85% of the card (`--gpu-memory`): past the card, the Windows driver spills into system RAM instead of failing.
   With collectors, the learner's cap leaves each `--collector-gb` plus about 0.4 GB of CUDA's own.

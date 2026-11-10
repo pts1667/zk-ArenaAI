@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define ZK_ABI_VERSION 17
+#define ZK_ABI_VERSION 18
 #define ZK_MAX_MOUNTS 8
 #define ZK_ARMOR_CLASSES 5
 #define ZK_ARMOR_SHIELD 4
@@ -148,6 +148,8 @@ typedef struct {
     int32_t beacon_type;         /* what a teleporter makes */
     int32_t ammo;                /* salvos before it goes back to rearm; 0 for no ammo */
     int32_t pad_count;           /* planes it can rearm at once: an airpad or plane factory's */
+    int32_t plate_parent;        /* a factory plate's factory type, or -1: it builds only within its build range of a finished one
+                                    of its side (unit_factory_plate.lua) */
     int32_t mount_weapon[ZK_MAX_MOUNTS];
     int32_t mount_only[ZK_MAX_MOUNTS];
     int32_t mount_bad[ZK_MAX_MOUNTS];

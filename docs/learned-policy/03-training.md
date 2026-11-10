@@ -256,7 +256,8 @@ For side A against side B at decision t:
   0.15 to 0.1 over the run, as the clip did.  Each action, done included, has its own ratio, averaged within the decision,
   and there's one advantage per decision.  `clip_fraction` is still the share of ratios outside 1 ± eps, and
   `ratio_deviation` the mean of |r - 1|, the paper's measure.  Dual-clip went with the clip: it capped the loss of a ratio
-  far past the region, which is the gradient SPO keeps.  Not yet compared with PPO in a run.
+  far past the region, which is the gradient SPO keeps.  `spo-1` ran it for 140 iterations ("What the earlier runs showed"):
+  its tests can't be told from `full-1`'s PPO.
 * **Entropy**: a bonus per head (0.01), raised for any head below 30% of its maximum entropy (`--entropy-floor`; 0 from a
   clone).
 * **One pass** over each sample (`passes` 1).  An EMA of the weights (0.99) plays the tests and is saved.
@@ -397,6 +398,21 @@ every seat that decides.
   From 13% wins after DAgger to 22-31%.  The first attempt, with the critic at the actor's rate, is kept in `full-1/ppo-critic-1e-5`.
   In a `record-2` game the actor rushed a singularity reactor to win on the metal ratio; by minute 10 it had won anyway, so the
   rule was left alone.
+* **`spo-1`** (2026-11-10): SPO's loss and the fading KL and cloning loss, from the same `dagger-2` actor, with 4 concurrent
+  collectors.  The user stopped it at iteration 140 (573,440 decisions):
+
+  | Iteration | Test wins / draws / losses | Explained variance |
+  |---|---|---|
+  | 20 | 23% / 33% / 44% | 0.24 |
+  | 40 | 14% / 27% / 59% | 0.61 |
+  | 60 | 12% / 30% / 58% | 0.75 |
+  | 80 | 28% / 27% / 45% | 0.81 |
+  | 100 | 28% / 25% / 47% | 0.82 |
+  | 120 | 14% / 23% / 62% | 0.89 |
+  | 140 | 20% / 28% / 52% | 0.90 |
+
+  The same range as `full-1`'s PPO, and no trend in either: a test is 64 games, so one is good to about 5 points.  The KL
+  and the cloning loss were at 0.09 of their weights by the end, and the mean of |ratio - 1| rose from 0.07 to 0.14-0.19.
 * **RL from scratch didn't learn.**  These runs were against the raider-only script, with an earlier actor:
   * `selfplay-6h` (7.2M decisions): 25% test wins in the first half and 28% in the second;
   * `latent-1` and `latent-2` (2M each): 13-15% early, 21-23% late.

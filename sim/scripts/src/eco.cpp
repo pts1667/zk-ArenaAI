@@ -45,15 +45,25 @@ constexpr double FLOATING_UNTIL = 0.15;
 constexpr float FLOAT_ASSIST_REACH = 3000.0f;
 constexpr double ENERGY_LOW = 0.3;
 constexpr int FLOAT_EXPANDERS = 4;
-constexpr double FACTORY_PER_INCOME = 12.0;
-constexpr int MOST_FACTORIES = 6;
+// Metal that floats (the user, 2026-11-10): help a production line (a factory or plate) that fewer than HELPERS_PER_LINE are
+// helping, else more production beside our first factory while income allows it: its plate, a line of its own for a fifth of a
+// factory's metal, and once it has one, caretakers in reach of both, which help them (the sim's World::run_caretaker); else help
+// the nearest line all the same.  Never a second factory like the first, nor a second plate.  A plate builds only within its
+// build range of its factory (World::plate_off).
+constexpr double PRODUCTION_PER_INCOME = 12.0;  // the factory, its plate and each caretaker (10 build power each): one for this much metal a second
+constexpr int MOST_PRODUCTION = 8;
+constexpr int HELPERS_PER_LINE = 2;
+constexpr double PLATE_SPREAD = 120.0;
+constexpr double PLATE_NEAR = 300.0;            // of the factory's centre; a plate's build range is 420
+constexpr double CARETAKER_SPREAD = 100.0;
+constexpr double CARETAKER_NEAR = 380.0;        // of the factory's centre and the plate's; a caretaker's build range is 500
 constexpr double RADAR_FROM = 180.0;
 constexpr int SITE_TRIES = 24;           // policy_opening.Ground.site
 constexpr double NEVER = -1e9;           // pending.get(name, -1e9)
-// The second factory: once it's both 18 minutes in and 50 metal a second not counting reclaim.  What it is is drawn once, when
-// it's due: planes most often, then gunships, then striders (the user's play).  A hub runs only on a grid of enough energy, so
-// with none it's planes.
-constexpr double SECOND_FROM_S = 18.0 * 60.0, SECOND_FROM_M = 50.0;
+// The second factory (the user's rule, 2026-11-10): at 40 metal a second not counting reclaim, or at 20 minutes, which the games
+// don't reach.  What it is is drawn once, when it's due: planes most often, then gunships, then striders (the user's play).  A
+// hub runs only on a grid of enough energy, so with none it's planes.  No third: more production is a plate and caretakers.
+constexpr double SECOND_FROM_S = 20.0 * 60.0, SECOND_FROM_M = 40.0;
 const double SECOND_WEIGHTS[3] = {0.5, 0.3, 0.2};     // zks_data_desc.second_factories' order
 // Reclaim (the user, 2026-11-09): a few constructors kept at it while there are wrecks worth taking, and an idle one takes what's
 // near it when there's nothing better to do.  Only what's safe (no enemy army or defence near it) and on our side of the map, or
@@ -125,6 +135,8 @@ struct Pass {
     std::vector<double> claimed;    // n x 2
     std::vector<int64_t> reclaimed; // features someone of ours is reclaiming or was sent to this pass
     int reclaimers = 0, reclaimers_wanted = 0;
+    std::vector<int64_t> helping;   // what each ASSIST of this pass helps: every constructor helping is idle, so asked again
+    int helpers(int64_t uid) const { return (int)std::count(helping.begin(), helping.end(), uid); }
 };
 
 bool Seat::avoided(double x, double z) const {
@@ -424,25 +436,54 @@ Job Seat::energy_job(const Ctx& c, int i, const GridOf& grid, Pass& pass, double
     return job;
 }
 
-Job Seat::factory_job(const Ctx& c, int i, Pass& pass, double income, int by_class, P2 by_at) {
+int Seat::told_to_build(size_t j) const {
+    const Rec* u = own[j];
+    return u->ord_kind == K_BUILD ? builds[u->uid] : -1;
+}
+
+Job Seat::production_job(const Ctx& c, int i, Pass& pass, double income, int by_class, P2 by_at) {
     const Data& d = *data;
     const double seconds = c.seconds;
     if (!floating || pass.factory || seconds - pending[X_FACTORY] < PENDING_FOR) return {};
-    int first = -1, n = 0;
-    for (size_t j = 0; j < own.size(); j++)
-        if (d.has(own_rows[j], ZKS_FACTORY)) {
-            if (first < 0) first = (int)j;
-            n++;
-        }
-    if (first < 0 || n >= std::min<int64_t>(MOST_FACTORIES, 1 + (int64_t)(income / FACTORY_PER_INCOME))) return {};
-    int kind = own_rows[first];
-    if (!d.can_build(own_rows[i], kind)) return {};
-    Job job = build(own[i]->uid, kind, along(base, enemy_base, -BEHIND_BASE), pass.taken, 300.0, nullptr, -1, by_class, by_at, true);
-    if (job.has) {
-        pass.factory = true;
-        pending[X_FACTORY] = seconds;
-        log.push_back({seconds, 0, kind});
+    int first = -1;
+    for (size_t j = 0; j < own.size() && first < 0; j++)
+        if (d.plate_of[own_rows[j]] >= 0 && built(own[j])) first = (int)j;
+    if (first < 0) return {};
+    // Its plate and the caretakers: finished, started, or that a constructor was sent to start (one building counts once).
+    const int plate_row = d.plate_of[own_rows[first]];
+    int plate = -1, done = 0, frames = 0, sent = 0, sent_plate = 0;
+    for (size_t j = 0; j < own.size(); j++) {
+        int r = own_rows[j], t = told_to_build(j);
+        sent += t >= 0 && (t == plate_row || t == d.caretaker);
+        sent_plate += t >= 0 && t == plate_row;
+        if (r != plate_row && (d.caretaker < 0 || r != d.caretaker)) continue;
+        if (built(own[j])) done++;
+        else frames++;
+        if (r == plate_row && (plate < 0 || built(own[j]))) plate = (int)j;
     }
+    if (1 + done + std::max(frames, sent) >= std::min<int64_t>(MOST_PRODUCTION, 1 + (int64_t)(income / PRODUCTION_PER_INCOME))) return {};
+    P2 at{own[first]->x, own[first]->z};
+    int row;
+    P2 near;
+    double spread;
+    if (plate < 0 && !sent_plate) {
+        row = plate_row, near = at, spread = PLATE_SPREAD;
+    } else if (plate >= 0 && built(own[plate]) && d.caretaker >= 0) {
+        row = d.caretaker, near = {(at.x + own[plate]->x) * 0.5, (at.z + own[plate]->z) * 0.5}, spread = CARETAKER_SPREAD;
+    } else {
+        return {};      // its plate is on its way: caretakers go beside both
+    }
+    if (!d.can_build(own_rows[i], row)) return {};
+    Job job = build(own[i]->uid, row, near, pass.taken, spread, nullptr, -1, by_class, by_at, true);
+    if (!job.has) return {};
+    const double from_factory = py_hypot((double)job.o.x - at.x, (double)job.o.z - at.z);
+    if (row == plate_row ? from_factory > PLATE_NEAR
+                         : from_factory > CARETAKER_NEAR ||
+                               py_hypot((double)job.o.x - own[plate]->x, (double)job.o.z - own[plate]->z) > CARETAKER_NEAR)
+        return {};
+    pass.factory = true;
+    pending[X_FACTORY] = seconds;
+    log.push_back({seconds, 0, row});
     return job;
 }
 
@@ -450,10 +491,11 @@ Job Seat::second_factory_job(const Ctx& c, int i, const GridOf& grid, Pass& pass
     const Data& d = *data;
     const double seconds = c.seconds;
     if (pass.second || second == -1 || seconds - pending[X_SECOND] < PENDING_FOR) return {};
-    if (seconds < SECOND_FROM_S || income - c.reclaim < SECOND_FROM_M) return {};
-    for (int r : own_rows)
+    if (seconds < SECOND_FROM_S && income - c.reclaim < SECOND_FROM_M) return {};
+    // One we have, or one a constructor was sent to start: the walk there can take longer than PENDING_FOR.
+    for (size_t j = 0; j < own.size(); j++)
         for (int k = 0; k < 3; k++)
-            if (r == d.second_factories[k]) return {};
+            if (own_rows[j] == d.second_factories[k] || told_to_build(j) == d.second_factories[k]) return {};
     if (second == -2) {
         double total = 0.0;
         for (int k = 0; k < 3; k++) total += d.second_factories[k] >= 0 ? SECOND_WEIGHTS[k] : 0.0;
@@ -711,15 +753,17 @@ Job Seat::job(const Ctx& c, int i, const GridOf& grid, bool has_project, int pro
     }
     float fx = u->x, fz = u->z;
     if (floating) {
-        Job j = factory_job(c, i, pass, income, by_class, by_at);
-        if (j.has) return j;
-        int best = -1;
-        float bd = 0.0f;
+        int best = -1, open = -1;
+        float bd = 0.0f, od = 0.0f;
         for (size_t k = 0; k < own.size(); k++) {
             if (!d.has(own_rows[k], ZKS_FACTORY)) continue;
             float dd = hypotf(own[k]->x - fx, own[k]->z - fz);
             if (best < 0 || dd < bd) best = (int)k, bd = dd;
+            if (built(own[k]) && pass.helpers(own[k]->uid) < HELPERS_PER_LINE && (open < 0 || dd < od)) open = (int)k, od = dd;
         }
+        if (open >= 0 && od <= FLOAT_ASSIST_REACH) return make(uid, K_ASSIST, 0.0, 0.0, own[open]->uid);
+        Job j = production_job(c, i, pass, income, by_class, by_at);
+        if (j.has) return j;
         if (best >= 0 && bd <= FLOAT_ASSIST_REACH) return make(uid, K_ASSIST, 0.0, 0.0, own[best]->uid);
     }
     {
@@ -735,7 +779,7 @@ Job Seat::job(const Ctx& c, int i, const GridOf& grid, bool has_project, int pro
         if (j.has) return j;
     }
     {
-        Job j = factory_job(c, i, pass, income, by_class, by_at);
+        Job j = production_job(c, i, pass, income, by_class, by_at);
         if (j.has) return j;
     }
     {
@@ -892,10 +936,12 @@ void Seat::eco(const Ctx& c) {
     for (int i : idle) {
         Job j = job(c, i, grid, has_project, prow, pat, pass, income);
         int64_t uid = own[i]->uid;
+        if (j.has && j.o.kind == K_ASSIST) pass.helping.push_back(j.o.target);
         if (!j.has || (j.o.kind == K_ASSIST && own[i]->ord_kind == K_ASSIST && helps[uid] == j.o.target)) continue;
         helps[uid] = j.o.kind == K_ASSIST ? j.o.target : -1;
         reclaims[uid] = j.o.kind == K_RECLAIM ? j.o.target : INT64_MIN;
         eco_out.push_back(j.o);
+        builds[uid] = j.o.kind == K_BUILD ? d.row_of_catalog[j.o.target] : -1;
         if (j.o.kind == K_BUILD) {
             int r = d.row_of_catalog[j.o.target];
             pass.taken.push_back(j.o.x), pass.taken.push_back(j.o.z), pass.taken.push_back(d.radius[r]);

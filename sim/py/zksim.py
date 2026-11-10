@@ -19,7 +19,7 @@ sys.path.insert(0, str(ROOT / "py"))
 sys.path.insert(0, str(ROOT.parent / "bots"))
 import zknav  # noqa: E402
 from zkbot.policy import rawframe  # noqa: E402
-ABI_VERSION = 17
+ABI_VERSION = 18
 MAX_MOUNTS = 8
 TICK_FRAMES = 5
 FRAMES_PER_SECOND = 30
@@ -61,7 +61,7 @@ class TypeRec(ct.Structure):
         "perceived_range", "heat_per_shot", "heat_decay", "heat_max_slow", "heat_initial", "bait_cost", "kamikaze_distance", "detonate_reach", "drop_height", "drop_gravity", "jump_range", "jump_speed", "jump_height", "jump_reload", "jump_delay", "burrow_speed", "mass", "push_scale", "needed_link", "throw_radius", "teleport_rate", "beacon_frames",
         "cruise_height", "vertical_speed", "turn_speed", "strafe_radius", "strafe_speed", "reammo_frames", "reammo_energy", "pad_bp")] + [(n, ct.c_int32) for n in (
             "move_state", "fire_state", "no_chase", "bait_level", "bait_target", "bait_target_armor",
-            "def_id", "wreck_feature", "heap_feature", "armor_class", "move_class", "category", "flags", "explode_weapon", "n_mounts", "landing_weapon", "drop_weapon", "missile_pads", "beacon_type", "ammo", "pad_count")] + [
+            "def_id", "wreck_feature", "heap_feature", "armor_class", "move_class", "category", "flags", "explode_weapon", "n_mounts", "landing_weapon", "drop_weapon", "missile_pads", "beacon_type", "ammo", "pad_count", "plate_parent")] + [
         ("mount_weapon", ct.c_int32 * MAX_MOUNTS), ("mount_only", ct.c_int32 * MAX_MOUNTS),
         ("mount_bad", ct.c_int32 * MAX_MOUNTS)]
 
@@ -192,6 +192,7 @@ class Catalog:
         types = (TypeRec * len(self.units))()
         for rec, u in zip(types, self.units):
             rec.move_state, rec.fire_state = 1, 2      # the engine's defaults, for records that don't say
+            rec.plate_parent = -1
             _fill(rec, u)
             rec.n_mounts = len(u["mount_weapon"])
             for i in range(rec.n_mounts):

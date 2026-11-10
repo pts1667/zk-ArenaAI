@@ -12,12 +12,17 @@ Each idle constructor, every few seconds, takes the first of these it can do:
 
   finish    help with something of ours that's being built near it, or the big project wherever it is
   project   start the big project, if one's due and nobody has
+  second    the second factory (the user's rule): at SECOND_FROM_M metal a second not counting reclaim, planes, gunships or a
+            strider hub, drawn once.  There's no third; more production is plates
   energy    first, while energy made is short of ENERGY_FIRST x metal income: building costs as much energy as metal, and
             overdrive only gets what's left, so short of energy, everything slows and metal piles up unspent
   expand    an extractor on the nearest free spot on our half that no enemy defence or army is near; while metal floats, only
             while fewer than FLOAT_EXPANDERS are on their way to one
-  spend     while metal floats (FLOATING of storage, until FLOATING_UNTIL): energy if that's what's short, else another factory
-            like our first, while income is past FACTORY_PER_INCOME for each, else help the nearest factory
+  spend     while metal floats (FLOATING of storage, until FLOATING_UNTIL): energy if that's what's short, else help the nearest
+            production line (a factory or plate) with fewer than HELPERS_PER_LINE helping, else more production beside our first
+            factory, one for each PRODUCTION_PER_INCOME: its plate (a line of its own for a fifth of the metal), and once it has
+            one, caretakers (CARETAKER) in reach of both, which help whatever is being built in their reach; else help the
+            nearest line anyway.  Never another factory like the first, nor a second plate (the user, 2026-11-10)
   energy    then, while energy made is short of a share of metal income that grows over the game, for overdrive: the best small
             generator for its metal beside extractors, then fusions, then a Singularity, the big ones at the base and on its grid
   radar     a radar tower behind the front from RADAR_FROM, and a second once there's a silo: what a missile is aimed at has to be seen
@@ -31,7 +36,8 @@ project comes first); the commander never does.  A reclaimer below RECLAIM_HURT 
 goes home.
 
 Metal in storage is income not yet spent, and past the cap it's lost: the user wants it spent almost all the time (2026-11-08).
-The army script makes a constructor for each INCOME_PER_CONSTRUCTOR of income (policy_mix.py) to have the build power.
+The army script makes a constructor for each INCOME_PER_CONSTRUCTOR of income (policy_mix.py) to have the build power, and two
+more while metal floats.
 
 A constructor that hasn't got nearer the place it was sent to build for STUCK_AFTER seconds is given something else, and that
 place is left alone for a while: some spots can't be reached by every kind of constructor.
@@ -73,6 +79,7 @@ CERBERUS, LUCIFER, SILO, NUKE = "staticarty", "turretantiheavy", "staticmissiles
 VALUABLE = ("energysingu", "staticarty", "turretantiheavy", "staticnuke", "staticheavyarty")
 FUSION = "energyfusion"             # valuable from the second one on
 PYLON = "energypylon"
+CARETAKER = "staticcon"             # a static constructor: in the sim it helps whatever is being built in its reach
 
 
 class EcoData:
@@ -103,6 +110,12 @@ class EcoData:
             self.commander[row] = bool(u["flags"] & zksim.COMMANDER)
             self.footing[row] = Footing.of(u)
             self.radius[row] = u["footprint_radius"]
+        # A factory's plate (the catalog's plate_parent): a production line of its own for a fifth of the metal, beside it.
+        self.plate_of = np.full(n, -1, np.int32)
+        for row, name in enumerate(table.names):
+            parent = cat.units[cat.index[name]].get("plate_parent", -1) if name in cat.index else -1
+            if parent >= 0 and cat.units[parent]["name"] in table.names:
+                self.plate_of[table.names.index(cat.units[parent]["name"])] = row
         self.armed = table.armed & ~table.mobile         # defences, which keep constructors off a spot
         # Generators that need a place the sim doesn't have, a geothermal vent: never chosen.
         self.needs_place = np.array([bool((bot_units.by_name(name) or {}).get("needGeo")) or "geo" in name for name in table.names] + [False])

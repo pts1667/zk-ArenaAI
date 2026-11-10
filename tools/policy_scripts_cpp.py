@@ -28,7 +28,7 @@ import policy_eco as eco  # noqa: E402
 from policy_mix import menu as factory_menu  # noqa: E402
 from policy_variants import ROLES, Variant  # noqa: E402
 
-ABI_VERSION = 7
+ABI_VERSION = 8
 MOVE_CLASSES = 6
 SEAT_ARMY = 1
 SEAT_ARMY_LABEL = 2     # the army script only advises the seat: its orders are labels, not carried out
@@ -51,7 +51,9 @@ class DataDesc(ct.Structure):
                 ("move_class", c_i8p), ("catalog_row", c_i32p), ("role", c_i32p), ("energy", c_f32p), ("pylon", c_f32p),
                 ("needs_link", c_f32p), ("radius", c_f32p), ("footing", c_i32p), ("footing_radius", c_f64p), ("best_missile", c_i32p),
                 ("generators", c_i32p), ("option_offsets", c_i32p), ("options", c_i32p), ("n_roles", ct.c_int), ("menu", c_i32p),
+                ("plate_of", c_i32p),
                 ("role_ids", ct.c_int32 * 10), ("special", ct.c_int32 * 7), ("second_factories", ct.c_int32 * 3),
+                ("caretaker", ct.c_int32),
                 ("group_radii", ct.c_double * len(groups.GROUP_RADII)), ("cerberus_reach", ct.c_double),
                 ("missile_reach", ct.c_double), ("extractor_radius", ct.c_float), ("n_footings", ct.c_int)]
 
@@ -185,7 +187,8 @@ class ScriptsData:
             energy=np.ascontiguousarray(ed.energy, np.float32), pylon=np.ascontiguousarray(ed.pylon, np.float32),
             needs_link=np.ascontiguousarray(ed.needs_link, np.float32), radius=np.ascontiguousarray(ed.radius, np.float32),
             footing=footing, footing_radius=footing_radius, best_missile=best, generators=generators,
-            option_offsets=np.array(offsets, np.int32), options=np.array(options + [0], np.int32), menu=menu)
+            option_offsets=np.array(offsets, np.int32), options=np.array(options + [0], np.int32), menu=menu,
+            plate_of=np.ascontiguousarray(ed.plate_of[:n], np.int32))
         a = self._arrays
         assert tuple(self.roles) == groups.roles()[0], "the policy's group roles are numbered as the scripts' are"
         desc = DataDesc(rows=n, n_def=len(a["row_of_def"]), row_of_def=_ptr(a["row_of_def"], c_i32p), bits=_ptr(bits, c_u32p),
@@ -195,11 +198,13 @@ class ScriptsData:
                         footing=_ptr(footing, c_i32p), footing_radius=_ptr(footing_radius, c_f64p), best_missile=_ptr(best, c_i32p),
                         generators=_ptr(generators, c_i32p), option_offsets=_ptr(a["option_offsets"], c_i32p),
                         options=_ptr(a["options"], c_i32p), n_roles=len(self.roles), menu=_ptr(menu, c_i32p),
+                        plate_of=_ptr(a["plate_of"], c_i32p),
                         cerberus_reach=float(ed.reach.get(eco.CERBERUS, 0.0)), missile_reach=float(ed.missile_reach),
                         extractor_radius=float(ed.radius[ext[0]]) if len(ext) else 24.0, n_footings=len(self.footings))
         desc.role_ids[:] = [role_index.get(r, -1) for r in ROLE_NAMES]
         desc.special[:] = [ed.row.get(name, -1) for name in SPECIAL]
         desc.second_factories[:] = [t.names.index(name) if name in t.names else -1 for name in SECOND_FACTORIES]
+        desc.caretaker = t.names.index(eco.CARETAKER) if eco.CARETAKER in t.names else -1
         desc.group_radii[:] = groups.GROUP_RADII
         self.lib = lib()
         self.handle = self.lib.zks_data_new(ct.byref(desc))

@@ -16,8 +16,8 @@ This builds three libraries in `~/zksim/build` (`ZKSIM_LIB` overrides where they
 
 | Library | What | Python side |
 |---|---|---|
-| `libzksim.so` | the sim (`sim/src`, `sim/include/zksim`, C ABI in `capi.h`, ABI 17) | `sim/py/zksim.py` (`Batch`), `sim/py/zknav.py` (routes) |
-| `libzkscripts.so` | the army and economy scripts (`sim/scripts`, `zkscripts.h`, ABI 7) | `tools/policy_scripts_cpp.py` |
+| `libzksim.so` | the sim (`sim/src`, `sim/include/zksim`, C ABI in `capi.h`, ABI 18) | `sim/py/zksim.py` (`Batch`), `sim/py/zknav.py` (routes) |
+| `libzkscripts.so` | the army and economy scripts (`sim/scripts`, `zkscripts.h`, ABI 8) | `tools/policy_scripts_cpp.py` |
 | `libzkrecord.so` | the game recorder (`sim/record`, `zkrecord.h`), needs `libzstd-dev` | `sim/py/zkrecord.py` |
 
 `sim/include/zksim/rawframe.hpp` is generated from `bots/zkbot/policy/rawframe.py` (`python tools/policy_schema.py`), and a test
@@ -161,6 +161,12 @@ A world runs the economy only if `zk_world_economy` turns it on.  Fight replays 
 * **Building**: progress per second is build speed / build time, paid from both resources as it goes, and stalling on whichever
   runs out.  A side's first factory is free and instant.  ASSIST helps build; given to a factory, it helps with what the
   factory is building.  A factory repeats the type of its last PRODUCE.
+* **Factory plates** (`unit_factory_plate.lua`) make their factory's roster, but only while a finished factory of their type and
+  side, not stunned or disarmed, is within the plate's build range (420).  Off, a plate makes nothing and helping it does
+  nothing (`World::plate_off`).  The catalog's `plate_parent` says whose plate is whose.
+* **Caretakers** (`staticcon`): an idle one helps the nearest factory of its side in its reach (500) that's building, else the
+  nearest frame of its side, as Zero-K's default widget has it patrol (`unit_auto_patrol_nanos.lua`; `World::run_caretaker`).
+  It needs no orders, so a policy that can't give them one still gets its use.  There's no repair or reclaim for it to do.
 * **Reclaim** runs at the builder's reclaim speed in metal a second and is paid as income.  **Upkeep** (radars, jammers, area
   cloak) is paid in energy once a second.  **Stockpile** pays for both resources as it goes.
 * **Regeneration** (`unit_regeneration.lua`): `idle_regen` health a second, once `idleTime` has passed since the last hit.  It's
@@ -232,8 +238,10 @@ It runs every `ECO_EVERY` 6 slots, as the actor decides.  A free constructor (id
    stalled; the Trinity from 18 minutes and 60, by a 30% chance;
 3. energy, while energy made is under 1.5x metal income;
 4. expand to the nearest free metal spot on our half with no enemy near;
-5. spend while metal floats over 50% of storage: energy if short, else another factory like the first (one per 12 metal a second,
-   6 at most), else help a factory;
+5. spend while metal floats over 50% of storage (the user, 2026-11-10): energy if short; else help a factory or plate that
+   fewer than 2 are helping; else more production beside the first factory, one per 12 metal a second and 8 at most counting
+   the factory, one started a minute: its plate, within 300 elmos, then caretakers within 380 of both, which help them; else
+   help the nearest factory anyway.  Never another factory like the first, nor a second plate;
 6. energy up to a share of income that grows over the game (solars, then fusions, then a Singularity);
 7. radars and pylons;
 8. help the factory.
@@ -242,12 +250,28 @@ Further rules:
 
 * **Reclaim**: up to 2 constructors (one in 3) reclaim full time.  Others with nothing better reclaim within 1,200 elmos rather
   than assist.  They avoid enemies, and go home when hurt.
-* **Constructors** come from the factory: the larger of a schedule by minute and one per 3 metal a second of income, 20 at most.
-* **A second factory**: a plane plant, gunship plant or strider hub (0.5, 0.3, 0.2), from both 18 minutes and 50 metal a second.
+* **Constructors** come from the factory: the larger of a schedule by minute and one per 3 metal a second of income, 2 more
+  while metal floats, 20 at most.
+* **A second factory** (the user's rule, 2026-11-10): a plane plant, gunship plant or strider hub (0.5, 0.3, 0.2), at 40 metal a
+  second not counting reclaim, or 20 minutes.  There's no third.  A factory a constructor was sent to start counts as there:
+  the walk can take longer than the minute between starts, which once gave two.
 * A constructor stuck for 30 s is given another job, and its spot is avoided for 3 minutes.
 
 Metal lost at the storage cap is 2-13% of income by game phase (it was 62% before the spend step).  Reclaim is about 4% of a
 side's metal.
+
+Against the scripts before 2026-11-10's change, 48 games each (one seed, so the same maps and draws to start with):
+
+| | before | after |
+|---|---|---|
+| factories at 10 / 15 / 19 minutes (median) | 3 / 4 / 5, up to 6 | 2 / 2 / 2 |
+| plates, caretakers at 19 minutes | 0, 0 | 1, 3 |
+| storage full at 10 / 15 / 19 minutes (mean) | 0.36 / 0.22 / 0.18 | 0.36 / 0.27 / 0.10 |
+| a side's value at 10 / 15 / 19 minutes (median) | 12,300 / 24,500 / 27,800 | 14,600 / 25,400 / 31,700 |
+| income at 10 / 15 / 19 minutes (median) | 48 / 66 / 50 | 56 / 77 / 66 |
+| the second factory | 2 sides, at 19.7 minutes | 96 sides, at a median of 7.6 minutes and 49 metal a second |
+
+The sides still in play thin out (84 at 10 minutes, 38 at 15, 20 at 19) as games end on a lead.
 
 ### What decides script games
 

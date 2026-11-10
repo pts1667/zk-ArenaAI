@@ -16,8 +16,8 @@ A role is built when it's furthest behind its share of the units the side has st
 loses its raiders keeps building raiders in the same proportion as before.
 
 Constructors aren't in the shares: the factory makes one whenever the side has fewer than CONSTRUCTORS says for the minute, or
-than one for each INCOME_PER_CONSTRUCTOR of metal income, lost ones included, for the economy script (policy_eco.py) to use.
-Without enough of them to spend it, income piles up in storage and is lost.
+than one for each INCOME_PER_CONSTRUCTOR of metal income, lost ones included, for the economy script (policy_eco.py) to use;
+FLOAT_CONSTRUCTORS more while metal floats.  Without enough of them to spend it, income piles up in storage and is lost.
 """
 from __future__ import annotations
 

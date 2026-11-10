@@ -142,7 +142,7 @@ void Seat::reset(const Data* d, const Ground* g, int side_, P2 base_, P2 enemy, 
     waypoints[2] = {rally_.x + vx * 0.8 + sx, rally_.z + vz * 0.8 + sz};
     waypoints[3] = {rally_.x + vx * 0.55, rally_.z + vz * 0.55};
     for (auto* v : {&state, &ordered_kind, &way}) v->clear();
-    ordered_x.clear(), ordered_z.clear(), squad_of.clear(), current.clear(), born.clear(), patrol.clear(), helps.clear();
+    ordered_x.clear(), ordered_z.clear(), squad_of.clear(), current.clear(), born.clear(), patrol.clear(), helps.clear(), builds.clear();
     noted.clear(), stamp.clear(), fighter_of.clear(), raider_stamp.clear(), view_stamp.clear(), view_index.clear();
     call = 0;
     squad_live.clear(), squad_target.clear(), since_has.clear(), since_t.clear(), since_d.clear();
@@ -182,6 +182,7 @@ void Seat::grow(int64_t uid) {
     patrol.resize(n, 0);
     helps.resize(n, INT64_MIN);
     reclaims.resize(n, INT64_MIN);
+    builds.resize(n, -1);
     noted.resize(n, 0);
     stamp.resize(n, -1);
     fighter_of.resize(n, 0);
@@ -336,9 +337,11 @@ zks_data* zks_data_new(const zks_data_desc* s) {
     d.options.assign(s->options, s->options + s->option_offsets[n]);
     d.n_roles = s->n_roles;
     d.menu.assign(s->menu, s->menu + (size_t)n * s->n_roles);
+    d.plate_of.assign(s->plate_of, s->plate_of + n);
     std::memcpy(d.role_ids, s->role_ids, sizeof d.role_ids);
     std::memcpy(d.special, s->special, sizeof d.special);
     std::memcpy(d.second_factories, s->second_factories, sizeof d.second_factories);
+    d.caretaker = s->caretaker;
     std::memcpy(d.group_radii, s->group_radii, sizeof d.group_radii);
     d.cerberus_reach = s->cerberus_reach;
     d.missile_reach = s->missile_reach;

@@ -1063,6 +1063,46 @@ def test_a_factory_repeats_its_type_and_an_assistant_doubles_its_pace():
     assert raiders_after(20.0, True) == 6             # ... and 3.25 s with a commander of the same speed
 
 
+def test_a_plate_makes_units_only_within_its_reach_of_a_finished_factory_of_its_type_and_side():
+    """unit_factory_plate.lua: a plate's build range is 420.  Off, it makes nothing, and helping it does nothing."""
+    def raiders_after(factory_x=None, factory="factorycloak", side=0, build=1.0, helped=False):
+        world = _economy(metal=50000.0, energy=50000.0)
+        plate = world.add("platecloak", 0, 1000.0, 1000.0)
+        if factory_x is not None:
+            world.add(factory, side, factory_x, 1000.0, build=build)
+        if helped:
+            world.assist(world.add(COMMANDER, 0, 1000.0, 1100.0), plate)
+        world.produce(plate, RAIDER)
+        world.step(int(20.0 * TICKS_PER_SECOND))
+        return sum(1 for u in world.view(0).units if u["def_id"] == CAT.units[CAT.index[RAIDER]]["def_id"] and not u["flags"] & rawframe.BEING_BUILT)
+    assert raiders_after(1300.0) == 3                 # as a factory: 6.5 s each
+    assert raiders_after() == 0
+    assert raiders_after(helped=True) == 0
+    assert raiders_after(1500.0) == 0                 # 500 away
+    assert raiders_after(1300.0, factory="factoryveh") == 0
+    assert raiders_after(1300.0, side=1) == 0
+    assert raiders_after(1300.0, build=0.5) == 0
+
+
+def test_an_idle_caretaker_helps_a_factory_of_its_side_in_its_reach_and_else_a_frame():
+    """unit_auto_patrol_nanos.lua, Zero-K's default: an idle caretaker patrols, which helps what's being built near it."""
+    def raiders_after(caretaker_x, side=0):
+        world = _economy(metal=50000.0, energy=50000.0)
+        factory = world.add("factorycloak", 0, 1000.0, 1000.0)
+        world.add("staticcon", side, caretaker_x, 1000.0)
+        world.produce(factory, RAIDER)
+        world.step(int(20.0 * TICKS_PER_SECOND))
+        return sum(1 for u in world.view(0).units if u["def_id"] == CAT.units[CAT.index[RAIDER]]["def_id"] and not u["flags"] & rawframe.BEING_BUILT)
+    assert raiders_after(1400.0) == 6                 # build speed 10, as the factory's: twice the pace
+    assert raiders_after(1600.0) == 3                 # beyond its reach of 500, and the factory's footprint
+    assert raiders_after(1400.0, side=1) == 3
+    world = _economy()
+    caretaker = world.add("staticcon", 0, 1000.0, 1000.0)
+    frame = world.add("energysolar", 0, 1200.0, 1000.0, build=0.0)
+    world.step(int(10.0 * TICKS_PER_SECOND))
+    assert world.get(frame).build == 1.0 and world.get(caretaker).order == zksim.ORDER_NONE
+
+
 def test_a_factory_stops_when_told():
     world = _economy(metal=50000.0, energy=50000.0)
     factory = world.add("factorycloak", 0, 1000.0, 1000.0)

@@ -1,4 +1,17 @@
 {
+"plates": {
+"plateamph": "factoryamph",
+"platecloak": "factorycloak",
+"plategunship": "factorygunship",
+"platehover": "factoryhover",
+"platejump": "factoryjump",
+"plateplane": "factoryplane",
+"plateshield": "factoryshield",
+"plateship": "factoryship",
+"platespider": "factoryspider",
+"platetank": "factorytank",
+"plateveh": "factoryveh"
+},
 "silos": {
 "staticmissilesilo": [
 "empmissile",

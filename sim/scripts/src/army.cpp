@@ -56,6 +56,7 @@ constexpr float COMMIT_FRAMES = 6 * 15;
 const double CONSTRUCTORS[7][2] = {{0.0, 0.0}, {1.0, 1.0}, {3.0, 2.0}, {5.0, 3.0}, {7.0, 4.0}, {10.0, 5.0}, {14.0, 6.0}};
 constexpr double INCOME_PER_CONSTRUCTOR = 3.0;
 constexpr int MOST_CONSTRUCTORS = 20;
+constexpr int FLOAT_CONSTRUCTORS = 2;   // more while the economy script finds metal floating: build power is what's short
 const double RAID_X[5] = {0.0, 4.0, 10.0, 20.0, 60.0}, RAID_Y[5] = {1.0, 1.0, 0.5, 0.4, 0.35};
 const double RIOT_X[4] = {0.0, 4.0, 10.0, 60.0}, RIOT_Y[4] = {0.0, 0.0, 0.3, 0.3};
 const double ASSAULT_X[4] = {0.0, 6.0, 12.0, 60.0}, ASSAULT_Y[4] = {0.0, 0.0, 0.25, 0.25};
@@ -75,13 +76,13 @@ double group_metal(double seconds) {
 
 int scout_quota(double seconds) { return (seconds >= 120.0) + (seconds >= 600.0); }
 
-int constructor_quota(double seconds, double metal_income) {
+int constructor_quota(double seconds, double metal_income, bool floating) {
     double by_time = 0.0;
     bool any = false;
     for (auto& p : CONSTRUCTORS)
         if (seconds >= p[0] * 60.0 && (!any || p[1] > by_time)) by_time = p[1], any = true;
     int64_t by_income = (int64_t)(metal_income / INCOME_PER_CONSTRUCTOR);
-    int64_t want = std::max((int64_t)by_time, by_income);
+    int64_t want = std::max((int64_t)by_time, by_income) + (floating ? FLOAT_CONSTRUCTORS : 0);
     return (int)std::min((int64_t)MOST_CONSTRUCTORS, want);
 }
 
@@ -149,7 +150,7 @@ void Seat::births_and_forget() {
 int Seat::choose(int factory_row, double seconds, int constructors, double metal_income) const {
     const Data& d = *data;
     int builder = d.menu_of(factory_row, R_BUILDER);
-    if (builder >= 0 && constructors < constructor_quota(seconds, metal_income)) return builder;
+    if (builder >= 0 && constructors < constructor_quota(seconds, metal_income, floating)) return builder;
     int scout = d.menu_of(factory_row, R_SCOUT);
     if (scout >= 0 && made[d.role_ids[R_SCOUT]] < scout_quota(seconds)) return scout;
     // shares(), in its dict's order: the schedule's roles, then those added once seen
