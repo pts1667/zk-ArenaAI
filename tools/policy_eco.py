@@ -96,7 +96,7 @@ class EcoData:
         self.missile = np.zeros(n, bool)
         self.commander = np.zeros(n, bool)
         self.footing: dict[int, Footing] = {}
-        self.radius = np.zeros(n, np.float32)
+        self.half = np.zeros((n, 2), np.float32)        # of each type's footprint, along x and z: what a build is tested against
         for row, name in enumerate(table.names):
             self.extractor[row] = bool(bot_units.is_mex(bot_units.by_name(name)))
             if name not in cat.index:
@@ -109,7 +109,9 @@ class EcoData:
             self.missile[row] = bool(u["flags"] & zksim.MISSILE)
             self.commander[row] = bool(u["flags"] & zksim.COMMANDER)
             self.footing[row] = Footing.of(u)
-            self.radius[row] = u["footprint_radius"]
+            self.half[row] = self.footing[row].half_x, self.footing[row].half_z
+        # Half the square kept clear at every metal spot: an extractor's footprint.
+        self.spot_half = float(self.half[self.extractor].max()) if self.half[self.extractor].size and self.half[self.extractor].max() > 0.0 else 24.0
         # A factory's plate (the catalog's plate_parent): a production line of its own for a fifth of the metal, beside it.
         self.plate_of = np.full(n, -1, np.int32)
         for row, name in enumerate(table.names):

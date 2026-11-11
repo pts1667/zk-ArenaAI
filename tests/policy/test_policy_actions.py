@@ -34,7 +34,7 @@ def legal(t, i=0):
 def test_order_memory_keeps_its_width_when_the_policy_gains_kinds():
     """Frames on disk and encoders trained on them have 16 slots."""
     assert rf.ORDER_SLOTS == 16 and rf.KIND_COUNT > rf.ORDER_SLOTS
-    assert fz.UNIT_DIM == 127 and fz.FEATURE_VERSION == 7
+    assert fz.UNIT_DIM == 127 and fz.FEATURE_VERSION == 8
 
 
 def test_the_facts_come_from_the_generated_data(table):

@@ -99,7 +99,7 @@ void World::reclaim_step(int u) {
     if (!within(u, wreck.x, wreck.z, reach_of(u, wreck.radius))) return;
     show_for_action(u);
     const float taken = std::min(wreck.left, type_of(u).reclaim_speed * TICK_SECONDS / wreck.metal);
-    purses[side[i]].reclaimed += wreck.metal * taken;
+    purses[team[i]].reclaimed += wreck.metal * taken;
     wreck.left -= taken;
     if (wreck.left <= 0.0f) {
         remove_wreck(id);

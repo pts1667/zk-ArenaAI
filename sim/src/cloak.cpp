@@ -27,7 +27,7 @@ void World::show_for_action(int u) {
 
 bool World::enemy_within(int u, float reach) const {
     bool found = false;
-    for_side(1 - side[size_t(u)], x[size_t(u)], z[size_t(u)], reach, [&](int e) {
+    for_enemies(side[size_t(u)], x[size_t(u)], z[size_t(u)], reach, [&](int e) {
         if (found || !alive[size_t(e)] || build[size_t(e)] < 1.0f) return;
         const float dx = x[size_t(e)] - x[size_t(u)], dz = z[size_t(e)] - z[size_t(u)];
         found = dx * dx + dz * dz <= reach * reach;
@@ -57,7 +57,7 @@ void World::consider_cloak(int u) {
     }
     // Under an area cloak it costs nothing of its own.  In a world with no economy there's nothing to pay with, and it's free.
     const float per_second = speed[i] > MOVING_SPEED ? d.cloak_cost_moving : d.cloak_cost;
-    cloaked[i] = area_cloaked[i] || !economy_on || pay_energy(side[i], per_second / UPDATES_PER_SECOND);
+    cloaked[i] = area_cloaked[i] || !economy_on || pay_energy(team[i], per_second / UPDATES_PER_SECOND);
 }
 
 void World::update_cloak() {
@@ -71,6 +71,7 @@ void World::update_cloak() {
         const size_t i = size_t(c);
         if (!alive[i] || !area_on[i] || !active(c) || disarmed(c) || unpaid[i]) continue;
         const float r = type_of(c).area_cloak_radius;
+        // An ally's units too, as unit_cloak_shield.lua goes by allyteam.
         for_side(side[i], x[i], z[i], r, [&](int u) {
             if (!alive[size_t(u)]) return;
             const float dx = x[size_t(u)] - x[i], dz = z[size_t(u)] - z[i];
@@ -78,7 +79,7 @@ void World::update_cloak() {
         });
     }
     // Anyone may be under one.
-    for (int u = 0; u < count(); ++u) consider_cloak(u);
+    for (size_t k = 0; k < live.size(); ++k) consider_cloak(live[k]);
 }
 
 }  // namespace zk

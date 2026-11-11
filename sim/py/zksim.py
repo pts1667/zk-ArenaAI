@@ -19,8 +19,9 @@ sys.path.insert(0, str(ROOT / "py"))
 sys.path.insert(0, str(ROOT.parent / "bots"))
 import zknav  # noqa: E402
 from zkbot.policy import rawframe  # noqa: E402
-ABI_VERSION = 18
+ABI_VERSION = 20
 MAX_MOUNTS = 8
+MAX_TEAMS = 8                       # players in a game, and so allyteams too
 TICK_FRAMES = 5
 FRAMES_PER_SECOND = 30
 MOVE_CLASSES = ("kbot", "tank", "spider", "amph", "hover", "ship")
@@ -29,8 +30,14 @@ ORDER_NONE, ORDER_MOVE, ORDER_FIGHT, ORDER_ATTACK, ORDER_MANUAL_FIRE, ORDER_JUMP
 ORDER_BUILD, ORDER_ASSIST, ORDER_RECLAIM, ORDER_PRODUCE, ORDER_MOVE_STATE, ORDER_FIRE_STATE, ORDER_UNIT_AI, ORDER_SELF_DESTRUCT = 10, 11, 13, 14, 15, 16, 17, 18
 ORDER_PLACE_BEACON, ORDER_WAIT_AT_BEACON, ORDER_ON_OFF = 19, 20, 21
 MOBILE, AIR, ARMED, FIREPROOF, FACTORY, PLOPPABLE, COMMANDER, CAN_CLOAK, STARTS_CLOAKED, FIRES_CLOAKED, AREA_CLOAK_ON, LEAVES_GHOST, KAMIKAZE_BLIND, FLOATS = 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192
-MISSILE, NEUTRAL, PLANE, LANDS, STRAFES = 16384, 32768, 65536, 131072, 262144
-FEATURES_PER_SIDE = 256             # records a frame can hold: more than is in sight in any game looked at
+MISSILE, NEUTRAL, PLANE, LANDS, STRAFES, DONT_COUNT = 16384, 32768, 65536, 131072, 262144, 524288
+FEATURES_PER_SIDE = 512             # records a frame can hold, as many as featurize keeps; past it, those with the most metal left (sim/src/views.cpp)
+# Chicken defense (sim/src/chickens.cpp): the difficulties, the roles of the gadget's kinds, and what chicken_state gives.
+CHICKEN_DIFFICULTIES = ("Beginner", "Very Easy", "Easy", "Normal", "Hard", "Suicidal")
+CHICKEN_OFFENSE, CHICKEN_DEFENSE, CHICKEN_SUPPORT, CHICKEN_SPECIAL = 0, 1, 2, 3
+CHICKEN_KINDS, CHICKEN_MINI_QUEENS, CHICKEN_NO_TARGET = 32, 4, 4
+CHICKEN_STATE = ("queen", "until_queen", "burrows", "burrows_killed", "chickens", "waves", "aggro", "tech", "queen_time", "queen_hp",
+                 "difficulty", "team")
 W_TURRET, W_NO_AUTO_TARGET, W_MANUAL, W_UNMODELLED = 2, 16, 512, 2048
 W_PIERCES, W_ONE_HIT_EACH, W_THROWS, W_BOMB, W_DROPPED = 524288, 1048576, 2097152, 4194304, 8388608
 
@@ -81,6 +88,33 @@ class UnitState(ct.Structure):
         (n, ct.c_int32) for n in ("alive", "order", "target", "stock", "cloaked", "chasing", "dodging", "shots_fired", "jumping", "skidding", "low_power", "deployed", "beacon", "pulling", "ammo", "air_state")]
 
 
+class ChickenKind(ct.Structure):
+    _fields_ = [("type", ct.c_int32), ("role", ct.c_int32)] + [(n, ct.c_float) for n in (
+        "time", "obsolete", "squad_size", "cost", "max_aggro", "count", "burrow_ratio", "min_dist", "max_dist", "cooldown")] + [
+        (n, ct.c_int32) for n in ("target_human", "tie_to_burrow")]
+
+
+class ChickenRules(ct.Structure):
+    _fields_ = [(n, ct.c_int32) for n in ("level", "burrow", "queen", "queen_morph", "mini_queen", "test_building", "test_building_queen")] + [
+        ("no_target", ct.c_int32 * CHICKEN_NO_TARGET)] + [(n, ct.c_int32) for n in ("max_tries", "max_tries_small", "n_mini_queen_times", "n_kinds")] + [
+        (n, ct.c_float) for n in (
+            "spawn_square", "spawn_square_increment", "max_burrows", "min_base_distance", "max_base_distance", "max_age", "egg_decay_time", "burrow_eggs",
+            "player_malus", "burrow_spawn_rate", "chicken_spawn_rate", "wave_ratio", "base_wave_size", "wave_size_mult", "queen_spawn_mult",
+            "defense_per_wave", "defense_per_burrow_kill", "grace_period", "grace_penalty", "grace_period_min", "ramp_up_time",
+            "queen_time", "queen_health_mod")] + [("queen_morph_frames", ct.c_float * 2), ("mini_queen_time", ct.c_float * CHICKEN_MINI_QUEENS)] + [
+        (n, ct.c_float) for n in (
+            "burrow_queen_time", "burrow_wave_size", "burrow_respawn_chance", "burrow_regress_time",
+            "human_aggro_per_burrow", "human_aggro_decay", "human_aggro_min", "human_aggro_max", "human_aggro_wave_factor", "human_aggro_wave_max",
+            "human_aggro_defense_factor", "human_aggro_tech_time_progress", "human_aggro_tech_time_regress",
+            "human_aggro_queen_time_factor", "human_aggro_queen_time_min", "human_aggro_queen_time_max",
+            "tech_accel_per_player", "tech_time_floor_factor", "tech_time_max", "time_spawn_bonus")] + [
+        ("kinds", ChickenKind * CHICKEN_KINDS)]
+
+
+class EggRec(ct.Structure):
+    _fields_ = [("feature", ct.c_int32), ("metal", ct.c_float), ("hp", ct.c_float), ("radius", ct.c_float)]
+
+
 def _load_library() -> ct.CDLL:
     path = os.environ.get("ZKSIM_LIB") or os.path.expanduser("~/zksim/build/libzksim.so")
     lib = ct.CDLL(path)
@@ -90,6 +124,9 @@ def _load_library() -> ct.CDLL:
     lib.zk_catalog_new.restype = vp
     lib.zk_catalog_new.argtypes = [ct.POINTER(TypeRec), it, ct.POINTER(WeaponRec), it, fp, ct.POINTER(TacticsRec), ct.POINTER(ct.c_uint8)]
     lib.zk_catalog_free.argtypes = [vp]
+    lib.zk_catalog_reveal.argtypes = [vp, fl, it]
+    lib.zk_catalog_chickens.argtypes = [vp, it, ct.POINTER(ChickenRules)]
+    lib.zk_catalog_eggs.argtypes = [vp, ct.POINTER(EggRec)]
     lib.zk_map_new.restype = vp
     lib.zk_map_new.argtypes = [it, it, fl, fp, fp, it, fp, fp, fp, fp, ct.POINTER(ct.c_short)]
     lib.zk_map_set_routes.restype = None
@@ -98,6 +135,7 @@ def _load_library() -> ct.CDLL:
     lib.zk_world_new.restype = vp
     lib.zk_world_new.argtypes = [cvp, cvp, ct.c_uint64, it]
     lib.zk_world_free.argtypes = [vp]
+    lib.zk_world_set_teams.argtypes = [vp, it, ip]
     lib.zk_world_add.restype = it
     lib.zk_world_add.argtypes = [vp, it, it, fl, fl, fl, fl, fl]
     lib.zk_world_order.argtypes = [vp, it, it, fl, fl, it]
@@ -118,10 +156,16 @@ def _load_library() -> ct.CDLL:
     lib.zk_world_features.argtypes = [vp, it, vp, it]
     lib.zk_world_view.restype = it
     lib.zk_world_view.argtypes = [vp, it, vp, it, fp, it, fp]
+    lib.zk_world_set_reveal.argtypes = [vp, it]
+    lib.zk_world_chickens.argtypes = [vp, it, it]
+    lib.zk_world_chicken_state.argtypes = [cvp, fp]
+    lib.zk_batch_set_reveal.argtypes = [vp, it]
+    lib.zk_batch_chickens.argtypes = [vp, it, it, it]
+    lib.zk_batch_chicken_state.argtypes = [cvp, it, fp]
     lib.zk_batch_new.restype = vp
-    lib.zk_batch_new.argtypes = [cvp, it, it]
+    lib.zk_batch_new.argtypes = [cvp, it, it, it]
     lib.zk_batch_free.argtypes = [vp]
-    lib.zk_batch_reset.argtypes = [vp, it, cvp, ct.c_uint64, it, it, ip, ip, fp, fp, fp, fp, fp, ip, fp]
+    lib.zk_batch_reset.argtypes = [vp, it, cvp, ct.c_uint64, it, it, ip, it, ip, ip, fp, fp, fp, fp, fp, ip, fp]
     lib.zk_batch_world.restype = vp
     lib.zk_batch_world.argtypes = [vp, it]
     lib.zk_batch_step.argtypes = [vp, ip, it, vp, ip, vp, ip, it, vp, it, ip, fp, fp, vp, it, ip]
@@ -139,7 +183,8 @@ def _load_library() -> ct.CDLL:
     if (lib.zk_sizeof_unit_record() != rawframe.UNIT_DTYPE.itemsize or lib.zk_sizeof_feature_record() != rawframe.FEATURE_DTYPE.itemsize
             or lib.zk_global_count() != len(rawframe.GLOBAL_FIELDS)):
         raise RuntimeError("libzksim was built from another raw frame schema: rebuild it")
-    for got, want in ((lib.zk_sizeof_weapon(), WeaponRec), (lib.zk_sizeof_type(), TypeRec), (lib.zk_sizeof_state(), UnitState)):
+    for got, want in ((lib.zk_sizeof_weapon(), WeaponRec), (lib.zk_sizeof_type(), TypeRec), (lib.zk_sizeof_state(), UnitState),
+                      (lib.zk_sizeof_chicken_rules(), ChickenRules)):
         if got != ct.sizeof(want):
             raise RuntimeError(f"{want.__name__}: {ct.sizeof(want)} bytes here, {got} in libzksim: rebuild it")
     return lib
@@ -166,7 +211,7 @@ def _ints(a: np.ndarray):
 
 
 class Catalog:
-    """Unit and weapon records from sim/data, indexed by name."""
+    """Unit and weapon records from sim/data, indexed by name, with the game's rules (rules.json, tools/sim_rules.py) if there."""
 
     def __init__(self, directory: pathlib.Path | str = DATA):
         directory = pathlib.Path(directory)
@@ -175,13 +220,15 @@ class Catalog:
         self.weapons = data["weapons"]
         arrays = np.load(directory / "priority.npz")
         self.tactics, self.relations = data["tactics"], arrays["relations"]
+        rules = directory / "rules.json"
+        self.rules = json.loads(rules.read_text("utf8")) if rules.exists() else None
         self._install(arrays["priority"].astype(np.float32))
 
     @classmethod
-    def from_records(cls, units: list[dict], weapons: list[dict]) -> "Catalog":
-        """A small catalog for tests: every weapon rates every unit equally."""
+    def from_records(cls, units: list[dict], weapons: list[dict], rules: dict | None = None) -> "Catalog":
+        """A small catalog for tests: every weapon rates every unit equally.  rules: as rules.json, for what its units have."""
         self = cls.__new__(cls)
-        self.units, self.weapons = units, weapons
+        self.units, self.weapons, self.rules = units, weapons, rules
         self.tactics, self.relations = [{} for _ in units], np.zeros((len(units), len(units)), np.uint8)
         self._install(np.zeros((len(weapons), len(units)), np.float32))
         return self
@@ -189,11 +236,14 @@ class Catalog:
     def _install(self, priority: np.ndarray) -> None:
         self.index = {u["name"]: i for i, u in enumerate(self.units)}
         self.weapon_index = {w["name"]: i for i, w in enumerate(self.weapons)}
+        dont_count = set((self.rules or {}).get("dont_count", ()))
         types = (TypeRec * len(self.units))()
         for rec, u in zip(types, self.units):
             rec.move_state, rec.fire_state = 1, 2      # the engine's defaults, for records that don't say
             rec.plate_parent = -1
             _fill(rec, u)
+            if u["name"] in dont_count:
+                rec.flags |= DONT_COUNT
             rec.n_mounts = len(u["mount_weapon"])
             for i in range(rec.n_mounts):
                 rec.mount_weapon[i] = u["mount_weapon"][i]
@@ -208,6 +258,62 @@ class Catalog:
         relations = np.require(self.relations, np.uint8, "C")
         self.handle = _lib.zk_catalog_new(types, len(self.units), weapons, len(self.weapons), _floats(priority), tactics,
                                           relations.ctypes.data_as(ct.POINTER(ct.c_uint8)))
+        if self.rules:
+            self._install_rules(self.rules)
+
+    def _install_rules(self, rules: dict) -> None:
+        if "reveal" in rules:
+            _lib.zk_catalog_reveal(self.handle, rules["reveal"]["value_ratio"], rules["reveal"]["every_frames"])
+        chickens = rules.get("chickens")
+        if not chickens or chickens["burrow"] not in self.index:
+            return
+        for difficulty, settings in enumerate(chickens["difficulties"]):
+            _lib.zk_catalog_chickens(self.handle, difficulty, ct.byref(self._chicken_rules(chickens, settings)))
+        eggs = (EggRec * len(self.units))()
+        for rec, u in zip(eggs, self.units):
+            egg = chickens["eggs"].get(u["name"])
+            rec.feature = -1 if egg is None else egg["feature"]
+            if egg is not None:
+                rec.metal, rec.hp, rec.radius = egg["metal"], egg["hp"], egg["radius"]
+        _lib.zk_catalog_eggs(self.handle, eggs)
+
+    def _chicken_rules(self, chickens: dict, settings: dict) -> ChickenRules:
+        """One difficulty's settings as capi.h's zk_chicken_rules: names to types, and -1 for what the gadget leaves to a fallback."""
+        def type_of(name):
+            return -1 if name is None else self.index[name]
+
+        def given(value):
+            return -1.0 if value is None else value
+
+        r = ChickenRules()
+        for name, kind in ChickenRules._fields_:
+            if kind is ct.c_float and name in settings:
+                setattr(r, name, settings[name])
+        r.level = settings["level"]
+        r.burrow, r.queen, r.queen_morph, r.mini_queen = (type_of(n) for n in (chickens["burrow"], settings["queen"], settings["queen_morph"], settings["mini_queen"]))
+        r.test_building, r.test_building_queen = type_of(chickens["test_building"]), type_of(chickens["test_building_queen"])
+        no_target = [self.index[n] for n in chickens["no_target"] if n in self.index]
+        assert len(no_target) <= CHICKEN_NO_TARGET, "more types chickens aren't sent at than capi.h has room for"
+        r.no_target[:] = no_target + [-1] * (CHICKEN_NO_TARGET - len(no_target))
+        r.max_tries, r.max_tries_small = chickens["max_tries"], chickens["max_tries_small"]
+        assert len(settings["mini_queen_time"]) <= CHICKEN_MINI_QUEENS
+        r.n_mini_queen_times = len(settings["mini_queen_time"])
+        for i, share in enumerate(settings["mini_queen_time"]):
+            r.mini_queen_time[i] = share
+        r.queen_morph_frames[:] = settings["queen_morph_frames"]
+        kinds = [(role, k) for role, key in ((CHICKEN_OFFENSE, "offense"), (CHICKEN_DEFENSE, "defense"), (CHICKEN_SUPPORT, "support"),
+                                             (CHICKEN_SPECIAL, "special")) for k in settings[key]]
+        assert len(kinds) <= CHICKEN_KINDS, "more kinds of chicken than capi.h has room for"
+        r.n_kinds = len(kinds)
+        for rec, (role, k) in zip(r.kinds, kinds):
+            rec.type, rec.role = type_of(k["unit"]), role
+            rec.time, rec.obsolete, rec.squad_size = k["time"], k["obsolete"], k.get("squad_size", 1.0)
+            rec.cost = 1.0 if k.get("cost") is None else k["cost"]     # SpawnTurret: (defenders[turret].cost) or 1
+            rec.max_aggro = k.get("max_aggro", 0.0)
+            rec.count, rec.burrow_ratio = given(k.get("count")), given(k.get("burrow_ratio"))
+            rec.min_dist, rec.max_dist, rec.cooldown = given(k.get("min_dist")), given(k.get("max_dist")), k.get("cooldown", 1.0)
+            rec.target_human, rec.tie_to_burrow = int(bool(k.get("target_human"))), int(bool(k.get("tie_to_burrow")))
+        return r
 
     def weapon_of(self, unit: str, mount: int = 0) -> dict:
         return self.weapons[self.units[self.index[unit]]["mount_weapon"][mount]]
@@ -217,6 +323,10 @@ class Catalog:
 START_METAL, START_ENERGY = 350.0, 350.0
 INNATE_METAL, INNATE_ENERGY = 2.0, 2.0
 COMMANDER_STORAGE = 500.0
+
+
+def _difficulty(difficulty: int | str) -> int:
+    return CHICKEN_DIFFICULTIES.index(difficulty) if isinstance(difficulty, str) else int(difficulty)
 
 
 def _set_economy(world, spots: np.ndarray, metal: float, energy: float, innate_metal: float, innate_energy: float, storage: float) -> None:
@@ -252,7 +362,14 @@ class Map:
         self.slope_mod = np.zeros(speed.shape[0], np.float32) if slope_mod is None else np.asarray(slope_mod, np.float32)
         self.segments = np.zeros(speed.shape, np.int16) if segments is None else np.asarray(segments, np.int16)
         if routes is None:
-            built = [zknav.navigation(s, v) for s, v in zip(self.segments, speed)]
+            # Classes that move alike here get one answer between them: on a map made by hand, usually all of them do.
+            known: dict[tuple[bytes, bytes], tuple] = {}
+            built = []
+            for s, v in zip(self.segments, speed):
+                key = (s.tobytes(), v.tobytes())
+                if key not in known:
+                    known[key] = zknav.navigation(s, v)
+                built.append(known[key])
             self.segments = np.stack([labels for labels, _ in built])
             routes = [r for _, r in built]
         self.routes = routes
@@ -288,8 +405,15 @@ class World:
             _lib.zk_world_free(self.handle)
             self.handle = None
 
-    def add(self, name: str, side: int, x: float, z: float, heading: float = 0.0, hp: float = 1.0, build: float = 1.0) -> int:
-        return _lib.zk_world_add(self.handle, self.catalog.index[name], side, x, z, heading, hp, build)
+    def set_teams(self, ally_of) -> None:
+        """Each team's allyteam, team by team: (0, 0, 1) is two players together against a third.  Until set, two teams, each
+        its own allyteam.  Before any unit is added."""
+        allies = np.require(ally_of, np.int32, "C")
+        _lib.zk_world_set_teams(self.handle, len(allies), _ints(allies))
+
+    def add(self, name: str, team: int, x: float, z: float, heading: float = 0.0, hp: float = 1.0, build: float = 1.0) -> int:
+        """A unit of this team (its allyteam is the team's).  Returns its handle, or -1 for a team the world hasn't."""
+        return _lib.zk_world_add(self.handle, self.catalog.index[name], team, x, z, heading, hp, build)
 
     def move(self, unit: int, x: float, z: float) -> None:
         _lib.zk_world_order(self.handle, unit, ORDER_MOVE, x, z, -1)
@@ -349,7 +473,7 @@ class World:
         _lib.zk_world_set_roles(self.handle, _ints(roles), len(roles))
 
     def order_group(self, anchor: int, roles: int, radius: float, kind: int, x: float = 0.0, z: float = 0.0, target: int = -1) -> int:
-        """One order to the anchor and each other mobile, finished unit of its side of a role in the `roles` bits within `radius` of it.
+        """One order to the anchor and each other mobile, finished unit of its team of a role in the `roles` bits within `radius` of it.
         Returns how many it went to."""
         g = np.array([(anchor, roles, radius, kind, x, z, target)], GROUP_DTYPE)
         return _lib.zk_world_order_group(self.handle, g.ctypes.data)
@@ -388,14 +512,28 @@ class World:
     def add_feature(self, x: float, z: float, metal: float, hp: float = 100.0, radius: float = 16.0, feature_def: int = -1) -> int:
         return _lib.zk_world_add_feature(self.handle, x, z, metal, hp, radius, feature_def)
 
-    def features(self, side: int) -> np.ndarray:
-        """What this side has in sight now."""
+    def features(self, team: int) -> np.ndarray:
+        """What this team's allyteam has in sight now."""
         records = np.zeros(FEATURES_PER_SIDE, rawframe.FEATURE_DTYPE)
-        return records[:_lib.zk_world_features(self.handle, side, records.ctypes.data, FEATURES_PER_SIDE)]
+        return records[:_lib.zk_world_features(self.handle, team, records.ctypes.data, FEATURES_PER_SIDE)]
 
-    def resources(self, side: int) -> dict[str, float]:
+    def set_reveal(self, on: bool) -> None:
+        """game_over.lua's reveal rule, on by default where the catalog has rules.json; never in a chicken game."""
+        _lib.zk_world_set_reveal(self.handle, int(on))
+
+    def chickens(self, team: int, difficulty: int | str) -> None:
+        """Chicken defense: this team, in an allyteam of its own and with no units, becomes the chickens, whom the world spawns and
+        orders from now on.  difficulty: an index or name of CHICKEN_DIFFICULTIES."""
+        _lib.zk_world_chickens(self.handle, team, _difficulty(difficulty))
+
+    def chicken_state(self) -> dict[str, float]:
+        out = np.zeros(len(CHICKEN_STATE), np.float32)
+        _lib.zk_world_chicken_state(self.handle, _floats(out))
+        return dict(zip(CHICKEN_STATE, map(float, out)))
+
+    def resources(self, team: int) -> dict[str, float]:
         out = np.zeros(6, np.float32)
-        _lib.zk_world_resources(self.handle, side, _floats(out))
+        _lib.zk_world_resources(self.handle, team, _floats(out))
         return dict(zip(("metal", "energy", "metal_income", "energy_income", "overdrive_metal", "overdrive_energy"), map(float, out)))
 
     def step(self, ticks: int = 1) -> None:
@@ -408,13 +546,13 @@ class World:
     def set_frame(self, frame: int) -> None:
         _lib.zk_world_set_frame(self.handle, frame)
 
-    def view(self, side: int, commander: int = -1, base: tuple[float, float] = (0.0, 0.0), cap: int = 1024) -> "rawframe.Frame":
-        """This side's raw frame as of now."""
+    def view(self, team: int, commander: int = -1, base: tuple[float, float] = (0.0, 0.0), cap: int = 1024) -> "rawframe.Frame":
+        """This team's raw frame as of now: its own units, its allies', then what its allyteam knows of the rest."""
         records = np.zeros(cap, rawframe.UNIT_DTYPE)
         glob = np.zeros(len(rawframe.GLOBAL_FIELDS), np.float32)
         where = np.array(base, np.float32)
-        n = _lib.zk_world_view(self.handle, side, records.ctypes.data, cap, _floats(glob), commander, _floats(where))
-        return rawframe.Frame(records[:n], np.zeros(0, rawframe.SITE_DTYPE), glob, self.features(side))
+        n = _lib.zk_world_view(self.handle, team, records.ctypes.data, cap, _floats(glob), commander, _floats(where))
+        return rawframe.Frame(records[:n], np.zeros(0, rawframe.SITE_DTYPE), glob, self.features(team))
 
     def get(self, unit: int) -> UnitState:
         state = UnitState()
@@ -423,23 +561,26 @@ class World:
 
 
 ORDER_DTYPE = np.dtype([("unit", "i4"), ("kind", "i4"), ("x", "f4"), ("z", "f4"), ("target", "i4")], align=True)
-# capi.h zk_group_rec: one order to the anchor and every unit of its side that's mobile and finished, of a role in `roles`, within `radius` of it
+# capi.h zk_group_rec: one order to the anchor and every unit of its team that's mobile and finished, of a role in `roles`, within `radius` of it
 GROUP_DTYPE = np.dtype([("anchor", "i4"), ("roles", "u4"), ("radius", "f4"), ("kind", "i4"), ("x", "f4"), ("z", "f4"), ("target", "i4")], align=True)
-STATS = 3      # per side: tracked value, live units, metal a second from reclaim
+STATS = 4      # per team: tracked value, live units, metal a second from reclaim, live units that keep the team in the game
 
 
 class Batch:
-    """Games stepping across threads.  `step` leaves frames in preallocated arrays, so reading one is a view, not a copy."""
+    """Games stepping across threads.  `step` leaves frames in preallocated arrays, so reading one is a view, not a copy.
 
-    def __init__(self, catalog: Catalog, games: int, threads: int = 16, cap: int = 1024):
-        self.catalog, self.games, self.cap = catalog, games, cap
-        self.handle = _lib.zk_batch_new(catalog.handle, games, threads)
-        self.records = np.zeros((games, 2, cap), rawframe.UNIT_DTYPE)
-        self.counts = np.zeros((games, 2), np.int32)
-        self.globs = np.zeros((games, 2, len(rawframe.GLOBAL_FIELDS)), np.float32)
-        self.stats = np.zeros((games, 2, STATS), np.float32)
-        self.features = np.zeros((games, 2, FEATURES_PER_SIDE), rawframe.FEATURE_DTYPE)
-        self.feature_counts = np.zeros((games, 2), np.int32)
+    Every array is [games, teams, ...]: `teams` slots a game, of which a game uses the first `n_teams` its reset gave, and the rest
+    read as empty frames (count 0, stats 0)."""
+
+    def __init__(self, catalog: Catalog, games: int, threads: int = 16, cap: int = 1024, teams: int = 2):
+        self.catalog, self.games, self.cap, self.teams = catalog, games, cap, teams
+        self.handle = _lib.zk_batch_new(catalog.handle, games, threads, teams)
+        self.records = np.zeros((games, teams, cap), rawframe.UNIT_DTYPE)
+        self.counts = np.zeros((games, teams), np.int32)
+        self.globs = np.zeros((games, teams, len(rawframe.GLOBAL_FIELDS)), np.float32)
+        self.stats = np.zeros((games, teams, STATS), np.float32)
+        self.features = np.zeros((games, teams, FEATURES_PER_SIDE), rawframe.FEATURE_DTYPE)
+        self.feature_counts = np.zeros((games, teams), np.int32)
         self.sites: list[np.ndarray] = [np.zeros(0, rawframe.SITE_DTYPE)] * games
         self.positions = np.arange(games, dtype=np.int32)
         self._in_flight = None      # what a step begun and not yet waited for reads
@@ -449,19 +590,39 @@ class Batch:
             _lib.zk_batch_free(self.handle)
             self.handle = None
 
-    def reset(self, game: int, world_map: Map, seed: int, type_: np.ndarray, side: np.ndarray, x: np.ndarray, z: np.ndarray,
+    def reset(self, game: int, world_map: Map, seed: int, type_: np.ndarray, team: np.ndarray, x: np.ndarray, z: np.ndarray,
               heading: np.ndarray | None = None, hp: np.ndarray | None = None, build: np.ndarray | None = None,
-              commander: tuple[int, int] = (-1, -1), base: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0),
-              sites: np.ndarray | None = None, behaviour: int = ORDERS) -> None:
+              commander=None, base=None, sites: np.ndarray | None = None, behaviour: int = ORDERS, ally_of=None, chickens=None) -> None:
+        """team: each unit's.  ally_of: each team's allyteam, no more teams than the batch's slots; None for two teams in allyteams
+        0 and 1.  commander: a handle per team, or -1 (all -1 if None); base: x, z per team (all 0 if None).  chickens: (team,
+        difficulty) for chicken defense (World.chickens), the team in an allyteam of its own and given no units."""
         n = len(type_)
         i32 = lambda a: np.require(a, np.int32, "C")  # noqa: E731
         f32 = lambda a: np.require(a, np.float32, "C")  # noqa: E731
+        allies = i32((0, 1) if ally_of is None else ally_of)
+        n_teams = len(allies)
+        assert n_teams <= self.teams, f"{n_teams} teams in a batch with room for {self.teams}"
+        commander = np.full(n_teams, -1, np.int32) if commander is None else i32(commander)
+        base = np.zeros(2 * n_teams, np.float32) if base is None else f32(base)
+        assert len(commander) >= n_teams and len(base) >= 2 * n_teams, "commander and base go by the teams"
         zeros, ones = np.zeros(n, np.float32), np.ones(n, np.float32)
-        _lib.zk_batch_reset(self.handle, game, world_map.handle, seed, behaviour, n, _ints(i32(type_)), _ints(i32(side)), _floats(f32(x)), _floats(f32(z)),
-                            _floats(zeros if heading is None else f32(heading)), _floats(ones if hp is None else f32(hp)),
-                            _floats(ones if build is None else f32(build)), _ints(i32(commander)), _floats(f32(base)))
+        _lib.zk_batch_reset(self.handle, game, world_map.handle, seed, behaviour, n_teams, _ints(allies), n, _ints(i32(type_)), _ints(i32(team)),
+                            _floats(f32(x)), _floats(f32(z)), _floats(zeros if heading is None else f32(heading)), _floats(ones if hp is None else f32(hp)),
+                            _floats(ones if build is None else f32(build)), _ints(commander), _floats(base))
+        if chickens is not None:
+            _lib.zk_batch_chickens(self.handle, game, int(chickens[0]), _difficulty(chickens[1]))
         if sites is not None:
             self.sites[game] = sites
+
+    def set_reveal(self, on: bool) -> None:
+        """game_over.lua's reveal rule (World.set_reveal) in every game, now and after any reset."""
+        _lib.zk_batch_set_reveal(self.handle, int(on))
+
+    def chicken_state(self, game: int) -> dict[str, float]:
+        """capi.h ZK_CS_*, by name: all 0 and team -1 in a game without chickens."""
+        out = np.zeros(len(CHICKEN_STATE), np.float32)
+        _lib.zk_batch_chicken_state(self.handle, game, _floats(out))
+        return dict(zip(CHICKEN_STATE, map(float, out)))
 
     def economy(self, game: int, spots: np.ndarray, metal: float = START_METAL, energy: float = START_ENERGY, innate_metal: float = INNATE_METAL,
                 innate_energy: float = INNATE_ENERGY, storage: float = COMMANDER_STORAGE) -> None:
@@ -520,21 +681,21 @@ class Batch:
                            self.records[game:].ctypes.data, self.cap, _ints(self.counts[game:]), _floats(self.globs[game:]), _floats(self.stats[game:]),
                            self.features[game:].ctypes.data, FEATURES_PER_SIDE, _ints(self.feature_counts[game:]))
 
-    def frame(self, position: int, side: int, game: int | None = None) -> rawframe.Frame:
-        """The frame of the position-th listed game, a view into this batch's buffers, so valid until the next step."""
-        n = int(self.counts[position, side])
-        return rawframe.Frame(self.records[position, side, :n], self.sites[position if game is None else game], self.globs[position, side],
-                              self.features[position, side, :int(self.feature_counts[position, side])])
+    def frame(self, position: int, team: int, game: int | None = None) -> rawframe.Frame:
+        """A team's frame in the position-th listed game, a view into this batch's buffers, so valid until the next step."""
+        n = int(self.counts[position, team])
+        return rawframe.Frame(self.records[position, team, :n], self.sites[position if game is None else game], self.globs[position, team],
+                              self.features[position, team, :int(self.feature_counts[position, team])])
 
     def frame_hash(self) -> int:
         """Of everything the last step wrote, to compare runs."""
         import hashlib
         h = hashlib.sha256()
         for position in range(self.games):
-            for side in (0, 1):
-                n = int(self.counts[position, side])
-                h.update(self.records[position, side, :n].tobytes())
-                h.update(self.features[position, side, :int(self.feature_counts[position, side])].tobytes())
+            for team in range(self.teams):
+                n = int(self.counts[position, team])
+                h.update(self.records[position, team, :n].tobytes())
+                h.update(self.features[position, team, :int(self.feature_counts[position, team])].tobytes())
         h.update(self.stats.tobytes())
         return int.from_bytes(h.digest()[:8], "little")
 

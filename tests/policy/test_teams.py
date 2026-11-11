@@ -74,7 +74,7 @@ def test_one_pool_holds_every_alliance_and_the_cap_counts_them_all(small_map, ta
     rows = [{"uid": i + 1, "x": 300.0 + i % 40, "z": 300.0 + i // 40} for i in range(fz.CAP_CONTROLLABLE)]
     rows += [{"uid": 1000 + i, "side": ENEMY, "player": 2 + i % 3, "ally_team": 1 + i % 3, "x": 800.0 + i % 30, "z": 800.0} for i in range(300)]
     # Allies, as near as the enemy and worth as much: what can be seen shooting at us still comes first.
-    rows += [{"uid": 3000 + i, "player": 1, "ally_team": 0, "x": 800.0 + i % 30, "z": 800.0} for i in range(300)]
+    rows += [{"uid": 3000 + i, "player": 1, "ally_team": 0, "x": 800.0 + i % 30, "z": 800.0} for i in range(fz.CAP_UNITS)]
     t = fz.featurize(make_frame(make_units(*rows)), small_map, table)
     units = t.uids[t.uids >= 0]
     assert len(units) == fz.CAP_UNITS
@@ -84,8 +84,9 @@ def test_one_pool_holds_every_alliance_and_the_cap_counts_them_all(small_map, ta
 
 
 def test_a_far_off_enemy_is_not_crowded_out_by_my_own_units_nearby(small_map, table):
-    rows = [{"uid": i + 1, "x": 300.0 + i % 40, "z": 300.0 + i // 40} for i in range(400)]
-    rows += [{"uid": 1000 + i, "side": ENEMY, "x": 2900.0 + i % 40, "z": 2900.0 + i // 40} for i in range(400)]
+    more = 144      # past what the caps leave each
+    rows = [{"uid": i + 1, "x": 300.0 + i % 40, "z": 300.0 + i // 40} for i in range(fz.CAP_CONTROLLABLE + more)]
+    rows += [{"uid": 1000 + i, "side": ENEMY, "x": 2900.0 + i % 40, "z": 2900.0 + i // 40} for i in range(fz.CAP_UNITS - fz.CAP_CONTROLLABLE + more)]
     t = fz.featurize(make_frame(make_units(*rows)), small_map, table)
     assert t.controllable == fz.CAP_CONTROLLABLE
     assert len(t.enemy_tokens) == fz.CAP_UNITS - fz.CAP_CONTROLLABLE

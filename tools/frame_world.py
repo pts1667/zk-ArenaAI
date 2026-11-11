@@ -19,7 +19,7 @@ import numpy as np
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 import policy_sim_env as se  # noqa: E402
-from policy_opening import Footing, Ground, Opening  # noqa: E402
+from policy_opening import Footing, Ground, Opening, footprints  # noqa: E402
 from policy_script import ARRIVED, GROUPS_FROM, LONGEST_WAIT, NEW, RECOVERED, RETREAT_BELOW, RETREATING, SENT, WAITING, ScriptData, group_metal  # noqa: E402
 import zksim  # noqa: E402
 from zkbot import catalog as bot_catalog, units as bot_units  # noqa: E402
@@ -64,14 +64,14 @@ class Roster:
         self.structures = np.unique(np.concatenate(list(self.options.values())))
         self.is_extractor = extractors(table)
         self.extractor = int(np.flatnonzero(self.is_extractor)[0])
-        self.radius = np.zeros(len(table.names) + 1, np.float32)
+        self.half = np.zeros((len(table.names) + 1, 2), np.float32)     # of each type's footprint, along x and z
         self.footing: dict[int, Footing] = {}
         self.is_energy = np.zeros(len(table.names) + 1, bool)
         for r, name in enumerate(table.names):
             if name in cat.index:
                 u = cat.units[cat.index[name]]
-                self.radius[r] = u["footprint_radius"]
                 self.footing[r] = Footing.of(u)
+                self.half[r] = self.footing[r].half_x, self.footing[r].half_z
                 self.is_energy[r] = not table.mobile[r] and u["energy_make"] > 0.0
         self.is_turret = ~table.mobile & table.armed & ~table.factory
         self.is_silo = np.zeros(len(table.names) + 1, bool)
@@ -417,8 +417,9 @@ class BaseScript:
     def _usable_factories(self) -> set[int]:
         return set(self.roster.factories_for(self.ground)[0])
 
-    def orders(self, own: np.ndarray, enemies: np.ndarray, features: np.ndarray, seconds: float, busy: int = -1) -> np.ndarray:
-        """own: a side's own records.  enemies: the other's, as this is a script and spots are all it uses them for.  busy: a uid not to touch."""
+    def orders(self, own: np.ndarray, enemies: np.ndarray, features: np.ndarray, seconds: float, busy: int = -1, allies: np.ndarray | None = None) -> np.ndarray:
+        """own: a side's own records.  enemies: the others', as this is a script and spots are all it uses them for.  busy: a uid not
+        to touch.  allies: its allies' records, whose spots it leaves and whose buildings it keeps off."""
         roster, table = self.roster, self.roster.table
         rows = table.rows(own["def_id"])
         finished = (own["flags"] & rf.BEING_BUILT) == 0
@@ -436,40 +437,45 @@ class BaseScript:
         idle = np.flatnonzero(finished & table.builder[rows] & table.mobile[rows] & ((own["flags"] & rf.IDLE) != 0) & (own["uid"] != busy))
         if len(idle):
             spots = self.ground.bundle.spot_list
-            other_rows = table.rows(enemies["def_id"])
-            holders = np.concatenate((own[roster.is_extractor[rows]][["x", "z"]], enemies[roster.is_extractor[other_rows]][["x", "z"]]))
+            others = enemies if allies is None or not len(allies) else np.concatenate((enemies, allies))
+            other_rows = table.rows(others["def_id"])
+            holders = np.concatenate((own[roster.is_extractor[rows]][["x", "z"]], others[roster.is_extractor[other_rows]][["x", "z"]]))
             free = spots
             if len(holders) and len(spots):
                 free = spots[np.hypot(spots[:, 0, None] - holders["x"], spots[:, 1, None] - holders["z"]).min(axis=1) > EXTRACTOR_REACH]
             # Our side of the map.
             free = free[np.hypot(free[:, 0] - self.base[0], free[:, 1] - self.base[1]) <= 1.2 * np.hypot(free[:, 0] - self.enemy[0], free[:, 1] - self.enemy[1])]
             built = ~table.mobile[rows]
-            taken = np.concatenate((np.column_stack((own["x"][built], own["z"][built], roster.radius[rows[built]])),
-                                    np.column_stack((spots[:, 0], spots[:, 1], np.full(len(spots), self.roster.footing[self.roster.extractor].radius))))).astype(np.float32)
+            taken = np.concatenate((footprints(own["x"][built], own["z"][built], roster.half[rows[built], 0], roster.half[rows[built], 1]),
+                                    footprints(spots[:, 0], spots[:, 1], *roster.half[roster.extractor])))
+            if allies is not None and len(allies):
+                ally_rows = table.rows(allies["def_id"])
+                theirs = ~table.mobile[ally_rows]
+                taken = np.concatenate((taken, footprints(allies["x"][theirs], allies["z"][theirs], roster.half[ally_rows[theirs], 0], roster.half[ally_rows[theirs], 1])))
             for i in idle:
                 job = self._job(own[i], int(rows[i]), own, rows, free, features, taken, seconds)
                 if job is None:
                     continue
                 out.append(job)
                 if job[1] == rf.BUILD:
-                    taken = np.concatenate((taken, np.array([[job[2], job[3], roster.radius[table.names.index(roster.cat.units[job[4]]["name"])]]], np.float32)))
+                    taken = np.concatenate((taken, footprints(job[2], job[3], *roster.half[table.names.index(roster.cat.units[job[4]]["name"])])))
                     if roster.is_extractor[table.names.index(roster.cat.units[job[4]]["name"])]:
                         free = free[np.hypot(free[:, 0] - job[2], free[:, 1] - job[3]) > EXTRACTOR_REACH]
         return np.array(out, zksim.ORDER_DTYPE)
 
 
 class BaseOrders:
-    """For an environment whose sides have a BaseScript as well as a fight script: in `bases`, by game, one for each side."""
+    """For an environment whose teams have a BaseScript as well as a fight script: in `bases`, by game, one for each team, None
+    for a team without (the chickens)."""
     BASE_EVERY = 8      # decisions: builders don't wait long for work
 
     def script_orders(self, g: int, side: int) -> np.ndarray:
         fights = super().script_orders(g, side)
-        if self.decisions[g] % self.BASE_EVERY:
+        if self.decisions[g] % self.BASE_EVERY or self.bases[g][side] is None:
             return fights
-        frame = self.batch.frame(g, side)
-        own, enemy = frame.units, self.batch.frame(g, 1 - side).units
+        own, enemies, allies = self._sides_of(g, side)
         seconds = float(self.decisions[g]) * self.ticks * zksim.TICK_FRAMES / zksim.FRAMES_PER_SECOND
-        base = self.bases[g][side].orders(own[own["player"] == side], enemy[enemy["player"] == 1 - side], frame.features, seconds, self._busy(g, side))
+        base = self.bases[g][side].orders(own, enemies, self._team_units(g)[side][1], seconds, self._busy(g, side), allies)
         return np.concatenate((fights, base)) if len(base) else fights
 
     def _busy(self, g: int, side: int) -> int:
@@ -496,7 +502,7 @@ class WideOpening(Opening):
                 fighters = roster.fighters[table.names.index(name)]
                 raider = table.names[int(fighters[np.argmin(table.cost[fighters])])]
             self.factories.append((i, cat.index[raider]))
-        self.factory_radius = max(cat.units[f]["footprint_radius"] for f, _ in self.factories)
+        self._factory_footing = None    # of these factories, not the opening's
 
     def _fallback(self, ground: Ground, start: tuple[float, float]) -> int:
         """No way there on this map for anything it can place: at least the air will do."""

@@ -36,6 +36,10 @@ constexpr double MERGE_REACH = 900.0;
 constexpr double REORDER = 200.0;
 constexpr double AT_GOAL = 150.0;
 constexpr double BEHIND = 150.0;
+// An assault that hasn't moved STILL_REACH elmos in STILL_FOR seconds doesn't lead: riots once held for 30 minutes behind two
+// stuck Thugs.
+constexpr double STILL_REACH = 100.0;
+constexpr double STILL_FOR = 60.0;
 constexpr double KITE_RANGE = 0.6;
 constexpr double KITE_STEP = 250.0;
 constexpr double ARTY_STAND = 0.75;
@@ -65,6 +69,22 @@ constexpr double SKIRM_SHARE = 0.25, AA_SHARE = 0.12, SNIPE_SHARE = 0.10, SNIPE_
 // An air plant's mix, of what it has: a plane plant's bombers (Ravens, Phoenixes), a gunship plant's raiders, assaults and
 // skirmishers; AA once the enemy has been seen with air.  It comes late, so there's no schedule.
 constexpr double AIR_RAID = 0.35, AIR_RIOT = 0.2, AIR_ASSAULT = 0.25, AIR_SKIRM = 0.2, AIR_BOMB = 0.4, AIR_AA = 0.3;
+// Chicken defense (unit_spawner.lua, with spawn_defs.lua's numbers).  A burrow killed brings the queen sooner by
+// burrowQueenTime (15 s) times the chickens' anger (humanAggro, taken between 0 and 8), and angers them by 1 / players; each
+// wave calms them by humanAggroDecay (0.25).  So a kill while the anger is at most 0 costs no time, and the alliance's kills
+// then settle at what the waves calm, players / 4 a wave.  Every burrow left alive makes each wave bigger (burrowWaveSize
+// squads), but each kill past that brings the queen sooner by more than the one before, and her coming is the game's end one
+// way or the other; and below 0 the chickens' kinds come sooner each wave, by humanAggroTechTimeProgress (20 s) times the
+// calm.  So the army hunts burrows only while a kill is free: first of all while the anger is below 0, else when no chicken is
+// near our buildings, as it goes for those first.  With nothing to do it holds at its rally.  But the chickens' tech outgrows
+// the scripts' economy before her full time, so from QUEEN_CALL the army hunts whatever the anger, to bring her on while
+// it's strongest against them, and each kill makes the waves smaller too.  Once she's come it goes for her; plants make AA for
+// her (she flies and lands by turns) from QUEEN_PREP before she's due, not sooner: AA is no use against the waves.
+constexpr double HUNT_ANGER = 0.0;      // the army hunts a burrow while the anger is at most this
+constexpr double QUEEN_CALL = 1800.0;   // game seconds
+constexpr double DEFEND_REACH = 800.0;  // a chicken this near one of our buildings is one the army goes for
+constexpr double QUEEN_PREP = 300.0;    // seconds before the queen is due
+constexpr double QUEEN_AA = 0.35;       // AA's share of a plant's mix from then, on top of any it has
 // policy_eco.py Aimer
 constexpr double FIRE_AGAIN = 60.0;
 constexpr float NUKE_VALUE_REACH = 960.0f;
@@ -139,6 +159,7 @@ void Seat::births_and_forget() {
         squad_of[u] = -1;
         current[u] = -1;
         patrol[u] = 0;
+        still_since[u] = NAN;
     }
     std::vector<uint8_t> used(squad_live.size(), 0);
     for (size_t u = 0; u < squad_of.size(); u++)
@@ -147,7 +168,7 @@ void Seat::births_and_forget() {
         if (squad_live[s] && !used[s]) squad_live[s] = 0, since_has[s] = 0;
 }
 
-int Seat::choose(int factory_row, double seconds, int constructors, double metal_income) const {
+int Seat::choose(int factory_row, double seconds, int constructors, double metal_income, bool queen_due) const {
     const Data& d = *data;
     int builder = d.menu_of(factory_row, R_BUILDER);
     if (builder >= 0 && constructors < constructor_quota(seconds, metal_income, floating)) return builder;
@@ -168,14 +189,14 @@ int Seat::choose(int factory_row, double seconds, int constructors, double metal
         add(R_ASSAULT, AIR_ASSAULT);
         add(R_SKIRM, AIR_SKIRM);
         add(R_BOMB, AIR_BOMB);
-        if (seen_air) add(R_AA, AA_SHARE + AIR_AA);
+        if (seen_air || queen_due) add(R_AA, (seen_air ? AA_SHARE + AIR_AA : 0.0) + (queen_due ? QUEEN_AA : 0.0));
     } else {
     add(R_RAID, interp(minutes, RAID_X, RAID_Y, 5));
     add(R_RIOT, interp(minutes, RIOT_X, RIOT_Y, 4));
     add(R_ASSAULT, interp(minutes, ASSAULT_X, ASSAULT_Y, 4));
     add(R_ARTY, interp(minutes, ARTY_X, ARTY_Y, 4));
     if (seen_kitable) add(R_SKIRM, SKIRM_SHARE);
-    if (seen_air) add(R_AA, AA_SHARE);
+    if (seen_air || queen_due) add(R_AA, (seen_air ? AA_SHARE : 0.0) + (queen_due ? QUEEN_AA : 0.0));
     if (seen_heavy && seconds >= SNIPE_FROM) add(R_SNIPE, SNIPE_SHARE);
     }
     if (!n) return -1;
@@ -203,6 +224,7 @@ void Seat::produce(const Ctx& c, double metal_income) {
     const Data& d = *data;
     int constructors = 0;
     for (int r : own_rows) constructors += d.has(r, ZKS_CONSTRUCTOR);
+    const bool queen_due = c.chickens.known && (c.chickens.queen || c.chickens.until_queen <= QUEEN_PREP);
     auto held = [&](const Rec* u) {
         return u->ord_kind == K_PRODUCE && u->ord_age < COMMIT_FRAMES && (u->flags & (zk::UF_DAMAGED | zk::UF_IDLE)) == 0;
     };
@@ -212,7 +234,7 @@ void Seat::produce(const Ctx& c, double metal_income) {
         if ((u->flags & zk::UF_BEING_BUILT) || !d.has(r, ZKS_FACTORY)) continue;
         int frame_on = u->ord_kind == K_PRODUCE ? d.row_of(u->ord_target) : -1;
         int on = current[u->uid] >= 0 ? current[u->uid] : (frame_on >= 0 && frame_on != d.unknown ? frame_on : -1);
-        int due = choose(r, c.seconds, constructors, metal_income);
+        int due = choose(r, c.seconds, constructors, metal_income, queen_due);
         if (due < 0 || due == on || held(u)) {
             if (on >= 0) current[u->uid] = on;
             continue;
@@ -336,28 +358,42 @@ void Seat::fight(const Ctx& c, std::vector<Fighter>& f, const std::vector<P2>& e
     std::vector<int> sent;
     for (int k = 0; k < n; k++)
         if (state[f[k].uid] == S_SENT) sent.push_back(k);
+    // The army walks to the start of the nearest enemy still in the game (`foe`).  A team the scripts don't play (the chickens)
+    // has no base there to walk to: against it the army guards (guard_goal), and the raiders go with it rather than raid.
+    const bool walk = foe >= 0 && game.player(foe);
+    const bool guard = !walk && game.chickens() >= 0;
+    march = walk ? enemy_base : rally;
     P2 centre = rally;
     if (!sent.empty()) {
         // pos[sent].mean(axis=0): an axis-0 sum, which numpy does row after row
         double sx = 0.0, sz = 0.0;
         for (int k : sent) sx += f[k].x, sz += f[k].z;
         centre = {sx / (double)sent.size(), sz / (double)sent.size()};
-        if (!reached_start)
+        if (walk && !reached_start)
             for (int k : sent)
                 if (std::hypot(f[k].x - enemy_base.x, f[k].z - enemy_base.z) < ARRIVED) reached_start = true;
     }
-    // _goal
-    P2 goal = enemy_base;
-    if (reached_start) {
+    // _goal: having been at an enemy's start, the army goes for the nearest building of any enemy, then the nearest armed unit.
+    P2 goal = march;
+    if (guard) {
+        goal = guard_goal(c, centre);
+    } else if (reached_start || !walk) {
         int i = nearest(view.building, centre);
         if (i < 0) i = nearest(view.threat, centre);
         if (i >= 0) goal = {view.x[i], view.z[i]};
+    }
+    // The rest hold behind the assaults that are on the move; with none, they go for the goal.
+    for (int k = 0; k < n; k++) {
+        const int64_t uid = f[k].uid;
+        if (std::isnan(still_since[uid]) || std::hypot(f[k].x - still_x[uid], f[k].z - still_z[uid]) > STILL_REACH)
+            still_x[uid] = f[k].x, still_z[uid] = f[k].z, still_since[uid] = seconds;
     }
     P2 lead = goal;
     {
         std::vector<int> assault;
         for (int k : sent)
-            if (!scout_or_raid(f[k].kind) && f[k].kind == R_ASSAULT) assault.push_back(k);
+            if (!scout_or_raid(f[k].kind) && f[k].kind == R_ASSAULT && seconds - still_since[f[k].uid] < STILL_FOR)
+                assault.push_back(k);
         if (!assault.empty()) {
             double m = (double)assault.size();
             lead = {np_sum<double>([&](int64_t i) { return f[assault[i]].x; }, (int64_t)assault.size()) / m,
@@ -377,7 +413,7 @@ void Seat::fight(const Ctx& c, std::vector<Fighter>& f, const std::vector<P2>& e
             p.kind = K_MOVE, p.x = waypoints[i].x, p.z = waypoints[i].z;
             continue;
         }
-        if (kind == R_RAID) {
+        if (kind == R_RAID && !guard) {
             p.has = false;
             continue;
         }
@@ -397,7 +433,8 @@ void Seat::fight(const Ctx& c, std::vector<Fighter>& f, const std::vector<P2>& e
         if (kind == R_ASSAULT) {
             p.x = goal.x, p.z = goal.z;
         } else if (kind == R_AA) {
-            p.x = centre.x, p.z = centre.z;
+            const P2 at = guard && c.chickens.queen ? goal : centre;     // the queen is the goal: to her
+            p.x = at.x, p.z = at.z;
         } else if (kind == R_SKIRM) {
             int near = nearest(view.threat, pos, KITE_RANGE * f[k].reach);
             if (near >= 0) {
@@ -424,7 +461,7 @@ void Seat::fight(const Ctx& c, std::vector<Fighter>& f, const std::vector<P2>& e
     std::vector<int> raiders;
     for (int k = 0; k < n; k++)
         if (f[k].kind == R_RAID) raiders.push_back(k);
-    raids(c, f, raiders, retreat, extractors, plans);
+    if (!guard) raids(c, f, raiders, retreat, extractors, plans);
     // _emit
     const size_t first = army_out.size();
     for (int k = 0; k < n; k++) {
@@ -440,6 +477,45 @@ void Seat::fight(const Ctx& c, std::vector<Fighter>& f, const std::vector<P2>& e
         army_out.push_back(order(uid, p.kind, p.x, p.z, p.target));
     }
     group_plans(c, first);
+}
+
+// Where the army goes in a chicken game: the queen, wherever she is, as her death is the game; else, while the anger is below 0
+// or from QUEEN_CALL, the burrow nearest our base (or what guards it); else the chicken nearest the army of those near our
+// buildings; else, while a kill is free, that burrow; else the rally.  The army sees every chicken, as it sees every enemy.
+P2 Seat::guard_goal(const Ctx& c, P2 centre) const {
+    const Data& d = *data;
+    int queen = -1;
+    double qd = 0.0;
+    for (int e = 0; e < view.size(); e++) {
+        if (!d.has(enemy_rows[e], ZKS_QUEEN)) continue;
+        const double dd = std::hypot(view.x[e] - centre.x, view.z[e] - centre.z);
+        if (queen < 0 || dd < qd) queen = e, qd = dd;
+    }
+    if (queen >= 0) return {view.x[queen], view.z[queen]};
+    const bool call = c.chickens.known && c.seconds >= QUEEN_CALL;
+    const int burrow = c.chickens.anger <= HUNT_ANGER || call ? nearest(view.building, base) : -1;
+    if (burrow >= 0 && (c.chickens.anger < HUNT_ANGER || call)) return {view.x[burrow], view.z[burrow]};
+    std::vector<P2> mine;
+    for (size_t i = 0; i < own.size(); i++)
+        if (!d.has(own_rows[i], ZKS_MOBILE)) mine.push_back({(double)own[i]->x, (double)own[i]->z});
+    const double reach2 = DEFEND_REACH * DEFEND_REACH;
+    int best = -1;
+    double bd = 0.0;
+    for (int e = 0; e < view.size(); e++) {
+        if (!view.threat[e]) continue;
+        const double dd = std::hypot(view.x[e] - centre.x, view.z[e] - centre.z);
+        if (best >= 0 && dd >= bd) continue;
+        for (const P2& m : mine) {
+            const double dx = view.x[e] - m.x, dz = view.z[e] - m.z;
+            if (dx * dx + dz * dz <= reach2) {
+                best = e, bd = dd;
+                break;
+            }
+        }
+    }
+    if (best >= 0) return {view.x[best], view.z[best]};
+    if (burrow >= 0) return {view.x[burrow], view.z[burrow]};
+    return rally;
 }
 
 // Group orders (capi.h zk_group_rec).  The fighters' orders from army_out[first] on that are the same order, to the letter, and of a kind
@@ -608,9 +684,10 @@ int64_t Seat::choose_target(P2 origin, double metal, double reach, const std::ve
     return view.uid[cand[best]];
 }
 
+// Towards where the army walks (`march`).
 P2 Seat::probe(P2 centre, double metal, double reach) {
     P2 frm = centre;
-    double dist = py_hypot(enemy_base.x - frm.x, enemy_base.z - frm.z);
+    double dist = py_hypot(march.x - frm.x, march.z - frm.z);
     double start = dist < PROBE ? dist : PROBE;
     // np.arange(start, 0.0, -PROBE_STEP): its length and its fill
     double len_f = std::ceil((0.0 - start) / -PROBE_STEP);
@@ -623,7 +700,7 @@ P2 Seat::probe(P2 centre, double metal, double reach) {
     for (int i = 2; i < len; i++) steps[i] = start + i * delta;
     std::vector<double> px(len), pz(len);
     for (int i = 0; i < len; i++) {
-        P2 p = along(frm, enemy_base, steps[i]);
+        P2 p = along(frm, march, steps[i]);
         px[i] = p.x, pz[i] = p.z;
     }
     std::vector<double> cv;

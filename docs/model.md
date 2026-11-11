@@ -69,7 +69,7 @@ featurizer").  Tokens come in a fixed order:
 
     controllable units | every other unit, most important first | summaries | regions | sites | features | global
 
-* **Units**: up to 592, of which up to 256 are controllable, plus 12 summaries of what the caps left out.  Each has 127 numbers:
+* **Units**: up to 1,280, of which up to 512 are controllable, plus 12 summaries of what the caps left out.  Each has 127 numbers:
   * type stats from the type table;
   * instance state: place, velocity, health, build, flags;
   * its current order and the order's age;
@@ -81,7 +81,7 @@ featurizer").  Tokens come in a fixed order:
 * **Regions** (about 120 at most): 34 numbers each.  The first 27 are static (place, terrain, spots).  The rest say what is there
   now: own value, seen and radar enemy value, DPS, wreck metal, and so on.
 * **Sites** (metal spots, up to 24): 9 numbers.
-* **Features** (wrecks in sight, up to 32): 5 numbers.
+* **Features** (wrecks in sight, up to 512): 5 numbers.
 * **Global**: 16 numbers (resources, storage, commander, time since contact, ...).
 * **Masks for the heads**:
   * which tokens are controllable;

@@ -8,8 +8,9 @@
 extern "C" {
 #endif
 
-#define ZK_ABI_VERSION 18
+#define ZK_ABI_VERSION 20
 #define ZK_MAX_MOUNTS 8
+#define ZK_MAX_TEAMS 8     /* players in a game, and so allyteams too */
 #define ZK_ARMOR_CLASSES 5
 #define ZK_ARMOR_SHIELD 4
 #define ZK_TICK_FRAMES 5
@@ -89,6 +90,7 @@ enum { ZK_U_MOBILE = 1, ZK_U_AIR = 2, ZK_U_ARMED = 4, ZK_U_FIREPROOF = 8, ZK_U_F
        ZK_U_PLANE = 65536,             /* flies on wings: can't stop in the air, and turns in a circle (air.cpp) */
        ZK_U_LANDS = 131072,            /* lands when it has nothing to do: an aircraft from a plane factory (unit_air_plants.lua) */
        ZK_U_STRAFES = 262144,          /* a gunship that circles what it attacks (airStrafe) */
+       ZK_U_DONT_COUNT = 524288,       /* doesn't keep its team in the game (game_over.lua; sim/data/rules.json) */
        ZK_U_LEAVES_GHOST = 2048 };     /* a building: once seen, radar shows just where it is */
 
 typedef struct {
@@ -149,7 +151,7 @@ typedef struct {
     int32_t ammo;                /* salvos before it goes back to rearm; 0 for no ammo */
     int32_t pad_count;           /* planes it can rearm at once: an airpad or plane factory's */
     int32_t plate_parent;        /* a factory plate's factory type, or -1: it builds only within its build range of a finished one
-                                    of its side (unit_factory_plate.lua) */
+                                    of its allyteam (unit_factory_plate.lua) */
     int32_t mount_weapon[ZK_MAX_MOUNTS];
     int32_t mount_only[ZK_MAX_MOUNTS];
     int32_t mount_bad[ZK_MAX_MOUNTS];
@@ -177,14 +179,14 @@ enum { ZK_ORDER_NONE = 0, ZK_ORDER_MOVE = 1, ZK_ORDER_FIGHT = 2, ZK_ORDER_ATTACK
        ZK_ORDER_JUMP = 7,       /* x, z: walks into range and goes when charged.  The order ends when it lands there. */
        ZK_ORDER_CLOAK_ON = 8, ZK_ORDER_CLOAK_OFF = 9,   /* Both a unit's own cloak and its area cloak.  Leave other orders alone. */
        ZK_ORDER_BUILD = 10,     /* target: the type to place at x, z.  The order ends when it's finished or lost. */
-       ZK_ORDER_ASSIST = 11,    /* target: a unit.  A factory is helped with whatever it's building, until told otherwise. */
+       ZK_ORDER_ASSIST = 11,    /* target: a unit of its allyteam.  A factory is helped with whatever it's building, until told otherwise. */
        ZK_ORDER_RECLAIM = 13,   /* target: a feature's id.  The order ends when it's all taken or gone. */
        ZK_ORDER_PRODUCE = 14,   /* target: the type a factory builds over and over, or -1 to stop.  Leaves other orders alone. */
        ZK_ORDER_MOVE_STATE = 15, ZK_ORDER_FIRE_STATE = 16,    /* target: the state.  Leave other orders alone. */
        ZK_ORDER_UNIT_AI = 17,    /* target: 0 turns off the tactical AI, as a player can, and 1 back on */
        ZK_ORDER_SELF_DESTRUCT = 18,    /* a bomb goes off now, unless it's stunned.  Nothing else does. */
        ZK_ORDER_PLACE_BEACON = 19,     /* x, z: a teleporter stops and makes its beacon there, replacing the one it has.  It deploys whenever it's standing with one. */
-       ZK_ORDER_WAIT_AT_BEACON = 20,   /* target: a beacon of its side, or the teleporter it belongs to.  It walks there and waits its turn. */
+       ZK_ORDER_WAIT_AT_BEACON = 20,   /* target: a beacon of its allyteam, or the teleporter it belongs to.  It walks there and waits its turn. */
        ZK_ORDER_ON_OFF = 21 };         /* target: 0 is off, 1 on.  What has both pulls when off and pushes when on.  Leaves other orders alone. */
 /* ZK_ORDER_MANUAL_FIRE: a target, or for what throws, x, z with a target of -1. */
 
@@ -217,6 +219,56 @@ void* zk_catalog_new(const zk_type_rec* types, int n_types, const zk_weapon_rec*
                      const zk_tactics_rec* tactics /* n_types */, const uint8_t* relations /* n_types x n_types */);
 void zk_catalog_free(void* catalog);
 
+/* Game rules from Zero-K's gadgets rather than its units (tools/sim_rules.py, sim/data/rules.json), given to a catalog once, before
+   any world of it is made.  A catalog without them has no reveal rule and no chickens. */
+
+/* game_over.lua: with two alliances left, one worth more than value_ratio times the other has the other's units always visible,
+   looked at every every_frames.  Value: the metal cost of finished units that keep a team in the game. */
+void zk_catalog_reveal(void* catalog, float value_ratio, int every_frames);
+
+/* Chicken defense (unit_spawner.lua, spawn_defs.lua): one difficulty's settings as the gadget ends up with them, the difficulty's own
+   over the defaults.  Times in seconds, as the gadget's formulas have them; distances in elmos. */
+#define ZK_CHICKEN_KINDS 32
+#define ZK_CHICKEN_MINI_QUEENS 4
+#define ZK_CHICKEN_NO_TARGET 4
+enum { ZK_CHICKEN_OFFENSE = 0,    /* what waves are made of */
+       ZK_CHICKEN_DEFENSE = 1,    /* turrets a burrow gets from the defense pool */
+       ZK_CHICKEN_SUPPORT = 2,    /* sent alongside a wave, by chance */
+       ZK_CHICKEN_SPECIAL = 3 };  /* a special power: an ambush or a sprouting spire, when the players have been slow to kill burrows */
+typedef struct {
+    int32_t type, role;
+    float time, obsolete;         /* from when it comes, and after when no longer (seconds, by the chickens' tech time) */
+    float squad_size, cost;       /* cost: a defender's, from the defense pool */
+    /* A special power's (a negative for what the gadget leaves to its fallbacks): */
+    float max_aggro, count, burrow_ratio, min_dist, max_dist, cooldown;
+    int32_t target_human, tie_to_burrow;
+} zk_chicken_kind;
+typedef struct {
+    int32_t level;                /* 1 Beginner .. 6 Suicidal, as the gadget numbers them */
+    int32_t burrow, queen, queen_morph, mini_queen, test_building, test_building_queen;   /* types; queen_morph -1 for none */
+    int32_t no_target[ZK_CHICKEN_NO_TARGET];   /* types chickens aren't sent at, -1 past the last */
+    int32_t max_tries, max_tries_small, n_mini_queen_times, n_kinds;
+    float spawn_square, spawn_square_increment, max_burrows, min_base_distance, max_base_distance, max_age, egg_decay_time, burrow_eggs;
+    float player_malus, burrow_spawn_rate, chicken_spawn_rate, wave_ratio, base_wave_size, wave_size_mult, queen_spawn_mult;
+    float defense_per_wave, defense_per_burrow_kill, grace_period, grace_penalty, grace_period_min, ramp_up_time;
+    float queen_time, queen_health_mod, queen_morph_frames[2], mini_queen_time[ZK_CHICKEN_MINI_QUEENS];
+    float burrow_queen_time, burrow_wave_size, burrow_respawn_chance, burrow_regress_time;
+    float human_aggro_per_burrow, human_aggro_decay, human_aggro_min, human_aggro_max, human_aggro_wave_factor, human_aggro_wave_max;
+    float human_aggro_defense_factor, human_aggro_tech_time_progress, human_aggro_tech_time_regress;
+    float human_aggro_queen_time_factor, human_aggro_queen_time_min, human_aggro_queen_time_max;
+    float tech_accel_per_player, tech_time_floor_factor, tech_time_max, time_spawn_bonus;
+    zk_chicken_kind kinds[ZK_CHICKEN_KINDS];
+} zk_chicken_rules;
+/* difficulty: 0 Beginner .. 5 Suicidal. */
+void zk_catalog_chickens(void* catalog, int difficulty, const zk_chicken_rules* rules);
+int zk_sizeof_chicken_rules(void);
+/* Per type, the egg it leaves when it dies (features/chicken_eggs.lua): a reclaimable feature, feature -1 for none. */
+typedef struct {
+    int32_t feature;
+    float metal, hp, radius;
+} zk_egg_rec;
+void zk_catalog_eggs(void* catalog, const zk_egg_rec* eggs /* n_types */);
+
 /* height, slope, normal_x, normal_z: rows x cols.  speed: classes x rows x cols, the multiplier
    CMoveMath gives without a direction, 0 impassable.  slope_mod: one per class. */
 void* zk_map_new(int cols, int rows, float cell, const float* height, const float* speed, int classes,
@@ -229,7 +281,12 @@ void zk_map_free(void* map);
 
 void* zk_world_new(const void* catalog, const void* map, uint64_t seed, int behaviour);
 void zk_world_free(void* world);
-int zk_world_add(void* world, int type, int side, float x, float z, float heading, float hp_frac, float build_frac);
+/* Teams (players: a purse, orders, a frame of their own) and their allyteams (who share sight and don't fight each other).
+   ally_of_team: n_teams allyteams, 0 to ZK_MAX_TEAMS - 1, or NULL for each team its own.  Until set: two teams, each its own
+   allyteam.  Call before any unit is added. */
+void zk_world_set_teams(void* world, int n_teams, const int32_t* ally_of_team);
+/* Returns the unit's handle, or -1 for a team the game hasn't. */
+int zk_world_add(void* world, int type, int team, float x, float z, float heading, float hp_frac, float build_frac);
 void zk_world_order(void* world, int unit, int kind, float x, float z, int target);
 void zk_world_step(void* world, int ticks);
 int zk_world_frame(const void* world);
@@ -244,16 +301,40 @@ void zk_world_kill(void* world, int unit);
 void zk_world_set_shield(void* world, int unit, float charge);
 /* Health, which may be more than its type has: for scenarios that want to see what a target would take. */
 void zk_world_set_hp(void* world, int unit, float hp);
-/* Turns on resources and construction, which a world otherwise doesn't run, with both sides starting alike.
-   spots: x, z, income for each of n_spots.  Incomes are per second. */
+/* Turns on resources and construction, which a world otherwise doesn't run, with every team starting alike.
+   spots: x, z, income for each of n_spots.  Incomes are per second.  Inside an allyteam of several teams, resources are shared as
+   unit_mex_overdrive.lua shares them: extractors' income is pooled and split evenly among the teams with a unit alive, overdrive
+   runs over the allyteam's grids and its metal goes by the energy each team put in, and what's over a team's storage goes to
+   allies with room. */
 void zk_world_economy(void* world, int n_spots, const float* spots, float metal, float energy, float innate_metal, float innate_energy, float storage);
-/* metal, energy, metal income, energy income, overdrive metal, overdrive energy */
-void zk_world_resources(const void* world, int side, float* out);
+/* metal, energy, metal income, energy income, overdrive metal, overdrive energy: the team's */
+void zk_world_resources(const void* world, int team, float* out);
 /* A reclaimable feature that no unit left, such as a map's rock.  metal, hp: as a feature def has them; radius: how near a builder must be, past its range.
    Returns its id. */
 int zk_world_add_feature(void* world, float x, float z, float metal, float hp, float radius, int feature_def);
-/* What this side has in sight now, as the raw frame has them.  Returns the number of records. */
-int zk_world_features(void* world, int side, void* records, int cap);
+/* What this team's allyteam has in sight now, as the raw frame has them, by id.  With more than cap in sight, the cap with the most
+   metal left (ties to the older).  Returns the number of records. */
+int zk_world_features(void* world, int team, void* records, int cap);
+
+/* The reveal rule is on in a world whose catalog has it, but for a chicken game's: Zero-K doesn't apply it there.  0 turns it off. */
+void zk_world_set_reveal(void* world, int on);
+
+/* Chicken defense.  Call after the teams are set and before the next step.  `team` has its own allyteam and was given no units;
+   from then on the world spawns its units and orders them itself, and every other team is a player.  difficulty: 0 Beginner ..
+   5 Suicidal, which the catalog must have rules for. */
+void zk_world_chickens(void* world, int team, int difficulty);
+#define ZK_CHICKEN_STATE 12
+enum { ZK_CS_QUEEN = 0,           /* 0 not yet, 1 alive, 2 dead: the players have won */
+       ZK_CS_UNTIL_QUEEN = 1,     /* seconds until she comes, as of now; 0 once she has */
+       ZK_CS_BURROWS = 2, ZK_CS_BURROWS_KILLED = 3,
+       ZK_CS_CHICKENS = 4,        /* the chicken team's live units, burrows aside */
+       ZK_CS_WAVES = 5,
+       ZK_CS_AGGRO = 6,           /* the gadget's humanAggro: up for each burrow killed, down for each wave */
+       ZK_CS_TECH = 7,            /* its totalTechAccel: seconds the chickens' kinds come early by */
+       ZK_CS_QUEEN_TIME = 8,      /* the game second she comes at, which burrows killed bring forward */
+       ZK_CS_QUEEN_HP = 9,        /* her health, of all of it, while she lives */
+       ZK_CS_DIFFICULTY = 10, ZK_CS_TEAM = 11 };
+void zk_world_chicken_state(const void* world, float* out /* ZK_CHICKEN_STATE; all 0 and team -1 for no chickens */);
 
 /* Replays many snapshots across threads.  Entities are flat: snapshot i owns
    offsets[i]..offsets[i+1].  tracked marks the units counted as losses.  horizons are in
@@ -270,7 +351,7 @@ typedef struct {
     int32_t target;
 } zk_order_rec;
 
-/* A group order: one order (kind, x, z, target), as zk_order_rec gives it, to the anchor and to every other unit of its side that
+/* A group order: one order (kind, x, z, target), as zk_order_rec gives it, to the anchor and to every other unit of its team that
    is alive, mobile and finished, has a role in `roles` (bit r for role r, as zk_batch_set_roles or zk_world_set_roles gave them),
    and stands within `radius` of the anchor, in float: dx * dx + dz * dz <= radius * radius.  Nothing, if the anchor is dead.  A
    game's group orders go before its unit orders, each in turn, so a later one replaces an earlier one for a unit it selects, and a
@@ -289,36 +370,48 @@ void zk_world_set_roles(void* world, const int32_t* role_of_type, int n_types);
 /* Returns how many units it selected. */
 int zk_world_order_group(void* world, const zk_group_rec* group);
 
-#define ZK_STATS 3 /* per side: tracked value, live units, metal a second from reclaim (part of the frame's income) */
+/* Per team: tracked value, live units, metal a second from reclaim (part of the frame's income), and the live units that keep a team
+   in the game: finished, and not ZK_U_DONT_COUNT (game_over.lua).  The value is cost x build progress; a chicken, which costs nothing,
+   counts its build time, which for every unit that has a cost is its metal cost. */
+#define ZK_STATS 4
 
 int zk_sizeof_unit_record(void);
 int zk_sizeof_site_record(void);
 int zk_sizeof_feature_record(void);
 int zk_global_count(void);
 
-/* One world's frame for one side, computed now.  Returns the number of records. */
-int zk_world_view(void* world, int side, void* records, int cap, float* glob, int commander, const float* base);
+/* One world's frame for one team, computed now: its own units, then its allies' (as in sight), then its allyteam's knowledge
+   of everyone else.  Returns the number of records. */
+int zk_world_view(void* world, int team, void* records, int cap, float* glob, int commander, const float* base);
 
 /* Many games stepping across a batch's own threads, which live as long as it does.  Free threads take the costliest game
    left; a game is stepped whole by one thread with its own RNG, so results don't depend on the thread count or the schedule.
    Batches share only the read-only catalog and maps: several may step at once, from different threads.  One batch takes one
-   call at a time. */
-void* zk_batch_new(const void* catalog, int games, int threads);
+   call at a time.  teams: the slots each game has in the step's arrays, 1 to ZK_MAX_TEAMS; a game uses the first n_teams of
+   them, and the rest read as empty frames (count 0, stats 0). */
+void* zk_batch_new(const void* catalog, int games, int threads, int teams);
 void zk_batch_free(void* batch);
 /* From the next step on.  1 steps on the caller's thread alone. */
 void zk_batch_set_threads(void* batch, int threads);
-/* Starts game `g` afresh.  commander: per side, or -1.  base: x, z per side. */
-void zk_batch_reset(void* batch, int g, const void* map, uint64_t seed, int behaviour, int n, const int* type, const int* side,
-                    const float* x, const float* z, const float* heading, const float* hp_frac, const float* build_frac,
-                    const int* commander, const float* base);
+/* Starts game `g` afresh, with n_teams teams (no more than the batch's slots) in the allyteams ally_of_team gives, as
+   zk_world_set_teams.  team: each unit's; a unit of a team outside the game's is left out.  commander: per team, or -1.
+   base: x, z per team. */
+void zk_batch_reset(void* batch, int g, const void* map, uint64_t seed, int behaviour, int n_teams, const int32_t* ally_of_team,
+                    int n, const int* type, const int* team, const float* x, const float* z, const float* heading,
+                    const float* hp_frac, const float* build_frac, const int* commander, const float* base);
 void* zk_batch_world(void* batch, int g);
 /* zk_world_set_roles for every game, now and after any reset. */
 void zk_batch_set_roles(void* batch, const int32_t* role_of_type, int n_types);
-/* Applies orders, steps `ticks`, and writes both sides' frames.  For the i-th game listed:
+/* zk_world_set_reveal for every game, now and after any reset. */
+void zk_batch_set_reveal(void* batch, int on);
+/* Chicken defense in game g (zk_world_chickens): after zk_batch_reset and before the game's next step. */
+void zk_batch_chickens(void* batch, int g, int team, int difficulty);
+void zk_batch_chicken_state(const void* batch, int g, float* out /* ZK_CHICKEN_STATE */);
+/* Applies orders, steps `ticks`, and writes every team's frame.  For the i-th game listed and team t, with S the batch's slots:
      groups[group_offsets[i] .. group_offsets[i + 1]] are its group orders, which go first (groups may be NULL for none);
      orders[order_offsets[i] .. order_offsets[i + 1]] are its unit orders;
-     records[(i * 2 + side) * cap ...], counts[i * 2 + side], globs[(i * 2 + side) * G], stats[(i * 2 + side) * ZK_STATS],
-     features[(i * 2 + side) * feature_cap ...], feature_counts[i * 2 + side]. */
+     records[(i * S + t) * cap ...], counts[i * S + t], globs[(i * S + t) * G], stats[(i * S + t) * ZK_STATS],
+     features[(i * S + t) * feature_cap ...], feature_counts[i * S + t]. */
 void zk_batch_step(void* batch, const int* games, int n_games, const zk_order_rec* orders, const int* order_offsets,
                    const zk_group_rec* groups, const int* group_offsets, int ticks,
                    void* records, int cap, int* counts, float* globs, float* stats, void* features, int feature_cap, int* feature_counts);

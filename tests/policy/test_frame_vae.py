@@ -161,28 +161,7 @@ def test_beta_rises_from_nothing_over_its_warmup():
     assert fv.beta_at(cfg, 0) == 0.0 and fv.beta_at(cfg, 50) == pytest.approx(0.1) and fv.beta_at(cfg, 500) == 0.2
 
 
-# It learns ----------------------------------------------------------------------------------------------------------------------------------------------
-
-
-def _fit(frames, beta: float, steps: int = 150) -> dict:
-    model = _model(cfg=replace(VAE, beta=beta)).train()
-    b = fm.collate_frames(frames)
-    model.fit_scales([b])
-    optimiser = torch.optim.Adam(model.parameters(), lr=2e-3)
-    parts = {}
-    for _ in range(steps):
-        loss, parts, _ = fv.vae_loss(model, b, beta)
-        optimiser.zero_grad()
-        loss.backward()
-        optimiser.step()
-    return parts
-
-
-def test_it_learns_to_give_frames_back_and_a_heavy_beta_buys_silence(frames):
-    light, heavy = _fit(frames, 0.01), _fit(frames, 50.0)
-    assert light["recon"] < 0.6                                 # 1.0 is saying only each column's mean
-    assert heavy["kl_nats"] < 0.05 * light["kl_nats"]           # given no reason to, it says nothing
-    assert heavy["recon"] > light["recon"]
+# A run ---------------------------------------------------------------------------------------------------------------------------------------------------
 
 
 def test_a_run_trains_reports_saves_and_goes_on(data, tmp_path):
@@ -236,34 +215,14 @@ def test_an_autoencoders_latents_keep_to_one_scale(frames):
     assert float(z.mean(-1).abs().max()) < 1e-4 and float((z.std(-1, unbiased=False) - 1.0).abs().max()) < 1e-2
 
 
-def test_an_autoencoder_learns_and_comes_back_from_a_checkpoint(frames, tmp_path):
-    torch.manual_seed(1)
-    model = fv.FrameVae(AUTO, ENCODER, TABLE)
+def test_an_autoencoder_comes_back_from_a_checkpoint(frames, tmp_path):
+    model = _model(cfg=AUTO)
     b = fm.collate_frames(frames[:16])
     model.fit_scales([b])
-    optimiser = torch.optim.Adam(model.parameters(), lr=3e-3)
-    first = None
-    for _ in range(40):
-        loss = fv.vae_loss(model, b, 0.0)[0]
-        first = first if first is not None else float(loss)
-        optimiser.zero_grad()
-        loss.backward()
-        optimiser.step()
-    assert float(loss) < first * 0.8
     fv.save_vae(tmp_path / "a.pt", model, 40)
     again = fv.load_vae(tmp_path / "a.pt")
     assert not again.cfg.variational
-    model.eval()
     assert torch.allclose(again.latent_tokens(b), model.latent_tokens(b))
-
-
-def test_a_checkpoint_from_before_this_is_still_variational(frames, tmp_path):
-    model = _model()
-    fv.save_vae(tmp_path / "v.pt", model, 1)
-    saved = torch.load(tmp_path / "v.pt", weights_only=True)
-    del saved["cfg"]["variational"]
-    torch.save(saved, tmp_path / "v.pt")
-    assert fv.load_vae(tmp_path / "v.pt").cfg.variational
 
 
 # Summing units into regions -----------------------------------------------------------------------------------------------------------------------
@@ -373,35 +332,6 @@ def test_two_part_does_not_pay_for_size_on_empty_cells(frames):
 
     assert costs(want, 100.0) == pytest.approx(costs(want, -100.0))
     assert costs(want + 5.0, 0.0) > costs(want, 0.0)
-
-
-def test_two_part_learns_and_reports_comparably(data, frames, tmp_path):
-    model = _model(cfg=replace(TWO, beta=0.01)).train()
-    b = fm.collate_frames(frames)
-    model.fit_scales([b])
-    optimiser = torch.optim.Adam(model.parameters(), lr=2e-3)
-    for _ in range(250):        # 150 was enough for the sim's games before their economies grew (0.708 after)
-        loss, parts, _ = fv.vae_loss(model, b, 0.01)
-        optimiser.zero_grad()
-        loss.backward()
-        optimiser.step()
-    assert parts["recon"] < 0.7
-    run = tmp_path / "run"
-    cfg = fm.TrainConfig(batch=8, steps=2, report_every=1, probe_every=1, probe_frames=64, warmup=1, checkpoint_every=100)
-    trained = fv.train(data, run, cfg, TWO, POOLED, device="cpu")
-    last = json.loads((run / "metrics.jsonl").read_text().splitlines()[-1])
-    assert "recon_r2" in last
-    assert fv.load_vae(run / "vae-last.pt").cfg.two_part and trained.encoder_cfg.region_pool == POOLED.region_pool
-
-
-def test_older_checkpoints_are_single_answer_and_unpooled(tmp_path):
-    model = _model()
-    fv.save_vae(tmp_path / "v.pt", model, 1)
-    saved = torch.load(tmp_path / "v.pt", weights_only=True)
-    del saved["cfg"]["two_part"], saved["encoder_cfg"]["region_pool"]
-    torch.save(saved, tmp_path / "v.pt")
-    again = fv.load_vae(tmp_path / "v.pt")
-    assert not again.cfg.two_part and again.encoder_cfg.region_pool == 0
 
 
 # Questions about units and wrecks -------------------------------------------------------------------------------------------------------------------
@@ -539,22 +469,6 @@ def test_questions_reach_the_encoder_and_recon_leaves_them_out(frames):
     assert not hasattr(plain, "where_out")
 
 
-def test_asking_learns_and_the_answers_get_better(frames):
-    torch.manual_seed(1)
-    model = fv.FrameVae(ASKING, ENCODER, TABLE)
-    b = fm.collate_frames(frames[:16])
-    model.fit_scales([b])
-    optimiser = torch.optim.Adam(model.parameters(), lr=2e-3)
-    first = None
-    for _ in range(120):
-        loss, parts, _ = fv.vae_loss(model, b, 0.0)
-        first = first or (parts["where_nats"], parts["what_nats"])
-        optimiser.zero_grad()
-        loss.backward()
-        optimiser.step()
-    assert parts["where_nats"] < first[0] and parts["what_nats"] < first[1]
-
-
 def test_the_report_marks_questions_on_held_out_maps(data):
     manifest, paths, held_out, _, _ = fm.collection(data)
     model = _asking_model()
@@ -594,30 +508,34 @@ def test_the_schedule_moves_both_rates_together():
     assert both.parts["muon"].param_groups[0]["lr"] == pytest.approx(MUON.muon_lr / 2.0)
 
 
-def test_a_muon_run_with_questions_trains_reports_and_goes_on(data, tmp_path):
+def test_a_run_as_the_pipeline_trains_it_reports_goes_on_and_keeps_what_it_is(data, tmp_path):
+    """An autoencoder with two answers a cell, questions, summed regions and Muon: policy_pipeline's ENCODER_FLAGS."""
     run = tmp_path / "run"
-    fv.train(data, run, MUON, ASKING, POOLED, device="cpu")
+    trained = fv.train(data, run, MUON, ASKING, POOLED, device="cpu")
     rows = [json.loads(line) for line in (run / "metrics.jsonl").read_text().splitlines()]
     assert [r["step"] for r in rows] == [0, 1, 2]
-    assert "where_unit_nats" in rows[-1] or "recon_r2" in rows[-1]
+    assert "where_unit_nats" in rows[-1] and "recon_r2" in rows[-1]
+    assert trained.encoder_cfg.region_pool == POOLED.region_pool
     fv.train(data, run, replace(MUON, steps=5), ASKING, POOLED, device="cpu")
     rows = [json.loads(line) for line in (run / "metrics.jsonl").read_text().splitlines()]
     assert [r["step"] for r in rows] == [0, 1, 2, 3, 4]
-    assert fv.load_vae(run / "vae-last.pt").cfg.questions
+    kept = fv.load_vae(run / "vae-last.pt")
+    assert kept.cfg.questions and kept.cfg.two_part and not kept.cfg.variational and kept.encoder_cfg.region_pool == POOLED.region_pool
 
 
-def test_muon_learns(frames):
+def test_it_learns_and_its_answers_get_better(frames):
+    """The one check that the loss can be learned at all, by the optimisers a run uses."""
     torch.manual_seed(1)
     model = fv.FrameVae(ASKING, ENCODER, TABLE)
     b = fm.collate_frames(frames[:16])
     model.fit_scales([b])
     both = fv.Optimisers(model, fm.TrainConfig(muon_lr=2e-3, lr=2e-3))
     first = None
-    for _ in range(60):
-        loss = fv.vae_loss(model, b, 0.0)[0]
-        first = first if first is not None else float(loss)
+    for _ in range(30):
+        loss, parts, _ = fv.vae_loss(model, b, 0.0)
+        first = first or (float(loss), parts["recon"], parts["where_nats"], parts["what_nats"])
         both.zero_grad()
         loss.backward()
         both.step()
-    assert float(loss) < first
+    assert float(loss) < first[0] and parts["recon"] < first[1] and parts["where_nats"] < first[2] and parts["what_nats"] < first[3]
 

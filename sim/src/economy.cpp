@@ -1,5 +1,12 @@
 // Resources and construction: income, overdrive through pylon grids, upkeep, build steps that stall without resources, assisting,
-// factories that repeat a type, and a side's free first factory.  Reclaim is in wrecks.cpp.  Not here yet: repair (01-simulator.md, "Known gaps").
+// factories that repeat a type, and a team's free first factory.  Reclaim is in wrecks.cpp.  Not here yet: repair (01-simulator.md, "Known gaps").
+//
+// Every team has its own purse.  Inside an allyteam of several, unit_mex_overdrive.lua's sharing, simply: extractors' income is pooled
+// and split evenly among the teams with a unit alive; overdrive runs over the allyteam's grids, each team putting in its own spare
+// energy, and what overdrive makes and draws goes to each by what it put in; what's over a team's storage goes to allies with room.
+// Generators, innate income, reclaim, upkeep and what's built are the owning team's, and a builder's team pays for whatever it helps.
+// Left out of the gadget's: paying back energy builders and extractors from overdrive, its pooling of energy storage and the energy
+// it holds back for allies who are stalling, and lag monitor's shares (every team with a unit counts as one).
 #include <algorithm>
 #include <cmath>
 
@@ -31,7 +38,7 @@ void World::set_economy(int n_spots, const float* spot_triples, float metal, flo
         const auto& d = type_of(int(u));
         extracts[u] = d.metal_make + (d.extract_mult > 0.0f ? d.extract_mult * spot_income(x[u], z[u]) : 0.0f);
     }
-    for (auto& p : purses) {
+    for (auto& p : purses) {      // every team the world could have: those it hasn't never earn
         p = Purse{};
         p.metal = metal;
         p.energy = energy;
@@ -58,15 +65,15 @@ bool World::within(int u, float px, float pz, float reach) const {
     return dx * dx + dz * dz <= reach * reach;
 }
 
-int World::place_frame(int t, int s, float px, float pz, float head) {
-    const int fresh = place_frame_only(t, s, px, pz, head);
+int World::place_frame(int t, int owner, float px, float pz, float head) {
+    const int fresh = place_frame_only(t, owner, px, pz, head);
     // A factory sends what it makes on its way, so it goes idle in the ordinary way, and from there it has a place to return to.
     if (fresh >= 0) ai[size_t(fresh)].queue_was_empty = false;
     return fresh;
 }
 
-int World::place_frame_only(int t, int s, float px, float pz, float head) {
-    const int f = add(t, s, px, pz, head, 0.0f, 0.0f);
+int World::place_frame_only(int t, int owner, float px, float pz, float head) {
+    const int f = add(t, owner, px, pz, head, 0.0f, 0.0f);
     // Whatever add() drew for a unit caught mid-fight: this one is new, and its weapons are ready.
     std::fill_n(cooldown.begin() + std::ptrdiff_t(size_t(f) * ZK_MAX_MOUNTS), ZK_MAX_MOUNTS, 0.0f);
     return f;
@@ -91,8 +98,8 @@ void World::hit_closes(int u) {
     last_hit[i] = frame;
 }
 
-bool World::pay_energy(int s, float amount) {
-    Purse& p = purses[s];
+bool World::pay_energy(int owner, float amount) {
+    Purse& p = purses[owner];
     if (p.energy < amount) return false;
     p.energy -= amount;
     p.energy_spent += amount;
@@ -105,47 +112,100 @@ void World::pay_upkeep() {
         const size_t i = size_t(u);
         if (!alive[i] || !active(u) || disarmed(u)) continue;
         const auto& d = type_of(u);
-        unpaid[i] = !pay_energy(side[i], d.energy_upkeep + (area_on[i] ? d.area_cloak_upkeep : 0.0f));
+        unpaid[i] = !pay_energy(team[i], d.energy_upkeep + (area_on[i] ? d.area_cloak_upkeep : 0.0f));
     }
 }
 
 void World::collect_income() {
-    float metal[2] = {purses[0].innate_metal, purses[1].innate_metal};
-    float energy[2] = {purses[0].innate_energy, purses[1].innate_energy};
+    float metal[ZK_MAX_TEAMS], energy[ZK_MAX_TEAMS];
+    // Per allyteam of several: its extractors' income, and what overdrive adds to it, which are shared (economy.cpp's head).
+    float pooled[ZK_MAX_TEAMS] = {}, extra[ZK_MAX_TEAMS] = {};
+    for (int t = 0; t < n_teams; ++t) {
+        metal[t] = purses[t].innate_metal;
+        energy[t] = purses[t].innate_energy;
+    }
     for (int u : earners) {
         const size_t i = size_t(u);
         if (!alive[i] || !active(u) || shut_for_hit(u)) continue;
         const auto& d = type_of(u);
-        energy[side[i]] += d.energy_make;
-        if (d.extract_mult <= 0.0f || !disarmed(u)) metal[side[i]] += extracts[i] + overdrive[i];
+        const int t = team[i], s = side[i];
+        energy[t] += d.energy_make;
+        if (d.extract_mult > 0.0f && disarmed(u)) continue;
+        if (d.extract_mult > 0.0f && ally_size[s] > 1) {
+            pooled[s] += extracts[i];
+            extra[s] += overdrive[i];
+        } else {
+            metal[t] += extracts[i] + overdrive[i];
+        }
     }
-    for (int s = 0; s < 2; ++s) {
-        Purse& p = purses[s];
-        p.energy_made = energy[s];
+    if (sharing) {
+        int units[ZK_MAX_TEAMS] = {}, with_units[ZK_MAX_TEAMS] = {};     // alive, of each team; teams with any, of each allyteam
+        for (const int u : live) units[team[size_t(u)]] += alive[size_t(u)];
+        for (int t = 0; t < n_teams; ++t) with_units[ally_of[t]] += units[t] > 0;
+        for (int t = 0; t < n_teams; ++t) {
+            const int s = ally_of[t];
+            if (ally_size[s] < 2) continue;
+            if (units[t] > 0) metal[t] += pooled[s] / float(with_units[s]);
+            metal[t] += extra[s] * purses[t].overdrive_share;
+        }
+    }
+    float over_metal[ZK_MAX_TEAMS], over_energy[ZK_MAX_TEAMS];
+    for (int t = 0; t < n_teams; ++t) {
+        Purse& p = purses[t];
+        p.energy_made = energy[t];
         // As the engine counts it, reclaim is income.  This tick's comes after this, so it shows from the next.
         p.reclaim_income = p.reclaimed / TICK_SECONDS;
-        p.metal_income = metal[s] + p.reclaim_income;
+        p.metal_income = metal[t] + p.reclaim_income;
         p.reclaimed = 0.0f;
-        p.energy_income = energy[s] - p.overdrive_energy;
-        p.metal = std::min(p.storage, p.metal + p.metal_income * TICK_SECONDS);
-        p.energy = std::clamp(p.energy + p.energy_income * TICK_SECONDS, 0.0f, p.storage);
+        p.energy_income = energy[t] - p.overdrive_energy;
+        const float m = p.metal + p.metal_income * TICK_SECONDS, e = p.energy + p.energy_income * TICK_SECONDS;
+        p.metal = std::min(p.storage, m);
+        p.energy = std::clamp(e, 0.0f, p.storage);
+        over_metal[t] = m - p.metal;
+        over_energy[t] = std::max(0.0f, e - p.storage);
+    }
+    if (sharing) {
+        share_overflow(over_metal, true);
+        share_overflow(over_energy, false);
+    }
+}
+
+// unit_mex_overdrive.lua: what's over a team's storage goes to its allies with room.  Here evenly among them, each up to its storage,
+// rather than by how much room each has; what none can take is lost.
+void World::share_overflow(const float* over, bool metal) {
+    const auto held = [&](int t) -> float& { return metal ? purses[t].metal : purses[t].energy; };
+    for (int t = 0; t < n_teams; ++t) {
+        if (over[t] <= 0.0f) continue;
+        int with_room = 0;
+        for (int k = 0; k < n_teams; ++k) with_room += k != t && ally_of[k] == ally_of[t] && held(k) < purses[k].storage;
+        if (!with_room) continue;
+        const float each = over[t] / float(with_room);
+        for (int k = 0; k < n_teams; ++k)
+            if (k != t && ally_of[k] == ally_of[t] && held(k) < purses[k].storage) held(k) = std::min(purses[k].storage, held(k) + each);
     }
 }
 
 void World::update_overdrive() {
     pylons.erase(std::remove_if(pylons.begin(), pylons.end(), [this](int u) { return !alive[size_t(u)]; }), pylons.end());
-    overdrive_side(0);
-    overdrive_side(1);
+    for (int s = 0; s < n_allies; ++s) overdrive_ally(s);
 }
 
-// unit_mex_overdrive.lua, for an ally team of one player.  What's spare goes to overdrive in proportion to how full storage is.
-// Each extractor's share goes by its income squared, over all grids; a grid can't take more than its own generators make, and
-// what it can't take goes to the other grids.  What no grid can take stays in storage.
-void World::overdrive_side(int s) {
-    Purse& p = purses[s];
-    const float full = p.energy > 0.0f ? std::min(1.0f, p.energy / std::max(p.storage, p.energy)) : 0.0f;
-    float energy = std::max(0.0f, p.energy_made - p.energy_spent) * full;
-    p.energy_spent = 0.0f;
+// unit_mex_overdrive.lua, per allyteam.  Each team puts in its spare energy in proportion to how full its own storage is.  Each
+// extractor's share goes by its income squared, over all the allyteam's grids; a grid can't take more than its own generators make,
+// and what it can't take goes to the other grids.  What no grid can take stays in storage.  The metal overdrive makes and the energy
+// it draws go to each team by what it put in.
+void World::overdrive_ally(int s) {
+    float put_in[ZK_MAX_TEAMS] = {};
+    float energy = 0.0f;
+    for (int t = 0; t < n_teams; ++t) {
+        if (ally_of[t] != s) continue;
+        Purse& p = purses[t];
+        const float full = p.energy > 0.0f ? std::min(1.0f, p.energy / std::max(p.storage, p.energy)) : 0.0f;
+        put_in[t] = std::max(0.0f, p.energy_made - p.energy_spent) * full;
+        p.energy_spent = 0.0f;
+        energy += put_in[t];
+    }
+    const float offered = energy;
 
     // Grids are worked out afresh: stun, death and new buildings all change them, and there are few pylons.
     std::vector<int>& nodes = grid_nodes;
@@ -218,7 +278,7 @@ void World::overdrive_side(int s) {
         }
     }
 
-    p.overdrive_metal = p.overdrive_energy = 0.0f;
+    float made = 0.0f, drew = 0.0f;
     for (size_t a = 0; a < n; ++a) {
         const int u = nodes[a];
         if (type_of(u).extract_mult <= 0.0f) continue;
@@ -228,16 +288,25 @@ void World::overdrive_side(int s) {
         if (maxed[g]) drawn = capacity[g] * m * m / squares[g];
         else if (all_squares > 0.0f) drawn = energy * m * m / all_squares;
         overdrive[size_t(u)] = m * OVERDRIVE_PER_ROOT * std::sqrt(drawn);
-        p.overdrive_metal += overdrive[size_t(u)];
-        p.overdrive_energy += drawn;
+        made += overdrive[size_t(u)];
+        drew += drawn;
+    }
+    // A team alone in its allyteam has a share of exactly 1.  With nothing put in there's no overdrive, and the shares are even.
+    for (int t = 0; t < n_teams; ++t) {
+        if (ally_of[t] != s) continue;
+        Purse& p = purses[t];
+        p.overdrive_share = offered > 0.0f ? put_in[t] / offered : 1.0f / float(ally_size[s]);
+        p.overdrive_metal = made * p.overdrive_share;
+        p.overdrive_energy = drew * p.overdrive_share;
     }
 }
 
-// A step as far as the side can pay for.  First come, first served, in handle order, as the engine's builders are.
+// A step as far as the builder's team can pay for, whoever's the frame.  First come, first served, in handle order, as the engine's
+// builders are.
 void World::advance_frame(int b, int f) {
     const auto& d = type_of(f);
     float step = std::min(type_of(b).build_speed * TICK_SECONDS / std::max(d.build_time, 1.0f), 1.0f - build[size_t(f)]);
-    Purse& p = purses[side[size_t(b)]];
+    Purse& p = purses[team[size_t(b)]];
     if (d.metal_cost * step > p.metal) step = p.metal / d.metal_cost;
     if (d.energy_cost * step > p.energy) step = p.energy / d.energy_cost;
     p.metal = std::max(0.0f, p.metal - d.metal_cost * step);
@@ -256,10 +325,10 @@ void World::run_builder(int u) {
         const auto& d = cat->types[size_t(t)];
         if (work_on[i] < 0) {
             if (!within(u, goal_x[i], goal_z[i], reach_of(u, d.footprint_radius))) return;
-            Purse& p = purses[side[i]];
+            Purse& p = purses[team[i]];
             const float centre_x = map->width() * 0.5f, centre_z = map->depth() * 0.5f;
             const float head = std::atan2(centre_x - goal_x[i], centre_z - goal_z[i]);
-            const int f = place_frame(t, side[i], goal_x[i], goal_z[i], head);
+            const int f = place_frame(t, team[i], goal_x[i], goal_z[i], head);
             if ((d.flags & ZK_U_PLOPPABLE) && p.free_factory) {
                 p.free_factory = false;
                 build[size_t(f)] = 1.0f;
@@ -295,7 +364,7 @@ void World::run_builder(int u) {
     }
 }
 
-// A factory plate builds only while a finished factory of its type and side is within its build range, and not stunned or
+// A factory plate builds only while a finished factory of its type and allyteam is within its build range, and not stunned or
 // disarmed (unit_factory_plate.lua).  Off, it makes nothing, and helping it does nothing.
 bool World::plate_off(int u) const {
     const int parent = type_of(u).plate_parent;
@@ -309,8 +378,8 @@ bool World::plate_off(int u) const {
 }
 
 // An idle caretaker (a builder that can't move and isn't a factory) helps what's in its reach, as Zero-K's default widget has it
-// patrol (unit_auto_patrol_nanos.lua): the nearest factory of its side that's building, else the nearest frame of its side.  It
-// has no order, so it chooses again each tick.  There's no repair to do, and it doesn't reclaim.
+// patrol (unit_auto_patrol_nanos.lua): the nearest factory of its allyteam that's building, else the nearest frame of its allyteam.
+// It has no order, so it chooses again each tick.  There's no repair to do, and it doesn't reclaim.
 void World::run_caretaker(int u) {
     const size_t i = size_t(u);
     int best = -1;
@@ -328,7 +397,8 @@ void World::run_caretaker(int u) {
         show_for_action(u);
         return;
     }
-    for (int f = 0; f < count(); ++f) {
+    for (size_t j = 0; j < live.size(); ++j) {
+        const int f = live[j];
         const size_t k = size_t(f);
         if (f == u || !alive[k] || side[k] != side[i] || build[k] >= 1.0f || !within(u, x[k], z[k], reach_of(u, type_of(f).footprint_radius)))
             continue;
@@ -353,7 +423,7 @@ void World::run_factory(int u) {
             const int pad = free_pad(u);
             if (pad < 0) return;
             const float across = type_of(u).footprint_radius * PAD_OFFSET;
-            f = work_on[i] = place_frame(produces[i], side[i], x[i] + (pad % 2 ? across : -across), z[i] + (pad / 2 ? across : -across), heading[i]);
+            f = work_on[i] = place_frame(produces[i], team[i], x[i] + (pad % 2 ? across : -across), z[i] + (pad / 2 ? across : -across), heading[i]);
             silo_missiles.push_back({f, u, pad});
             advance_frame(u, f);
             return;
@@ -371,7 +441,7 @@ void World::run_factory(int u) {
                 break;
             }
         }
-        f = work_on[i] = place_frame(produces[i], side[i], px, pz, heading[i]);
+        f = work_on[i] = place_frame(produces[i], team[i], px, pz, heading[i]);
     }
     advance_frame(u, f);
 }

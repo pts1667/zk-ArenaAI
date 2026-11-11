@@ -1,10 +1,15 @@
-// The replay viewer: a recorded game (tools/policy_replay.py's JSON) drawn on its map, units as Zero-K's icons in their side's
-// colour, moving smoothly between the once-a-second frames.  Opened by app.js from the hash:
+// The replay viewer: a recorded game (tools/policy_replay.py's JSON, read by static/replay.js) drawn on its map, units as Zero-K's
+// icons in their team's colour, moving smoothly between the once-a-second frames.  Opened by app.js from the hash:
 //   #replay=/replay/DIR/FILE&t=SECONDS[&zoom=Z&at=X,Z&speed=S&play=1&orders=0]
 (function () {
   'use strict';
   const { fmt, esc, token } = window.Charts;
-  const TINT = ['#4b9bff', '#ff7a33'];          // the sides on the map: bright enough for any map picture
+  const { prepare, CHICKENS } = window.Replay;
+  // The teams on the map, by team number, the chickens last.  The dashboard palette's steps for a dark surface (style.css's --team0
+  // to --team7 in dark mode), since the map is dark under its picture; they're told apart for colour-blind viewers by the alliance
+  // marks, the teams' table and a team's focus, not by colour alone: no eight colours stay apart for them two by two.
+  const MAP_TINT = ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181', '#008300', '#9085e9', '#e66767', '#c8c0ae'];
+  const teamVar = (slot) => (slot === CHICKENS ? '--chickens' : `--team${slot}`);
   const ORDER_NAMES = { 0: 'keep', 1: 'move', 2: 'fight', 3: 'attack unit', 4: 'attack ground', 5: 'stop', 6: 'manual fire', 7: 'jump',
     8: 'cloak on', 9: 'cloak off', 10: 'build', 11: 'assist', 12: 'repair', 13: 'reclaim', 14: 'produce', 16: 'throw', 17: 'push',
     18: 'pull', 19: 'place beacon', 20: 'wait at beacon' };
@@ -13,6 +18,7 @@
   const ORDER_CLASS = { 1: 0, 7: 0, 16: 0, 17: 0, 18: 0, 19: 0, 20: 0, 2: 1, 3: 2, 4: 2, 6: 2, 10: 3, 11: 4, 12: 4, 13: 5 };
   const SPEEDS = [1, 2, 4, 8, 16, 32];
   const DEATH = 2.5;                              // seconds a death stays marked
+  const FADED = 0.22;                             // the other teams' units while one team has the focus
   const clock = (s) => { s = Math.max(0, Math.floor(s)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
   const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
   const store = {
@@ -20,14 +26,46 @@
     set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* no storage */ } },
   };
   const canvas = (w, h) => Object.assign(document.createElement('canvas'), { width: w, height: h });
+  const getJSON = (url) => fetch(url).then((r) => {
+    if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+    return r.json();
+  });
 
-  // Icons: each type loaded once, tinted per side into offscreen canvases (64 px, and 28 px for small draws) -------------------
+  // An alliance's mark: a shape, on the map beside each of its units and in the teams' table, so that allies read as allies
+  // without their colours.  Points around 0, 0 for a size of 1; null is a circle.
+  function shapePoints(shape) {
+    const ring = (k, r, turn) => Array.from({ length: k }, (_, i) => [r * Math.cos(turn + 2 * Math.PI * i / k), r * Math.sin(turn + 2 * Math.PI * i / k)]);
+    switch (shape) {
+      case 'square': return [[-0.85, -0.85], [0.85, -0.85], [0.85, 0.85], [-0.85, 0.85]];
+      case 'triangle': return ring(3, 1.2, -Math.PI / 2).map(([x, y]) => [x, y + 0.2]);
+      case 'down': return ring(3, 1.2, Math.PI / 2).map(([x, y]) => [x, y - 0.2]);
+      case 'diamond': return ring(4, 1.2, 0);
+      case 'bar': return [[-1.1, -0.45], [1.1, -0.45], [1.1, 0.45], [-1.1, 0.45]];
+      case 'star': return ring(10, 1, -Math.PI / 2).map(([x, y], i) => (i % 2 ? [x * 0.45, y * 0.45] : [x * 1.25, y * 1.25]));
+      case 'cross': { const a = 0.38, b = 1.05; return [[-a, -b], [a, -b], [a, -a], [b, -a], [b, a], [a, a], [a, b], [-a, b], [-a, a], [-b, a], [-b, -a], [-a, -a]]; }
+      default: return null;
+    }
+  }
+  function markPath(g, shape, x, y, r) {
+    const p = shapePoints(shape);
+    if (!p) { g.moveTo(x + r, y); g.arc(x, y, r, 0, 7); return; }
+    g.moveTo(x + p[0][0] * r, y + p[0][1] * r);
+    for (let k = 1; k < p.length; k++) g.lineTo(x + p[k][0] * r, y + p[k][1] * r);
+    g.closePath();
+  }
+  function markSVG(shape) {
+    const p = shapePoints(shape);
+    const body = p ? `<polygon points="${p.map(([x, y]) => `${(x * 5 + 6).toFixed(2)},${(y * 5 + 6).toFixed(2)}`).join(' ')}"/>` : '<circle cx="6" cy="6" r="5"/>';
+    return `<svg class="mark" viewBox="0 0 12 12" aria-hidden="true">${body}</svg>`;
+  }
+
+  // Icons: each type loaded once, tinted for a colour slot when it's first drawn in it (64 px, and 28 px for small draws) ---------
   const icons = new Map();
   let iconReady = () => {};
   function iconEntry(type) {
     let e = icons.get(type);
     if (e) return e.alias || e;
-    e = { ready: false, big: [], small: [], url: [] };
+    e = { ready: false, base: null, big: [], small: [], url: [] };
     icons.set(type, e);
     const img = new Image();
     img.onload = () => { try { prepareIcon(e, img); e.ready = true; } catch (err) { e.failed = true; } iconReady(); };
@@ -47,25 +85,28 @@
       for (let i = 0; i < p.length; i += 4) p[i + 3] = Math.min(255, Math.max(p[i], p[i + 1], p[i + 2]) * 2);
       g.putImageData(d, 0, 0);
     }
-    for (const side of [0, 1]) {
-      const c = canvas(n, n), t = c.getContext('2d');
-      t.drawImage(base, 0, 0);
-      t.globalCompositeOperation = 'multiply';    // white takes the side's colour, black stays black
-      t.fillStyle = TINT[side];
-      t.fillRect(0, 0, n, n);
-      t.globalCompositeOperation = 'destination-in';
-      t.drawImage(base, 0, 0);
-      e.big[side] = c;
-      const s = canvas(28, 28), u = s.getContext('2d');
-      u.imageSmoothingQuality = 'high';
-      u.drawImage(c, 0, 0, 28, 28);
-      e.small[side] = s;
-    }
+    e.base = base;
   }
-  function iconURL(type, side) {
+  function tinted(e, slot) {
+    if (e.big[slot]) return e;
+    const n = 64, c = canvas(n, n), t = c.getContext('2d');
+    t.drawImage(e.base, 0, 0);
+    t.globalCompositeOperation = 'multiply';      // white takes the team's colour, black stays black
+    t.fillStyle = MAP_TINT[slot];
+    t.fillRect(0, 0, n, n);
+    t.globalCompositeOperation = 'destination-in';
+    t.drawImage(e.base, 0, 0);
+    e.big[slot] = c;
+    const s = canvas(28, 28), u = s.getContext('2d');
+    u.imageSmoothingQuality = 'high';
+    u.drawImage(c, 0, 0, 28, 28);
+    e.small[slot] = s;
+    return e;
+  }
+  function iconURL(type, slot) {
     const e = iconEntry(type);
     if (!e.ready) return null;
-    return e.url[side] || (e.url[side] = e.small[side].toDataURL());
+    return e.url[slot] || (e.url[slot] = tinted(e, slot).small[slot].toDataURL());
   }
 
   // Loading -------------------------------------------------------------------------------------------------------------------
@@ -74,72 +115,18 @@
   const image = (src) => new Promise((ok, fail) => { const i = new Image(); i.onload = () => ok(i); i.onerror = fail; i.src = src; });
 
   async function load(url) {
-    const [json, catalog] = await Promise.all([fetch(url).then((r) => {
-      if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
-      return r.json();
-    }), units()]);
+    const [json, catalog] = await Promise.all([getJSON(url), units()]);
     let map = null, img = null;
     try {
       const r = await fetch('/api/map/' + encodeURIComponent(json.map.slug));
       if (r.ok) map = await r.json();
       if (map && map.image) img = await image(map.image).catch(() => null);
     } catch (e) { /* no picture: a plain ground */ }
-    return prepare(json, catalog, map, img);
-  }
-
-  function prepare(json, catalog, map, img) {
-    const F = {};
-    json.unit_fields.forEach((k, i) => { F[k] = i; });
-    const NF = json.unit_fields.length;
-    const S = {};
-    json.side_fields.forEach((k, i) => { S[k] = i; });
-    const frames = json.frames.map((f) => {
-      const u = Int32Array.from(f.units);
-      const index = new Map();
-      for (let o = 0; o < u.length; o += NF) index.set(u[o + F.uid], o);
-      return { t: f.t, u, index, sides: f.sides, features: f.features ? Float32Array.from(f.features) : null };
-    });
-    json.frames = null;                           // kept as typed arrays above
-    const N = frames.length;
-    const defs = [];
-    let defaultDef = null;
-    const info = (id, name, cost) => {
-      const c = catalog[name] || {};
-      const air = !!c.air, mobile = c.mobile ?? true;
-      return { id, name, cost: cost || c.cost || 0, human: c.human || name, desc: c.description || '', icon: c.icon || 'default',
-        size: c.icon_size || 1.3, air, mobile, layer: air ? 2 : mobile ? 1 : 0 };
-    };
-    for (const [id, d] of Object.entries(json.defs || {})) defs[+id] = info(+id, d.name, d.cost);
-    defaultDef = info(-1, 'unknown', 0);
-    const deaths = [new Float32Array(0)];
-    let rows = 0, featAt = new Int32Array(N), lastFeat = 0;
-    for (let f = 0; f < N; f++) {
-      const A = frames[f];
-      rows = Math.max(rows, A.u.length / NF);
-      if (A.features) lastFeat = f;
-      featAt[f] = lastFeat;
-      if (!f) continue;
-      const P = frames[f - 1], out = [];
-      for (let o = 0; o < P.u.length; o += NF) {
-        if (!A.index.has(P.u[o + F.uid])) out.push(P.u[o + F.x], P.u[o + F.z], P.u[o + F.side], P.u[o + F.def]);
-      }
-      deaths.push(Float32Array.from(out));
-    }
-    const series = (field) => [0, 1].map((s) => Float32Array.from(frames, (f) => (f.sides[s] ? f.sides[s][S[field]] : 0)));
-    const times = Float64Array.from(frames, (f) => f.t);
-    for (const d of defs) if (d) iconEntry(d.icon);
-    return {
-      json, F, NF, S, frames, N, times, defs, defaultDef, deaths, featAt, maxRows: rows, img, map,
-      w: json.map.width || (map && map.width) || 8192, h: json.map.height || (map && map.height) || 8192,
-      end: times[N - 1] || 0,
-      income: series('metal_income'), value: series('value'), units: series('units'),
-      frameAt(t) {
-        let lo = 0, hi = N - 1;
-        if (t >= times[hi]) return hi;
-        while (hi - lo > 1) { const m = (lo + hi) >> 1; if (times[m] <= t) lo = m; else hi = m; }
-        return lo;
-      },
-    };
+    const dir = url.slice(0, url.lastIndexOf('/') + 1);
+    const R = prepare(json, catalog, (file) => getJSON(dir + file));
+    Object.assign(R, { catalog, map, img, w: R.json.map.width || (map && map.width) || 8192, h: R.json.map.height || (map && map.height) || 8192 });
+    for (const d of R.defs) if (d) iconEntry(d.icon);
+    return R;
   }
 
   // The viewer ------------------------------------------------------------------------------------------------------------------
@@ -152,9 +139,10 @@
       this.t = 0;
       this.playing = false;
       this.speed = store.get('viewer:speed', 4);
-      this.opts = Object.assign({ orders: true, health: true, wrecks: true, spots: true, icons: 1 }, store.get('viewer:opts', {}));
+      this.opts = Object.assign({ orders: true, health: true, wrecks: true, spots: true, marks: true, icons: 1 }, store.get('viewer:opts', {}));
       this.zoom = 1; this.cx = 0; this.cz = 0;
       this.hover = -1; this.selected = -1;
+      this.focus = -1; this.hoverTeam = -1;      // a team picked in the table: its units drawn, the others' faded
       this.frameShown = -1;
       root.innerHTML = `
 <div class="v-top"><span class="v-title">Replay</span><span class="v-result"></span><span class="spacer"></span>
@@ -165,13 +153,14 @@
     <div class="v-zoom"><button type="button" data-z="in" title="Zoom in">+</button><button type="button" data-z="out" title="Zoom out">−</button><button type="button" data-z="fit" title="Fit the map (F)">⤢</button></div>
     <div class="v-hint">wheel zoom · drag pan · click a unit for its details</div><div class="v-loading">Loading…</div></div>
   <div class="v-side">
-    ${[0, 1].map((s) => `<div class="v-sidecard" data-side="${s}"><div class="v-sidehead"><i class="sw" style="background:${TINT[s]}"></i><span class="name"></span><span class="won"></span></div>
-      <div class="v-sub"></div><div class="v-stats"></div><div class="v-comp"></div></div>`).join('')}
+    <div class="v-kind dim"></div>
+    <table class="v-teams"></table>
     ${[['income', 'metal income'], ['value', 'army value'], ['units', 'units']].map(([k, label]) =>
       `<div class="v-mini" data-key="${k}"><div class="t-label"><span>${label}</span><span class="cur"></span></div><canvas></canvas></div>`).join('')}
     <div class="v-toggles">
       <label><input type="checkbox" data-opt="orders">orders</label><label><input type="checkbox" data-opt="health">health</label>
       <label><input type="checkbox" data-opt="wrecks">wrecks</label><label><input type="checkbox" data-opt="spots">metal spots</label>
+      <label class="v-marks-opt"><input type="checkbox" data-opt="marks">alliance marks</label>
       <label>icons <select class="v-sel" data-opt="icons"><option value="0.7">small</option><option value="1">medium</option><option value="1.4">large</option></select></label>
     </div>
     <div class="v-legend">${CLASSES.map((c) => `<span><i style="background:${c[1]}"></i>${c[2]}</span>`).join('')}</div>
@@ -191,8 +180,8 @@
       this.timeText = q('.v-time');
       this.playButton = q('.v-play');
       this.unitBox = q('.v-unit');
+      this.teamTable = q('.v-teams');
       this.minis = Array.from(root.querySelectorAll('.v-mini')).map((el) => ({ el, key: el.dataset.key, canvas: el.querySelector('canvas'), cur: el.querySelector('.cur') }));
-      this.sideCards = Array.from(root.querySelectorAll('.v-sidecard'));
       this.bind();
       iconReady = () => { this.dirty = true; this.compKey = null; this.frameShown = -1; };
     }
@@ -211,6 +200,18 @@
           this.dirty = true;
         });
       }
+      // The teams' table: pointing at a team fades the others' units; a click keeps it so, and shows what it has.
+      const team = (e) => { const tr = e.target.closest('tr[data-team]'); return tr ? +tr.dataset.team : -1; };
+      this.teamTable.addEventListener('pointerover', (e) => { const t = team(e); if (t !== this.hoverTeam) { this.hoverTeam = t; this.dirty = true; } });
+      this.teamTable.addEventListener('pointerleave', () => { this.hoverTeam = -1; this.dirty = true; });
+      const pick = (e) => {
+        const t = team(e);
+        if (t < 0) return;
+        this.focus = this.focus === t ? -1 : t;
+        this.showTeams();
+      };
+      this.teamTable.addEventListener('click', pick);
+      this.teamTable.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); pick(e); } });
       root.querySelector('.v-zoom').addEventListener('click', (e) => {
         const b = e.target.closest('button');
         if (!b) return;
@@ -263,7 +264,7 @@
         else if (k === 'o' || k === 'O') this.toggle('orders');
         else if (k === 'h' || k === 'H') this.toggle('health');
         else if (k === 'f' || k === 'F') this.fit();
-        else if (k === 'Escape') this.dismiss();
+        else if (k === 'Escape') { if (this.focus >= 0) { this.focus = -1; this.showTeams(); } else this.dismiss(); }
         else if (k === 'Home') this.seek(0);
         else if (k === 'End') this.seek(Infinity);
         else return;
@@ -344,34 +345,71 @@
       this.setPlaying(p.get('play') === '1', true);
     }
 
+    teamName(t) { const team = this.R.json.teams[t] || {}; return team.name || `team ${t}`; }
+    swatch(t) { return `<i class="sw" style="background:var(${teamVar(this.R.slot[t])})"></i>`; }
+
     setup() {
       const R = this.R, j = R.json;
       const winner = j.result ? j.result.winner : null;
       const info = j.info || {};
       const extra = [info.iteration != null ? `iteration ${info.iteration}` : '', info.hours != null ? `${(+info.hours).toFixed(1)} h of PPO` : ''].filter(Boolean).join(' · ');
       const mapName = (R.map && R.map.name) || j.map.slug;
-      this.root.querySelector('.v-title').textContent = `${j.label || j.stage} · ${mapName}${extra ? ' · ' + extra : ''}`;
+      this.root.querySelector('.v-title').textContent = `${j.label || j.stage} · ${R.kindName} · ${mapName}${extra ? ' · ' + extra : ''}`;
       const how = j.result ? `${j.result.how} at ${clock(j.result.seconds)}` : '';
-      this.root.querySelector('.v-result').innerHTML = winner == null
-        ? `<span class="badge">draw</span> <span class="dim">${esc(how)}</span>`
-        : `<span class="badge"><i class="sw" style="background:${TINT[winner]};border-radius:50%"></i>${esc(j.sides[winner].name)} won</span> <span class="dim">${esc(how)}</span>`;
-      unitsPromise.then((catalog) => {
-        this.sideCards.forEach((card, s) => {
-          const side = j.sides[s] || {};
-          const fac = catalog[side.factory];
-          card.querySelector('.name').textContent = `${side.name || 'side ' + s}`;
-          card.querySelector('.won').textContent = winner === s ? 'won' : '';
-          card.querySelector('.v-sub').textContent = `side ${s} · ${side.variant || '?'} · ${fac ? fac.human : side.factory || '?'}`;
-        });
-      });
+      const won = R.alliances.find((a) => a.ally === winner);
+      this.root.querySelector('.v-result').innerHTML = won
+        ? `<span class="badge">${markSVG(won.shape)} alliance ${won.letter} won</span> ${won.teams.map((t) => `<span class="v-who">${this.swatch(t)}${esc(this.teamName(t))}</span>`).join(' ')} <span class="dim">${esc(how)}</span>`
+        : `<span class="badge">${R.alliances.length > 2 ? 'no sole winner' : 'draw'}</span> <span class="dim">${esc(how)}</span>`;
+      this.root.querySelector('.v-kind').textContent = `${R.kindName} · ${R.n} teams in ${R.alliances.length} alliances`;
+      this.root.querySelector('.v-marks-opt').hidden = !R.marks;
+      // The teams' table, by alliance: who each team is, and its numbers at the frame shown (`panel`).
+      const catalog = R.catalog || {};
+      const end = (a) => {
+        if (a.ally === winner) return 'won';
+        const o = Math.max(...a.teams.map((t) => +(j.teams[t].outcome || 0)));
+        return o < 0 ? (R.alliances.length > 2 ? 'out' : 'lost') : o > 0 ? 'survived' : '';
+      };
+      // Alliances of several teams head their teams; an alliance of one is its team's row, with its mark there.
+      const grouped = R.alliances.some((a) => a.teams.length > 1);
+      this.teamTable.innerHTML = '<thead><tr><th>team</th><th class="num">metal</th><th class="num">income</th><th class="num">value</th><th class="num">units</th></tr></thead>' +
+        R.alliances.map((a) => '<tbody>' + (grouped ? `<tr class="v-allyrow"><th colspan="5">${markSVG(a.shape)}alliance ${a.letter}<span class="won">${end(a)}</span></th></tr>` : '') +
+          a.teams.map((t) => {
+            const team = j.teams[t] || {};
+            const fac = catalog[team.factory];
+            const sub = [`team ${t}`, grouped ? '' : `alliance ${a.letter}`, team.plays, team.variant, fac ? fac.human : team.factory].filter(Boolean).map(esc).join(' · ');
+            const mark = !grouped && R.marks ? markSVG(a.shape) : '';
+            const state = grouped ? '' : `<span class="won">${end(a)}</span>`;
+            return `<tr class="v-team" data-team="${t}" tabindex="0"><td><div class="nm">${mark}${this.swatch(t)}<span class="name">${esc(this.teamName(t))}</span>${state}</div>` +
+              `<div class="v-sub" title="${sub}">${sub}</div></td><td class="num"></td><td class="num"></td><td class="num"></td><td class="num"></td></tr>` +
+              `<tr class="v-comprow" data-of="${t}"><td colspan="5"><div class="v-comp"></div></td></tr>`;
+          }).join('') + '</tbody>').join('');
+      this.focus = -1;
+      this.hoverTeam = -1;
+      this.showTeams();
       this.statics = null;
       this.compKey = null;
       this.frameShown = -1;
       this.selected = -1;
-      const cap = R.maxRows * 2 + 8;
+      this.cur = null;
+      this.fit();
+    }
+
+    // Which teams' holdings show: every team's in a game of two, else the focused one's.
+    showTeams() {
+      const R = this.R;
+      for (const tr of this.teamTable.querySelectorAll('tr.v-team')) tr.setAttribute('aria-pressed', String(+tr.dataset.team === this.focus));
+      for (const tr of this.teamTable.querySelectorAll('tr.v-comprow')) tr.hidden = !(R.n <= 2 || +tr.dataset.of === this.focus);
+      this.compKey = null;
+      this.frameShown = -1;
+      this.dirty = true;
+    }
+
+    // Room for every unit drawn at once, interpolating: both frames' units.  Pages loaded later may hold more.
+    room() {
+      const cap = this.R.maxRows * 2 + 8;
+      if (this.cur && this.cur.uid.length >= cap) return;
       this.cur = { n: 0, uid: new Int32Array(cap), sx: new Float32Array(cap), sy: new Float32Array(cap), px: new Float32Array(cap),
         alpha: new Float32Array(cap), src: new Uint8Array(cap), off: new Int32Array(cap), at: new Map() };
-      this.fit();
     }
 
     // The view: a zoom over the fitted map and the world point at the canvas's centre.
@@ -423,7 +461,7 @@
         const dt = last ? Math.min(0.25, (now - last) / 1000) : 0;
         last = now;
         if (!this.R) return;
-        if (this.playing) {
+        if (this.playing && this.R.loaded(this.R.frameAt(this.t))) {      // the clock waits for a page still coming
           this.t += dt * this.speed;
           if (this.t >= this.R.end) { this.t = this.R.end; this.setPlaying(false); }
           this.dirty = true;
@@ -460,9 +498,6 @@
       }
       g.strokeStyle = 'rgba(0,0,0,0.7)';
       g.strokeRect(ox - 0.5, oy - 0.5, R.w * s + 1, R.h * s + 1);
-
-      const t = this.t, i = R.frameAt(t), j = Math.min(i + 1, R.N - 1), A = R.frames[i], B = R.frames[j];
-      const a = j > i ? clamp((t - A.t) / (B.t - A.t), 0, 1) : 0;
       const zoom = this.zoom, base = Math.min(W, H) / 125 * this.opts.icons * Math.sqrt(zoom);
       const sizeOf = (d) => clamp(d.size * base, 5, 80);
 
@@ -476,8 +511,26 @@
         g.fill();
         g.stroke();
       }
+
+      const t = this.t, i = R.frameAt(t), j = Math.min(i + 1, R.N - 1);
+      if (!R.loaded(i)) {           // a page of a long game not here yet: the map now, the units when it comes
+        const token = this.token;
+        this.loading.hidden = false;
+        this.loading.textContent = 'Loading this part of the game…';
+        R.ensure(i).then(() => { if (token === this.token) { this.loading.hidden = true; this.dirty = true; } },
+          (e) => { if (token === this.token) this.loading.textContent = 'Could not load this part of the game: ' + e.message; });
+        this.drawCursors();
+        this.timeText.textContent = `${clock(t)} / ${clock(R.end)}`;
+        return;
+      }
+      R.ensure(i);                  // and the page ahead, while this one plays
+      this.room();
+      const A = R.frame(i), B = R.frame(j);
+      this.A = A; this.B = B;
+      const a = j > i ? clamp((t - A.t) / (B.t - A.t), 0, 1) : 0;
+
       if (this.opts.wrecks) {
-        const f = R.frames[R.featAt[i]].features;
+        const f = R.features(i);
         if (f && f.length) {
           g.fillStyle = 'rgba(214,190,140,0.85)';
           g.strokeStyle = 'rgba(30,24,12,0.8)';
@@ -514,6 +567,8 @@
       const rowOf = (k) => (cur.src[k] ? B.u : A.u);
       const hoverK = this.mouse && !this.root.querySelector('.v-stage.dragging') ? this.pick(this.mouse) : -1;
       this.hover = hoverK >= 0 ? cur.uid[hoverK] : -1;
+      const focus = this.hoverTeam >= 0 ? this.hoverTeam : this.focus;
+      const shown = (team) => (focus < 0 || team === focus ? 1 : FADED);
 
       // Orders, under the units: one path per kind of order.
       const paths = CLASSES.map(() => new Path2D()), ends = CLASSES.map(() => new Path2D());
@@ -522,7 +577,7 @@
         const row = rowOf(k), o = cur.off[k], cls = ORDER_CLASS[row[o + F.order]];
         if (cls === undefined) continue;
         const uid = cur.uid[k];
-        if (!this.opts.orders && uid !== this.hover && uid !== this.selected) continue;
+        if ((!this.opts.orders || (focus >= 0 && row[o + F.team] !== focus)) && uid !== this.hover && uid !== this.selected) continue;
         let X, Y;
         const tx = row[o + F.tx], tz = row[o + F.tz], target = row[o + F.target];
         if (tx > 0 || tz > 0) { X = ox + tx * s; Y = oy + tz * s; }      // -1 is no point; so is 0, 0 (a near-zero point, rounded)
@@ -541,23 +596,31 @@
         g.globalAlpha = 1;
       }
 
-      // Units: structures, then ground, then air.
+      // Units: structures, then ground, then air; each with its alliance's mark when there are allies to tell apart.
+      const marks = R.marks && this.opts.marks;
       for (let layer = 0; layer < 3; layer++) {
         for (let k = 0; k < n; k++) {
           const row = rowOf(k), o = cur.off[k], d = R.defs[row[o + F.def]] || R.defaultDef;
           if (d.layer !== layer) continue;
           const X = cur.sx[k], Y = cur.sy[k], px = cur.px[k];
           if (X < -px || Y < -px || X > W + px || Y > H + px) continue;
-          const side = row[o + F.side] ? 1 : 0, hp = row[o + F.hp], build = row[o + F.build], flags = row[o + F.flags];
-          let alpha = cur.alpha[k];
+          const team = row[o + F.team], slot = R.slot[team] ?? 0, hp = row[o + F.hp], build = row[o + F.build], flags = row[o + F.flags];
+          let alpha = cur.alpha[k] * shown(team);
           if (build < 100) alpha *= 0.38;
           if (flags & 1) alpha *= 0.55;
           g.globalAlpha = alpha;
           const e = iconEntry(d.icon);
-          if (e.ready) g.drawImage(px <= 24 ? e.small[side] : e.big[side], X - px / 2, Y - px / 2, px, px);
-          else { g.fillStyle = TINT[side]; g.beginPath(); g.arc(X, Y, px * 0.3, 0, 7); g.fill(); }
+          if (e.ready) { tinted(e, slot); g.drawImage(px <= 24 ? e.small[slot] : e.big[slot], X - px / 2, Y - px / 2, px, px); }
+          else { g.fillStyle = MAP_TINT[slot]; g.beginPath(); g.arc(X, Y, px * 0.3, 0, 7); g.fill(); }
           if (flags & 2) { g.strokeStyle = '#9fe8ff'; g.lineWidth = 1.5; g.beginPath(); g.arc(X, Y, px * 0.55, 0, 7); g.stroke(); }
-          g.globalAlpha = cur.alpha[k];
+          g.globalAlpha = cur.alpha[k] * shown(team);
+          if (marks && px >= 9) {
+            const al = R.allianceOf[team], r = clamp(px * 0.17, 2.2, 6);
+            g.beginPath();
+            markPath(g, al ? al.shape : 'circle', X + px * 0.46, Y - px * 0.46, r);
+            g.fillStyle = '#ffffff'; g.fill();
+            g.strokeStyle = '#000000'; g.lineWidth = 1; g.stroke();
+          }
           if (px >= 7 && (build < 100 || (this.opts.health && hp < 100))) {
             const bw = Math.max(6, px * 0.8), bh = Math.max(2, Math.min(4, px * 0.12)), bx = X - bw / 2, by = Y + px * 0.48;
             g.fillStyle = 'rgba(0,0,0,0.7)';
@@ -572,16 +635,17 @@
 
       // Deaths: a cross where a unit was last seen, fading over DEATH seconds.
       for (let f = Math.max(1, i - Math.ceil(DEATH) - 1); f <= i; f++) {
-        const age = t - R.frames[f].t;
+        const age = t - R.times[f];
         if (age < 0 || age >= DEATH) continue;
-        const list = R.deaths[f], q = age / DEATH;
+        const list = R.deaths(f), q = age / DEATH;
+        if (!list) continue;
         for (let m = 0; m < list.length; m += 4) {
           const d = R.defs[list[m + 3]] || R.defaultDef, X = ox + list[m] * s, Y = oy + list[m + 1] * s, r = sizeOf(d) * 0.32 * (1 + q * 0.6);
-          g.globalAlpha = 1 - q;
+          g.globalAlpha = (1 - q) * shown(list[m + 2]);
           g.beginPath();
           g.moveTo(X - r, Y - r); g.lineTo(X + r, Y + r); g.moveTo(X + r, Y - r); g.lineTo(X - r, Y + r);
           g.strokeStyle = 'rgba(0,0,0,0.75)'; g.lineWidth = 4; g.stroke();
-          g.strokeStyle = TINT[list[m + 2] ? 1 : 0]; g.lineWidth = 2; g.stroke();
+          g.strokeStyle = MAP_TINT[R.slot[list[m + 2]] ?? 0]; g.lineWidth = 2; g.stroke();
           g.beginPath(); g.arc(X, Y, r * 1.5 + q * r, 0, 7); g.lineWidth = 1; g.stroke();
         }
       }
@@ -612,8 +676,8 @@
     }
 
     describe(k) {
-      const R = this.R, F = R.F, cur = this.cur, row = cur.src[k] ? R.frames[Math.min(R.frameAt(this.t) + 1, R.N - 1)].u : R.frames[R.frameAt(this.t)].u, o = cur.off[k];
-      const d = R.defs[row[o + F.def]] || R.defaultDef, side = row[o + F.side], kind = row[o + F.order];
+      const R = this.R, F = R.F, cur = this.cur, row = cur.src[k] ? this.B.u : this.A.u, o = cur.off[k];
+      const d = R.defs[row[o + F.def]] || R.defaultDef, team = row[o + F.team], kind = row[o + F.order];
       const flags = row[o + F.flags], build = row[o + F.build];
       let order = kind >= 0 ? ORDER_NAMES[kind] || `order ${kind}` : 'no order';
       const tx = row[o + F.tx], tz = row[o + F.tz], target = row[o + F.target];
@@ -621,14 +685,14 @@
       else if (kind >= 0 && target >= 0) {
         const m = cur.at.get(target);
         if (m !== undefined) {
-          const trow = cur.src[m] ? R.frames[Math.min(R.frameAt(this.t) + 1, R.N - 1)].u : R.frames[R.frameAt(this.t)].u;
+          const trow = cur.src[m] ? this.B.u : this.A.u;
           const td = R.defs[trow[cur.off[m] + F.def]] || R.defaultDef;
           order += ` → ${td.human} #${target}`;
         } else order += ` → #${target}`;
       }
-      const sideName = (R.json.sides[side] || {}).name || `side ${side}`;
+      const al = R.allianceOf[team];
       return `<b>${esc(d.human)}</b> <span class="d">${esc(d.desc)}</span><br>` +
-        `<span style="color:${TINT[side ? 1 : 0]}">●</span> ${esc(sideName)} <span class="d">#${cur.uid[k]} · ${fmt(d.cost)} metal</span><br>` +
+        `<span style="color:${MAP_TINT[R.slot[team] ?? 0]}">●</span> ${esc(this.teamName(team))} <span class="d">team ${team}${al ? ' · alliance ' + al.letter : ''} · #${cur.uid[k]} · ${fmt(d.cost)} metal</span><br>` +
         `hp ${row[o + F.hp]}%${build < 100 ? ` · built ${build}%` : ''}${flags & 1 ? ' · cloaked' : ''}${flags & 2 ? ' · paralyzed' : ''}<br>` +
         `<span class="d">order:</span> ${esc(order)}`;
     }
@@ -646,35 +710,37 @@
       this.tip.style.top = '0';
     }
 
-    // The side panel at frame i: stats, what each side has, the selected unit.
+    // The side panel at frame i: each team's numbers, what the shown teams have, the selected unit.
     panel(i) {
-      const R = this.R, F = R.F, NF = R.NF, A = R.frames[i];
-      this.sideCards.forEach((card, s) => {
-        const v = A.sides[s] || [];
-        const stat = (k, label) => `<div class="v-stat"><div class="k">${label}</div><div class="v">${fmt(v[R.S[k]])}</div></div>`;
-        card.querySelector('.v-stats').innerHTML = stat('metal', 'metal') + stat('metal_income', 'm income') + stat('energy_income', 'e income') +
-          stat('value', 'value') + stat('units', 'units');
-      });
-      const key = i + ':' + icons.size;
-      if (key !== this.compKey) {
+      const R = this.R, F = R.F, NF = R.NF, A = R.frame(i), S = R.S;
+      const stats = R.stats[i] || [];          // every frame's, whether its page is loaded or not
+      for (const tr of this.teamTable.querySelectorAll('tr.v-team')) {
+        const v = stats[+tr.dataset.team] || [];
+        const cells = tr.querySelectorAll('td.num');
+        ['metal', 'metal_income', 'value', 'units'].forEach((k, c) => { cells[c].textContent = k === 'units' && v[S[k]] != null ? String(v[S[k]]) : fmt(v[S[k]]); });
+        tr.title = `energy income ${fmt(v[S.energy_income])}`;
+      }
+      const key = i + ':' + icons.size + ':' + this.focus;
+      if (A && key !== this.compKey) {
         this.compKey = key;
-        [0, 1].forEach((s) => {
-          const count = new Map();
+        for (const tr of this.teamTable.querySelectorAll('tr.v-comprow')) {
+          if (tr.hidden) continue;
+          const team = +tr.dataset.of, slot = R.slot[team] ?? 0, count = new Map();
           let structures = 0;
           for (let o = 0; o < A.u.length; o += NF) {
-            if (A.u[o + F.side] !== s || A.u[o + F.build] < 100) continue;
+            if (A.u[o + F.team] !== team || A.u[o + F.build] < 100) continue;
             const d = R.defs[A.u[o + F.def]] || R.defaultDef;
             if (d.layer === 0) { structures++; continue; }
             count.set(d, (count.get(d) || 0) + 1);
           }
           const list = [...count].sort((x, y) => y[1] * y[0].cost - x[1] * x[0].cost);
           const shown = list.slice(0, 10).map(([d, c]) => {
-            const url = iconURL(d.icon, s);
+            const url = iconURL(d.icon, slot);
             return `<span title="${c} × ${esc(d.human)}${d.desc ? ' (' + esc(d.desc) + ')' : ''}">${url ? `<img src="${url}" alt="">` : esc(d.human)}${c}</span>`;
           }).join('');
           const more = list.length > 10 ? `<span class="more">+${list.length - 10} kinds</span>` : '';
-          this.sideCards[s].querySelector('.v-comp').innerHTML = shown + more + `<span class="more">${structures} structures</span>`;
-        });
+          tr.querySelector('.v-comp').innerHTML = shown + more + `<span class="more">${structures} structures</span>`;
+        }
       }
       if (this.selected >= 0 && this.cur && this.cur.at.has(this.selected)) this.unitBox.innerHTML = this.describe(this.cur.at.get(this.selected));
       else this.unitBox.innerHTML = '';
@@ -689,12 +755,12 @@
       draw(g, w, h);
       return { off, w, h };
     }
-    curves(g, w, h, pair, pad) {
-      const R = this.R, top = Math.max(1e-9, ...pair.map((a) => a.reduce((m, v) => Math.max(m, v), 0))) * 1.08;
+    curves(g, w, h, lines, pad) {
+      const R = this.R, top = Math.max(1e-9, ...lines.map((a) => a.reduce((m, v) => Math.max(m, v), 0))) * 1.08;
       const x = (k) => (R.times[k] / (R.end || 1)) * w, y = (v) => h - pad - (v / top) * (h - 2 * pad);
-      pair.forEach((arr, s) => {
-        g.strokeStyle = TINT[s];
-        g.lineWidth = 1.5;
+      lines.forEach((arr, s) => {
+        g.strokeStyle = token(teamVar(R.slot[s] ?? 0));
+        g.lineWidth = lines.length > 2 ? 1.25 : 1.5;
         g.lineJoin = 'round';
         g.beginPath();
         for (let k = 0; k < arr.length; k++) (k ? g.lineTo(x(k), y(arr[k])) : g.moveTo(x(k), y(arr[k])));
@@ -741,7 +807,7 @@
       if (!this.statics) this.makeStatics();
       const R = this.R, i = R.frameAt(this.t), dpr = window.devicePixelRatio || 1;
       const ink = token('--text');
-      const draw = (el, st, values) => {
+      const draw = (el, st) => {
         if (el.width !== st.off.width || el.height !== st.off.height) { el.width = st.off.width; el.height = st.off.height; }
         const g = el.getContext('2d');
         g.setTransform(1, 0, 0, 1, 0, 0);
@@ -754,13 +820,14 @@
         g.beginPath(); g.moveTo(x, 0); g.lineTo(x, st.h); g.stroke();
         g.fillStyle = ink;
         g.beginPath(); g.moveTo(x - 4, 0); g.lineTo(x + 4, 0); g.lineTo(x, 5); g.fill();
-        return values;
       };
       draw(this.timeline, this.statics.timeline);
       for (const m of this.minis) {
         draw(m.canvas, this.statics[m.key]);
         const v = R[m.key];
-        m.cur.innerHTML = [0, 1].map((s) => `<span style="color:${TINT[s]}">●</span> ${fmt(v[s][i])}`).join('&nbsp; ');
+        // Each team's number beside the chart in a game of two; with more, the teams' table has them.
+        const number = m.key === 'units' ? (x) => String(Math.round(x)) : fmt;
+        m.cur.innerHTML = R.n <= 2 ? v.map((a, s) => `${this.swatch(s)}${number(a[i])}`).join('&nbsp; ') : '';
       }
     }
   }

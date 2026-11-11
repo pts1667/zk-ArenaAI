@@ -105,6 +105,17 @@ def test_the_cap_keeps_most_metal_for_the_walk_and_regions_count_the_rest(small_
     assert np.array_equal(t.feat_ids, again.feat_ids) and np.array_equal(t.feat_x, again.feat_x)
 
 
+def test_a_frame_holds_the_units_and_wrecks_the_user_asked_for_and_the_sim_gives_as_many_wrecks():
+    """1280 units, 512 of them ours to tell, and 512 wrecks (the user, 2026-11-10).  A sim frame holds no fewer features than the
+    featurizer keeps, so its choice of them is the featurizer's."""
+    assert (fz.CAP_UNITS, fz.CAP_CONTROLLABLE, fz.CAP_FEATURES) == (1280, 512, 512)
+    try:
+        import zksim
+    except OSError:
+        pytest.skip("needs the built sim library")
+    assert zksim.FEATURES_PER_SIDE >= fz.CAP_FEATURES
+
+
 def test_tensor_shapes_and_token_order(small_map, table):
     units = make_units({"name": "cloakraid", "uid": 1}, {"name": "cloakcon", "uid": 2}, {"name": "staticmex", "uid": 3},
                        {"name": "cloakriot", "side": ENEMY, "uid": 4, "x": 800.0},

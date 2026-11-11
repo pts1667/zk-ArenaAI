@@ -295,7 +295,8 @@ def encode_shards(encoder, paths: list[pathlib.Path], device: str, frames: int, 
 
 
 def probe_report(sample: dict[str, np.ndarray], names: tuple[str, ...], outcomes: tuple[np.ndarray, np.ndarray] | None, held_out: tuple[int, ...] | list[int], groups: dict[str, list[int]] | None = None) -> dict[str, float]:
-    """R^2 on maps the probes didn't fit on, and on each of `groups` of them.  Outcome is side-relative: +1 if this frame's seat went on to win.  Only finished games count, and only script games, since a scenario is cut off."""
+    """R^2 on maps the probes didn't fit on, and on each of `groups` of them.  Outcome is side-relative: +1 if this frame's seat went on to win.  Only finished games count, and only script games, since a scenario is cut off.
+    outcomes: games and each one's result, team 0's (then the other seat's is its negative, as in a 1v1), or games x teams, each team's own."""
     test = np.isin(sample["map"], held_out)
     if not test.any() or test.all():
         return {}
@@ -310,7 +311,11 @@ def probe_report(sample: dict[str, np.ndarray], names: tuple[str, ...], outcomes
         at = np.searchsorted(outcomes[0], sample["game"])
         at = np.minimum(at, len(outcomes[0]) - 1)
         known = (outcomes[0][at] == sample["game"]) & (sample["source"] == 0)
-        result = outcomes[1][at] * np.where(sample["seat"] == 0, 1.0, -1.0)
+        if outcomes[1].ndim == 2:
+            result = outcomes[1][at, np.minimum(sample["seat"], outcomes[1].shape[1] - 1)]
+            known &= np.isfinite(result)
+        else:
+            result = outcomes[1][at] * np.where(sample["seat"] == 0, 1.0, -1.0)
         fit, check = known & ~test, known & test
         if fit.sum() > 8 * sample["z"].shape[1] and check.sum() > 16:
             out["r2_outcome"] = float(ridge_r2(sample["z"][fit], result[fit, None], sample["z"][check], result[check, None])[0])
@@ -351,7 +356,7 @@ def collection(data: pathlib.Path) -> tuple[dict, list[pathlib.Path], list[int],
         raise ValueError(f"{data}: frames of feature version {manifest.get('feature_version')}, this code's encoder reads {fz.ENCODER_FEATURE_VERSIONS}: collect them again")
     groups = {"real": [m for m, k in enumerate(manifest["kinds"]) if k == "real"], "made": [m for m, k in enumerate(manifest["kinds"]) if k == "made"], "wet": [m for m, w in enumerate(manifest["water"]) if w >= 0.03]}
     with np.load(data / "outcomes.npz") as ends:
-        outcomes = (ends["game"], ends["result"])
+        outcomes = (ends["game"], ends["results"] if "results" in ends.files else ends["result"])    # each team's, in collections since 2026-11-10
     return manifest, sorted(data.glob("*-*.npz")), manifest["held_out"], groups, outcomes
 
 

@@ -151,7 +151,7 @@ void World::fly_plane(int u) {
     speed[i] = a.phase == AIR_FLYING ? v : 0.0f;
 }
 
-// The nearest pad of its side with room, or the nearest if none has.
+// The nearest pad of its allyteam with room, or the nearest if none has (unit_bomber_command.lua).
 int World::find_pad(int u) const {
     const int s = side[size_t(u)];
     int best = -1, best_full = -1;
@@ -196,9 +196,9 @@ void World::update_air() {
                 continue;
             }
             if (a.ammo <= 0) {
-                // unit_refuel_pad_handler.lua: so much energy a frame, without which it waits.
+                // unit_refuel_pad_handler.lua: so much energy a frame, without which it waits.  The pad's team pays, an ally's or not.
                 const float cost = d.reammo_energy * float(ZK_TICK_FRAMES);
-                if (!economy_on || pay_energy(side[i], cost)) a.rearmed += float(ZK_TICK_FRAMES);
+                if (!economy_on || pay_energy(team[size_t(p)], cost)) a.rearmed += float(ZK_TICK_FRAMES);
                 if (a.rearmed >= d.reammo_frames) {
                     a.ammo = d.ammo;
                     a.rearmed = 0.0f;

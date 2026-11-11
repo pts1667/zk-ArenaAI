@@ -12,7 +12,7 @@ viewer read JSON:
                                     the keys asked for if any; with every numeric key there is
   GET /api/eval/STAGE               a test's result (policy_clone_eval.py's JSON); for ppo, its tests (tests.jsonl)
   GET /api/replays                  every replay's index line (policy_replay.py), with its url, oldest first
-  GET /replay/DIR/FILE              a replay: gzipped JSON, policy_replay.py describes it
+  GET /replay/DIR/FILE              a replay, or a page of a long one: gzipped JSON, policy_replay.py describes it
   GET /api/units                    each unit def by name: human name, description, icon type and size, air, mobile
   GET /api/map/SLUG                 a map's name, kind ("real" or "made"), size in elmos, liquid, and its picture's url
   GET /map/SLUG.png                 the picture: the minimap in the map's archive (.sd7, .sdz), or for a made map its heights shaded
@@ -373,6 +373,23 @@ def read_jsonl(path: pathlib.Path) -> list[dict]:
     return rows
 
 
+def test_summary(test: dict) -> dict:
+    """A PPO test's games counted: games, won and drew over its 1v1s (a game whose facts say no kind is one), so that the headline
+    stays the 1v1 test however many kinds a run tests; and, when any game says its kind, `kinds`: each kind's games, won and drew."""
+    games = test.get("games", [])
+    kinds: dict[str, dict] = {}
+    for g in games:
+        c = kinds.setdefault(str(g.get("kind") or "1v1"), {"games": 0, "won": 0, "drew": 0})
+        c["games"] += 1
+        c["won"] += g.get("result") == "won"
+        c["drew"] += g.get("result") == "drew"
+    one = kinds.get("1v1", {"games": 0, "won": 0, "drew": 0})
+    out = {"iteration": test.get("iteration"), "decisions": test.get("decisions"), "opponent": test.get("opponent"), **one}
+    if any("kind" in g for g in games):
+        out["kinds"] = kinds
+    return out
+
+
 class Run:
     """What a pipeline's directory says: its stages (pipeline.json), their logs (logs/), results and replays."""
 
@@ -469,11 +486,7 @@ class Run:
             e = self.evaluation(stage)
             out["eval"] = {k: v for k, v in e.items() if k != "records"} if isinstance(e, dict) else None
         if "tests" in files and files["tests"].exists():
-            tests = read_jsonl(files["tests"])
-            out["tests"] = [{"iteration": t.get("iteration"), "decisions": t.get("decisions"), "opponent": t.get("opponent"),
-                             "games": len(t.get("games", [])),
-                             "won": sum(g.get("result") == "won" for g in t.get("games", [])),
-                             "drew": sum(g.get("result") == "drew" for g in t.get("games", []))} for t in tests]
+            out["tests"] = [test_summary(t) for t in read_jsonl(files["tests"])]
         if "manifest" in files and files["manifest"].exists():
             try:
                 m = json.loads(files["manifest"].read_text())

@@ -162,9 +162,10 @@ float World::target_score(int u, int slot, int t) {
 }
 
 void World::pick_targets() {
-    const int n = count();
-    std::fill(stun_attackers.begin(), stun_attackers.end(), 0);
-    for (int u = 0; u < n; ++u) {
+    // Only what's in the grid is counted, and the grid's units are all here.
+    for (const int u : live) stun_attackers[size_t(u)] = 0;
+    for (size_t k = 0, n = live.size(); k < n; ++k) {
+        const int u = live[k];
         if (!alive[size_t(u)] || !active(u)) continue;
         const auto& d = type_of(u);
         for (int m = 0; m < d.n_mounts; ++m) {
@@ -209,7 +210,7 @@ void World::pick_targets() {
             }
             float best = 1e30f;
             int chosen = -1;
-            for_side(1 - side[size_t(u)], x[size_t(u)], z[size_t(u)], w.range + SEARCH_MARGIN, [&](int t) {
+            for_enemies(side[size_t(u)], x[size_t(u)], z[size_t(u)], w.range + SEARCH_MARGIN, [&](int t) {
                 const float score = target_score(u, m, t);
                 if (score >= 0.0f && score < best) {
                     best = score;
@@ -311,8 +312,8 @@ int World::manual_mount(int u) const {
 }
 
 void World::fire_weapons() {
-    const int n = count();
-    for (int u = 0; u < n; ++u) {
+    for (size_t k = 0, n = live.size(); k < n; ++k) {
+        const int u = live[k];
         // A unit killed earlier this tick still fires: within a tick both sides shoot together.
         if (!alive[size_t(u)]) continue;
         const auto& d = type_of(u);
@@ -387,7 +388,7 @@ void World::fire_weapons() {
 
 void World::damage_unit(int u, const zk_weapon_rec& w, float mult) {
     const auto& d = type_of(u);
-    const float amount = w.damage[d.armor_class] * mult * armor_mult(u);
+    const float amount = w.damage[d.armor_class] * mult * armor_mult(u) * damage_mult[size_t(u)];
     // energysolar.lua's HitByWeapon: anything that does damage by the book, except a weapon that can't hurt friends.  Each hit starts it over.
     if (d.close_frames > 0.0f && amount > 0.0f && build[size_t(u)] >= 1.0f && !(w.flags & ZK_W_NO_FRIENDLY_FIRE)) hit_closes(u);
     // unit_decloak_damaged.lua: any damage shows a unit, pure status effects included.
@@ -479,7 +480,7 @@ void World::burn_areas() {
                 amount -= amount * w.area_range_fall * (dist - w.area_plateau) / (w.area_radius - w.area_plateau);
             if (w.area_plateau_fall != 0.0f && dist < w.area_plateau)
                 amount -= amount * w.area_plateau_fall * (w.area_plateau - dist) / w.area_plateau;
-            amount *= frames;
+            amount *= frames * damage_mult[size_t(u)];
             if (w.flags & ZK_W_AREA_SLOWS) {
                 slow[size_t(u)] = std::max(slow[size_t(u)], std::min(MAX_SLOW, slow[size_t(u)] + amount / std::max(hp[size_t(u)], 1.0f)));
             } else {
@@ -545,7 +546,7 @@ void World::pierce(const Shot& s, float px, float pz, float power) {
     const float rise = s.target >= 0 && jump[size_t(s.target)].flying ? jump_altitude(s.target) / aimed : 0.0f;
     std::vector<PierceHit>& hits = pierce_hits;      // nothing below pierces again
     hits.clear();
-    for_side(1 - s.source_side, ox + ux * reach * 0.5f, oz + uz * reach * 0.5f, reach * 0.5f + BLAST_MARGIN, [&](int u) {
+    for_enemies(s.source_side, ox + ux * reach * 0.5f, oz + uz * reach * 0.5f, reach * 0.5f + BLAST_MARGIN, [&](int u) {
         if (!alive[size_t(u)] || u == s.source) return;
         if (airborne(u) != s.air) return;
         const float r = type_of(u).hit_radius, dx = x[size_t(u)] - ox, dz = z[size_t(u)] - oz;
@@ -566,10 +567,10 @@ void World::resolve_shots() {
 }
 
 void World::finish_deaths() {
-    const int n = count();
-    for (int u = 0; u < n; ++u) {
+    for (size_t k = 0, n = live.size(); k < n; ++k) {
+        const int u = live[k];
         if (!alive[size_t(u)] || hp[size_t(u)] > 0.0f) continue;
-        alive[size_t(u)] = 0;
+        died(u);
         const auto& d = type_of(u);
         // unit_nanoframe_death.lua: a frame explodes only if it's nearly done.  Chains are caught later in this loop or next tick.
         // No one to return fire at, but a side for no friendly fire.  Before its remains, as in ForcedKillUnit, so a blast doesn't eat its own heap.

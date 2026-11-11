@@ -1,8 +1,12 @@
-"""The opening both sides of a sim game play by rule.
+"""The opening every team of a sim game plays by rule.
 
 The commander places its factory, free and at once, which then repeats its raider.  The commander goes round the metal spots near
 its start, an extractor and a solar beside it at each, and after that helps the factory for good.  What's picked by chance is which
-commander and which factory, per side, among the factories that suit the map.  Commanders, factories and raiders are chosen by what the data says they are.
+commander and which factory, per team, among the factories that suit the map.  Commanders, factories and raiders are chosen by what the data says they are.
+
+A team faces one enemy, the one whose start is nearest (policy_sim_env picks it), and its spots are those no nearer that enemy's
+start than its own and, among allies, nearer its own start than any ally's, a tie going to the lower team: as the scripts share
+them out (sim/scripts).
 """
 from __future__ import annotations
 
@@ -77,8 +81,17 @@ def is_buildable(bundle: bd.Bundle, x: float, z: float, radius: float) -> bool:
     return bool(np.all((bundle.passable[r0:r1, c0:c1] & GROUND) == GROUND))
 
 
-def _clear(x: float, z: float, radius: float, taken: list[tuple[float, float, float]]) -> bool:
-    return all(math.hypot(x - ox, z - oz) >= radius + other + SITE_GAP for ox, oz, other in taken)
+def apart(taken: np.ndarray, x: float, z: float, half_x: float, half_z: float, gap: float = 0.0) -> bool:
+    """Whether a footprint of these half sizes here overlaps none of those taken (N x 4: x, z, half x, half z), with a gap
+    between if one's asked.  Footprints are rectangles along the map's axes, as the game's are (a build is given no facing), and
+    in the game two may touch."""
+    return not len(taken) or bool(((np.abs(taken[:, 0] - x) >= taken[:, 2] + half_x + gap) | (np.abs(taken[:, 1] - z) >= taken[:, 3] + half_z + gap)).all())
+
+
+def footprints(x, z, half_x, half_z) -> np.ndarray:
+    """N x 4 for `apart`: x, z, half x, half z, each one number or one for each."""
+    columns = np.broadcast_arrays(np.atleast_1d(np.asarray(x, np.float32)), np.asarray(z, np.float32), np.asarray(half_x, np.float32), np.asarray(half_z, np.float32))
+    return np.column_stack(columns).astype(np.float32).reshape(-1, 4)
 
 
 def _towards(x: float, z: float, tx: float, tz: float, distance: float) -> list[tuple[float, float]]:
@@ -88,10 +101,15 @@ def _towards(x: float, z: float, tx: float, tz: float, distance: float) -> list[
     return [(x + math.cos(facing + k * 2 * math.pi / TURNS) * distance, z + math.sin(facing + k * 2 * math.pi / TURNS) * distance) for k in turns]
 
 
-def nearby_spots(spots: np.ndarray, x: float, z: float, ex: float, ez: float) -> np.ndarray:
-    """The spots to take, on our side of the map, each next to the last."""
+def nearby_spots(spots: np.ndarray, x: float, z: float, ex: float, ez: float, allies: tuple = ()) -> np.ndarray:
+    """The spots to take, on our side of the map, each next to the last.  allies: ((x, z), lower) for each ally, `lower` whether
+    its team is the lower one, which a spot as near both goes to."""
     own = np.hypot(spots[:, 0] - x, spots[:, 1] - z)
-    near = spots[(own <= NEAR_SPOTS) & (own <= np.hypot(spots[:, 0] - ex, spots[:, 1] - ez))]
+    mine = (own <= NEAR_SPOTS) & (own <= np.hypot(spots[:, 0] - ex, spots[:, 1] - ez))
+    for (ax, az), lower in allies:
+        theirs = np.hypot(spots[:, 0] - ax, spots[:, 1] - az)
+        mine &= (own < theirs) if lower else (own <= theirs)
+    near = spots[mine]
     near = near[np.argsort(np.hypot(near[:, 0] - x, near[:, 1] - z), kind="stable")[:MOST_SPOTS]]
     route, left, at = [], list(range(len(near))), (x, z)
     while left:
@@ -102,40 +120,52 @@ def nearby_spots(spots: np.ndarray, x: float, z: float, ex: float, ez: float) ->
     return np.array(route, np.float32).reshape(-1, 3)
 
 
-def make_plan(bundle: bd.Bundle, start: tuple[float, float], enemy: tuple[float, float], factory_radius: float,
-              mex: int, mex_radius: float, solar: int, solar_radius: float) -> Plan:
+def make_plan(ground: "Ground", start: tuple[float, float], enemy: tuple[float, float], factory: "Footing",
+              mex: int, mex_footing: "Footing", solar: int, solar_footing: "Footing", allies: tuple = ()) -> Plan:
+    """factory: a footing as large as any factory's that might go there.  allies: as `nearby_spots` takes them.
+    Each goes where the game would let it be built (`Ground.fits`: its footprint's rectangle, on level ground) and both walkers
+    and vehicles can get about, a gap from the next."""
+    bundle = ground.bundle
     x, z = start
-    spot_keepout = mex_radius + SITE_GAP + 2 * solar_radius
-    keep_off = [(float(s[0]), float(s[1]), spot_keepout) for s in bundle.spot_list]
+    spots = np.asarray(bundle.spot_list, np.float32).reshape(-1, 3)
+
+    def free(p: tuple[float, float], footing: "Footing", taken: np.ndarray) -> bool:
+        return (is_buildable(bundle, *p, max(footing.half_x, footing.half_z)) and ground.fits(*p, footing)
+                and apart(taken, *p, footing.half_x, footing.half_z, SITE_GAP))
+
+    # The factory keeps off each spot by an extractor and a solar beside it, whichever side that ends up on.
+    keep_off = footprints(spots[:, 0], spots[:, 1], mex_footing.half_x + SITE_GAP + 2 * solar_footing.half_x, mex_footing.half_z + SITE_GAP + 2 * solar_footing.half_z)
+    reach = max(factory.half_x, factory.half_z)
     site = None
-    for distance in np.arange(factory_radius + FACTORY_NEAREST, FACTORY_FARTHEST, RING):
-        site = next((p for p in _towards(x, z, *enemy, float(distance)) if is_buildable(bundle, *p, factory_radius) and _clear(*p, factory_radius, keep_off)), None)
+    for distance in np.arange(reach + FACTORY_NEAREST, FACTORY_FARTHEST, RING):
+        site = next((p for p in _towards(x, z, *enemy, float(distance)) if free(p, factory, keep_off)), None)
         if site:
             break
     site = site or start        # nowhere clear in reach, which no training map does
-    taken = [(site[0], site[1], factory_radius)] + [(float(s[0]), float(s[1]), mex_radius) for s in bundle.spot_list]
+    taken = np.concatenate((footprints(site[0], site[1], factory.half_x, factory.half_z), footprints(spots[:, 0], spots[:, 1], mex_footing.half_x, mex_footing.half_z)))
     builds: list[Build] = []
-    for spot in nearby_spots(bundle.spot_list, x, z, *enemy):
+    for spot in nearby_spots(bundle.spot_list, x, z, *enemy, allies):
         sx, sz = float(spot[0]), float(spot[1])
         builds.append(Build(mex, sx, sz))
         # Right beside it, unless the ground there is too steep.
         beside = None
-        for distance in np.arange(mex_radius + solar_radius + SITE_GAP, LINK_REACH, RING / 2):
-            beside = next((p for p in _towards(sx, sz, x, z, float(distance)) if is_buildable(bundle, *p, solar_radius) and _clear(*p, solar_radius, taken)), None)
+        for distance in np.arange(max(mex_footing.half_x + solar_footing.half_x, mex_footing.half_z + solar_footing.half_z) + SITE_GAP, LINK_REACH, RING / 2):
+            beside = next((p for p in _towards(sx, sz, x, z, float(distance)) if free(p, solar_footing, taken)), None)
             if beside:
                 break
         if beside:
-            taken.append((beside[0], beside[1], solar_radius))
+            taken = np.concatenate((taken, footprints(beside[0], beside[1], solar_footing.half_x, solar_footing.half_z)))
             builds.append(Build(solar, *beside))
-    rally = next((p for distance in np.arange(factory_radius + RALLY_AHEAD, FACTORY_FARTHEST, RING)
+    rally = next((p for distance in np.arange(reach + RALLY_AHEAD, FACTORY_FARTHEST, RING)
                   for p in _towards(*site, *enemy, float(distance)) if is_buildable(bundle, *p, RALLY_ROOM)), site)
     return Plan(site, tuple(builds), rally)
 
 
 @dataclass
 class Seat:
-    """One side's way through its opening."""
-    side: int
+    """One team's way through its opening.  `team` is its player and its commander's handle too (policy_sim_env adds the
+    commanders first, in team order)."""
+    team: int
     plan: Plan
     factory_type: int
     factory_def: int
@@ -148,14 +178,14 @@ class Seat:
 
     def advance(self, units: np.ndarray, decision: int) -> list[tuple[int, int, float, float, int]]:
         """The orders to give now.  Call when the commander has nothing to do, or when its step ran out of time."""
-        commander = self.side
+        commander = self.team
         self.deadline = decision + self.step_decisions
         if self.next_build == -1:
             self.next_build = 0
             return [(commander, rf.BUILD, *self.plan.factory, self.factory_type)]
         out = []
         if self.factory_uid < 0:
-            built = units[(units["def_id"] == self.factory_def) & (units["player"] == self.side) & ((units["flags"] & rf.BEING_BUILT) == 0)]
+            built = units[(units["def_id"] == self.factory_def) & (units["player"] == self.team) & ((units["flags"] & rf.BEING_BUILT) == 0)]
             if len(built):
                 self.factory_uid = int(built["uid"][0])
                 out.append((self.factory_uid, rf.PRODUCE, 0.0, 0.0, self.raider_type))
@@ -173,9 +203,12 @@ class Seat:
 class Ground:
     """One map's cells, for placing and for routes.  Everything's made when first asked for, as most maps of a pool are in use for only some of the time."""
 
-    def __init__(self, bundle: bd.Bundle, facts: Any):
+    def __init__(self, bundle: bd.Bundle, facts: Any, height: np.ndarray | None = None):
+        """height: the sim map's (zksim.Map.height), the ground at each cell of `passable`.  Without it, level ground is judged
+        by the bundle's coarser heights."""
         self.bundle, self.facts = bundle, facts
         self.rows, self.cols = bundle.passable.shape
+        self._height = np.ascontiguousarray(height, np.float32) if height is not None and height.shape == bundle.passable.shape else None
         self.water = facts.liquid == "water"
         self._masks: dict[tuple[float, float], np.ndarray] = {}
         self._cells: dict[tuple[float, float], np.ndarray] = {}
@@ -220,18 +253,38 @@ class Ground:
     def has_room(self, low: float, high: float) -> bool:
         return len(self._sites(low, high)) > 0
 
+    @property
+    def heights(self) -> np.ndarray:
+        """The ground's height at each cell of `passable`, float32."""
+        if self._height is None:
+            scale = int(self.bundle.cell / bd.PASS_CELL)
+            self._height = np.ascontiguousarray(np.repeat(np.repeat(self.bundle.height, scale, 0), scale, 1)[:self.rows, :self.cols], np.float32)
+        return self._height
+
     def fits(self, x: float, z: float, footing: "Footing") -> bool:
-        r = footing.radius
-        if x < r or z < r or x > self.bundle.map_w - r or z > self.bundle.map_h - r:
+        """Whether the game would let it be built here, but for what else stands there (CGameHelper::TestUnitBuildSquare): its
+        footprint's rectangle on the map, on ground or in water its data allows, and level: every cell under it within its
+        maxHeightDif of the ground at its middle.  One whose middle is under water floats or sits on the sea bed, and isn't asked."""
+        hx, hz = footing.half_x, footing.half_z
+        if x < hx or z < hz or x > self.bundle.map_w - hx or z > self.bundle.map_h - hz:
             return False
-        r0, r1 = int((z - r) / bd.PASS_CELL), min(int((z + r) / bd.PASS_CELL) + 1, self.rows)
-        c0, c1 = int((x - r) / bd.PASS_CELL), min(int((x + r) / bd.PASS_CELL) + 1, self.cols)
-        return bool(self.mask(footing.low, footing.high)[r0:r1, c0:c1].all())
+        r0, r1 = int((z - hz) / bd.PASS_CELL), min(int((z + hz) / bd.PASS_CELL) + 1, self.rows)
+        c0, c1 = int((x - hx) / bd.PASS_CELL), min(int((x + hx) / bd.PASS_CELL) + 1, self.cols)
+        if not self.mask(footing.low, footing.high)[r0:r1, c0:c1].all():
+            return False
+        if footing.height_dif <= 0.0:
+            return True
+        heights = self.heights
+        middle = heights[min(int(z / bd.PASS_CELL), self.rows - 1), min(int(x / bd.PASS_CELL), self.cols - 1)]
+        if middle < 0.0:
+            return True
+        under = heights[r0:r1, c0:c1]
+        return bool(under.max() - middle <= footing.height_dif and middle - under.min() <= footing.height_dif)
 
     def site(self, rng: np.random.Generator, footing: "Footing", x: float, z: float, taken: np.ndarray, spread: float = SITE_SPREAD) -> tuple[float, float] | None:
-        """Somewhere near this point it can stand, clear of what's taken (N x 3: x, z, radius).  If there's nowhere near, as for a shipyard at a base inland, the nearest it can find."""
+        """Somewhere near this point it can be built (`fits`), clear of what's taken (N x 4, `footprints`).  If there's nowhere near, as for a shipyard at a base inland, the nearest it can find."""
         def clear(px: float, pz: float) -> bool:
-            return not len(taken) or bool((np.hypot(taken[:, 0] - px, taken[:, 1] - pz) >= taken[:, 2] + footing.radius).all())
+            return apart(taken, px, pz, footing.half_x, footing.half_z)
 
         for _ in range(SITE_TRIES):
             px, pz = float(x + rng.normal(0.0, spread)), float(z + rng.normal(0.0, spread))
@@ -362,15 +415,32 @@ class Ground:
 
 @dataclass(frozen=True)
 class Footing:
-    """What a structure's data says about where it can stand."""
+    """What a structure's data says about where it can be built.  The game tests its footprint, a rectangle, and not the circle
+    units keep out of (`radius`, half the footprint's width): a Cloakbot Factory's is 112 by 160 elmos, its radius 56."""
     radius: float
     low: float      # water depth, below ground for land: a shipyard must have 15, a solar can't have any
     high: float
+    half_x: float = 0.0         # half the footprint, in elmos; the radius both ways if not said
+    half_z: float = 0.0
+    height_dif: float = 0.0     # how far the ground under it may be above or below the ground at its middle (the game's maxHeightDif); 0 for any
+
+    def __post_init__(self) -> None:
+        if self.half_x <= 0.0:
+            object.__setattr__(self, "half_x", self.radius)
+        if self.half_z <= 0.0:
+            object.__setattr__(self, "half_z", self.radius)
 
     @classmethod
     def of(cls, unit: dict) -> "Footing":
         """From a catalog record."""
-        return cls(float(unit["footprint_radius"]), float(unit["min_water_depth"]), float(unit["max_water_depth"]))
+        return cls(float(unit["footprint_radius"]), float(unit["min_water_depth"]), float(unit["max_water_depth"]),
+                   float(unit.get("foot_x", 0.0)), float(unit.get("foot_z", 0.0)), float(unit.get("max_height_dif", 0.0)))
+
+    def over(self, other: "Footing") -> "Footing":
+        """One that covers both, for a place either might go: the larger footprint, the stricter ground."""
+        dif = min(self.height_dif, other.height_dif) if self.height_dif > 0.0 and other.height_dif > 0.0 else max(self.height_dif, other.height_dif)
+        return Footing(max(self.radius, other.radius), max(self.low, other.low), min(self.high, other.high),
+                       max(self.half_x, other.half_x), max(self.half_z, other.half_z), dif)
 
 
 class Opening:
@@ -391,14 +461,28 @@ class Opening:
                 if not r["flags"] & zksim.AIR and r["move_class"] != zksim.MOVE_CLASSES.index("ship"):
                     self.factories.append((i, cat.index[raider]))
         self.mex, self.solar = cat.index[MEX], cat.index[SOLAR]
-        self.factory_radius = max(cat.units[f]["footprint_radius"] for f, _ in self.factories)
         self._plans: dict[tuple, Plan] = {}
+        self._factory_footing: Footing | None = None
 
-    def plan(self, bundle: bd.Bundle, start: tuple[float, float], enemy: tuple[float, float]) -> Plan:
-        key = (id(bundle), start, enemy)
+    @property
+    def factory_footing(self) -> Footing:
+        """As large as any of the factories that go on land, and wanting ground as level as the strictest: a plan's factory site
+        is whichever's."""
+        if self._factory_footing is None:
+            footings = [Footing.of(self.cat.units[f]) for f, _ in self.factories]
+            land = [f for f in footings if f.low <= 0.0] or footings
+            out = land[0]
+            for f in land[1:]:
+                out = out.over(f)
+            self._factory_footing = out
+        return self._factory_footing
+
+    def plan(self, ground: "Ground", start: tuple[float, float], enemy: tuple[float, float], allies: tuple = ()) -> Plan:
+        key = (id(ground.bundle), start, enemy, allies)
         if key not in self._plans:
             u = self.cat.units
-            self._plans[key] = make_plan(bundle, start, enemy, self.factory_radius, self.mex, u[self.mex]["footprint_radius"], self.solar, u[self.solar]["footprint_radius"])
+            self._plans[key] = make_plan(ground, start, enemy, self.factory_footing, self.mex, Footing.of(u[self.mex]), self.solar,
+                                         Footing.of(u[self.solar]), allies)
         return self._plans[key]
 
     def choices(self, ground: Ground, start: tuple[float, float], enemy: tuple[float, float]) -> tuple[list[int], np.ndarray]:
@@ -415,14 +499,16 @@ class Opening:
         """When none suits, the one that gets to most metal."""
         return max(range(len(self.factories)), key=lambda k: ground.metal_reach(int(self.cat.units[self.factories[k][1]]["move_class"]), start))
 
-    def seat(self, rng: np.random.Generator, side: int, ground: Ground, start: tuple[float, float], enemy: tuple[float, float]) -> Seat:
+    def seat(self, rng: np.random.Generator, team: int, ground: Ground, start: tuple[float, float], enemy: tuple[float, float],
+             allies: tuple = ()) -> Seat:
+        """enemy: the start it plans towards, the nearest enemy's.  allies: as `nearby_spots` takes them, none in a 1v1."""
         chosen, chances = self.choices(ground, start, enemy)
         k = chosen[int(rng.choice(len(chosen), p=chances))] if chosen else self._fallback(ground, start)
         factory, raider = self.factories[k]
-        plan = self.plan(ground.bundle, start, enemy)
+        plan = self.plan(ground, start, enemy, allies)
         footing = Footing.of(self.cat.units[factory])
         if footing.low > 0.0:       # a shipyard: as near as there's deep enough water
-            place = ground.site(rng, footing, start[0], start[1], np.zeros((0, 3), np.float32))
+            place = ground.site(rng, footing, start[0], start[1], np.zeros((0, 4), np.float32))
             if place is not None:
                 plan = replace(plan, factory=place)
-        return Seat(side, plan, factory, int(self.cat.units[factory]["def_id"]), raider, int(STEP_SECONDS * 2) // self.decide_every)
+        return Seat(team, plan, factory, int(self.cat.units[factory]["def_id"]), raider, int(STEP_SECONDS * 2) // self.decide_every)

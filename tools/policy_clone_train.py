@@ -137,7 +137,7 @@ def bundles(maps: str | None) -> dict[str, bd.Bundle]:
 # Data -------------------------------------------------------------------------------------------------------------------------------------------------
 
 def _files(data: pathlib.Path) -> tuple[list[tuple[str, int, int]], list[tuple[str, int, int]]]:
-    """Sides of games, (path, side, length), training and held out.  Both sides of a game go the same way."""
+    """Sides of games, (path, side, length), training and held out.  Every side of a game goes the same way."""
     train, held = [], []
     for path, side, n in cd.sides(data):
         (held if zlib.crc32(pathlib.Path(path).name.encode()) % HELD_OUT == 0 else train).append((path, side, n))

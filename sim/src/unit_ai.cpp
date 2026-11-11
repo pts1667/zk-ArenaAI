@@ -66,7 +66,7 @@ void random_ball(Rng& rng, float& ox, float& oz) {
 }
 }  // namespace
 
-// ---------- What a side knows ----------
+// ---------- What an allyteam knows ----------
 
 bool World::in_sight(int s, int t) const { return behaviour != ZK_BEHAVIOUR_ORDERS || views[size_t(s)].in_los[size_t(t)]; }
 
@@ -97,8 +97,8 @@ void World::aim_error(int t, float& ex, float& ez) const {
 }
 
 void World::update_radar_error() {
-    const int n = count();
-    for (int u = 0; u < n; ++u) {
+    for (size_t k = 0, n = live.size(); k < n; ++k) {
+        const int u = live[k];
         if (!alive[size_t(u)]) continue;
         UnitAI& a = ai[size_t(u)];
         float nx, nz;
@@ -229,7 +229,7 @@ int World::closest_target(int u, float cx, float cz, float radius) const {
     float best = radius * radius;
     int found = -1;
     const int s = side[size_t(u)];
-    for_side(1 - s, cx, cz, radius, [&](int t) {
+    for_enemies(s, cx, cz, radius, [&](int t) {
         if (!alive[size_t(t)]) return;
         const float dx = x[size_t(t)] - cx, dz = z[size_t(t)] - cz, d2 = dx * dx + dz * dz;
         if (d2 < best && can_be_aimed_at(s, t) && valid_chase_target(u, t)) {
@@ -244,7 +244,7 @@ int World::nearest_seen_enemy(int u, float radius) const {
     float best = radius * radius;
     int found = -1;
     const int s = side[size_t(u)];
-    for_side(1 - s, x[size_t(u)], z[size_t(u)], radius, [&](int t) {
+    for_enemies(s, x[size_t(u)], z[size_t(u)], radius, [&](int t) {
         if (!alive[size_t(t)]) return;
         const float dx = x[size_t(t)] - x[size_t(u)], dz = z[size_t(t)] - z[size_t(u)], d2 = dx * dx + dz * dz;
         if (d2 < best && can_be_aimed_at(s, t)) {
@@ -634,8 +634,8 @@ void World::update_unit_ai() {
         ZK_PROF(AI_ERROR);
         update_radar_error();
     }
-    const int n = count();
-    for (int u = 0; u < n; ++u) {
+    for (size_t k = 0, n = live.size(); k < n; ++k) {
+        const int u = live[k];
         if (!alive[size_t(u)] || !active(u) || !(type_of(u).flags & ZK_U_MOBILE)) continue;
         {
             ZK_PROF(AI_COMMANDS);
@@ -672,7 +672,7 @@ bool World::kamikaze_due(int u) const {
     if (a.fire_state < FIRE_AT_WILL) return false;
     bool due = false;
     const int own = side[size_t(u)];
-    for_side(1 - own, px, pz, reach, [&](int t) {
+    for_enemies(own, px, pz, reach, [&](int t) {
         if (due || !alive[size_t(t)] || (type_of(t).flags & ZK_U_AIR)) return;
         if (!within(t, reach)) return;
         due = (d.flags & ZK_U_KAMIKAZE_BLIND) || in_sight(own, t);
@@ -687,8 +687,8 @@ void World::self_destruct(int u) {
 }
 
 void World::update_kamikaze() {
-    const int n = count();
-    for (int u = 0; u < n; ++u) {
+    for (size_t k = 0, n = live.size(); k < n; ++k) {
+        const int u = live[k];
         if (alive[size_t(u)] && type_of(u).kamikaze_distance > 0.0f && active(u) && kamikaze_due(u)) self_destruct(u);
     }
 }

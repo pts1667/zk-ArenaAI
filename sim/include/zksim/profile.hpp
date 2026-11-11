@@ -13,7 +13,7 @@ enum Phase {
     GRID, CLOAK, NEAREST, TARGETS, FIRE, SHOTS, BURN, DEATHS, STATUS, ECONOMY,
     MOVE, MOVE_WANT, MOVE_WAYPOINT, WAYPOINT_LINE, WAYPOINT_ROUTE, MOVE_FRAMES, MOVE_SEPARATE, FOG, UNIT_AI,
     KAMIKAZE, ORDERS, EMIT, FEATURES, STATS, FOG_SWEEP, FOG_GONE, AI_ERROR, AI_COMMANDS, AI_TACTICS,
-    FEATURES_INDEX, FEATURES_SWEEP, MOVE_ABILITIES,
+    FEATURES_INDEX, FEATURES_SWEEP, MOVE_ABILITIES, CHICKENS,
     PHASE_COUNT
 };
 
@@ -21,7 +21,7 @@ inline constexpr const char* NAMES[PHASE_COUNT] = {
     "grid", "cloak", "nearest", "targets", "fire", "shots", "burn", "deaths", "status", "economy",
     "move", "move.wants_to_walk", "move.waypoint", "move.waypoint.goal_line", "move.waypoint.route", "move.frames", "move.separate", "fog", "unit_ai",
     "kamikaze", "orders", "emit_view", "emit_features", "side_stats", "fog.sweep", "fog.gone", "unit_ai.radar_error", "unit_ai.commands",
-    "unit_ai.tactics", "emit_features.index", "emit_features.sweep", "move.abilities",
+    "unit_ai.tactics", "emit_features.index", "emit_features.sweep", "move.abilities", "chickens",
 };
 
 struct Counters {

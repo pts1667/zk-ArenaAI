@@ -345,8 +345,8 @@ void World::move_one(int u) {
 }
 
 void World::separate() {
-    const int n = count();
-    for (int u = 0; u < n; ++u) {
+    for (size_t k = 0, n = live.size(); k < n; ++k) {
+        const int u = live[k];
         if (!alive[size_t(u)]) continue;
         const auto& d = type_of(u);
         if (!(d.flags & ZK_U_MOBILE) || (d.flags & ZK_U_AIR) || jump[size_t(u)].flying) continue;
@@ -379,9 +379,8 @@ void World::separate() {
 }
 
 void World::move_units() {
-    const int n = count();
-    for (int u = 0; u < n; ++u)
-        if (alive[size_t(u)] && (type_of(u).flags & ZK_U_MOBILE)) {
+    for (size_t k = 0, n = live.size(); k < n; ++k)
+        if (const int u = live[k]; alive[size_t(u)] && (type_of(u).flags & ZK_U_MOBILE)) {
             if (type_of(u).flags & ZK_U_PLANE)
                 fly_plane(u);
             else

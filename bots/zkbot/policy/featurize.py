@@ -25,13 +25,15 @@ from . import rawframe as rf
 from .bundle import PASS_CELL, Bundle
 from .tables import TYPE_DIM, TypeTable
 
-FEATURE_VERSION = 7          # what a saved encoder or actor was trained to read: raise it with any change to the tensors' meaning
+FEATURE_VERSION = 8          # what a saved encoder or actor was trained to read: raise it with any change to the tensors' meaning
                              # 7: ids sized for free-for-all, 64 players and 8 allyteams, so an unknown id reads 64 and 8 (2026-11-10)
-ENCODER_FEATURE_VERSIONS = (7,)     # those an encoder reads alike
+                             # 8: caps raised for long and many-sided games, 1280 units, 512 controllable, 512 features (2026-11-10)
+ENCODER_FEATURE_VERSIONS = (8,)     # those an encoder reads alike
 
-CAP_CONTROLLABLE, CAP_UNITS, CAP_HIDDEN = 256, 592, 64
+# The user's, for long and many-sided games (2026-11-10): an 80-minute 1v1 had 656 records in sight on a side and 609 of its own.
+CAP_CONTROLLABLE, CAP_UNITS, CAP_HIDDEN = 512, 1280, 64
 CAP_SITES = 24
-CAP_FEATURES = 32           # wrecks and the like in sight.  Past that, a region's metal says what's left out.
+CAP_FEATURES = 512          # wrecks and the like in sight.  Past that, a region's metal says what's left out.
 CAP_SUMMARIES = 12
 # How the rest of the pool is chosen: what can be aimed at comes first, what's in sight before what's on radar, whichever way the
 # armies stand.  Within each, value over distance from our army.  A blip's type may be unknown, so nothing counts for less than the floor.

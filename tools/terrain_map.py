@@ -54,6 +54,7 @@ class MapFile:
     spot_source: str = "metalmap"
     blocked_types: int = 0
     generated: bool = False    # placeholder heights: the map builds its terrain in-game
+    cluster_radius: float | None = None     # elmos walking between spots of one region: terrain.TerrainMap's for the map's size if None
 
     @property
     def center(self) -> np.ndarray:
@@ -248,7 +249,7 @@ def build(mf: MapFile, water_level: float = 0.0) -> tr.TerrainMap:
     # The slope uses the real corner heights, as the engine does.
     return tr.TerrainMap(mf.center, tr.slope_from_corners(mf.corners), spots=mf.spots,
                          water_level=water_level, water_damage=mf.water_damage * DAMAGE_PER_SLOW_UPDATE,
-                         hover_safe=mf.hover_safe)
+                         hover_safe=mf.hover_safe, cluster_radius=mf.cluster_radius)
 
 
 def graph_errors(mf: MapFile, m: tr.TerrainMap) -> dict[str, tuple[int, int]]:

@@ -164,7 +164,7 @@ bool World::throw_ready(int u) const {
     return m >= 0 && cooldown[size_t(u) * ZK_MAX_MOUNTS + size_t(m)] <= 0.0f;
 }
 
-// CheckOverlobPrevention: it won't fire with nothing around it that its side can see.
+// CheckOverlobPrevention: it won't fire with nothing around it that its allyteam can see.
 bool World::someone_to_throw(int u) const {
     bool found = false;
     const size_t i = size_t(u);
@@ -325,9 +325,9 @@ void World::update_teleporters() {
             if (active(t.unit) && !disarmed(t.unit)) t.make_left -= float(ZK_TICK_FRAMES) * (1.0f - slow_now(t.unit));
             if (t.make_left <= 0.0f) {
                 if (t.beacon >= 0) hp[size_t(t.beacon)] = 0.0f;
-                const int side_of = side[i], beacon_type = d.beacon_type;
+                const int owner = team[i], beacon_type = d.beacon_type;
                 const float bx = std::clamp(t.make_x, 0.0f, map->width() - 1.0f), bz = std::clamp(t.make_z, 0.0f, map->depth() - 1.0f);
-                const int made = add(beacon_type, side_of, bx, bz, 0.0f, 1.0f, 1.0f);
+                const int made = add(beacon_type, owner, bx, bz, 0.0f, 1.0f, 1.0f);
                 std::fill_n(cooldown.begin() + std::ptrdiff_t(size_t(made) * ZK_MAX_MOUNTS), ZK_MAX_MOUNTS, 0.0f);
                 ai[size_t(made)].queue_was_empty = true;
                 t.beacon = made;
@@ -365,7 +365,7 @@ int World::free_pad(int silo) const {
 
 // cruisemissile.lua's RemoveMissile: it goes off the map when it fires, and leaves nothing behind.
 void World::launch_missile(int u) {
-    alive[size_t(u)] = 0;
+    died(u);
     silo_missiles.erase(std::remove_if(silo_missiles.begin(), silo_missiles.end(), [u](const SiloMissile& m) { return m.unit == u; }), silo_missiles.end());
 }
 

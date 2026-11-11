@@ -18,15 +18,17 @@ except OSError:
     pytest.skip("needs the built sim library", allow_module_level=True)
 
 
-def _env_with_values(a: float, b: float, decide_every: int = 1) -> se.SimEnv:
+def _env_with_values(a: float, b: float, decide_every: int = 1, lead_share: float = 1.0) -> se.SimEnv:
     """Both sides stay alive at these metal values, whatever the sim does."""
     env = se.SimEnv(1, 3, ["mirror"], units=2, threads=1, decide_every=decide_every)
+    env.lead_share = lead_share
     env.begin()
     real = env.batch.step
 
     def step(*args, **kwargs):
         real(*args, **kwargs)
         env.batch.stats[0, :, :2] = ((a, 5.0), (b, 5.0))
+        env.batch.stats[0, :, se.KEEP_STAT] = 5.0       # in the game, whichever stat says so
     env.batch.step = step
     return env
 
@@ -79,6 +81,50 @@ def test_a_lead_short_of_the_ratio_or_the_metal_plays_on(a, b):
 def test_exactly_the_metal_lead_is_enough():
     env = _env_with_values(10000.0, 0.0)
     assert _steps_to_end(env, se.EARLY_END_DECISIONS)[0] == se.EARLY_END_DECISIONS
+
+
+def test_a_game_drawn_without_the_lead_rule_plays_on_however_far_ahead_and_its_facts_say_so():
+    env = _env_with_values(16000.0, 6000.0, lead_share=0.0)
+    assert not env.lead_rule[0]
+    assert _steps_to_end(env, se.EARLY_END_DECISIONS + 5)[1] == []
+    env.time_limit = int(env.decisions[0]) + 1
+    env.step(0.0)
+    assert env.done and env.result[0] == 0.0 and env.ended[0]["how"] == "limit" and env.ended[0]["lead_rule"] is False
+    won = _env_with_values(16000.0, 6000.0)
+    _steps_to_end(won, se.EARLY_END_DECISIONS)
+    assert won.ended[0]["how"] == "lead" and won.ended[0]["lead_rule"] is True
+
+
+def test_the_lead_rule_is_drawn_for_each_new_game_at_its_share():
+    env = se.SimEnv(64, 3, ["fight"], threads=1)
+    env.begin()
+    assert env.lead_rule.all(), "whole by default: tests, recording and evals"
+    env.lead_share = 0.5
+    assert env.lead_rule.all(), "games under way stay as they are"
+    for g in range(64):
+        env._reset(g)
+    assert 16 < int(env.lead_rule.sum()) < 48
+
+
+@pytest.mark.parametrize("beta", (0.0, 0.6))
+def test_a_win_pays_a_share_of_the_time_left_on_top_unfaded_and_the_loser_pays_it(beta):
+    """policy_sim_env._speed: at the lead's end at 2 minutes, speed_weight x the share of the time limit left, whatever beta,
+    zero-sum; none for a draw."""
+    env = _env_with_values(16000.0, 6000.0)
+    env.speed_weight = 0.1
+    _steps_to_end(env, se.EARLY_END_DECISIONS)
+    with_speed = [env.reward(seat, beta) for seat in (0, 1)]
+    env.speed_weight = 0.0
+    without = [env.reward(seat, beta) for seat in (0, 1)]
+    term = 0.1 * (1.0 - se.EARLY_END_DECISIONS / se.TIME_LIMIT_DECISIONS)
+    assert with_speed[0] - without[0] == pytest.approx(term) and with_speed[1] - without[1] == pytest.approx(-term)
+    assert with_speed[0] == pytest.approx(-with_speed[1])
+    draw = _env_with_values(16000.0, 6000.0, lead_share=0.0)
+    draw.speed_weight, draw.time_limit = 0.1, 10
+    _steps_to_end(draw, 10)
+    paid = draw.reward(0, beta)
+    draw.speed_weight = 0.0
+    assert draw.done and draw.result[0] == 0.0 and draw.reward(0, beta) == paid
 
 
 def test_two_minutes_stay_two_minutes_at_a_slower_decision_rate():
@@ -174,15 +220,17 @@ def test_a_plan_on_a_box_is_kept_and_not_redone():
     env = se.SimEnv(1, 3, ["scripts"], threads=1)
     _, bundle, facts = se.pool()[0]
     boxes = facts.layouts[0]
-    assert env.opening.plan(bundle, boxes[0].point, boxes[1].point) is env.opening.plan(bundle, boxes[0].point, boxes[1].point)
+    assert env.opening.plan(env.grounds[id(bundle)],boxes[0].point, boxes[1].point) is env.opening.plan(env.grounds[id(bundle)],boxes[0].point, boxes[1].point)
 
 
 def test_every_map_has_a_plan_with_a_solar_beside_each_extractor():
     env = se.SimEnv(1, 3, ["scripts"], threads=1)
     op, cat = env.opening, se.catalog()
     mex_r, solar_r = cat.units[op.mex]["footprint_radius"], cat.units[op.solar]["footprint_radius"]
+    # Footprints are rectangles kept apart along x or along z, so centres are at least the shorter halves apart.
+    factory_r = min(op.factory_footing.half_x, op.factory_footing.half_z)
     for bundle, start, enemy in _sides(env):
-        plan = op.plan(bundle, start, enemy)
+        plan = op.plan(env.grounds[id(bundle)], start, enemy)
         mexes = [b for b in plan.builds if b.type == op.mex]
         solars = [b for b in plan.builds if b.type == op.solar]
         assert 3 <= len(mexes) <= 6 and len(solars) == len(mexes), bundle.map_w
@@ -191,16 +239,16 @@ def test_every_map_has_a_plan_with_a_solar_beside_each_extractor():
         spots = bundle.spot_list
         assert all(np.min(np.hypot(spots[:, 0] - m.x, spots[:, 1] - m.z)) < 1.0 for m in mexes)
         # Nothing is planned on a spot it doesn't use, or on the factory.
-        assert np.min(np.hypot(spots[:, 0] - plan.factory[0], spots[:, 1] - plan.factory[1])) > op.factory_radius
+        assert np.min(np.hypot(spots[:, 0] - plan.factory[0], spots[:, 1] - plan.factory[1])) > factory_r
         for s in solars:
             assert np.min(np.hypot(spots[:, 0] - s.x, spots[:, 1] - s.z)) >= mex_r + solar_r
-            assert np.hypot(s.x - plan.factory[0], s.z - plan.factory[1]) >= op.factory_radius + solar_r
+            assert np.hypot(s.x - plan.factory[0], s.z - plan.factory[1]) >= factory_r + solar_r
 
 
 def test_each_side_only_takes_spots_on_its_own_side():
     env = se.SimEnv(1, 3, ["scripts"], threads=1)
     for bundle, start, enemy in _sides(env):
-        for b in env.opening.plan(bundle, start, enemy).builds:
+        for b in env.opening.plan(env.grounds[id(bundle)],start, enemy).builds:
             if b.type == env.opening.mex:
                 assert np.hypot(b.x - start[0], b.z - start[1]) <= np.hypot(b.x - enemy[0], b.z - enemy[1])
 
@@ -400,3 +448,232 @@ def test_finished_units_of_rare_types_earn_a_zero_sum_bonus_and_the_first_units_
         env.finished_seats()
     assert earned > 0.0 and env.made.sum() > 0.0
     assert env.bonus.max() <= env.diversity * 50
+
+# Games of several teams ------------------------------------------------------------------------------------------------------------
+
+
+def _ffa_maps(boxes: int = 4, **facts) -> list:
+    """Agalta with `boxes` start boxes of its own, round places a base fits, as a free-for-all map: the training maps have two."""
+    import dataclasses
+    world_map, bundle, known = se.pool()[0]
+    places = []
+    for fx, fz in ((0.15, 0.2), (0.85, 0.8), (0.85, 0.2), (0.15, 0.8)):
+        x0, z0 = fx * bundle.map_w, fz * bundle.map_h
+        near = [(x0 + dx, z0 + dz) for r in range(0, 1600, 64) for dx in (-r, 0, r) for dz in (-r, 0, r)]
+        places.append(next((float(x), float(z)) for x, z in near if po.is_buildable(bundle, x, z, se.START_ROOM)))
+    starts = [se.StartBox(([[x - 300.0, z - 300.0], [x + 300.0, z - 300.0], [x + 300.0, z + 300.0], [x - 300.0, z + 300.0]],), (x, z))
+              for x, z in places[:boxes]]
+    modes = {**known.modes, "ffa": boxes, **facts.pop("modes", {})}
+    return [(world_map, bundle, dataclasses.replace(known, layouts=[starts], modes=modes, **facts))]
+
+
+def _held(env: se.SimEnv, values: np.ndarray, keep: np.ndarray) -> None:
+    """Game 0's teams at these values, and in the game where `keep` says, whatever the sim does."""
+    real = env.batch.step
+
+    def step(*args, **kwargs):
+        real(*args, **kwargs)
+        n = len(values)
+        env.batch.stats[0, :n, 0] = values
+        env.batch.stats[0, :n, se.KEEP_STAT] = keep
+    env.batch.step = step
+
+
+def test_kinds_draw_only_maps_that_hold_them_and_a_groups_maps_weigh_as_one():
+    """Violet Rampart's three seeds of a number of bases weigh as one map; a map that isn't a 1v1 map isn't drawn for 1v1s."""
+    one = _ffa_maps(2, modes={"ffa": 0})[0]
+    rampart = _ffa_maps(3, modes={"1v1": False}, group="violet_rampart:3")[0]
+    big = _ffa_maps(4)[0]
+    env = se.SimEnv(1, 3, ["scripts"], threads=1, maps=[one, rampart, rampart, rampart, big], kinds={"1v1": 1.0, "ffa": 1.0}, teams=4)
+    index, p = env._map_draws["ffa"]
+    assert index.tolist() == [1, 2, 3, 4] and np.allclose(p, [1 / 6, 1 / 6, 1 / 6, 1 / 2])
+    assert env._map_draws["1v1"][0].tolist() == [0, 4]
+    assert se.SimEnv(1, 3, ["scripts"], threads=1)._map_draws == {"1v1": None}, "every map, none grouped: drawn as always"
+    with pytest.raises(ValueError):
+        se.SimEnv(1, 3, ["scripts"], threads=1, kinds={"ffa": 1.0})        # the training maps have two boxes
+
+
+def test_a_1v1_plays_the_same_in_a_batch_with_room_for_8_teams():
+    narrow, wide = se.SimEnv(4, 31, ["fight"], threads=2, variants=True), se.SimEnv(4, 31, ["fight"], threads=2, variants=True, teams=8)
+    for env in (narrow, wide):
+        env.diversity = 0.05
+        env.begin()
+    for _ in range(300):
+        for env in (narrow, wide):
+            for s in env.policy_seats_to_act():
+                env.give_orders(s, [])
+            env.step(0.0)
+        assert narrow.batch.records[:, :2].tobytes() == wide.batch.records[:, :2].tobytes()
+        assert [narrow.reward(g * 2 + t, 0.3) for g in range(4) for t in (0, 1)] == [wide.reward(g * 8 + t, 0.3) for g in range(4) for t in (0, 1)]
+        assert [(s // 2, s % 2) for s, _, _ in narrow.finished_seats()] == [(s // 8, s % 8) for s, _, _ in wide.finished_seats()]
+
+
+def test_a_team_game_starts_each_alliance_in_its_own_box_each_team_with_its_own_commander_and_its_allies_in_sight():
+    env = se.SimEnv(2, 5, ["mirror"], threads=2, kinds={"teams": 1.0})
+    env.begin()
+    assert env.slots == 8 and env.seat_count == 16
+    layouts = {id(b): facts.layouts for _, b, facts in se.pool()}
+    for g in range(2):
+        assert env.kind[g] == "teams" and env.n_teams[g] == 4 and env.ally[g].tolist() == [0, 0, 1, 1, -1, -1, -1, -1]
+        starts = env.starts[g, :8].reshape(4, 2)
+        layout = next(b for b in layouts[id(env.bundle[g])] if any(_near_box(box, *starts[0]) for box in b))
+        box_of = [next(i for i, box in enumerate(layout) if _near_box(box, float(x), float(z))) for x, z in starts]
+        assert box_of[0] == box_of[1] != box_of[2] == box_of[3]
+        assert np.hypot(*(starts[0] - starts[1])) > 0.0 and np.hypot(*(starts[2] - starts[3])) > 0.0
+        for t in range(4):
+            u = env.batch.records[g, t, :env.batch.counts[g, t]]
+            assert u["uid"][0] == t and u["player"][0] == t
+            ally = t + 1 if t % 2 == 0 else t - 1
+            assert ally in u["player"].tolist() and (u["ally_team"][u["player"] == ally] == t // 2).all()
+    assert env.policy_seats() == [0, 1, 2, 3, 8, 9, 10, 11] == env.policy_seats_to_act()
+
+
+def test_every_team_of_an_alliance_gets_its_alliances_reward_and_the_two_alliances_rewards_sum_to_zero():
+    env = se.SimEnv(2, 9, ["scripts"], threads=2, kinds={"teams": 1.0}, variants=True)
+    env.diversity, env.speed_weight = 1.0, 0.1
+    env.begin()
+    for _ in range(300):
+        env.step(0.0)
+        for g in range(2):
+            r = [env.reward(g * env.slots + t, 0.3) for t in range(4)]
+            assert r[0] == r[1] == -r[2] == -r[3]
+        env.finished_seats()
+
+
+def test_in_a_free_for_all_an_alliance_out_is_paid_its_loss_at_once_and_the_survivors_share_it_at_the_end():
+    """With A alliances: -1 / (A - 1) at once for one out, and the speed term on top; its seat finishes and acts no more while the
+    game goes on, and the rest's shaped rewards sum to zero.  At the end the last one in gets 1, and the whole game's results and
+    speed terms sum to zero."""
+    env = se.SimEnv(1, 3, ["mirror"], threads=1, maps=_ffa_maps(4), kinds={"ffa": 1.0}, teams=4)
+    env.speed_weight = 0.1
+    values, keep = np.full(4, 5000.0, np.float32), np.ones(4, np.float32)
+    _held(env, values, keep)
+    env.begin()
+    A = int(env.n_allies[0])
+    assert env.kind[0] == "ffa" and A in (3, 4) and env.ally[0, :A].tolist() == list(range(A))
+    paid = np.zeros(A)
+    for _ in range(5):
+        env.step(0.0)
+        assert not env.done
+    keep[A - 1] = 0.0
+    env.step(0.0)
+    left = 1.0 - float(env.decisions[0]) / env.time_limit
+    assert env.done == [(A - 1, "mirror", 0.0)] and not env._replace
+    assert env.reward(A - 1, 1.0) == pytest.approx(-(1.0 + 0.1 * left) / (A - 1))
+    assert env.outcome[0, A - 1] == -1.0 / (A - 1) and env.ended[A - 1]["result"] == "lost" and env.ended[A - 1]["how"] == "eliminated"
+    paid += env.paid[0, :A] + 0.1 * env.speed_paid[0, :A]
+    env.finished_seats()
+    assert env.policy_seats_to_act() == list(range(A - 1))
+    for _ in range(3):
+        env.step(0.0)
+        assert env.reward(A - 1, 1.0) == 0.0 and not env.done
+        assert sum(env.reward(t, 0.0) for t in range(A - 1)) == pytest.approx(0.0, abs=1e-9)
+        env.finished_seats()
+    keep[1:] = 0.0
+    env.step(0.0)
+    paid += env.paid[0, :A] + 0.1 * env.speed_paid[0, :A]
+    assert env._replace == [0] and env.result[0] == 1.0 and env.outcome[0, :A].tolist() == [1.0] + [-1.0 / (A - 1)] * (A - 1)
+    assert sorted(s for s, _, _ in env.done) == list(range(A - 1)) and env.ended[0]["result"] == "won"
+    assert paid.sum() == pytest.approx(0.0, abs=1e-12) and paid[0] > 1.0
+
+
+def test_a_lead_over_the_rest_together_ends_a_free_for_all_with_every_other_alliance_out():
+    env = se.SimEnv(1, 3, ["scripts"], threads=1, maps=_ffa_maps(3), kinds={"ffa": 1.0}, teams=3)
+    _held(env, np.array([40000.0, 6000.0, 6000.0], np.float32), np.ones(3, np.float32))
+    env.begin()
+    for _ in range(se.EARLY_END_DECISIONS):
+        env.step(0.0)
+        if env._replace:
+            break
+    assert env.decisions[0] == se.EARLY_END_DECISIONS and env.outcome[0, :3].tolist() == [1.0, -0.5, -0.5]
+    assert {o["how"] for o in env.outcomes} == {"lead"} and len(env.outcomes) == 3
+
+
+# Chicken games ---------------------------------------------------------------------------------------------------------------------
+
+
+def _queen(env: se.SimEnv, state: dict) -> None:
+    """Game 0's chicken state as `state` says, whatever the sim's (its "queen": 0 not yet, 1 alive, 2 dead)."""
+    real = env.batch.chicken_state
+    env.batch.chicken_state = lambda g: {**real(g), **state} if g == 0 else real(g)
+
+
+def _players(env: se.SimEnv, n: int) -> None:
+    """Every chicken game of the environment with n players."""
+    env._sizes = lambda kind, facts, boxes: [n]
+
+
+def test_chicken_difficulties_go_by_zero_k_names_and_a_chicken_game_needs_a_team_or_chicken_map_and_a_slot_for_its_chickens():
+    assert se.difficulty_weights(["very-easy:2", "Easy", "3:0.5"]) == {1: 2.0, 2: 1.0, 3: 0.5}
+    assert se.difficulty_weights({"Normal": 1.0, "Hard": 0.0}) == {3: 1.0}
+    assert set(se.difficulty_weights(se.CHICKEN_DIFFICULTY_WEIGHTS)) == {1, 2, 3}
+    with pytest.raises(ValueError):
+        se.difficulty_weights(["medium:1"])
+    assert se.slots_for({"chicken": 1.0}) == 5 and se.slots_for(se.parse_kinds("1v1:0.5 teams:0.2 ffa:0.2 chicken:0.1")) == 8
+    import dataclasses
+    facts = se.pool()[0][2]
+    ffa = dataclasses.replace(facts, modes={"1v1": False, "teams": 0, "ffa": 4, "chickens": False, "chickens_or_teams": False})
+    chickens = dataclasses.replace(facts, modes={"1v1": False, "teams": 0, "ffa": 0, "chickens": True, "chickens_or_teams": True})
+    older = dataclasses.replace(facts, modes={"1v1": True, "teams": 2, "ffa": 0, "chickens": False})       # before the key
+    assert [se.holds(f, "chicken", 5) for f in (ffa, chickens, older)] == [False, True, True]
+    assert not se.holds(chickens, "1v1", 5) and not se.holds(chickens, "chicken", 1)
+
+
+def test_a_chicken_game_starts_its_players_in_one_box_and_the_chickens_after_them_in_an_alliance_of_their_own_with_no_seat():
+    env = se.SimEnv(2, 4, ["mirror"], threads=2, kinds={"chicken": 1.0})
+    env.begin()
+    assert env.slots == 5
+    layouts = {id(b): facts.layouts for _, b, facts in se.pool()}
+    for g in range(2):
+        n = int(env.n_teams[g])
+        c = n - 1
+        assert env.kind[g] == "chicken" and 2 <= n <= 5 and env.chickens[g] == c and env.seats[g][c] is None
+        assert env.ally[g, :n].tolist() == [0] * c + [1] and env.n_allies[g] == 2 and not env.lead_rule[g]
+        assert [env.plays(g, t) for t in range(n)] == ["policy"] * c + ["chickens"]
+        assert env.batch.chicken_state(g)["team"] == c and zksim.CHICKEN_DIFFICULTIES[env.difficulty[g]] in se.CHICKEN_DIFFICULTY_WEIGHTS
+        own = env.batch.records[g, c, :env.batch.counts[g, c]]
+        assert not (own["player"] == c).any(), "the sim spawns them later"
+        starts = env.starts[g, :2 * c].reshape(c, 2)
+        layout = next(b for b in layouts[id(env.bundle[g])] if any(_near_box(box, *starts[0]) for box in b))
+        assert len({next(i for i, box in enumerate(layout) if _near_box(box, float(x), float(z))) for x, z in starts}) == 1
+    seats = [g * 5 + t for g in range(2) for t in range(int(env.n_teams[g]) - 1)]
+    assert env.policy_seats() == seats == env.policy_seats_to_act()
+
+
+def test_a_chicken_game_is_won_when_the_queen_dies_and_until_then_its_chickens_are_in_with_no_unit_at_all():
+    env = se.SimEnv(1, 4, ["mirror"], threads=1, kinds={"chicken": 1.0}, difficulties={"Easy": 1.0})
+    env.speed_weight = 0.1
+    _players(env, 2)
+    _held(env, np.full(3, 5000.0, np.float32), np.array([1.0, 1.0, 0.0], np.float32))
+    state = {"queen": 1}
+    _queen(env, state)
+    env.begin()
+    for _ in range(5):
+        env.step(0.0)
+        assert not env.done and env.reward(0, 0.3) == env.reward(1, 0.3)
+    state["queen"] = 2
+    env.step(0.0)
+    left = 1.0 - float(env.decisions[0]) / env.time_limit
+    assert env._replace == [0] and env.outcome[0, :3].tolist() == [1.0, 1.0, -1.0] and env.result[0] == 1.0
+    assert sorted((s, won) for s, _, won in env.done) == [(0, 1.0), (1, 1.0)]
+    assert env.ended[0]["how"] == "queen" and env.ended[0]["difficulty"] == "Easy" and env.ended[0]["game_kind"] == "chicken"
+    assert env.reward(0, 1.0) == env.reward(1, 1.0) == pytest.approx(1.0 + 0.1 * left)
+    chickens = env._game_facts(0, 2, False, True)
+    assert chickens["variant"] == "chickens" and chickens["own_factory"] == "" and chickens["how"] == "queen"
+
+
+@pytest.mark.parametrize("out", [True, False])
+def test_a_chicken_game_is_lost_when_its_players_are_out_and_drawn_at_the_time_limit(out):
+    env = se.SimEnv(1, 4, ["mirror"], threads=1, kinds={"chicken": 1.0})
+    _players(env, 2)
+    env.time_limit = 6
+    keep = np.array([1.0, 1.0, 0.0], np.float32)
+    _held(env, np.full(3, 5000.0, np.float32), keep)
+    _queen(env, {"queen": 1})
+    env.begin()
+    if out:
+        keep[:2] = 0.0
+    while not env._replace:
+        env.step(0.0)
+    assert env.outcome[0, :3].tolist() == ([-1.0, -1.0, 1.0] if out else [0.0, 0.0, 0.0])
+    assert env.decisions[0] == (1 if out else 6) and env.ended[0]["how"] == ("eliminated" if out else "limit")

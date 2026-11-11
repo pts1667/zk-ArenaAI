@@ -60,9 +60,10 @@ constexpr double CARETAKER_NEAR = 380.0;        // of the factory's centre and t
 constexpr double RADAR_FROM = 180.0;
 constexpr int SITE_TRIES = 24;           // policy_opening.Ground.site
 constexpr double NEVER = -1e9;           // pending.get(name, -1e9)
-// The second factory (the user's rule, 2026-11-10): at 40 metal a second not counting reclaim, or at 20 minutes, which the games
-// don't reach.  What it is is drawn once, when it's due: planes most often, then gunships, then striders (the user's play).  A
-// hub runs only on a grid of enough energy, so with none it's planes.  No third: more production is a plate and caretakers.
+// The second factory (the user's rule, 2026-11-10): at 40 metal a second not counting reclaim, or at 20 minutes, which games
+// reach now that they run to 80.  What it is is drawn once, when it's due: planes most often, then gunships, then striders (the
+// user's play).  A hub runs only on a grid of enough energy, so with none it's planes.  No third: more production is a plate and
+// caretakers.
 constexpr double SECOND_FROM_S = 20.0 * 60.0, SECOND_FROM_M = 40.0;
 const double SECOND_WEIGHTS[3] = {0.5, 0.3, 0.2};     // zks_data_desc.second_factories' order
 // Reclaim (the user, 2026-11-09): a few constructors kept at it while there are wrecks worth taking, and an idle one takes what's
@@ -78,6 +79,7 @@ constexpr double RECLAIM_WALK = 400.0;        // a wreck's worth is its metal / 
 constexpr float RECLAIM_FLEE = 500.0f;        // a reclaimer with an enemy army this near goes home
 constexpr float RECLAIM_HURT = 0.5f;          // and one below this share of its health
 constexpr float RECLAIM_FIT = 0.7f;           // a constructor below this isn't sent to reclaim
+constexpr double HOME_REACH = 300.0;          // one sent home is home within this (Seat::stuck)
 
 zk_order_rec order(int64_t uid, int kind, double x, double z, int64_t target) {
     zk_order_rec o;
@@ -128,7 +130,7 @@ struct GridOf {
 struct Pass {
     double made = 0.0;
     int small = 0;
-    std::vector<float> taken;       // n x 3
+    std::vector<float> taken;       // n x 4: x, z and half the footprint along each
     int pylons = 0;
     bool radar = false, factory = false, second = false;
     int expanding = 0;
@@ -146,13 +148,19 @@ bool Seat::avoided(double x, double z) const {
     return false;
 }
 
-std::vector<uint8_t> Seat::stuck(const Ctx& c, const std::vector<uint8_t>& builders) {
+// A constructor that's been going to a build for STUCK_AFTER without getting STUCK_NEARER to it, while still far from it; or one
+// sent home that's been as near as it gets, in reach of home, as long: those sent home crowd the one point, and many never reach
+// it, so their move never ends.
+std::vector<uint8_t> Seat::stuck(const Ctx& c, const std::vector<uint8_t>& builders, P2 home) {
     const double seconds = c.seconds;
     std::vector<uint8_t> out(own.size(), 0);
     std::vector<int64_t> alive;
     for (size_t i = 0; i < own.size(); i++) {
         const Rec* u = own[i];
-        if (!builders[i] || u->ord_kind != K_BUILD) continue;
+        if (!builders[i]) continue;
+        const bool build = u->ord_kind == K_BUILD;
+        const bool homing = u->ord_kind == K_MOVE && std::hypot(u->ord_x - home.x, u->ord_z - home.z) < 1.0;
+        if (!build && !homing) continue;
         int64_t uid = u->uid;
         alive.push_back(uid);
         double gx = u->ord_x, gz = u->ord_z;
@@ -163,13 +171,15 @@ std::vector<uint8_t> Seat::stuck(const Ctx& c, const std::vector<uint8_t>& build
         if (!was || py_hypot(was->gx - gx, was->gz - gz) > 1.0 || d < was->nearest - STUCK_NEARER) {
             if (was) *was = {uid, gx, gz, seconds, d};
             else going.push_back({uid, gx, gz, seconds, d});
-        } else if (seconds - was->since >= STUCK_AFTER && d > 300.0) {
+        } else if (seconds - was->since >= STUCK_AFTER && (build ? d > 300.0 : d <= HOME_REACH)) {
             out[i] = 1;
-            int64_t ix = floordiv(gx, 64.0), iz = floordiv(gz, 64.0);
-            bool found = false;
-            for (auto& a : avoid)
-                if (a.ix == ix && a.iz == iz) a.until = seconds + AVOID_FOR, found = true;
-            if (!found) avoid.push_back({ix, iz, seconds + AVOID_FOR});
+            if (build) {
+                int64_t ix = floordiv(gx, 64.0), iz = floordiv(gz, 64.0);
+                bool found = false;
+                for (auto& a : avoid)
+                    if (a.ix == ix && a.iz == iz) a.until = seconds + AVOID_FOR, found = true;
+                if (!found) avoid.push_back({ix, iz, seconds + AVOID_FOR});
+            }
             going.erase(going.begin() + (was - going.data()));
         }
     }
@@ -204,8 +214,25 @@ int Seat::have(int x, double seconds) const {
     return (seconds - pending[x] < PENDING_FOR && n == 0) ? 1 : n;
 }
 
+// On our half: nearer our base than any enemy base (`bases`), by OUR_HALF.
 bool Seat::ours(P2 p) const {
-    return py_hypot(p.x - base.x, p.z - base.z) <= OUR_HALF * py_hypot(p.x - enemy_base.x, p.z - enemy_base.z);
+    const double home = py_hypot(p.x - base.x, p.z - base.z);
+    for (P2 b : bases)
+        if (!(home <= OUR_HALF * py_hypot(p.x - b.x, p.z - b.z))) return false;
+    return true;
+}
+
+// A metal spot on our half, as numpy reckons it in float32, that's no ally's: among allies, a spot is whoever's start is nearest
+// (ties to the lower team), so that allied economies don't send constructors to the same spots.
+bool Seat::our_spot(float x, float z) const {
+    const float home = hypotf(x - (float)base.x, z - (float)base.z);
+    for (P2 b : bases)
+        if (!(home <= (float)OUR_HALF * hypotf(x - (float)b.x, z - (float)b.z))) return false;
+    for (const auto& p : partners) {
+        const float theirs = hypotf(x - (float)p.second.x, z - (float)p.second.z);
+        if (theirs < home || (theirs == home && p.first < team)) return false;
+    }
+    return true;
 }
 
 P2 Seat::front() const {
@@ -321,21 +348,25 @@ bool Seat::project(const Ctx& c, double income, const GridOf& grid, int& prow, P
     return false;
 }
 
-// policy_opening.Ground.site
-bool Seat::site(int mask, double radius, P2 near, const std::vector<float>& taken, double spread, P2& place) {
+// policy_opening.Ground.site: somewhere near that a structure of this row can be built, its footprint's rectangle clear of
+// those taken (policy_opening.apart: two may touch).
+bool Seat::site(int row, P2 near, const std::vector<float>& taken, double spread, P2& place) {
     const Ground& g = *ground;
-    size_t nt = taken.size() / 3;
-    float rf = (float)radius;
+    const Data& d = *data;
+    int mask = d.footing[row];
+    size_t nt = taken.size() / 4;
+    float hx = d.half_x[row], hz = d.half_z[row];
+    double dif = d.height_dif[row];
     auto clear = [&](double px, double pz) {
         float fx = (float)px, fz = (float)pz;
         for (size_t t = 0; t < nt; t++)
-            if (!(hypotf(taken[3 * t] - fx, taken[3 * t + 1] - fz) >= taken[3 * t + 2] + rf)) return false;
+            if (!(std::fabs(taken[4 * t] - fx) >= taken[4 * t + 2] + hx || std::fabs(taken[4 * t + 1] - fz) >= taken[4 * t + 3] + hz)) return false;
         return true;
     };
     for (int k = 0; k < SITE_TRIES; k++) {
         double px = near.x + (0.0 + spread * draws.normal());
         double pz = near.z + (0.0 + spread * draws.normal());
-        if (g.fits(px, pz, radius, mask) && clear(px, pz)) {
+        if (g.fits(px, pz, hx, hz, dif, mask) && clear(px, pz)) {
             place = {px, pz};
             return true;
         }
@@ -355,7 +386,7 @@ bool Seat::site(int mask, double radius, P2 near, const std::vector<float>& take
                       [&](int a, int b) { return dist[a] < dist[b] || (dist[a] == dist[b] && a < b); });
     for (size_t k = 0; k < take; k++) {
         double px = cells[2 * idx[k]], pz = cells[2 * idx[k] + 1];
-        if (g.fits(px, pz, radius, mask) && clear(px, pz)) {
+        if (g.fits(px, pz, hx, hz, dif, mask) && clear(px, pz)) {
             place = {px, pz};
             return true;
         }
@@ -370,7 +401,7 @@ Job Seat::build(int64_t uid, int row, P2 near, const std::vector<float>& taken, 
     if (mask < 0) return {};
     for (int k = 0; k < 4; k++) {
         P2 place;
-        if (!site(mask, d.footing_radius[row], near, taken, spread, place)) return {};
+        if (!site(row, near, taken, spread, place)) return {};
         if (avoided(place.x, place.z) || (use_by && by_class != -1 && !ground->joined(by_class, by_at, place))) continue;
         if (!grid || on < 0 || grid->links(place.x, place.z, (double)d.pylon[row], on))
             return make(uid, K_BUILD, place.x, place.z, d.catalog_row[row]);
@@ -582,18 +613,21 @@ Job Seat::spot_job(const Ctx& c, int i, Pass& pass) {
     if (ext_row < 0 || !g.n_spots) return {};
     double x = own[i]->x, z = own[i]->z;
     std::vector<int> spots;
-    float bx = (float)base.x, bz = (float)base.z, ebx = (float)enemy_base.x, ebz = (float)enemy_base.z;
+    float bx = (float)base.x, bz = (float)base.z;
     for (int s = 0; s < g.n_spots; s++) {
         if (d.has(row, ZKS_COMMANDER) && !(hypotf(g.spots[3 * s] - bx, g.spots[3 * s + 1] - bz) <= COMMANDER_REACH)) continue;
         spots.push_back(s);
     }
     if (spots.empty()) return {};
-    // holders: float32 while nothing's been claimed this pass, float64 after (np.concatenate with a list of Python floats)
+    // holders: float32 while nothing's been claimed this pass, float64 after (np.concatenate with a list of Python floats).
+    // Anyone's extractor holds its spot, an ally's too.
     std::vector<float> hf;
     for (size_t j = 0; j < own.size(); j++)
         if (d.has(own_rows[j], ZKS_EXTRACTOR)) hf.push_back(own[j]->x), hf.push_back(own[j]->z);
     for (size_t e = 0; e < enemies.size(); e++)
         if (d.has(enemy_rows[e], ZKS_EXTRACTOR)) hf.push_back(enemies[e]->x), hf.push_back(enemies[e]->z);
+    for (size_t a = 0; a < allies.size(); a++)
+        if (d.has(ally_rows[a], ZKS_EXTRACTOR)) hf.push_back(allies[a]->x), hf.push_back(allies[a]->z);
     bool wide = !pass.claimed.empty();
     std::vector<int> cand;
     for (int s : spots) {
@@ -610,8 +644,7 @@ Job Seat::spot_job(const Ctx& c, int i, Pass& pass) {
             for (size_t h = 0; h < hf.size() / 2; h++) best = std::min(best, hypotf(sx - hf[2 * h], sz - hf[2 * h + 1]));
             free_ = best > 64.0f;
         }
-        bool mine = hypotf(sx - bx, sz - bz) <= (float)OUR_HALF * hypotf(sx - ebx, sz - ebz);
-        if (free_ && mine) cand.push_back(s);
+        if (free_ && our_spot(sx, sz)) cand.push_back(s);
     }
     if (cand.empty()) return {};
     float fx = (float)x, fz = (float)z;
@@ -659,8 +692,8 @@ bool Seat::unsafe(P2 p, float army_reach) const {
     return false;
 }
 
-// The wreck most worth this constructor's walk, within reach of it: safe, on ground it can walk to, nearer our base than the
-// enemy's (RECLAIM_HALF), and nobody of ours on it already.
+// The wreck most worth this constructor's walk, within reach of it: safe, on ground it can walk to, nearer our base than any
+// enemy's (RECLAIM_HALF, `bases`), and nobody of ours on it already.
 Job Seat::reclaim_job(const Ctx& c, int i, Pass& pass, double reach) {
     const Data& d = *data;
     const Rec* u = own[i];
@@ -677,7 +710,10 @@ Job Seat::reclaim_job(const Ctx& c, int i, Pass& pass, double reach) {
         P2 p{(double)f.x, (double)f.z};
         double away = py_hypot(p.x - at.x, p.z - at.z);
         if (away > reach) continue;
-        if (py_hypot(p.x - base.x, p.z - base.z) > RECLAIM_HALF * py_hypot(p.x - enemy_base.x, p.z - enemy_base.z)) continue;
+        const double home = py_hypot(p.x - base.x, p.z - base.z);
+        bool theirs = false;
+        for (P2 b : bases) theirs = theirs || home > RECLAIM_HALF * py_hypot(p.x - b.x, p.z - b.z);
+        if (theirs) continue;
         double worth = (double)f.metal / (away + RECLAIM_WALK);
         if (best >= 0 && worth <= best_worth) continue;
         if (avoided(p.x, p.z) || unsafe(p, SAFE_FROM_ARMY) || (cls != -1 && !ground->joined(cls, at, p))) continue;
@@ -801,10 +837,11 @@ void Seat::eco(const Ctx& c) {
     const Data& d = *data;
     const double seconds = c.seconds;
     size_t n = own.size();
-    // _count
+    // _count: the alliance's extractors against every enemy's, for whether map control has stalled
     {
         int ours_ = 0, theirs = 0;
         for (int r : own_rows) ours_ += d.has(r, ZKS_EXTRACTOR);
+        for (int r : ally_rows) ours_ += d.has(r, ZKS_EXTRACTOR);
         for (int r : enemy_rows) theirs += d.has(r, ZKS_EXTRACTOR);
         counts.push_back({seconds, ours_, theirs});
         while (!counts.empty() && counts.front().t < seconds - STALE_FOR - 10.0) counts.pop_front();
@@ -829,19 +866,17 @@ void Seat::eco(const Ctx& c) {
     }
     // Reclaimers go home if an enemy army comes near or they're hurt.
     std::vector<uint8_t> fled(n, 0);
-    {
-        P2 home = along(base, enemy_base, -BEHIND_BASE * 0.5);
-        for (size_t i = 0; i < n; i++) {
-            const Rec* u = own[i];
-            if (!builders[i] || u->ord_kind != K_RECLAIM) continue;
-            if (u->hp_frac < RECLAIM_HURT || unsafe({(double)u->x, (double)u->z}, RECLAIM_FLEE)) {
-                eco_out.push_back(order(u->uid, K_MOVE, home.x, home.z, -1));
-                reclaims[u->uid] = INT64_MIN;
-                fled[i] = 1;
-            }
+    const P2 home = along(base, enemy_base, -BEHIND_BASE * 0.5);
+    for (size_t i = 0; i < n; i++) {
+        const Rec* u = own[i];
+        if (!builders[i] || u->ord_kind != K_RECLAIM) continue;
+        if (u->hp_frac < RECLAIM_HURT || unsafe({(double)u->x, (double)u->z}, RECLAIM_FLEE)) {
+            eco_out.push_back(order(u->uid, K_MOVE, home.x, home.z, -1));
+            reclaims[u->uid] = INT64_MIN;
+            fled[i] = 1;
         }
     }
-    std::vector<uint8_t> stuck_ = stuck(c, builders);
+    std::vector<uint8_t> stuck_ = stuck(c, builders, home);
     std::vector<int> idle;
     std::vector<uint8_t> is_idle(n, 0);
     for (size_t i = 0; i < n; i++) {
@@ -911,15 +946,20 @@ void Seat::eco(const Ctx& c) {
         }
         pass.reclaimers_wanted = std::min(RECLAIMERS, constructors / RECLAIMER_PER);
     }
-    // _taken
+    // _taken: our structures and our allies', and every metal spot
     for (size_t i = 0; i < n; i++) {
         int r = own_rows[i];
         if (d.has(r, ZKS_MOBILE)) continue;
-        pass.taken.push_back(own[i]->x), pass.taken.push_back(own[i]->z), pass.taken.push_back(d.radius[r]);
+        pass.taken.insert(pass.taken.end(), {own[i]->x, own[i]->z, d.half_x[r], d.half_z[r]});
+    }
+    for (size_t a = 0; a < allies.size(); a++) {
+        int r = ally_rows[a];
+        if (d.has(r, ZKS_MOBILE)) continue;
+        pass.taken.insert(pass.taken.end(), {allies[a]->x, allies[a]->z, d.half_x[r], d.half_z[r]});
     }
     const Ground& g = *ground;
     for (int s = 0; s < g.n_spots; s++)
-        pass.taken.push_back(g.spots[3 * s]), pass.taken.push_back(g.spots[3 * s + 1]), pass.taken.push_back(d.extractor_radius);
+        pass.taken.insert(pass.taken.end(), {g.spots[3 * s], g.spots[3 * s + 1], d.spot_half, d.spot_half});
     // _expanding
     if (g.n_spots) {
         for (size_t i = 0; i < n; i++) {
@@ -944,7 +984,7 @@ void Seat::eco(const Ctx& c) {
         builds[uid] = j.o.kind == K_BUILD ? d.row_of_catalog[j.o.target] : -1;
         if (j.o.kind == K_BUILD) {
             int r = d.row_of_catalog[j.o.target];
-            pass.taken.push_back(j.o.x), pass.taken.push_back(j.o.z), pass.taken.push_back(d.radius[r]);
+            pass.taken.insert(pass.taken.end(), {(float)j.o.x, (float)j.o.z, d.half_x[r], d.half_z[r]});
         }
     }
 }

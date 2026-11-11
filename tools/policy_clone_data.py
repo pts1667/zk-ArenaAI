@@ -8,13 +8,21 @@ Games run as a batch in the sim, which steps them on its threads, and the script
 processes of their own, each with its own seed.  `--variants` gives each side's army script its own knobs at each game's start
 (policy_variants.py), and each game's meta says which: without it every side plays the standard script, as before.
 
-A file a game (`game-*.zkr`, data version 6): both sides' frames in order, the orders each side's scripts gave at each, as the policy
-would give them (a group order as its anchor's order and a groups.GROUP_MARK record after it; the army script's, then the economy
-script's), and how the game ended.  libzkrecord writes it straight from the batch's arrays, narrowed and compressed (sim/record/zkrecord.h);
-`zkrecord.read` gives it back.  Data versions 1 to 3 were a file a side (`game-*-SIDE.npz`, rawframe.save_frames): `read_game` reads
-both.  Frames and orders are kept raw, not as features or choices, so the data outlives changes to the featurizer: `labels` turns them
-into the policy's choices when they're read.  The commander's opening orders aren't kept: they aren't the policy's to give, so the
-commander's label is to keep doing what it does.
+A file a game (`game-*.zkr`, data version 7): each recorded side's frames in order, the orders its scripts gave at each, as the
+policy would give them (a group order as its anchor's order and a groups.GROUP_MARK record after it; the army script's, then the
+economy script's), and how the game ended.  A side is one of the game's teams; every player's is recorded (a chicken game's
+chickens, whom no one plays, aren't).  libzkrecord writes it straight from the batch's arrays, narrowed and compressed
+(sim/record/zkrecord.h); `zkrecord.read` gives it back.  `--kinds` plays team games, free-for-alls and chicken games too
+(policy_sim_env.GAME_KINDS), `--slots` the teams a game has room for, `--chicken-difficulties` how likely each chicken difficulty
+is.  Its meta says, a list with one entry a side, each one's team, ally, script, variant, result (`SimEnv.outcome`: 1 won,
+0 drew, below 0 lost), how it ended for it (eliminated, lead, limit, or queen: the chickens' queen died) and `until`, the frames
+it played: an alliance out of a game that goes on stops there, and `sides` lists only those.  Of the game it says its map and its
+kind ("1v1", "teams", "ffa", "chicken"), and a chicken game its difficulty (a name of zksim.CHICKEN_DIFFICULTIES).  Data
+versions 4 to 6 held both sides of a 1v1, teams 0 and 1, and said neither teams, allies nor the kind: `side_info` reads them as
+that.  Versions 1 to 3 were a file a side (`game-*-SIDE.npz`, rawframe.save_frames): `read_game` reads both.  Frames and orders
+are kept raw, not as features or choices, so the data outlives changes to the featurizer: `labels` turns them into the policy's
+choices when they're read.  The commander's opening orders aren't kept: they aren't the policy's to give, so the commander's
+label is to keep doing what it does.
 """
 from __future__ import annotations
 
@@ -36,16 +44,18 @@ import zkrecord  # noqa: E402
 import zksim  # noqa: E402
 from zkbot.policy import actions, bundle as bd, featurize as fz, rawframe as rf, tables  # noqa: E402
 
-DATA_VERSION = 6      # 1: the army script with the opening's economy only.  2: with the economy script (policy_eco.py), 2026-11-08.
+DATA_VERSION = 7      # 1: the army script with the opening's economy only.  2: with the economy script (policy_eco.py), 2026-11-08.
                       # 3: the army script aims missiles and the Trinity (labels now), the economy spends what it makes, and in the sim
                       # help for a factory still being built builds it, 2026-11-08.  4: the same games, a .zkr file a game, 2026-11-08.
                       # 5: the army script's group orders, recorded as the policy gives them (groups.GROUP_MARK), air, and a second
                       # factory, 2026-11-08.  6: the economy script's orders too, after the army script's for each seat, both
-                      # scripts looking every 6 slots, 2026-11-09 (03-training.md, "Script data")
+                      # scripts looking every 6 slots, 2026-11-09 (03-training.md, "Script data").  7: any number of sides a file
+                      # ("ZKREC002"), each side's team and ally, the game's kind and how it ended in the meta, 2026-11-10; then
+                      # team games and free-for-alls, with how it ended and `until` for each side (`side_info` reads both)
 
 
 class Recorder:
-    """Both sides of every game of an environment, until each game ends; then a file for it.
+    """Every recorded side of every game of an environment, until each game ends; then a file for it.
 
     After `close`, games that start aren't kept, and those running are played out, so that the data isn't biased towards short
     games, as it would be if those running were dropped; `closed` says when they're all written."""
@@ -54,13 +64,24 @@ class Recorder:
         self.env, self.out, self.prefix = env, out, prefix
         out.mkdir(parents=True, exist_ok=True)
         self.slugs = {id(b): f.name for _, b, f in env.maps}
-        self.writer = zkrecord.Writer(env.count, threads, level)
+        self.slots = env.batch.counts.shape[1]      # the batch's teams a game, which its arrays are laid out by
+        self.writer = zkrecord.Writer(env.count, threads, level, teams=self.slots)
         self.games = self.decisions = 0
         self.ended: Counter = Counter()
+        # By game, by team: how it ended for the team, and how many frames the game had then (an alliance out stops playing, its
+        # frames after that empty of its own units; they're recorded with the rest, and `sides` lists only those before).
+        self.how: dict[int, dict[int, tuple[str, int]]] = {}
         self.kept = set(range(env.count))     # games whose present run will be written
         self._empty = np.zeros(0, zksim.ORDER_DTYPE)
         for g in self.kept:
             self._begin(g)
+
+    def _sides(self, g: int) -> tuple[list[int], list[int], list[float]]:
+        """Game g's teams that are recorded, in the file's order, each one's ally, and how the game ended for each
+        (`SimEnv.outcome`): every player's team (not the chickens', whom no one plays)."""
+        env = self.env
+        teams = [t for t in range(int(env.n_teams[g])) if env.plays(g, t) != "chickens"]
+        return teams, [int(env.ally[g, t]) for t in teams], [float(env.outcome[g, t]) for t in teams]
 
     def close(self) -> None:
         self.closing = True
@@ -73,7 +94,7 @@ class Recorder:
 
     def _begin(self, g: int) -> None:
         bundle = self.env.bundle[g]
-        self.writer.begin(g, bundle.map_w, bundle.map_h, zkrecord.height_range(bundle.height), self.env.batch.sites[g])
+        self.writer.begin(g, bundle.map_w, bundle.map_h, zkrecord.height_range(bundle.height), self.env.batch.sites[g], teams=self._sides(g)[0])
 
     def _orders(self) -> tuple[np.ndarray, np.ndarray]:
         """This step's script orders over every seat, and where each seat's start."""
@@ -96,10 +117,14 @@ class Recorder:
         self.writer.frames(env.batch, listed)
         env.step(0.0)
         self.writer.orders(listed, *self._orders())
-        for g, facts in zip(env._replace, env.outcomes[::2]):     # both sides of each game that ended, side 0 first
+        for facts in env.outcomes:          # every team whose alliance went out, or whose game ended
+            g = facts["game"]
             if g in self.kept:
-                self.ended[facts["how"]] += 1
+                self.how.setdefault(g, {})[facts["team"]] = (facts["how"], self.writer.frames_held(g))
         env.outcomes.clear()
+        for g in env._replace:
+            if g in self.kept:
+                self.ended[self.how.get(g, {}).get(0, ("?",))[0]] += 1      # each game once, by how it ended for team 0
         ended = [g for g in env._replace if g in self.kept]
         for g in ended:
             self._write(g)
@@ -116,21 +141,48 @@ class Recorder:
     def _write(self, g: int) -> None:
         env = self.env
         frames = self.writer.frames_held(g)
-        result = float(env.result[g])
+        teams, allies, results = self._sides(g)
+        how = self.how.pop(g, {})
         meta = {"data_version": DATA_VERSION, "schema_version": rf.SCHEMA_VERSION, "map": self.slugs.get(id(env.bundle[g]), "?"),
-                "script": list(env.script_kinds[g]), "result": [result, -result]}
+                "script": [env.script_kinds[g][t] for t in teams], "result": results, "teams": teams, "allies": allies,
+                "kind": env.kind[g], "how": [how.get(t, (None, frames))[0] for t in teams],
+                "until": [how.get(t, (None, frames))[1] for t in teams]}
+        if env.chickens[g] >= 0:
+            meta["difficulty"] = zksim.CHICKEN_DIFFICULTIES[int(env.difficulty[g])]
         if env.styles[g] is not None:
-            meta["variants"] = [v.as_dict() for v in env.styles[g]]     # each side's army script knobs (policy_variants.py)
+            meta["variants"] = [env.styles[g][t].as_dict() for t in teams]     # each side's army script knobs (policy_variants.py)
         self.writer.finish(g, self.out / f"{self.prefix}-{self.games:06d}{zkrecord.SUFFIX}", meta)
-        self.decisions += 2 * frames
+        self.decisions += sum(meta["until"])
         self.games += 1
 
 
 Side = tuple[list[rf.Frame], list[np.ndarray], dict]
 
 
+def side_info(meta: dict, s: int) -> dict:
+    """What a file's meta says of its side s: how the game ended for it (result, and how: eliminated, lead, limit or queen), the
+    map, its script and variant, its team and ally, the kind of game, a chicken game's difficulty (else None), and `until`, the
+    frames it played: up to its alliance going out, all the file's if it was in to the end (None where a file doesn't say, as the
+    first files of version 7 don't).  Data version 6 and before held the two sides of a 1v1, side s being team s and ally s; the
+    first files of version 7 said one `how` for the game."""
+    teams = meta.get("teams", (0, 1))
+    allies = meta.get("allies", teams)
+    how = meta.get("how")
+    return {"result": float(meta["result"][s]), "map": meta["map"], "script": meta["script"][s],
+            "variant": meta["variants"][s] if "variants" in meta else None, "team": int(teams[s]), "ally": int(allies[s]),
+            "kind": meta.get("kind", "1v1"), "how": how[s] if isinstance(how, list) else how,
+            "until": int(meta["until"][s]) if "until" in meta else None, "difficulty": meta.get("difficulty")}
+
+
+def _meta(path: pathlib.Path) -> dict:
+    """A .zkr file's meta alone, from its start."""
+    with open(path, "rb") as f:
+        f.read(8)
+        return json.loads(f.read(int(np.frombuffer(f.read(4), "<u4")[0])))
+
+
 def read_game(path: pathlib.Path) -> list[Side]:
-    """Every side a file holds, as (frames, the orders given at each, the rest): both of a .zkr game, the one of an .npz."""
+    """Every side a file holds, as (frames, the orders given at each, the rest): each of a .zkr game's, the one of an .npz."""
     path = pathlib.Path(path)
     if path.suffix == ".npz":
         frames = rf.load_frames(path)
@@ -139,9 +191,7 @@ def read_game(path: pathlib.Path) -> list[Side]:
             info = {"result": float(d["result"]), "map": str(d["map"]), "script": str(d["script"])}
         return [(frames, orders, info)]
     meta, sides = zkrecord.read(path)
-    return [(frames, orders, {"result": float(meta["result"][s]), "map": meta["map"], "script": meta["script"][s],
-                              "variant": meta["variants"][s] if "variants" in meta else None})
-            for s, (frames, orders) in enumerate(sides)]
+    return [(frames, orders, side_info(meta, s)) for s, (frames, orders) in enumerate(sides)]
 
 
 def read_side(path: pathlib.Path, side: int, until: int | None = None) -> Side:
@@ -151,8 +201,7 @@ def read_side(path: pathlib.Path, side: int, until: int | None = None) -> Side:
         return read_game(path)[0]
     meta, sides = zkrecord.read(path, side=side, until=until)
     frames, orders = sides[side]
-    return frames, orders, {"result": float(meta["result"][side]), "map": meta["map"], "script": meta["script"][side],
-                            "variant": meta["variants"][side] if "variants" in meta else None}
+    return frames, orders, side_info(meta, side)
 
 
 def load(path: pathlib.Path, side: int = 0) -> Side:
@@ -161,29 +210,38 @@ def load(path: pathlib.Path, side: int = 0) -> Side:
 
 
 def sides(data: pathlib.Path) -> list[tuple[str, int, int]]:
-    """Every side of every finished game in a dataset: (path, side in `read_game`, frames)."""
+    """Every side of every finished game in a dataset: (path, side in `read_game`, the frames it played).  A side whose alliance
+    went out before the end played fewer than its file holds (`side_info`'s until)."""
     out = []
     paths = sorted(data.glob("game-*.zkr"))
-    # Each file's length is in its header, but reading 84k headers over /mnt/d took 3 to 10 minutes a run: kept in sides.npz,
-    # good while the files listed are the same ones.
+    # Each file's length and sides are in its header, and how long each side played in its meta, but reading 84k headers over
+    # /mnt/d took 3 to 10 minutes a run: kept in sides.npz, good while the files listed are the same ones.  One written before
+    # files had any number of sides has no `sides`, its files two sides each; before sides could stop early, no `side_frames`.
     cache = data / "sides.npz"
-    known: dict[str, int] = {}
+    known: dict[str, tuple[int, list[int]]] = {}
     if cache.exists():
         with np.load(cache) as c:
-            known = dict(zip(c["names"].tolist(), c["frames"].tolist()))
-    counted = {}
+            frames = c["frames"].tolist()
+            counts = c["sides"].tolist() if "sides" in c.files else [2] * len(frames)
+            each = np.split(c["side_frames"], np.cumsum(counts)[:-1]) if "side_frames" in c.files else [[n] * k for n, k in zip(frames, counts)]
+            known = {name: (n, [int(v) for v in e]) for name, n, e in zip(c["names"].tolist(), frames, each)}
+    counted: dict[str, tuple[int, list[int]]] = {}
     for path in paths:
-        n = known.get(path.name)
-        if n is None:
+        found = known.get(path.name)
+        if found is None:
             try:
-                n = zkrecord.frame_count(path)
+                frames, teams = zkrecord.header(path)
+                until = _meta(path).get("until") or [frames] * len(teams)
             except (OSError, ValueError):
                 continue
-        counted[path.name] = n
-        out += [(str(path), 0, n), (str(path), 1, n)]
+            found = (frames, [min(int(u), frames) for u in until])
+        counted[path.name] = found
+        out += [(str(path), s, n) for s, n in enumerate(found[1])]
     if counted.keys() != known.keys():
         try:
-            np.savez(cache, names=np.array(list(counted)), frames=np.array(list(counted.values()), np.int64))
+            np.savez(cache, names=np.array(list(counted)), frames=np.array([n for n, _ in counted.values()], np.int64),
+                     sides=np.array([len(e) for _, e in counted.values()], np.int64),
+                     side_frames=np.array([v for _, e in counted.values() for v in e], np.int64))
         except OSError:
             pass
     for path in sorted(data.glob("game-*.npz")):
@@ -262,36 +320,48 @@ _Z: dict = {}
 
 
 def _zindex_game(path: str) -> tuple[str, np.ndarray, np.ndarray]:
+    """A file's sides' z (sides x Z_DIM) and results, by its name."""
     if not _Z:
         _Z["table"] = tables.table()
         _Z["rows"] = _category_rows(_Z["table"])
-    meta, both = zkrecord.read(pathlib.Path(path), until=max(Z_MINUTES) * FRAMES_A_MINUTE + 1)
-    z = np.zeros((2, Z_DIM), np.float32)
-    for side, (frames, _) in enumerate(both):
-        variant = meta["variants"][side] if "variants" in meta else None
-        z[side] = variant_z(variant) + counts_z(frames, side, _Z["table"], _Z["rows"])
+    meta, every = zkrecord.read(pathlib.Path(path), until=max(Z_MINUTES) * FRAMES_A_MINUTE + 1)
+    z = np.zeros((len(every), Z_DIM), np.float32)
+    for side, (frames, _) in enumerate(every):
+        info = side_info(meta, side)
+        played = frames[:info["until"]] if info["until"] else frames      # an alliance out counts as it went out, as a game over does
+        z[side] = variant_z(info["variant"]) + counts_z(played, info["team"], _Z["table"], _Z["rows"])
     return pathlib.Path(path).name, z, np.array(meta["result"], np.float32)
 
 
 def zindex(args: argparse.Namespace) -> None:
-    """z.npz in the dataset: each game's sides' z and results, by file name, for the cloning trainer (--z, --finish-winners)."""
+    """z.npz in the dataset, a row a side: each side's file name, its side in the file, its z and its result, for the cloning
+    trainer (--z, --finish-winners)."""
     data = pathlib.Path(args.data)
     paths = sorted(str(p) for p in data.glob("game-*.zkr"))
     began = time.perf_counter()
-    with multiprocessing.get_context("fork").Pool(args.workers) as pool:
-        out = list(pool.imap(_zindex_game, paths, chunksize=8))
-    names = np.array([o[0] for o in out])
-    np.savez(data / "z.npz", names=names, z=np.stack([o[1] for o in out]), result=np.stack([o[2] for o in out]))
-    print(json.dumps({"games": len(out), "seconds": round(time.perf_counter() - began, 1)}))
+    if args.workers <= 1:       # in this process, which may have threads of its own that a fork would leave behind
+        out = [_zindex_game(p) for p in paths]
+    else:
+        with multiprocessing.get_context("fork").Pool(args.workers) as pool:
+            out = list(pool.imap(_zindex_game, paths, chunksize=8))
+    names = np.array([name for name, z, _ in out for _ in range(len(z))])
+    side = np.array([s for _, z, _ in out for s in range(len(z))], np.int32)
+    np.savez(data / "z.npz", names=names, side=side, z=np.concatenate([z for _, z, _ in out]) if out else np.zeros((0, Z_DIM), np.float32),
+             result=np.concatenate([r for _, _, r in out]) if out else np.zeros(0, np.float32))
+    print(json.dumps({"games": len(out), "sides": len(side), "seconds": round(time.perf_counter() - began, 1)}))
 
 
 def load_z(data: pathlib.Path) -> dict[tuple[str, int], tuple[np.ndarray, float]]:
-    """(file name, side) -> (z, result), from `zindex`'s z.npz."""
+    """(file name, side) -> (z, result), from `zindex`'s z.npz: a row a side, or, as data version 6's was written, a row a file of
+    its two sides."""
     # Each d[key] decompresses the whole array afresh, and a row of it keeps that copy alive: indexing d in the loop held 167k
     # copies of 21 MB and filled the machine's memory (2026-11-09).  Read once; copy the rows.
     with np.load(pathlib.Path(data) / "z.npz") as d:
         names, z, result = d["names"], d["z"], d["result"]
-    return {(str(n), s): (z[i, s].copy(), float(result[i, s])) for i, n in enumerate(names) for s in (0, 1)}
+        side = d["side"] if "side" in d.files else None
+    if side is None:
+        return {(str(n), s): (z[i, s].copy(), float(result[i, s])) for i, n in enumerate(names) for s in range(z.shape[1])}
+    return {(str(n), int(s)): (z[i].copy(), float(result[i])) for i, (n, s) in enumerate(zip(names, side))}
 
 
 def labels(frame: rf.Frame, orders: np.ndarray, bundle: bd.Bundle, table: tables.TypeTable, **featurize) -> tuple[fz.Tensors, actions.Decision, int]:
@@ -321,7 +391,8 @@ def _maps(args: argparse.Namespace) -> tuple[list | None, np.ndarray | None]:
 def _record_part(args: argparse.Namespace, worker: int, decisions: int) -> dict:
     maps, weights = _maps(args)
     threads = max(1, args.threads // args.workers)
-    env = se.SimEnv(args.games, args.seed * 1000 + worker, ["scripts"], threads=threads, maps=maps, weights=weights, variants=args.variants)
+    env = se.SimEnv(args.games, args.seed * 1000 + worker, ["scripts"], threads=threads, maps=maps, weights=weights, variants=args.variants,
+                    teams=args.slots or None, kinds=se.parse_kinds(args.kinds), difficulties=args.chicken_difficulties or None)
     env.begin()
     rec = Recorder(env, pathlib.Path(args.out), f"game-w{worker:02d}", level=args.level, threads=threads)
     began = time.perf_counter()
@@ -355,11 +426,13 @@ def record(args: argparse.Namespace) -> None:
     seconds = time.perf_counter() - began
     decisions = sum(p["decisions"] for p in parts)
     size = sum(p.stat().st_size for p in out.glob(f"game-*{zkrecord.SUFFIX}"))
+    difficulties = se.difficulty_weights(args.chicken_difficulties or se.CHICKEN_DIFFICULTY_WEIGHTS)
     summary = {"games": sum(p["games"] for p in parts), "decisions": decisions, "seconds": seconds, "loading_maps_seconds": loaded,
                "decisions_a_second_playing": decisions / max(max(p["seconds"] for p in parts), 1e-9), "ended": dict(ended),
                "bytes_a_decision": size / max(decisions, 1), "clamped": dict(clamped), "level": args.level,
                "maps": args.maps or "training", "seed": args.seed, "workers": args.workers, "data_version": DATA_VERSION,
-               "variants": args.variants}
+               "variants": args.variants, "kinds": se.parse_kinds(args.kinds),
+               "chicken_difficulties": {zksim.CHICKEN_DIFFICULTIES[d]: w for d, w in difficulties.items()}}
     (out / "summary.json").write_text(json.dumps(summary, indent=1))
     print(json.dumps(summary))
 
@@ -414,6 +487,12 @@ def main() -> None:
     r.add_argument("--workers", type=int, default=1)
     r.add_argument("--level", type=int, default=3, help="zstd's: 3 is about 10%% larger than 9 and 6 times as fast")
     r.add_argument("--variants", action="store_true", help="each side's army script draws its own knobs (policy_variants.py), recorded in each game")
+    r.add_argument("--kinds", nargs="+", default=["1v1"], metavar="KIND:WEIGHT",
+                   help="kinds of game and how likely each, among 1v1, teams, ffa and chicken, as 1v1:0.5 teams:0.2 ffa:0.2 chicken:0.1 "
+                        "(default: %(default)s)")
+    r.add_argument("--slots", type=int, default=0, help="teams a game has room for; 0: what the biggest of --kinds needs")
+    r.add_argument("--chicken-difficulties", nargs="+", metavar="NAME:WEIGHT",
+                   help="how likely each chicken difficulty is, as very-easy:1 easy:1 normal:1 (default policy_sim_env.CHICKEN_DIFFICULTY_WEIGHTS)")
     c = sub.add_parser("check")
     c.add_argument("--data", required=True)
     c.add_argument("--maps")

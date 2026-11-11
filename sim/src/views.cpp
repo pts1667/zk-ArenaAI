@@ -1,5 +1,5 @@
-// What each side can see, as the raw frame the live bot also produces.  It's an approximation of the engine's LOS: one ray per
-// pair on the height map, not its mip-mapped circles, and no jammers yet.  Fog only runs for worlds that emit frames.
+// What each allyteam can see, and each team's raw frame of it, as the live bot also produces.  It's an approximation of the engine's
+// LOS: one ray per pair on the height map, not its mip-mapped circles, and no jammers yet.  Fog only runs for worlds that emit frames.
 #include <algorithm>
 #include <cmath>
 
@@ -21,7 +21,8 @@ inline float surface(const Map& m, float x, float z) { return std::max(0.0f, m.h
 
 void World::ensure_views() {
     const size_t n = size_t(count());
-    for (auto& v : views) {
+    for (int s = 0; s < n_allies; ++s) {
+        SideView& v = views[s];
         if (v.in_los.size() == n) continue;
         v.in_los.resize(n, 0);
         v.in_radar.resize(n, 0);
@@ -55,25 +56,28 @@ void World::update_view(int s) {
     SideView& v = views[size_t(s)];
     if (v.updated_frame == frame) return;     // done for targeting, or by a frame just asked for
     v.updated_frame = frame;
-    const int n = count();
-    radar_units.clear();
-    for (int o = 0; o < n; ++o)
-        if (side[size_t(o)] == s && alive[size_t(o)] && build[size_t(o)] >= 1.0f && type_of(o).radar_radius > 0.0f && !unpaid[size_t(o)]) radar_units.push_back(o);
-    // Who's in sight, from each of the side's eyes outward: it visits only the grid cells eyes can reach, where going from each enemy
-    // would look through every cell within the game's longest sight.  Whether something is seen doesn't depend on which eye looks first.
+    // Who's in sight, from each of the allyteam's eyes outward: it visits only the grid cells eyes can reach, where going from each
+    // enemy would look through every cell within the game's longest sight.  Whether something is seen doesn't depend on which eye
+    // looks first.
     std::vector<uint8_t>& sighted = scratch_seen;
     std::vector<int>& eyes = scratch_eyes;
-    sighted.assign(size_t(n), 0);
+    sighted.assign(size_t(count()), 0);
+    radar_units.clear();
     eyes.clear();
-    for (int o = 0; o < n; ++o)
-        if (side[size_t(o)] == s && alive[size_t(o)] && build[size_t(o)] >= 1.0f) eyes.push_back(o);
+    float farthest = 0.0f;          // ground sight of any eye
+    for (const int o : live) {
+        if (side[size_t(o)] != s || !alive[size_t(o)] || build[size_t(o)] < 1.0f) continue;
+        eyes.push_back(o);
+        farthest = std::max(farthest, type_of(o).los_radius);
+        if (type_of(o).radar_radius > 0.0f && !unpaid[size_t(o)]) radar_units.push_back(o);
+    }
     ZK_PROF(FOG_SWEEP);
     for (int o : eyes) {
         const size_t eye = size_t(o);
         const auto& od = type_of(o);
         const bool from_air = (od.flags & ZK_U_AIR) != 0;
         const float ex = x[eye], ez = z[eye], reach = std::max(od.los_radius, od.air_los_radius);
-        for_side(1 - s, ex, ez, reach + SEARCH_PAD, [&](int e) {
+        for_enemies(s, ex, ez, reach + SEARCH_PAD, [&](int e) {
             const size_t i = size_t(e);
             if (sighted[i] || cloaked[i] || !alive[i]) return;
             const float dx = ex - x[i], dz = ez - z[i], d2 = dx * dx + dz * dz;
@@ -85,27 +89,13 @@ void World::update_view(int s) {
         });
     }
     bool contact = false;
-    for (int e = 0; e < n; ++e) {
+    for (const int e : live) {
         const size_t i = size_t(e);
-        if (side[i] == s) continue;
-        if (!alive[i]) {
-            // A remembered building is forgotten once its place is back in sight.
-            if (v.remembered[i]) {
-                ZK_PROF(FOG_GONE);
-                for (int o : eyes) {
-                    const float r = type_of(o).los_radius, dx = x[size_t(o)] - x[i], dz = z[size_t(o)] - z[i];
-                    if (dx * dx + dz * dz <= r * r) {
-                        v.remembered[i] = 0;
-                        break;
-                    }
-                }
-            }
-            v.in_los[i] = v.in_radar[i] = v.known[i] = 0;
-            continue;
-        }
+        if (side[i] == s || !alive[i]) continue;
         const auto& d = type_of(e);
-        // LosHandler.cpp: a cloaked enemy isn't in sight, and unit_stealth.lua keeps it off radar too.
-        const bool los = sighted[i] != 0;
+        // LosHandler.cpp: a cloaked enemy isn't in sight, and unit_stealth.lua keeps it off radar too.  One the reveal rule shows is
+        // in everyone's sight (check_reveal).
+        const bool los = sighted[i] != 0 || ((revealed >> side[i]) & 1u) != 0;
         bool radar = false;
         if (!cloaked[i] && !los)
             for (int o : radar_units) {
@@ -144,11 +134,37 @@ void World::update_view(int s) {
         }
     }
     if (contact) v.last_contact = frame;
+    // The dead: out of sight and radar from their first look on, and a building among them remembered until its place is back in
+    // sight.  Only the newly dead and the remembered are looked at.
+    for (; v.fallen_seen < fallen.size(); ++v.fallen_seen) {
+        const size_t i = size_t(fallen[v.fallen_seen]);
+        if (side[i] == s) continue;
+        v.in_los[i] = v.in_radar[i] = v.known[i] = 0;
+        if (v.remembered[i]) v.memories.push_back(int(i));
+    }
+    if (!v.memories.empty()) {
+        // Any eye near enough will do, so only those in the grid round its place are asked.  The grid was made since anyone
+        // came or went, as the sweep above needs too, so its finished units of this allyteam are the eyes.
+        ZK_PROF(FOG_GONE);
+        size_t kept = 0;
+        for (const int m : v.memories) {
+            const size_t i = size_t(m);
+            bool seen = false;
+            for_side(s, x[i], z[i], farthest + SEARCH_PAD, [&](int o) {
+                if (seen || !alive[size_t(o)] || build[size_t(o)] < 1.0f) return;
+                const float r = type_of(o).los_radius, dx = x[size_t(o)] - x[i], dz = z[size_t(o)] - z[i];
+                seen = dx * dx + dz * dz <= r * r;
+            });
+            if (seen) v.remembered[i] = 0;
+            else v.memories[kept++] = m;
+        }
+        v.memories.resize(kept);
+    }
 }
 
-int World::emit_view(int s, UnitRecord* out, int cap, float* glob, int commander, const float* base) {
+int World::emit_view(int viewer, UnitRecord* out, int cap, float* glob, int commander, const float* base) {
+    const int s = ally_of[viewer];
     SideView& v = views[size_t(s)];
-    const int n = count();
     int w = 0;
     int unfinished = 0, idle_builders = 0;
     auto common = [&](int u, int knowledge, int flags) -> UnitRecord& {
@@ -172,39 +188,43 @@ int World::emit_view(int s, UnitRecord* out, int cap, float* glob, int commander
         r.ord_x = 0.0f;
         r.ord_z = 0.0f;
         r.knowledge = uint8_t(knowledge);
-        // One player to an alliance, for now: a side is both.
-        r.player = int16_t(side[i]);
+        r.player = int16_t(team[i]);
         r.ally_team = int16_t(side[i]);
         r.pad = 0;
         r.ord_kind = -1;
         if (build[i] < 1.0f) flags |= UF_BEING_BUILT;
         if (stunned(u)) flags |= UF_PARALYZED;
-        if (cloaked[i] && side[i] == s) flags |= UF_CLOAKED;
+        if (cloaked[i] && side[i] == s) flags |= UF_CLOAKED;     // an ally knows its friends are hidden
         r.flags = uint16_t(flags);
         return r;
     };
-    // Own units first, then what's seen, then radar, then memory, then what's hidden: each in handle order.  One pass sorts them
-    // into those five, which don't overlap.
-    auto& [own, seen, blips, memory, hidden] = emit_lists;
+    // Own units first, then allies', then what's seen, then radar, then memory, then what's hidden: each in handle order.  One pass
+    // over the living sorts them into those six, which don't overlap; the dead are only ever remembered.
+    auto& [own, allies, seen, blips, memory, hidden] = emit_lists;
     own.clear();
+    allies.clear();
     seen.clear();
     blips.clear();
     memory.clear();
     hidden.clear();
-    for (int u = 0; u < n; ++u) {
+    for (const int u : live) {
         const size_t i = size_t(u);
-        if (side[i] == s) {
-            if (alive[i]) own.push_back(u);
-        } else if (v.in_los[i]) {
-            if (alive[i]) seen.push_back(u);
-        } else if (alive[i] && v.in_radar[i]) {
-            blips.push_back(u);
-        } else if (v.remembered[i]) {
-            memory.push_back(u);
-        } else if (alive[i]) {
-            hidden.push_back(u);
-        }
+        if (!alive[i]) continue;
+        if (side[i] == s) (team[i] == viewer ? own : allies).push_back(u);
+        else if (v.in_los[i]) seen.push_back(u);
+        else if (v.in_radar[i]) blips.push_back(u);
+        else if (v.remembered[i]) memory.push_back(u);
+        else hidden.push_back(u);
     }
+    // The remembered dead, and any that died since the view was last brought up to date, which it still has as they were.
+    const size_t living = memory.size();
+    for (const int u : v.memories)
+        if (!v.in_los[size_t(u)] && v.remembered[size_t(u)]) memory.push_back(u);
+    for (size_t k = v.fallen_seen; k < fallen.size(); ++k) {
+        const size_t i = size_t(fallen[k]);
+        if (side[i] != s && !v.in_los[i] && v.remembered[i]) memory.push_back(int(i));
+    }
+    if (memory.size() > living) std::sort(memory.begin(), memory.end());
     for (int u : own) {
         if (w >= cap) break;
         const size_t i = size_t(u);
@@ -230,6 +250,11 @@ int World::emit_view(int s, UnitRecord* out, int cap, float* glob, int commander
             // What a factory or silo makes is a type: the frame gives it as a def id, as it gives every other type.
             r.ord_target = mem_kind[i] == ZK_ORDER_PRODUCE && mem_target[i] >= 0 ? cat->types[size_t(mem_target[i])].def_id : mem_target[i];
         }
+    }
+    // An ally's units are always in sight, and show what a seen unit does: not its orders, nor whether it's idle.
+    for (int u : allies) {
+        if (w >= cap) break;
+        common(u, KNOW_LOS, UF_IN_LOS | UF_TYPE_KNOWN);
     }
     for (int u : seen) {
         if (w >= cap) break;
@@ -260,7 +285,7 @@ int World::emit_view(int s, UnitRecord* out, int cap, float* glob, int commander
     if (glob) {
         std::fill(glob, glob + G_COUNT, 0.0f);
         glob[G_FRAME] = float(frame);
-        glob[G_PLAYER] = float(s);
+        glob[G_PLAYER] = float(viewer);
         glob[G_ALLY_TEAM] = float(s);
         glob[G_MAP_W] = map->width();
         glob[G_MAP_H] = map->depth();
@@ -274,7 +299,7 @@ int World::emit_view(int s, UnitRecord* out, int cap, float* glob, int commander
         glob[G_FRAMES_SINCE_CONTACT] = float(frame - v.last_contact);
         glob[G_UNFINISHED_STRUCTURES] = float(unfinished);
         if (economy_on) {
-            const Purse& p = purses[size_t(s)];
+            const Purse& p = purses[size_t(viewer)];
             glob[G_METAL] = p.metal;
             glob[G_METAL_INCOME] = p.metal_income;
             glob[G_METAL_STORAGE] = p.storage;
@@ -302,18 +327,16 @@ void World::index_wrecks() {
     wreck_ids.resize(live_wrecks.size());
     wreck_px.resize(live_wrecks.size());
     wreck_pz.resize(live_wrecks.size());
-    wreck_slot.resize(wrecks.size());
     for (int id : live_wrecks) {
         const size_t k = size_t(--wreck_start[cell_of(id)]);
         wreck_ids[k] = id;
-        wreck_slot[size_t(id)] = int(k);
         wreck_px[k] = wrecks[size_t(id)].x;
         wreck_pz[k] = wrecks[size_t(id)].z;
     }
 }
 
-// In ground sight of the side, as a feature is (AICallback.cpp).  One ray per wreck and unit, as for units.  From each of the side's
-// eyes outward, a row of the wreck grid at a time, as for units in update_view.
+// In ground sight of the allyteam, as a feature is (AICallback.cpp).  One ray per wreck and unit, as for units.  From each of the
+// allyteam's eyes outward, a row of the wreck grid at a time, as for units in update_view.
 int World::emit_features(int s, FeatureRecord* out, int cap) {
     if (live_wrecks.empty() || cap <= 0) return 0;
     {
@@ -323,8 +346,9 @@ int World::emit_features(int s, FeatureRecord* out, int cap) {
     ZK_PROF(FEATURES_SWEEP);
     std::vector<uint8_t>& sighted = scratch_seen;      // by place in the index
     sighted.assign(wreck_ids.size(), 0);
-    const int n = count();
-    for (int o = 0; o < n; ++o) {
+    std::vector<int>& found = scratch_found;
+    found.clear();
+    for (const int o : live) {
         const size_t eye = size_t(o);
         if (side[eye] != s || !alive[eye] || build[eye] < 1.0f) continue;
         const auto& od = type_of(o);
@@ -338,14 +362,28 @@ int World::emit_features(int s, FeatureRecord* out, int cap) {
                 if (sighted[k]) continue;
                 const float dx = ex - wreck_px[k], dz = ez - wreck_pz[k];
                 if (dx * dx + dz * dz > reach2) continue;
-                if (from_air || sees_point(o, wreck_px[k], wreck_pz[k])) sighted[k] = 1;
+                if (from_air || sees_point(o, wreck_px[k], wreck_pz[k])) {
+                    sighted[k] = 1;
+                    found.push_back(wreck_ids[k]);
+                }
             }
         }
     }
+    // By id, as the live wrecks are.  When there's more in sight than a frame holds, the ones with the most metal left: what a frame
+    // shows features for is reclaiming them.  Ties go to the older.
+    std::sort(found.begin(), found.end());
+    if (int(found.size()) > cap) {
+        const auto richer = [this](int a, int b) {
+            const float ma = wrecks[size_t(a)].metal * wrecks[size_t(a)].left, mb = wrecks[size_t(b)].metal * wrecks[size_t(b)].left;
+            return ma != mb ? ma > mb : a < b;
+        };
+        std::nth_element(found.begin(), found.begin() + cap, found.end(), richer);
+        found.resize(size_t(cap));
+        std::sort(found.begin(), found.end());
+    }
     int w = 0;
-    for (int id : live_wrecks) {
+    for (const int id : found) {
         if (w >= cap) break;
-        if (!sighted[size_t(wreck_slot[size_t(id)])]) continue;
         const Wreck& wreck = wrecks[size_t(id)];
         FeatureRecord& r = out[w++];
         r.feat_id = id;
@@ -357,19 +395,24 @@ int World::emit_features(int s, FeatureRecord* out, int cap) {
     return w;
 }
 
-void World::side_stats(int s, float* out) const {
-    // The reward's tracked value (03-training.md, "Reward"): cost x build progress, real units only.
+void World::team_stats(int t, float* out) const {
+    // The reward's tracked value (03-training.md, "Reward"): cost x build progress, real units only.  A chicken costs nothing; its
+    // build time stands in, which for every unit that does cost something is the same as its metal cost.
     float value = 0.0f;
-    int units = 0;
-    for (int u = 0; u < count(); ++u) {
+    int units = 0, counting = 0;
+    for (const int u : live) {
         const size_t i = size_t(u);
-        if (side[i] != s || !alive[i]) continue;
-        value += type_of(u).cost * build[i];
+        if (team[i] != t || !alive[i]) continue;
+        const auto& d = type_of(u);
+        value += (d.cost > 0.0f ? d.cost : d.build_time) * build[i];
         ++units;
+        // What keeps a team in the game (game_over.lua): finished units, but for those that don't count.
+        counting += build[i] >= 1.0f && !(d.flags & ZK_U_DONT_COUNT);
     }
     out[0] = value;
     out[1] = float(units);
-    out[2] = purses[s].reclaim_income;
+    out[2] = purses[t].reclaim_income;
+    out[3] = float(counting);
 }
 
 }  // namespace zk

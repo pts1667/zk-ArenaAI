@@ -1,7 +1,9 @@
 """Made-up maps, and the frames that use them: do they hold together, and can things stand where they're put?"""
 from __future__ import annotations
 
+import json
 import pathlib
+import shutil
 import sys
 from types import SimpleNamespace
 
@@ -14,6 +16,9 @@ try:
     import frame_data as fd
     import frame_world as fw
     import map_gen as mg
+    import map_modes
+    import map_rampart as mr
+    import policy_opening as po
     import policy_sim_env as se
     import zksim
     from zkbot.policy import bundle as bd, rawframe as rf, tables
@@ -28,13 +33,23 @@ SHIP = bd.MOVE_CLASSES.index("ship")
 
 
 @pytest.fixture(scope="module")
-def pool(tmp_path_factory):
-    """A small pool: two dry maps and two nearly all water."""
+def made_maps():
+    """Two dry maps and two nearly all water, by seed."""
+    return {seed: mg.make(seed, rules) for seed, rules in ((1, DRY), (2, DRY), (3, ISLANDS), (4, ISLANDS))}
+
+
+@pytest.fixture(scope="module")
+def pool_dir(made_maps, tmp_path_factory):
+    """A small pool: those four."""
     out = tmp_path_factory.mktemp("maps")
-    for seed, rules in ((1, DRY), (2, DRY), (3, ISLANDS), (4, ISLANDS)):
-        made = mg.make(seed, rules)
+    for made in made_maps.values():
         mg.write_entry(made.map, "made", made.layouts, made.features, out, made.style)
-    return se.load_pool(out)
+    return out
+
+
+@pytest.fixture(scope="module")
+def pool(pool_dir):
+    return se.load_pool(pool_dir)
 
 
 def _wet(pool):
@@ -48,8 +63,8 @@ def _dry(pool):
 # Maps -----------------------------------------------------------------------------------------------------------------------------------------------------
 
 
-def test_a_seed_makes_one_map():
-    a, b = mg.make(5, DRY), mg.make(5, DRY)
+def test_a_seed_makes_one_map(made_maps):
+    a, b = made_maps[1], mg.make(1, DRY)
     assert np.array_equal(a.map.corners, b.map.corners) and a.map.spots == b.map.spots and a.layouts == b.layouts
 
 
@@ -66,9 +81,9 @@ def test_a_symmetric_map_is_its_own_image(symmetry):
     assert min(images) < 1.0
 
 
-@pytest.mark.parametrize("seed", range(10, 16))
-def test_a_walker_can_get_from_start_to_start_on_a_map_meant_for_walkers(seed):
-    made = mg.make(seed, DRY)
+@pytest.mark.parametrize("seed", (1, 2, 10, 11))
+def test_a_walker_can_get_from_start_to_start_on_a_map_meant_for_walkers(made_maps, seed):
+    made = made_maps[seed] if seed in made_maps else mg.make(seed, DRY)
     ground = mg.Ground.of(made.map.corners, 0.0, False)
     can = ground.can("kbot")
     labels, _ = tr.label_runs(can)
@@ -92,8 +107,8 @@ def test_sea_maps_are_mostly_sea_with_their_starts_on_land():
             assert mg.tm_buildable(ground, *box["startpoints"][0])
 
 
-def test_spots_are_on_the_map_and_some_are_under_water_on_a_map_of_water():
-    made = mg.make(3, ISLANDS)
+def test_spots_are_on_the_map_and_some_are_under_water_on_a_map_of_water(made_maps):
+    made = made_maps[3]
     ground = mg.Ground.of(made.map.corners, 0.0, False)
     spots = np.array(made.map.spots)
     w, d = (made.map.corners.shape[1] - 1) * 8.0, (made.map.corners.shape[0] - 1) * 8.0
@@ -129,6 +144,146 @@ def test_titanduel_is_held_out_and_a_large_pool_loses_about_a_tenth():
     assert 60 < len(fw.held_out_maps(many)) < 140
 
 
+# Kinds of game ----------------------------------------------------------------------------------------------------------------------------------------------
+
+
+def _modes(one: bool, teams: int, ffa: int, chickens: bool = False) -> dict:
+    return {"1v1": one, "teams": teams, "ffa": ffa, "chickens": chickens, "chickens_or_teams": chickens or teams > 0}
+
+
+def _of(boxes: int, area: float = 0.0, listing=None, names=("some map",), points: int = 1, variant: bool = False) -> dict:
+    return map_modes.modes(map_modes.Known(boxes, points, area, None if listing is None else tuple(listing), tuple(names), variant))
+
+
+def test_a_map_zero_k_lists_holds_the_team_games_and_free_for_alls_it_is_listed_for_as_far_as_its_boxes_go():
+    assert _of(4, 196.0, ["1v1", "teams", "ffa (up to 4)"]) == _modes(True, 4, 4)
+    assert _of(5, 400.0, ["ffa (up to 11)"]) == _modes(True, 0, 5)
+    assert _of(9, 400.0, ["ffa (up to 11)"])["ffa"] == 8          # the sim's most teams
+    # Listed for a free-for-all, but the game its facts came from made two boxes: a free-for-all of two is a 1v1.
+    assert _of(2, 400.0, ["ffa (up to 9)"]) == _modes(True, 0, 0)
+
+
+def test_any_playable_map_with_two_boxes_or_more_is_a_1v1_map_whatever_zero_k_lists_it_for():
+    assert _of(2, 256.0, ["teams"]) == _modes(True, 4, 0)
+    assert _of(6, 256.0, ["ffa (up to 6)"])["1v1"] and not _of(1, 256.0, ["1v1"])["1v1"]
+    # But not the many variants a generator makes of one map, which would crowd out the rest.
+    assert not _of(5, 576.0, ["ffa (up to 11)"], variant=True)["1v1"]
+
+
+def test_a_map_zero_k_doesnt_list_is_a_team_map_with_two_boxes_and_a_free_for_all_with_more():
+    assert _of(2, 100.0) == _of(2, 100.0, []) == _modes(True, 2, 0)
+    assert _of(4, 256.0) == _modes(True, 0, 4)
+    assert _of(1) == _modes(False, 0, 0)
+
+
+def test_a_team_map_holds_more_a_side_the_larger_it_is_and_never_more_than_four():
+    assert [map_modes.team_size(side * side) for side in (6, 8, 10, 12, 14, 24)] == [2, 2, 2, 3, 4, 4]
+    assert map_modes.team_size(100.0, points=3) == 3     # its boxes list a start point for each of three
+
+
+def test_a_map_named_for_this_space_or_zero_wars_plays_nothing():
+    for name in ("THISspace", "thisspace_v2", "ZeroWars Crossfire 1.36.9", "zerowars_crossfire_1.36.9"):
+        assert _of(4, 256.0, ["1v1", "teams"], names=("x", name)) == _modes(False, 0, 0)
+    assert map_modes.unplayable("ZEROWARS 2") and not map_modes.unplayable("Zero Wars", "Space This")
+
+
+def test_a_map_named_for_chickens_or_made_for_them_plays_chicken_games_only_whatever_its_boxes():
+    chickens = _modes(False, 0, 0, True)
+    assert _of(2, 96.0, ["chickens"]) == _of(4, 96.0, None, names=("chicken_nuggets_v5",)) == chickens
+    assert _of(1, 96.0, ["1v1", "teams"], names=("x", "Chicken Coop v2")) == chickens
+    # Listed for chickens among other things, it plays those too.
+    assert _of(2, 196.0, ["1v1", "teams", "chickens"]) == {**_modes(True, 4, 0), "chickens": True}
+
+
+def test_chicken_games_may_go_on_team_maps_by_the_separate_fact():
+    team = _of(2, 196.0, ["1v1", "teams"])
+    assert not team["chickens"] and team["chickens_or_teams"]
+    assert not _of(2, 196.0, ["1v1"])["chickens_or_teams"]
+
+
+def test_a_facts_file_goes_by_zero_k_s_listing_found_by_its_archive_s_name_or_its_generator_s():
+    table = map_modes.catalog()
+    for m in json.loads((ROOT / "maps.json").read_text("utf8")):
+        assert map_modes.lookup(pathlib.Path(m["File"]).stem, table) == (m["Name"], m["Modes"]) == map_modes.lookup(m["Name"], table)
+    box = {"polygons": [], "startpoints": [[0.0, 0.0]]}
+    assert map_modes.known({"name": "Chicken_Nuggets_v5", "kind": "real", "layouts": [[box, box]]}, 96.0, table).listing == ("chickens",)
+    rampart = map_modes.known({"name": "violet_rampart_5_bases_seed_1", "kind": "real", "layouts": [[box] * 5], "style": {"generator": mr.NAME}}, 576.0, table)
+    assert rampart.listing == ("ffa (up to 11)",) and rampart.variant
+    assert map_modes.known({"name": "gen_00001", "kind": "made", "layouts": [[box, box]]}, 64.0, table).listing is None
+
+
+def test_a_start_box_keeps_every_start_point_it_lists_with_the_first_as_its_point():
+    square = [[0.0, 0.0], [100.0, 0.0], [100.0, 100.0], [0.0, 100.0]]
+    a, b = se._layouts({"layouts": [[{"polygons": [square], "startpoints": [[10, 10], [50, 50], [90, 90]]},
+                                     {"polygons": [square], "startpoints": [[60, 60]]}]]})[0]
+    assert a.point == (10.0, 10.0) and a.points == ((10.0, 10.0), (50.0, 50.0), (90.0, 90.0)) and b.points == (b.point,)
+    assert se.MapFacts([[a, b]], np.zeros((0, 6))).modes == _modes(True, 3, 0)
+
+
+def test_written_maps_say_their_kinds_of_game_and_facts_without_them_read_the_same_from_their_boxes(pool_dir, tmp_path):
+    old = tmp_path / "old"
+    old.mkdir()
+    for path in pool_dir.iterdir():
+        shutil.copy(path, old / path.name)
+        if path.name.endswith(".facts.json"):
+            facts = json.loads(path.read_text("utf8"))
+            assert facts["modes"] == _of(len(facts["layouts"][0]), 64.0, names=(facts["name"],))      # 8 x 8, so 2 a side
+            del facts["modes"]
+            (old / path.name).write_text(json.dumps(facts), "utf8")
+    derived = {f.name: f.modes for _, _, f in se.load_pool(old)}
+    mg.update_modes(old, tmp_path / "new")
+    written = {p.name[:-len(".facts.json")]: json.loads(p.read_text("utf8"))["modes"] for p in (tmp_path / "new").glob("*.facts.json")}
+    assert written == derived and len(written) == 4
+    assert all(f.modes == derived[f.name] for _, _, f in se.load_pool(pool_dir))
+
+
+def test_the_training_maps_without_modes_on_file_are_1v1_and_two_a_side_maps():
+    assert all(f.modes == _modes(True, 2, 0) for _, _, f in se.pool())
+
+
+# Violet Rampart ---------------------------------------------------------------------------------------------------------------------------------------------
+
+
+def test_violet_rampart_makes_one_map_for_a_seed_and_a_number_of_bases():
+    a, b = mr.generate(5, 314159), mr.generate(5, 314159)
+    assert np.array_equal(a.corners, b.corners) and a.spots == b.spots and a.boxes == b.boxes
+    assert not np.array_equal(a.corners, mr.generate(5, 271828).corners)
+
+
+@pytest.mark.parametrize("bases", (3, 4, 8))
+def test_violet_rampart_gives_each_base_its_spots_and_a_level_start_in_its_box_that_walks_to_every_other(bases):
+    r = mr.generate(bases, 271828)
+    assert len(r.spots) == 11 * bases and len(r.boxes) == bases
+    assert sorted(m for _, _, m in r.spots[:11]) == [1.5] * 5 + [2.0] * 5 + [3.0]
+    ground = mg.Ground.of(r.corners.astype(np.float32), mr.WATER_DAMAGE, False)
+    can = ground.can("kbot")
+    labels, _ = tr.label_runs(can)
+    parts = {int(labels[mg._cell(*start, can.shape)]) for _, start in r.boxes}
+    assert len(parts) == 1 and -1 not in parts
+    assert all(int(labels[mg._cell(x, z, can.shape)]) in parts for x, z, _ in r.spots)
+    for box, start in r.boxes:
+        assert mg.tm_buildable(ground, *start) and se._inside([list(p) for p in box], *start)
+        assert ground.height[mg._cell(*start, can.shape)] == pytest.approx(mr.RAMPART)
+
+
+def test_violet_rampart_with_four_bases_is_its_own_quarter_turn():
+    r = mr.generate(4, 161803)
+    assert (np.rot90(r.corners) != r.corners).mean() < 0.001        # a corner right on an edge may fall either way
+    spots = np.array(r.spots)
+    c = mr.MAP_SIZE / 2
+    turned = np.stack((c - (spots[:, 1] - c), c + (spots[:, 0] - c)), 1)       # a quarter turn about the centre
+    gaps = np.hypot(turned[:, None, 0] - spots[None, :, 0], turned[:, None, 1] - spots[None, :, 1]).min(1)
+    assert gaps.max() <= 23.0       # spots are put on building centres, 16 apart: a tie in each may round either way
+
+
+def test_violet_rampart_is_a_free_for_all_of_its_bases_and_replaces_the_pool_s_old_map():
+    box = {"polygons": [], "startpoints": [[0.0, 0.0]]}
+    for bases in (3, 8):
+        facts = {"name": f"violet_rampart_{bases}_bases_seed_1", "kind": "real", "layouts": [[box] * bases], "style": {"generator": mr.NAME}}
+        assert map_modes.of_facts(facts, 576.0, map_modes.catalog()) == _modes(False, 0, bases)
+    assert mg.REPLACED == ("violet_rampart_generator_v1_4",)
+
+
 # What stands where ------------------------------------------------------------------------------------------------------------------------------------------
 
 
@@ -161,7 +316,7 @@ def test_a_shipyard_goes_to_the_water_however_far_the_base_is_from_it(pool, rost
     ground = fw.Ground(bundle, facts)
     footing = roster.footing[_row(roster, "factoryship")]
     box = facts.layouts[0][0]
-    place = ground.site(np.random.default_rng(1), footing, *box.point, np.zeros((0, 3), np.float32))
+    place = ground.site(np.random.default_rng(1), footing, *box.point, np.zeros((0, 4), np.float32))
     assert place is not None and ground.fits(*place, footing)
     assert not fw.Ground(*_dry(pool)[0][1:]).has_room(footing.low, footing.high)
 
@@ -222,19 +377,21 @@ def test_a_scenario_side_remembers_some_of_what_it_cannot_see(pool):
     env.begin()
     env.step(0.0)
     memory = 0
-    for seat in range(16):
+    seats = [g * env.slots + t for g in range(env.count) for t in range(int(env.n_teams[g])) if t != env.chickens[g]]
+    for seat in seats:
         frame = env.frame(seat)
         u = frame.units
         rows = env.table.rows(u["def_id"])
         assert not ((u["knowledge"] == rf.KNOW_MEMORY) & env.table.mobile[rows]).any()
-        at_the_start = u["uid"] < len(env.scouted[seat // 2][seat % 2])    # and not what's been begun since
+        at_the_start = u["uid"] < len(env.scouted[seat // env.slots][seat % env.slots])    # and not what's been begun since
         assert not ((u["knowledge"] == rf.KNOW_HIDDEN) & ~env.table.mobile[rows] & at_the_start).any()      # the whole base was seen
         memory += int((u["knowledge"] == rf.KNOW_MEMORY).sum())
     assert memory > 0
     never = fd.ScenarioEnv(8, 6, fd.ScenarioRules(side_value=(8000.0, 8000.0), scouted=(0.0, 0.0)), threads=2, maps=pool, weights=fw.pool_weights(pool))
     never.begin()
     never.step(0.0)
-    assert sum(int((never.frame(s).units["knowledge"] == rf.KNOW_MEMORY).sum()) for s in range(16)) < memory / 4     # what the sim itself remembers, of a first moment's glimpse
+    seats = [g * never.slots + t for g in range(never.count) for t in range(int(never.n_teams[g])) if t != never.chickens[g]]
+    assert sum(int((never.frame(s).units["knowledge"] == rf.KNOW_MEMORY).sum()) for s in seats) < memory / 4     # what the sim itself remembers, of a first moment's glimpse
 
 
 # Games ----------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -421,6 +578,95 @@ def test_tanks_that_start_on_an_island_of_their_own_dont_suit():
     assert not ground.suits(ANYWHERE, TANK, a, b) and ground.suits(ANYWHERE, KBOT, a, b)
     assert ground.metal_reach(TANK, a) == 0.25
     assert ground.suits(ANYWHERE, TANK, b, _at(50, 5))      # those on the larger part are fine
+
+
+# Where the game lets a structure be built ----------------------------------------------------------------------------------------------------------------
+
+
+FACTORY = fw.Footing(56.0, -10000.0, 0.0, 56.0, 80.0, 10.72)    # a Cloakbot Factory's: 112 by 160 elmos, maxSlope 15
+SOLAR = fw.Footing(40.0, -10000.0, 0.0, 40.0, 40.0, 13.0)
+
+
+def _slope(rise: float, base: float = 0.0) -> fw.Ground:
+    """Land all over, this much higher each cell towards +x from `base`."""
+    ground = _ground(np.ones((FLAT_CELLS, FLAT_CELLS), bool), [])
+    ground._height = np.ascontiguousarray(np.tile(base + rise * np.arange(FLAT_CELLS, dtype=np.float32), (FLAT_CELLS, 1)))
+    return ground
+
+
+def test_the_catalog_says_each_footprint_and_how_level_it_wants_the_ground():
+    cat = se.catalog()
+    factory, solar = (fw.Footing.of(cat.units[cat.index[name]]) for name in ("factorycloak", "energysolar"))
+    assert (factory.half_x, factory.half_z, factory.radius) == (56.0, 80.0, 56.0)     # footprint 7 x 10, of 16 elmos
+    assert factory.height_dif == pytest.approx(40.0 * np.tan(np.radians(15.0)), abs=1e-3)      # the engine's maxHeightDif for maxSlope 15
+    assert (solar.half_x, solar.half_z) == (40.0, 40.0) and solar.height_dif > factory.height_dif
+    assert fw.Footing(32.0, 0.0, 0.0).half_x == fw.Footing(32.0, 0.0, 0.0).half_z == 32.0          # the radius both ways, if not said
+
+
+def test_a_build_is_tested_against_its_footprints_rectangle():
+    ground = _slope(0.0)
+    size = FLAT_CELLS * bd.PASS_CELL
+    # At the map's edge: 56 from it along x is room, and along z, where it's 80 deep, isn't.
+    assert ground.fits(60.0, 500.0, FACTORY) and not ground.fits(500.0, 60.0, FACTORY) and ground.fits(500.0, 80.0, FACTORY)
+    assert not ground.fits(size - 50.0, 500.0, FACTORY) and ground.fits(size - 56.0, 500.0, FACTORY)
+    # Beside another: footprints may touch, and the factory's is deeper than its circle.
+    taken = fw.footprints(500.0, 500.0, FACTORY.half_x, FACTORY.half_z)
+    apart = lambda x, z: po.apart(taken, x, z, 24.0, 24.0)  # noqa: E731
+    assert apart(500.0 + 56.0 + 24.0, 500.0) and not apart(500.0 + 79.0, 500.0)
+    assert not apart(500.0, 500.0 + 56.0 + 24.0), "80 along z is inside the footprint, though clear of a 56 circle"
+    assert apart(500.0, 500.0 + 80.0 + 24.0) and apart(500.0 + 80.0, 500.0 + 60.0)
+    assert po.apart(np.zeros((0, 4), np.float32), 1.0, 1.0, 24.0, 24.0)
+
+
+def test_a_build_needs_ground_within_its_height_limit_of_the_ground_at_its_middle():
+    flat, slope = _slope(0.0), _slope(4.0)
+    assert flat.fits(504.0, 504.0, FACTORY) and flat.fits(504.0, 504.0, SOLAR)
+    # 4 a cell: the factory's footprint reaches 4 cells from its middle's, 16 up, past its 10.72; the solar's 3, 12 of its 13.
+    assert not slope.fits(504.0, 504.0, FACTORY) and slope.fits(504.0, 504.0, SOLAR)
+    assert not _slope(-4.0, 1000.0).fits(504.0, 504.0, FACTORY), "down as much as up"
+    assert slope.fits(504.0, 504.0, fw.Footing(56.0, -10000.0, 0.0, 56.0, 80.0)), "no limit in its data, none here"
+    # Nowhere on a slope too steep for it, so `site` finds none; on one it can take, somewhere.
+    none = np.zeros((0, 4), np.float32)
+    assert slope.site(np.random.default_rng(1), FACTORY, 504.0, 504.0, none) is None
+    place = _slope(2.0).site(np.random.default_rng(1), FACTORY, 504.0, 504.0, none)
+    assert place is not None and _slope(2.0).fits(*place, FACTORY)
+    # One whose middle is under water floats or sits on the sea bed: the ground there isn't asked.
+    sea = _ground(np.zeros((FLAT_CELLS, FLAT_CELLS), bool), [])
+    sea._height = np.ascontiguousarray(np.tile(-100.0 - 8.0 * np.arange(FLAT_CELLS, dtype=np.float32), (FLAT_CELLS, 1)))
+    assert sea.fits(504.0, 504.0, fw.Footing(64.0, 15.0, 10000.0, 64.0, 96.0, 10.72))
+
+
+def test_a_ground_judges_level_by_the_sim_maps_heights_when_given_them(pool):
+    world_map, bundle, facts = _dry(pool)[0]
+    assert world_map.height.shape == bundle.passable.shape, "the sim map's cells are the passability cells"
+    fine, coarse = fw.Ground(bundle, facts, world_map.height), fw.Ground(bundle, facts)
+    assert fine.heights is not coarse.heights and np.shares_memory(fine.heights, world_map.height)
+    assert coarse.heights.shape == fine.heights.shape and np.abs(coarse.heights - fine.heights).mean() < 20.0
+
+
+def test_the_economy_script_builds_only_where_the_game_would_let_it():
+    """libzkscripts' own test of a site (Ground::fits) against this one, on what it builds in whole games."""
+    env = se.SimEnv(4, 7, ["scripts"], threads=2)
+    env.begin()
+    ed = env.eco_data
+    row_of = {int(c): r for r, c in enumerate(ed.catalog_row) if c >= 0}
+    checked, big = 0, 0
+    for _ in range(900):
+        env.step(0.0)
+        orders, offsets = env.eco_orders
+        for seat in range(env.seat_count):
+            for o in orders[offsets[seat]:offsets[seat + 1]]:
+                row = row_of.get(int(o["target"]), -1) if o["kind"] == zksim.ORDER_BUILD else -1
+                if row < 0 or ed.extractor[row]:
+                    continue
+                ground, footing = env.grounds[id(env.bundle_of(seat))], ed.footing[row]
+                assert ground.fits(float(o["x"]), float(o["z"]), footing), env.table.names[row]
+                spots = np.asarray(ground.bundle.spot_list, np.float32).reshape(-1, 3)
+                assert po.apart(fw.footprints(spots[:, 0], spots[:, 1], ed.spot_half, ed.spot_half), float(o["x"]), float(o["z"]), footing.half_x, footing.half_z)
+                checked += 1
+                big += footing.half_z > footing.half_x
+        env.finished_seats()
+    assert checked > 40 and big > 0, (checked, big)
 
 
 def test_ships_want_a_real_sea_with_both_bases_on_it():

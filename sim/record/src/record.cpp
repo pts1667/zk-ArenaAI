@@ -29,7 +29,7 @@ using zk::FeatureRecord;
 using zk::SiteRecord;
 using zk::UnitRecord;
 
-constexpr char MAGIC[8] = {'Z', 'K', 'R', 'E', 'C', '0', '0', '1'};
+constexpr char MAGIC[8] = {'Z', 'K', 'R', 'E', 'C', '0', '0', '2'};
 constexpr int64_t KEY_LIMIT = int64_t(1) << 24;     // uids and feature ids are handles: past this one isn't matched
 
 enum Clamp { C_X, C_Z, C_Y, C_ORD_X, C_ORD_Z, C_BUILD, C_ORD_AGE, C_HALF, C_FEATURE_XZ };
@@ -240,8 +240,10 @@ struct Slot {
     bool on = false;
     float map_w = 1.0f, map_h = 1.0f, y_lo = 0.0f, y_hi = 1.0f;
     std::vector<SiteRecord> sites;
-    Side sides[2];
+    std::vector<Side> sides;                // the recorded teams', in the file's order
+    std::vector<int32_t> teams;             // each side's team
     int frames = 0, chunks = 0;
+    int open = 0;                           // frames in the open chunk
     std::vector<uint8_t> body;              // the compressed chunks so far, each with its length in front
     std::vector<uint8_t> raw;               // a chunk before compressing
     int64_t clamps[ZKR_CLAMPS] = {};
@@ -303,9 +305,9 @@ int write_file(const Pending& p) {
 
 class Recorder {
 public:
-    Recorder(int slots, int threads, int level, int chunk_frames)
+    Recorder(int slots, int threads, int level, int chunk_frames, int teams)
         : slots_(size_t(slots)), pool_(std::max(1, threads)), level_(level), chunk_frames_(std::max(1, chunk_frames)),
-          writer_([this] { write_loop(); }) {}
+          teams_(std::max(1, teams)), writer_([this] { write_loop(); }) {}
     ~Recorder() {
         {
             std::lock_guard<std::mutex> lock(write_mutex_);
@@ -323,8 +325,19 @@ public:
         return err;
     }
 
-    void begin(int s, float map_w, float map_h, float y_lo, float y_hi, const void* sites, int n_sites) {
+    void begin(int s, float map_w, float map_h, float y_lo, float y_hi, const void* sites, int n_sites, int n_sides,
+               const int32_t* side_teams) {
         Slot& slot = slots_[size_t(s)];
+        slot.on = false;
+        slot.teams.clear();
+        for (int i = 0; i < std::max(0, n_sides); i++) {
+            const int32_t team = side_teams ? side_teams[i] : int32_t(i);
+            if (team < 0 || team >= teams_) {
+                std::fprintf(stderr, "zkrecord: slot %d: team %d isn't one of the recorder's %d\n", s, int(team), teams_);
+                return;
+            }
+            slot.teams.push_back(team);
+        }
         slot.on = true;
         slot.map_w = map_w;
         slot.map_h = map_h;
@@ -332,8 +345,9 @@ public:
         slot.y_hi = y_hi > y_lo ? y_hi : y_lo + 1.0f;
         const auto* p = static_cast<const SiteRecord*>(sites);
         slot.sites.assign(p, p + std::max(0, n_sites));
+        slot.sides.resize(slot.teams.size());       // kept, and their buffers with them, from the slot's last run
         for (Side& side : slot.sides) side.clear();
-        slot.frames = slot.chunks = 0;
+        slot.frames = slot.chunks = slot.open = 0;
         slot.body.clear();
     }
 
@@ -342,13 +356,14 @@ public:
             const int s = a.games[k];
             Slot& slot = slots_[size_t(s)];
             if (!slot.on) return;
-            for (int side = 0; side < 2; side++) {
-                const size_t seat = size_t(s) * 2 + size_t(side);
+            for (size_t i = 0; i < slot.sides.size(); i++) {
+                const size_t seat = size_t(s) * size_t(teams_) + size_t(slot.teams[i]);
                 const auto* units = static_cast<const UnitRecord*>(a.records) + seat * size_t(a.cap);
                 const auto* features = static_cast<const FeatureRecord*>(a.features) + seat * size_t(a.feature_cap);
-                add_frame(slot, slot.sides[side], units, a.counts[seat], a.globs + seat * ZKR_GLOBALS, features, a.feature_counts[seat]);
+                add_frame(slot, slot.sides[i], units, a.counts[seat], a.globs + seat * ZKR_GLOBALS, features, a.feature_counts[seat]);
             }
             slot.frames++;
+            slot.open++;
         });
     }
 
@@ -357,29 +372,31 @@ public:
             const int s = games[k];
             Slot& slot = slots_[size_t(s)];
             if (!slot.on) return;
-            for (int side = 0; side < 2; side++) {
-                Side& sd = slot.sides[side];
-                const size_t seat = size_t(s) * 2 + size_t(side);
+            for (size_t i = 0; i < slot.sides.size(); i++) {
+                Side& sd = slot.sides[i];
+                const size_t seat = size_t(s) * size_t(teams_) + size_t(slot.teams[i]);
                 const int a = offsets[seat], b = offsets[seat + 1];
                 // Orders for a frame not taken (or taken twice) would put the two out of step: the count follows the frames.
                 if (sd.order_counts.size() >= sd.unit_counts.size()) continue;
                 sd.order_counts.push_back(b - a);
                 sd.orders.insert(sd.orders.end(), orders + a, orders + b);
             }
-            if (int(slot.sides[0].unit_counts.size()) >= chunk_frames_) close_chunk(slot);
+            if (slot.open >= chunk_frames_) close_chunk(slot);
         });
     }
 
     int finish(int s, const char* path, const char* meta, int meta_len) {
         Slot& slot = slots_[size_t(s)];
         if (!slot.on) return -1;
-        if (!slot.sides[0].unit_counts.empty()) close_chunk(slot);
+        if (slot.open) close_chunk(slot);
         std::vector<uint8_t> head;
         head.insert(head.end(), MAGIC, MAGIC + 8);
         put_value<uint32_t>(head, uint32_t(std::max(0, meta_len)));
         head.insert(head.end(), meta, meta + std::max(0, meta_len));
         for (float v : {slot.map_w, slot.map_h, slot.y_lo, slot.y_hi}) put_value(head, v);
         for (int32_t v : {int32_t(slot.frames), int32_t(slot.chunks), int32_t(chunk_frames_), int32_t(slot.sites.size())}) put_value(head, v);
+        put_value<int32_t>(head, int32_t(slot.teams.size()));
+        put_raw(head, slot.teams);
         std::vector<uint8_t> sites;
         put_raw(sites, slot.sites);
         compress_into(head, sites);
@@ -393,7 +410,7 @@ public:
         slot.on = false;
         for (Side& side : slot.sides) side.clear();
         slot.body = std::vector<uint8_t>();
-        slot.frames = slot.chunks = 0;
+        slot.frames = slot.chunks = slot.open = 0;
         return 0;
     }
 
@@ -484,8 +501,8 @@ private:
     void close_chunk(Slot& slot) {
         std::vector<uint8_t>& raw = slot.raw;
         raw.clear();
-        Side& first = slot.sides[0];
-        const int frames = int(first.unit_counts.size());
+        const int frames = slot.open;
+        slot.open = 0;
         put_value<int32_t>(raw, frames);
         for (Side& sd : slot.sides) {
             sd.order_counts.resize(sd.unit_counts.size(), 0);       // frames whose orders never came: none
@@ -551,6 +568,7 @@ private:
     std::vector<Slot> slots_;
     Pool pool_;
     int level_, chunk_frames_;
+    int teams_;                 // the batch's a game: its arrays' second dimension
     int64_t clamps_[ZKR_CLAMPS] = {};
     std::mutex write_mutex_;
     std::condition_variable write_wake_, write_idle_;
@@ -566,12 +584,15 @@ extern "C" {
 
 int zkr_abi_version(void) { return ZKR_ABI_VERSION; }
 
-void* zkr_new(int slots, int threads, int level, int chunk_frames) { return new Recorder(slots, threads, level, chunk_frames); }
+void* zkr_new(int slots, int threads, int level, int chunk_frames, int teams) {
+    return new Recorder(slots, threads, level, chunk_frames, teams);
+}
 
 void zkr_free(void* rec) { delete static_cast<Recorder*>(rec); }
 
-void zkr_begin(void* rec, int slot, float map_w, float map_h, float y_lo, float y_hi, const void* sites, int n_sites) {
-    static_cast<Recorder*>(rec)->begin(slot, map_w, map_h, y_lo, y_hi, sites, n_sites);
+void zkr_begin(void* rec, int slot, float map_w, float map_h, float y_lo, float y_hi, const void* sites, int n_sites, int n_sides,
+               const int32_t* side_teams) {
+    static_cast<Recorder*>(rec)->begin(slot, map_w, map_h, y_lo, y_hi, sites, n_sites, n_sides, side_teams);
 }
 
 void zkr_frames(void* rec, const zkr_frames_args* args) { static_cast<Recorder*>(rec)->frames(*args); }

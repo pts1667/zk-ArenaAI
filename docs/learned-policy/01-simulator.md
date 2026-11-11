@@ -16,9 +16,9 @@ This builds three libraries in `~/zksim/build` (`ZKSIM_LIB` overrides where they
 
 | Library | What | Python side |
 |---|---|---|
-| `libzksim.so` | the sim (`sim/src`, `sim/include/zksim`, C ABI in `capi.h`, ABI 18) | `sim/py/zksim.py` (`Batch`), `sim/py/zknav.py` (routes) |
-| `libzkscripts.so` | the army and economy scripts (`sim/scripts`, `zkscripts.h`, ABI 8) | `tools/policy_scripts_cpp.py` |
-| `libzkrecord.so` | the game recorder (`sim/record`, `zkrecord.h`), needs `libzstd-dev` | `sim/py/zkrecord.py` |
+| `libzksim.so` | the sim (`sim/src`, `sim/include/zksim`, C ABI in `capi.h`, ABI 20) | `sim/py/zksim.py` (`Batch`), `sim/py/zknav.py` (routes) |
+| `libzkscripts.so` | the army and economy scripts (`sim/scripts`, `zkscripts.h`, ABI 11) | `tools/policy_scripts_cpp.py` |
+| `libzkrecord.so` | the game recorder (`sim/record`, `zkrecord.h`, ABI 2), needs `libzstd-dev` | `sim/py/zkrecord.py` |
 
 `sim/include/zksim/rawframe.hpp` is generated from `bots/zkbot/policy/rawframe.py` (`python tools/policy_schema.py`), and a test
 compares the two.  The game around the sim (starts, scripts, rewards, the policy's orders) is `tools/policy_sim_env.py`'s `SimEnv`.
@@ -27,33 +27,60 @@ compares the two.  The game around the sim (starts, scripts, rewards, the policy
 
 * A batch holds many games and steps them a slot at a time on a thread pool of its own.  The caller's thread works too, and
   games are handed out costliest first, by the last step's time.  Any thread count plays the same games bit for bit.
+* A game has up to 8 teams (`ZK_MAX_TEAMS`), each in an allyteam ("Teams and alliances").  The batch's arrays are
+  games x teams, a team's place being its seat (`game * slots + team`); a slot a game doesn't use gives empty frames.  With 2
+  slots that's the `game * 2 + side` of a batch of 1v1s, which plays bit for bit as it did before there were teams.
 * Several batches can step at once in one process.  A forked process with a live batch starts its own threads
   (`test_batch_threads.py`).  `zk_batch_step_begin` / `zk_batch_step_wait` let the caller work while the sim steps, and
   `zk_batch_set_threads` changes the pool.
 * Each game has its own random generator, seeded by the seed and the game's index.  Sums run in handle order.
-* Fog goes out from each side's own units.  The spatial grid is split by side, and a tick allocates nothing.
+* Fog goes out from each allyteam's own units.  The spatial grid is split by allyteam, and a tick allocates nothing.  What a
+  tick costs follows the units alive, not every unit there has been: an 80-minute 1v1 steps in 142 µs a game.
 
-Speed, `tools/sim_step_bench.py`, 128 games on 8 threads: 142,943 game-steps a second at 1 minute into games, 57,889 at 8 and
-33,213 at 16.  With both sides scripted, `SimEnv.step` runs 92,443 seat decisions a second at 8 minutes (2.8 ms a step).
-Movement is the largest phase.
+Speed, `tools/sim_step_bench.py`, 128 games on 8 threads, measured before the sim had teams (16-minute games have run about
+12% faster since): 142,943 game-steps a second at 1 minute into games, 57,889 at 8 and 33,213 at 16.  With both sides scripted,
+`SimEnv.step` runs 92,443 seat decisions a second at 8 minutes (2.8 ms a step).  Movement is the largest phase.
 
 ## Data
 
 * **Units and weapons** come from an in-engine dump after Zero-K's post-processing (`tools/simgame/` gadgets, then
   `python tools/sim_data.py`), because `armordefs.lua` and `unitdefs_post.lua` change values the raw unit files don't show.
   `sim_data.py` also flags what isn't modelled (`ZK_W_UNMODELLED`: capture, spawned units, area impulse) and reads each
-  `customParams` that changes a weapon's meaning.
+  `customParams` that changes a weapon's meaning.  A unit's record has its footprint (`foot_x`, `foot_z`: half its `xsize` and
+  `zsize` in elmos) and `max_height_dif`, for "Where a building can go".
+* **The game's rules** (`sim/data/rules.json`, from `python tools/sim_rules.py`, which needs a Python with `lupa`): the 42
+  units that don't keep a team in the game, the reveal rule's numbers, the six chicken difficulties and the 21 egg features.
 * **Maps** are exported by `tools/sim_data.py`, with their routes worked out at export (see "Movement").  `sim/data/maps` is
-  gitignored: after a pull, run `python tools/sim_data.py maps`.
+  gitignored: after a pull, run `python tools/sim_data.py maps`.  A map built by hand (`zksim.Map(...)` without routes) works
+  them out when made, once for the move classes that move alike on it.
 * **Map facts** come from a real game (`python tools/sim_engine.py facts MAP...`, into `sim/data/map_facts.json`): start boxes,
   metal spots and reclaimable features.  A game is asked because a map's layout file is Lua that may build its lists in code
   (Faultline makes half its spots that way).  A map may also draw its boxes differently on each load, so `facts` loads each map
   several times and keeps every layout it sees.
 * **The five training maps** (`TRAINING_MAPS`): Agalta, Faultline, FrostyCove, Red Comet and TitanDuel.
-* **The map pool** (`/mnt/d/zk-learned/maps`, `tools/map_gen.py`): 98 real maps and 200 made-up ones (relief, water and
-  symmetry drawn per map, with starts made reachable).  21 are held out (`held_out_maps`): TitanDuel and a tenth by the hash of
-  the name.  The pool loads in 37 s to about 7.5 GB, so load it once before forking workers, and never in two jobs at once.
-  `policy_sim_env.share_maps` builds each map's derived data before the fork too, so workers share it.
+* **The map pool** (`/mnt/d/zk-learned/maps`, `tools/map_gen.py`): 315 maps.  115 are real, 18 of them Violet Rampart; 200
+  are made up (relief, water and symmetry drawn per map, with starts made reachable).  23 are held out (`held_out_maps`):
+  TitanDuel and a tenth by the hash of the name.  The pool loaded in 37 s to about 7.5 GB at 298 maps, so load it once
+  before forking workers, and never in two jobs at once.  `policy_sim_env.share_maps` builds each map's derived data before
+  the fork too, so workers share it.
+* **What each pool map can play** is its facts' `modes` (`tools/map_modes.py`; `python tools/map_gen.py modes` writes them):
+  * `1v1`: any playable map with two start boxes or more (296 maps);
+  * `teams`: players a side (261 maps).  Whether it's a team map is Zero-K's listing (`maps.json`), or two boxes on a map
+    Zero-K doesn't list; how many a side is the map's area over 48 square map units, 2 at least and 4 at most, since Zero-K
+    doesn't say;
+  * `ffa`: alliances (51 maps): Zero-K's "up to N", or the boxes of an unlisted map with more than two, up to its boxes and 8;
+  * `chickens`: a map named `Chicken...`, or listed for chicken defense and nothing else, plays nothing else (1 map).
+    `chickens_or_teams` adds the team maps, where chicken games are drawn too (262).
+  
+  Maps named `THISspace...` or `ZeroWars...` play nothing (the user, 2026-11-10).
+* **Violet Rampart** makes its terrain at game start, by its number of bases and a seed.  `tools/map_rampart.py` is a port of
+  the map's gadget: bit-identical to the Lua under a shared random generator (40 runs, 3 to 11 bases), and its 4-base map has
+  exactly the 44 metal spots of a real game.  `python tools/map_gen.py rampart` adds the pool's 18: 3 to 8 bases, each at
+  three seeds.  They're free-for-all maps only, and the maps of one base count share one map's weight in a draw.
+* **New maps** need the engine: `zk-maps.ps1` to fetch them, `python tools/sim_engine.py facts ... --out
+  D:/zk-learned/maps/real_facts.json` (which starts the engine six times a new map), then `python tools/map_gen.py real
+  --facts ... --out D:/zk-learned/maps --workers 6`.  `Chicken_Roast_v1` isn't in the pool: its facts have one start box, and
+  `real` keeps layouts of two or more.
 
 ## What's modelled
 
@@ -159,8 +186,13 @@ A world runs the economy only if `zk_world_economy` turns it on.  Fight replays 
   extractor's income squared, and an extractor earns income x (1 + 0.25 sqrt(energy)).  It matches the game exactly on full
   storage.  The income reported is the game's, so energy income falls when overdrive runs.
 * **Building**: progress per second is build speed / build time, paid from both resources as it goes, and stalling on whichever
-  runs out.  A side's first factory is free and instant.  ASSIST helps build; given to a factory, it helps with what the
-  factory is building.  A factory repeats the type of its last PRODUCE.
+  runs out.  A team's first factory is free and instant.  ASSIST helps build, within an allyteam; given to a factory, it helps
+  with what the factory is building.  A factory repeats the type of its last PRODUCE.  The sim builds wherever it's told:
+  whether a place will do is decided by who orders it ("Where a building can go").
+* **Allies** share as Zero-K's teams do, simplified.  Extractor income is pooled and split evenly among the allyteam's teams
+  that have a live unit.  Overdrive runs per allyteam, its metal and energy shared by the spare energy each put in.  What
+  overflows a team's storage is split among its allies with room, energy too.  There's no payback to whoever built the energy
+  and no pooled storage, and innate and generator income stay with their owner.
 * **Factory plates** (`unit_factory_plate.lua`) make their factory's roster, but only while a finished factory of their type and
   side, not stunned or disarmed, is within the plate's build range (420).  Off, a plate makes nothing and helping it does
   nothing (`World::plate_off`).  The catalog's `plate_parent` says whose plate is whose.
@@ -176,18 +208,68 @@ A world runs the economy only if `zk_world_economy` turns it on.  Fight replays 
 ### Group orders
 
 One order to many units, as a player gives one to a box (`World::order_group`).  It names an anchor, a radius and a set of
-roles.  The anchor, and every other alive, mobile, finished unit of its side within the radius whose role is in the set, get the
-order.  Roles are the bot catalog's (`zkbot.policy.groups`).  Group orders apply before unit orders in a step.
+roles.  The anchor, and every other alive, mobile, finished unit of its team within the radius whose role is in the set, get the
+order: never an ally's.  Roles are the bot catalog's (`zkbot.policy.groups`).  Group orders apply before unit orders in a step.
+
+### Teams and alliances
+
+* **A team owns** its units and its purse (`team[u]`); **an allyteam** shares sight and can't be shot by its own (`side[u]`).
+  A raw frame's `player` is the team and its `ally_team` the allyteam.  A frame lists the viewer's own units first, then its
+  allies' (seen whole), then what it sees, radar blips, memories, and what's hidden (the critic's).
+* **What keeps a team in the game** is any finished unit not on Zero-K's don't-count list (`game_over.lua`: the Flea, the
+  bombs, terraform units and the like; 42 in `rules.json`).  The batch's four stats a team are its tracked value, its live
+  units, its reclaim income, and its finished units that keep it in.
+* **The reveal rule** (`game_over.lua`): with two allyteams left and one worth over 25 times the other, the weaker one's
+  units are always visible, and any off the map are destroyed.  It's checked every 45 frames, never in chicken games, and
+  doesn't end the game (`zk_world_set_reveal`, `zk_batch_set_reveal`; on by default).
+
+### Chicken defense (`sim/src/chickens.cpp`)
+
+A port of Zero-K's `unit_spawner.lua` with `spawn_defs.lua`'s numbers, at Zero-K's own timings (the user, 2026-11-10).
+`Batch.reset(..., chickens=(team, difficulty))` gives a team to it: the sim then spawns and orders that team's units, and
+`Batch.chicken_state(game)` says where things stand (the queen: not yet, here or dead; seconds until she's due; burrows alive
+and killed; chickens; waves; anger; tech).
+
+* **Burrows and waves** come up on the frames the Lua's formulas give (checked to wave 91).  A burrow killed angers the
+  chickens and brings the queen sooner; each wave calms them.  The six difficulties are `rules.json`'s.
+* **The queen** arrives when her time is up, morphs between her two forms, and her death ends the chickens: they vanish, and
+  the players have won.
+* **A chicken's tracked value** is its cost, or its build time where it has no cost.
+* **Simplified**: no PvP, lava, eggs or endless modes.  Burrows come up on dry, empty land a kbot can walk.  The queen's extra
+  health is damage divided.  A morph is a new unit of the other form with the same share of health.  A digger's ambush comes
+  up above ground.
+* **Cost**: about 1 ms a decision at 20 minutes, and 1.4 ms at 60 with 1,153 live units.
 
 ## The game in the sim
 
-`SimEnv` (`tools/policy_sim_env.py`) plays games of two sides, each one player:
+`SimEnv` (`tools/policy_sim_env.py`) plays games of four kinds (`kinds`, by weight; the user, 2026-11-10), each on a map whose
+`modes` hold it ("Data"):
 
-* **Start**: commanders in two of the map's start boxes, drawn as Zero-K's `allshuffle` does.  The start is the box's start
-  point half the time; otherwise it's anywhere level in the box.
-* **End**: elimination; or from 2 minutes, one side at 2.5x the other's value and 10,000 metal ahead; or a draw at 20 minutes.
-* **Every side** plays the opening script, and its constructors run the economy script.  Its fighters and factories are run
-  by the army script or by the policy.
+| Kind | Teams | 
+|---|---|
+| `1v1` | two alliances of one |
+| `teams` | two alliances of 2 to 4 players, as many as the map holds a side |
+| `ffa` | 3 to 8 alliances of one, as many as the map has boxes for |
+| `chicken` | 1 to 4 players in one alliance against chicken defense, which the sim plays and no seat has |
+
+A batch has room for the biggest game of its kinds (`slots`): 2 teams for 1v1s, 5 with chicken games, 8 with team games or
+free-for-alls (the padding costs about 90 MB at 64 games, and no speed).  A seat is `game * slots + team`.
+
+* **Start**: each alliance in one of the map's start boxes, drawn as Zero-K's `allshuffle` does; on a map with more boxes than
+  alliances some stay empty.  An alliance of one starts at the box's start point half the time, otherwise anywhere level in
+  the box.  Allies start at the box's start points, or apart in it.  In a chicken game the players share one box and the
+  burrows come up away from them.
+* **Out**: an alliance with no team that has a unit keeping it in ("Teams and alliances") is out, and its seats finish at once.
+  A dead team in a live alliance stops acting, and its seat finishes with its alliance.
+* **End**: one alliance left; or the lead rule; or the time limit at 80 minutes (the user, 2026-11-10; it was 20).  A chicken
+  game ends when the queen dies (the players win), when the players are out, or at the limit (a draw).
+* **The lead rule**: from 2 minutes, an alliance at 2.5x the value of all the others together, and 10,000 metal ahead, has
+  won.  Each game draws whether it has the rule (`lead_share`): PPO fades the share (03-training.md, "Reward"), tests,
+  recordings and evals keep it in every game, frame collection in none, and chicken games never have it.  It rarely fires in
+  a big free-for-all.
+* **Every team** plays the opening script, and its constructors run the economy script.  Its fighters and factories are run
+  by the army script or by the policy.  Against the scripts (`fight`) the policy plays team 0 and scripts play every other
+  team, its allies too; in self-play (`mirror`) it plays every team.
 * **A policy's seat**: the scripts can still run there but only advise (`SimEnv.advise`), giving labels that are never carried
   out (libzkscripts' label seats).  In a share of games the policy runs its economy as well (`policy_economy_share`).
 * **Variants** (`variants=True`): each side's army script draws its knobs at the start: a preset (standard, rush, turtle,
@@ -196,17 +278,36 @@ order.  Roles are the bot catalog's (`zkbot.policy.groups`).  Group orders apply
   which a fighter retreats.
 * **Group orders**: the army script sends identical orders as group orders wherever that's exact (`group_orders`, on by
   default).
+* **Chicken difficulty** is drawn each game (`difficulties`, `--chicken-difficulties`): Very Easy, Easy and Normal evenly by
+  default.  Four scripted players won at Very Easy and Easy, 1 game in 6 at Normal and none at Hard (2026-11-10, a few games
+  each); the default hasn't been set from that.
+
+### Where a building can go
+
+The engine's test (`CGameHelper::TestUnitBuildSquare`), in place of a circle round the building (the user, 2026-11-10).  The
+sim itself builds wherever it's told, so the rule lives with whoever picks the place: `policy_opening.Ground.fits` and `site`
+for the opening, the Python scripts and scenarios, `policy_sim_env.place_build` for the policy's orders, and `Ground::fits`
+and `Seat::site` in the C++ economy script.  A test plays the C++ script's builds through the Python rule.
+
+* **The footprint** is the def's `xsize` x `zsize` rectangle of 8-elmo squares (the catalog's `foot_x`, `foot_z` are its
+  halves: a cloak factory 56 x 80, a solar 40 x 40, an extractor 24 x 24).  Two buildings' rectangles may touch and not
+  overlap.  What's in the way is kept as rows of x, z, half x, half z.
+* **Level ground**: every cell under the rectangle must be within the def's `maxHeightDif` of the height at its middle (a
+  cloak factory 10.7 elmos, a solar 13, an extractor 21.3).  The engine tests its 8-elmo squares; this tests the sim map's
+  16-elmo cells.  It's skipped for what floats or stands on the sea bed (the middle under water), and for a def with no limit.
+* **And as before**: the rectangle on the map, on ground the def can stand on (land, or water of its depth).
 
 ### The opening (`tools/policy_opening.py`)
 
-The same on both sides, in Python:
+The same for every team, in Python:
 
 1. The factory goes about 160 elmos towards the enemy, and starts repeating its raider.  The factory and commander are drawn per
-   side.  The training maps keep all 8 land factories, drawn evenly; the pool offers what suits each map (`Ground.suits`).
-2. An extractor and a solar go at each of the nearest spots that are nearer us than them, 4 to 6 by map.
+   team.  The training maps keep all 8 land factories, drawn evenly; the pool offers what suits each map (`Ground.suits`).
+2. An extractor and a solar go at each of the nearest spots that are nearer us than them, 4 to 6 by map.  Among allies a spot
+   is whose start is nearest it.
 3. Then the commander assists the factory.
 
-It finishes by a median of 152 s.  A step that takes over 2 minutes is given up.
+It finishes by a median of 152 s.  A step that takes over 2 minutes is given up.  The chickens have no opening.
 
 ### The army script (`sim/scripts/src/army.cpp`)
 
@@ -221,8 +322,18 @@ It finishes by a median of 152 s.  A step that takes over 2 minutes is given up.
 * **Raiders** move in squads of three.  A squad goes for extractors, then other buildings, and takes a target only when its
   metal beats the cover there.  Without a target, it probes towards the enemy and stops before defended ground.  A quarter of
   the raiders guard their own extractors.
-* **The rest**: assaults lead to the enemy's start, then to the nearest building.  Riots hold behind them; skirmishers back off
-  armed units; artillery stands at 0.75 of its range; AA follows the army; snipers hunt slow heavies; bombers go for defences.
+* **The rest**: assaults lead to the start of the nearest enemy that still has units, then to the nearest building of any
+  enemy, then to the nearest armed unit.  Riots, skirmishers, artillery and bombers hold behind assaults that are on the move
+  (one that hasn't moved 100 elmos in 60 s doesn't count; with none moving they go for the goal themselves).  Skirmishers
+  back off armed units; artillery stands at 0.75 of its range; AA follows the army; snipers hunt slow heavies; bombers go
+  for defences.  Scouts' waypoints are kept on the map.
+* **Several teams** (`zks_reset`'s `script_teams`): a script's enemies are the units of every team not allied to it, and its
+  allies' buildings are in the way when it places its own.
+* **Against chickens** (a game with a team the scripts don't play) the army guards.  It goes for chickens within 800 elmos of
+  its buildings first, and hunts a burrow only while a kill is free: while the chickens' anger is at most 0, since a kill then
+  brings the queen no sooner.  From minute 30 it hunts whatever the anger, to bring her on while it's strongest against them.
+  Once she's come it goes for her, and plants add AA (0.35 of their mix) from 5 minutes before she's due.  Before this posture
+  the scripts killed about 45 burrows in 9 minutes, met the queen at minute 8 to 10 and lost at Normal.
 * **Re-ordering**: a unit is re-ordered only when its job or goal changes.
 * **Groups**: orders that are the same to the letter go as one group order (`Seat::group_plans`), and take in units already
   told that order.
@@ -255,7 +366,12 @@ Further rules:
 * **A second factory** (the user's rule, 2026-11-10): a plane plant, gunship plant or strider hub (0.5, 0.3, 0.2), at 40 metal a
   second not counting reclaim, or 20 minutes.  There's no third.  A factory a constructor was sent to start counts as there:
   the walk can take longer than the minute between starts, which once gave two.
-* A constructor stuck for 30 s is given another job, and its spot is avoided for 3 minutes.
+* A constructor stuck for 30 s is given another job, and its spot is avoided for 3 minutes.  One sent home after fleeing is
+  freed once it has sat within 300 elmos of home for 30 s.
+* **Places** are tested as the game would ("Where a building can go"), from the catalog's footprints and the map's heights
+  (`zks_data_desc`'s `half_x`, `half_z`, `height_dif`; `zks_map_desc.height`).
+* **In long games** with the lead rule off (64 1v1s to the 80-minute limit): a median of 19.4 minutes, 7 past 40 minutes and 2
+  at the limit, both slow sieges.
 
 Metal lost at the storage cap is 2-13% of income by game phase (it was 62% before the spend step).  Reclaim is about 4% of a
 side's metal.
@@ -341,4 +457,9 @@ What's left out on purpose, so it isn't mistaken for modelled:
 * **Unmodelled weapons:** capture, spawned units and area impulse (`bomberassault`, `dronecarry`, `hoverminer`,
   `jumpblackhole`, `veharty`, `vehcapture`, `zenith`).  These units stand in frames without their weapon doing what it does,
   and are kept out of armies.
-* **The frame:** disarm isn't shown (only paralysis), and nor are grid numbers.
+* **The frame:** disarm isn't shown (only paralysis), and nor are grid numbers.  A unit's `ord_age` (16-bit frames) stops
+  counting at 36 minutes, and the global time feature (frame / 36,000) reaches 4.0 at 80 minutes, where it was made for 20.
+* **Teams:** allies share income, overdrive and overflow only ("Economy"): units can't be given, and there's no pooled
+  storage.
+* **Chicken defense:** the simplifications listed under it.  A chicken counts as costing 1 in the policy's type table, so
+  probes of enemy value undercount them.

@@ -49,11 +49,11 @@ numba, giving the same tensors to the bit as the numpy it replaced.  Without num
 
 | Group | Numbers each | Cap, and what happens past it |
 |---|---|---|
-| Units | 127: type stats, instance state, order memory, 24 terrain rays (free distance, enemy and own DPS in 8 sectors), summary counts | 592, controllable first (up to 256, by cost, then distance to the army).  After those come other alliances' units in sight, then on radar, then the rest, each by max(cost, 100) / (distance to our army + 200) |
+| Units | 127: type stats, instance state, order memory, 24 terrain rays (free distance, enemy and own DPS in 8 sectors), summary counts | 1,280, controllable first (up to 512, by cost, then distance to the army).  After those come other alliances' units in sight, then on radar, then the rest, each by max(cost, 100) / (distance to our army + 200) |
 | Summaries | as units | 12 tokens, one per (whose, what's known, coarse role), for what the unit cap left out |
 | Regions | 34: 27 static, then what's there now (own value, seen and radar enemy value, DPS, wreck metal, ...) | all of them (120 at most on the maps seen) |
 | Sites | 9 | 24, nearest the base first |
-| Features | 5 | 32, by metal / (distance + 200); a region's wreck metal still counts every one |
+| Features | 5 | 512, by metal / (distance + 200); a region's wreck metal still counts every one |
 | Global | 16 | |
 
 * **Who owns a unit** is two ids numbered from the viewer: own is 0, and the others count from 1, skipping its own.  An unknown
@@ -67,10 +67,14 @@ numba, giving the same tensors to the bit as the numpy it replaced.  Without num
 * **The economy is on** (`economy=True`) everywhere the actor's or the encoder's frames are made: metal, energy, income,
   storage, unfinished structures, idle builders and site status.
 * **For the critic only**: up to 64 enemy units the seat can't see (`hidden_*`).
-* **`FEATURE_VERSION`** (7) is what a saved encoder or actor was trained to read.  Raise it with any change to the tensors'
+* **`FEATURE_VERSION`** (8) is what a saved encoder or actor was trained to read.  Raise it with any change to the tensors'
   meaning.  Loading checks it, and `ENCODER_FEATURE_VERSIONS` lists what an encoder reads alike.  Frame shards store featurized
   tensors, ids included, so a change means collecting frames again.  Version 7 (2026-11-10) resized the id tables for
-  free-for-all, so every encoder, clone and frame pool from before is invalid.
+  free-for-all.  Version 8 (the same day, the user's numbers) raised the caps for long and many-sided games, from 592 unit
+  tokens with 256 controllable and 32 features: an 80-minute 1v1 had 656 records in sight on a side and 609 of its own.  So
+  every encoder, actor and frame pool from before is invalid, `full-1`'s too.
+* **Allies** are units like any other in the pool, told apart by their ids: the viewer's allyteam is 0 and its own player 0.
+  Only the viewer's own units are controllable.
 * **Golden tests** (`tests/policy/test_golden.py`): 5 live frames and 4 sim frames against reviewed output, at 1e-6.  Rewrite
   them with `tools/policy_golden.py` only after a change you meant.
 
@@ -85,7 +89,7 @@ and the commander once the opening is over (`featurize._select`, `table.acts_in_
 
 * **Factory plates** are factories in the type table (`specials.json`'s `plates`, from the dump's `child_of_factory`), though the
   engine's def says they aren't: a plate can be told what to PRODUCE and be helped, as in the sim.  Its type stats keep the
-  def's flag.  FEATURE_VERSION stayed at 7 (2026-11-10): no recorded game or frame had held a plate.
+  def's flag.  FEATURE_VERSION wasn't raised for it (2026-11-10): no recorded game or frame had held a plate.
 * **Caretakers** can't be told anything (they've nothing to build), and need nothing: the sim has an idle one help what's
   being built in its reach, as Zero-K's default widget does.
 
@@ -126,13 +130,14 @@ target was lost, or it's idle.  This keeps orders steady.
 * **Targets**: one pointer per kind (attack unit, attack ground, manual fire, assist), over the tokens that kind may aim at.
 * **BUILD**: a type (the same head as PRODUCE, over the constructor's options: 187 producible types, 127 from factories and silos
   and 60 built), then a place, then an offset.  The place is one of our unit tokens or a site.  The offset is on it, or one of 8
-  compass points at 64, 128 or 256 elmos.  The sim builds at the nearest spot the footing fits (`SimEnv.place_build`), and an
-  extractor at the free spot nearest the point.  On the economy script's builds, that comes out p50 19 elmos from the script's
+  compass points at 64, 128 or 256 elmos.  The sim builds at the nearest spot the building's footprint fits, on ground level
+  enough for it (`SimEnv.place_build`; 01-simulator.md, "Where a building can go"), and an extractor at the free spot
+  nearest the point.  On the economy script's builds, that comes out p50 19 elmos from the script's
   place, with 99% within 150.
 * **RECLAIM**: a pointer over the wreck tokens.
 * **Group orders** (MOVE, FIGHT and ATTACK_UNIT only): alone, or one of 10 radii from 60 to 2,250 elmos (each 1.5x the one
-  before), then each of 15 roles in or out.  The sim gives the order as well to every unit of the side of those roles within the
-  radius of the anchor.
+  before), then each of 15 roles in or out.  The sim gives the order as well to every unit of the anchor's team of those roles
+  within the radius of the anchor, and to no ally's.
 
 ### Encoding and decoding
 

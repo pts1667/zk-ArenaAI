@@ -178,6 +178,7 @@
       { title: 'decisions / s', series: ['overall_rate', 'collect_rate', 'train_rate'] },
       { title: 'returns', series: ['return_min', 'return_max'] },
       { title: 'self-play share, beta', series: ['self_play_share', 'beta'] },
+      { title: 'lead rule: share drawn, games it could end', series: ['lead_share', 'lead_rule_games'], y: [0, 1] },
     ],
   };
 
@@ -278,17 +279,19 @@
     }
   }
 
-  // A test's games by the policy's factory, its variant and the map.
+  // A test's games by the policy's factory, its variant and the map; and by kind of game when the games say theirs (a game that
+  // doesn't is a 1v1).
   async function breakdown(host) {
     host.dataset.mounted = '1';
     let e;
     try { e = await getJSON('/api/eval/' + encodeURIComponent(host.dataset.stage)); } catch (err) { return; }
     const records = (e && e.records) || [];
     if (!records.length) return;
-    const table = (title, key, most) => {
+    const kinds = records.some((r) => r.kind != null);
+    const table = (title, key, most, absent = '?') => {
       const by = new Map();
       for (const r of records) {
-        const k = r[key] ?? '?';
+        const k = r[key] ?? absent;
         const c = by.get(k) || { n: 0, won: 0, drew: 0 };
         c.n++;
         if (r.result === 'won') c.won++;
@@ -301,8 +304,8 @@
       return `<div class="tablebox"><table class="grid"><tr><th>${esc(title)}</th><th class="num">games</th><th class="num">won</th><th class="num">drew</th>` +
         `<th class="num">win rate</th></tr>${body}</table></div>`;
     };
-    host.innerHTML = `<div class="t-label">the ${records.length} games by</div><div class="three">${table("policy's factory", 'own_factory', 12)}` +
-      `${table('variant', 'variant', 12)}${table('map', 'map', 10)}</div>`;
+    host.innerHTML = `<div class="t-label">the ${records.length} games by</div><div class="three">${kinds ? table('kind of game', 'kind', 8, '1v1') : ''}` +
+      `${table("policy's factory", 'own_factory', 12)}${table('variant', 'variant', 12)}${table('map', 'map', 10)}</div>`;
   }
 
   htmx.onLoad((el) => {

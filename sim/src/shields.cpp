@@ -106,7 +106,7 @@ void World::recharge_shields() {
         const float added = std::min(whole, w.shield_power - shield[size_t(u)]);
         if (added <= 0.0f) continue;
         // All of a step or none of it, and only what fills it is paid for.
-        if (economy_on && w.shield_energy > 0.0f && !pay_energy(side[size_t(u)], w.shield_energy * rate * frames * added / whole)) continue;
+        if (economy_on && w.shield_energy > 0.0f && !pay_energy(team[size_t(u)], w.shield_energy * rate * frames * added / whole)) continue;
         shield[size_t(u)] += added;
     }
 }
@@ -116,6 +116,7 @@ void World::find_shield_links() {
         sh.links.clear();
         if (!alive[size_t(sh.unit)] || !active(sh.unit) || (sh.weapon->flags & ZK_W_UNLINKED)) continue;
         const float own_y = map->height_at(x[size_t(sh.unit)], z[size_t(sh.unit)]);
+        // An ally's shields link too: unit_shield_link.lua keeps them by allyteam.
         for (int k = 0; k < int(shields.size()); ++k) {
             const ShieldUnit& other = shields[size_t(k)];
             if (other.unit == sh.unit || side[size_t(other.unit)] != side[size_t(sh.unit)] || !alive[size_t(other.unit)] || !active(other.unit)) continue;
@@ -155,7 +156,11 @@ void World::update_shields() {
     if (shields.empty()) return;
     recharge_shields();
     if (shields.size() < 2) return;
-    if (tick_count % LINK_UPDATE_TICKS == 0) find_shield_links();
+    if (tick_count % LINK_UPDATE_TICKS == 0) {
+        // Links are by place in the list, so the dead leave it only as they're made again.
+        shields.erase(std::remove_if(shields.begin(), shields.end(), [this](const ShieldUnit& sh) { return !alive[size_t(sh.unit)]; }), shields.end());
+        find_shield_links();
+    }
     for (int f = 0; f < ZK_TICK_FRAMES; ++f)
         if ((frame + f) % LINK_STEP_FRAMES == 0) share_shield_charge();
 }

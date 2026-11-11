@@ -6,8 +6,8 @@ kernels each: about 0.25 s a round whatever its batch, with one core busy launch
 replay launches the lot at once.
 
 * **Shapes are padded** to a ladder of widths (`bucket`), each token group on its own, and the decisions to the same ladder.
-  Sites, feature tokens and hidden units always pad to their caps.  Padding changes no decision's own outputs, as every reader
-  masks it (policy_model.collate); only the random draws fall differently.
+  Sites and hidden units always pad to their caps; feature tokens, whose cap is 512, take the ladder as units do.  Padding
+  changes no decision's own outputs, as every reader masks it (policy_model.collate); only the random draws fall differently.
 * **Each width only grows**: a batch pads to the widest of each group yet seen, so the shape changes only when a batch outgrows
   it.  Padded to its own buckets, a batch of 64 games' frames came to a new shape one round in five, as each group's widest
   game came and went: 95 captures in 494 rounds, at 0.7 s each, and 32 graphs' inputs kept (2026-11-10).  A wider shape costs
@@ -49,7 +49,7 @@ from zkbot.policy import actions as act, featurize as fz  # noqa: E402
 
 # Each step at most half as big again as the one before it.
 LADDER = (1, 2, 4, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024, 1536, 2048)
-FIXED = {"s": fz.CAP_SITES, "f": fz.CAP_FEATURES, "h": fz.CAP_HIDDEN}    # featurize's caps: small, so always padded to
+FIXED = {"s": fz.CAP_SITES, "h": fz.CAP_HIDDEN}    # featurize's caps: small, so always padded to
 CUTS = (4, 6, 8, 10, 12, 14)    # where the action steps may stop: the head runs to the first, each chunk to the next
 
 

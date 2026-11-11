@@ -386,21 +386,29 @@ def _ppo_body(summary: dict) -> str:
         tiles.append(tile("last test win rate", pct(t["won"] / g) if g else "–",
                           f'it {num(t.get("iteration"))} · {g} games vs {esc(str(t.get("opponent") or "?"))}', "accent"))
     for key, label in (("kl", "KL"), ("kl_clone", "KL to clone"), ("explained_variance", "explained variance"), ("clip_fraction", "clip fraction"),
-                       ("overall_rate", "decisions / s"), ("self_play_share", "self-play share"), ("beta", "beta")):
+                       ("overall_rate", "decisions / s"), ("self_play_share", "self-play share"), ("beta", "beta"), ("lead_share", "lead rule share")):
         if key in last:
             tiles.append(tile(label, num(last[key])))
     table = ""
     if tests:
+        kinds = any(t.get("kinds") for t in tests)      # the games say their kind: the columns are the 1v1s, the rest beside
         body = []
         for t in reversed(tests[-200:]):
             g = t.get("games") or 0
             rate = t["won"] / g if g else 0
             body.append(f'<tr><td class="num">{num(t.get("iteration"))}</td><td class="num dim">{num(t.get("decisions"))}</td>'
                         f'<td>{esc(str(t.get("opponent") or ""))}</td><td class="num">{g}</td><td class="num">{t["won"]}</td><td class="num">{t["drew"]}</td>'
-                        f'<td class="num wbar"><span style="width:{rate * 100:.0f}%"></span>{pct(rate) if g else "–"}</td></tr>')
+                        f'<td class="num wbar"><span style="width:{rate * 100:.0f}%"></span>{pct(rate) if g else "–"}</td>'
+                        + (f'<td class="small">{kind_tally(t.get("kinds") or {})}</td>' if kinds else "") + "</tr>")
         table = ('<div class="tablebox tall"><table class="grid"><tr><th class="num">iteration</th><th class="num">decisions</th><th>opponent</th>'
-                 f'<th class="num">games</th><th class="num">won</th><th class="num">drew</th><th class="num">win rate</th></tr>{"".join(body)}</table></div>')
+                 '<th class="num">games</th><th class="num">won</th><th class="num">drew</th><th class="num">win rate</th>'
+                 + ('<th title="won of played, by kind of game">by kind</th>' if kinds else "") + f'</tr>{"".join(body)}</table></div>')
     return f'<div class="tiles">{"".join(tiles)}</div>' + (f'<div class="ppo-tests"><div class="t-label">tests during PPO ({len(tests)})</div>{table}</div>' if table else "")
+
+
+def kind_tally(kinds: dict) -> str:
+    """Won of played, by kind of game, the 1v1s first: "1v1 12/32 · ffa 3/8"."""
+    return " · ".join(f'{esc(str(k))} {c.get("won", 0)}/{c.get("games", 0)}' for k, c in sorted(kinds.items(), key=lambda kc: (kc[0] != "1v1", kc[0])))
 
 
 def _card(stage: str, summary: dict) -> str:
@@ -474,21 +482,66 @@ def factory_name(name: str) -> str:
     return (name or "?").removeprefix("factory").removeprefix("plate") or name
 
 
+def teams_of(r: dict) -> list[dict]:
+    """A replay's teams, from its index line: format 3's "teams", or format 2's two "sides", each its own alliance."""
+    if r.get("teams") is not None:
+        return r["teams"]
+    return [{**s, "ally": i, "plays": "policy" if s.get("name") == "policy" else "script"} for i, s in enumerate(r.get("sides") or [])]
+
+
+def alliances(teams: list[dict]) -> list[tuple[int, list[int]]]:
+    """Each alliance's allyteam and its teams, in the order of their allyteams: the viewer's alliance A, B, ..."""
+    by: dict[int, list[int]] = {}
+    for i, t in enumerate(teams):
+        by.setdefault(t.get("ally", i), []).append(i)
+    return sorted(by.items())
+
+
+def kind_name(r: dict) -> str:
+    """What kind of game a replay is, as the viewer names it (static/replay.js `kindName`): "1v1", "2v2", "4-way free-for-all"."""
+    teams = teams_of(r)
+    chickens = sum(t.get("plays") == "chickens" for t in teams)
+    if r.get("kind") == "chicken" or chickens:
+        return f"{len(teams) - chickens} vs chickens"
+    sizes = [len(members) for _, members in alliances(teams)]
+    if len(sizes) > 2:
+        return f"{len(sizes)}-way free-for-all" if all(n == 1 for n in sizes) else "v".join(map(str, sizes))
+    return "v".join(map(str, sizes)) or str(r.get("kind") or "1v1")
+
+
+def _swatch(teams: list[dict], i: int) -> str:
+    """A team's colour, by its number as in the viewer, the chickens' their own."""
+    slot = "chickens" if teams[i].get("plays") == "chickens" else f"t{min(i, 7)}"
+    return f'<i class="sw {slot}" title="team {i}: {esc(str(teams[i].get("name", "")))}"></i>'
+
+
 def _replay_item(r: dict) -> str:
-    sides = r.get("sides") or []
+    teams = teams_of(r)
+    groups = alliances(teams)
     w = r.get("winner")
-    if w in (0, 1) and w < len(sides):
-        badge = f'<span class="badge win s{w}"><i class="sw s{w}"></i>{esc(sides[w].get("name", f"side {w}"))} won</span>'
+    won = next(((k, members) for k, (ally, members) in enumerate(groups) if w is not None and ally == w), None)
+    if won is not None:
+        k, members = won
+        who = teams[members[0]].get("name", f"team {members[0]}") if len(members) == 1 else f"alliance {chr(65 + k)}"
+        badge = f'<span class="badge win">{"".join(_swatch(teams, i) for i in members)}{esc(who)} won</span>'
     else:
-        badge = '<span class="badge draw">draw</span>'
-    lines = "".join(f'<div class="rside"><i class="sw s{i}"></i><span class="rname">{esc(s.get("name", ""))}</span>'
-                    f'<span class="dim">{esc(str(s.get("variant", "")))} · {esc(factory_name(s.get("factory", "")))}</span>'
-                    f'<span class="num">{num(s.get("value"))}</span></div>' for i, s in enumerate(sides[:2]))
+        badge = f'<span class="badge draw">{"no sole winner" if len(groups) > 2 else "draw"}</span>'
+    if len(teams) <= 2:
+        lines = "".join(f'<div class="rside">{_swatch(teams, i)}<span class="rname">{esc(t.get("name", ""))}</span>'
+                        f'<span class="dim">{esc(str(t.get("variant", "")))} · {esc(factory_name(t.get("factory", "")))}</span>'
+                        f'<span class="num">{num(t.get("value"))}</span></div>' for i, t in enumerate(teams))
+    else:       # the alliances on one line: at eight teams, a line a team would be most of the card
+        vs = '<span class="dim">vs</span>'.join(
+            f'<span class="rally" title="alliance {chr(65 + k)}: {esc(", ".join(str(teams[i].get("name", "")) for i in members))}">'
+            f'{"".join(_swatch(teams, i) for i in members)}</span>' for k, (_, members) in enumerate(groups))
+        lines = (f'<div class="rlineup">{vs}</div>'
+                 f'<div class="dim">{len(teams)} teams · {esc(", ".join(sorted({str(t.get("name", "")) for t in teams})))}</div>')
     slug = r.get("map", "")
     title = f'{r.get("label", "")} · {slug} · slot {r.get("slot", "")}'
     return (f'<a class="replay" href="#replay={esc(r["url"])}" title="{esc(title)}"><div class="thumb">'
             f'<img loading="lazy" src="/map/{esc(slug)}.png" alt="" onerror="this.remove()"><span class="map">{esc(slug.replace("_", " "))}</span></div>'
-            f'<div class="rinfo"><div class="rtop">{badge}<span class="dim">{esc(str(r.get("how", "")))} · {clock(r.get("seconds"))}</span></div>{lines}</div></a>')
+            f'<div class="rinfo"><div class="rtop">{badge}<span class="rkind">{esc(kind_name(r))}</span>'
+            f'<span class="dim">{esc(str(r.get("how", "")))} · {clock(r.get("seconds"))}</span></div>{lines}</div></a>')
 
 
 def replays(items: list[dict]) -> str:

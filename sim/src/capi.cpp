@@ -37,8 +37,8 @@ void face_nearest_enemy(World& w, int first, int last, const int* side, const fl
 
 struct Game {
     std::unique_ptr<World> world;
-    int commander[2] = {-1, -1};
-    float base[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    int commander[ZK_MAX_TEAMS] = {-1, -1, -1, -1, -1, -1, -1, -1};      // per team
+    float base[2 * ZK_MAX_TEAMS] = {};
     long long cost = 0;     // nanoseconds its last step took: what the schedule goes by, never the results
 };
 
@@ -69,9 +69,13 @@ class Batch {
 public:
     const Catalog* cat = nullptr;
     std::vector<Game> games;
+    int slots = 2;                        // teams a game has room for in a step's arrays
     std::vector<int8_t> role_of_type;     // zk_batch_set_roles: each new game's
+    bool reveal = true;                   // zk_batch_set_reveal: each new game's
 
-    Batch(const Catalog* c, int n, int threads_) : cat(c), games(size_t(n)) { set_threads(threads_); }
+    Batch(const Catalog* c, int n, int threads_, int teams) : cat(c), games(size_t(n)), slots(std::clamp(teams, 1, ZK_MAX_TEAMS)) {
+        set_threads(threads_);
+    }
 
     ~Batch() {
         if (forked()) return;       // the threads are the parent's, and there's no one here to stop
@@ -240,20 +244,38 @@ private:
         if (a.ticks > 0) w.step(a.ticks);
         w.ensure_views();
         w.rebuild_index();
-        for (int s = 0; s < 2; ++s) {
-            const size_t slot = size_t(i) * 2 + size_t(s);
+        for (int t = 0; t < slots; ++t) {
+            const size_t slot = size_t(i) * size_t(slots) + size_t(t);
+            if (t >= w.n_teams) {
+                // A slot the game doesn't use: an empty frame.
+                a.counts[slot] = a.feature_counts[slot] = 0;
+                std::fill_n(a.globs + slot * G_COUNT, G_COUNT, 0.0f);
+                std::fill_n(a.stats + slot * ZK_STATS, ZK_STATS, 0.0f);
+                continue;
+            }
+            const int s = w.ally_of[t];
             w.update_view(s);
             {
                 ZK_PROF(EMIT);
-                a.counts[slot] = w.emit_view(s, a.records + slot * size_t(a.cap), a.cap, a.globs + slot * G_COUNT, game.commander[s], game.base + 2 * s);
+                a.counts[slot] = w.emit_view(t, a.records + slot * size_t(a.cap), a.cap, a.globs + slot * G_COUNT, game.commander[t], game.base + 2 * t);
             }
             {
                 ZK_PROF(STATS);
-                w.side_stats(s, a.stats + slot * ZK_STATS);
+                w.team_stats(t, a.stats + slot * ZK_STATS);
             }
             {
                 ZK_PROF(FEATURES);
-                a.feature_counts[slot] = w.emit_features(s, a.features + slot * size_t(a.feature_cap), a.feature_cap);
+                // An allyteam's features are the same for each of its teams: the first's are copied.
+                int first = 0;
+                while (w.ally_of[first] != s) ++first;
+                FeatureRecord* out = a.features + slot * size_t(a.feature_cap);
+                if (first == t) {
+                    a.feature_counts[slot] = w.emit_features(s, out, a.feature_cap);
+                } else {
+                    const size_t from = size_t(i) * size_t(slots) + size_t(first);
+                    a.feature_counts[slot] = a.feature_counts[from];
+                    std::copy_n(a.features + from * size_t(a.feature_cap), a.feature_counts[from], out);
+                }
             }
         }
         game.cost = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
@@ -304,6 +326,26 @@ void* zk_catalog_new(const zk_type_rec* types, int n_types, const zk_weapon_rec*
 
 void zk_catalog_free(void* catalog) { delete static_cast<Catalog*>(catalog); }
 
+void zk_catalog_reveal(void* catalog, float value_ratio, int every_frames) {
+    auto* c = static_cast<Catalog*>(catalog);
+    c->reveal_ratio = value_ratio;
+    c->reveal_every = every_frames;
+}
+
+void zk_catalog_chickens(void* catalog, int difficulty, const zk_chicken_rules* rules) {
+    auto* c = static_cast<Catalog*>(catalog);
+    if (difficulty < 0 || difficulty >= 6) return;
+    c->chickens[difficulty] = *rules;
+    c->has_chickens[difficulty] = true;
+}
+
+int zk_sizeof_chicken_rules(void) { return int(sizeof(zk_chicken_rules)); }
+
+void zk_catalog_eggs(void* catalog, const zk_egg_rec* eggs) {
+    auto* c = static_cast<Catalog*>(catalog);
+    c->eggs.assign(eggs, eggs + c->types.size());
+}
+
 void* zk_map_new(int cols, int rows, float cell, const float* height, const float* speed, int classes,
                  const float* slope, const float* normal_x, const float* normal_z, const float* slope_mod,
                  const short* segments) {
@@ -351,8 +393,12 @@ void* zk_world_new(const void* catalog, const void* map, uint64_t seed, int beha
 
 void zk_world_free(void* world) { delete static_cast<World*>(world); }
 
-int zk_world_add(void* world, int type, int side, float x, float z, float heading, float hp_frac, float build_frac) {
-    return static_cast<World*>(world)->add(type, side, x, z, heading, hp_frac, build_frac);
+void zk_world_set_teams(void* world, int n_teams, const int32_t* ally_of_team) { static_cast<World*>(world)->set_teams(n_teams, ally_of_team); }
+
+int zk_world_add(void* world, int type, int team, float x, float z, float heading, float hp_frac, float build_frac) {
+    auto* w = static_cast<World*>(world);
+    if (team < 0 || team >= w->n_teams) return -1;
+    return w->add(type, team, x, z, heading, hp_frac, build_frac);
 }
 
 void zk_world_order(void* world, int unit, int kind, float x, float z, int target) {
@@ -387,14 +433,20 @@ int zk_world_add_feature(void* world, float x, float z, float metal, float hp, f
     return static_cast<World*>(world)->add_wreck(x, z, metal, hp, radius, feature_def, -1);
 }
 
-int zk_world_features(void* world, int side, void* records, int cap) {
+int zk_world_features(void* world, int team, void* records, int cap) {
     auto* w = static_cast<World*>(world);
     w->rebuild_index();
-    return w->emit_features(side, static_cast<FeatureRecord*>(records), cap);
+    return w->emit_features(w->ally_of[team], static_cast<FeatureRecord*>(records), cap);
 }
 
-void zk_world_resources(const void* world, int side, float* out) {
-    const Purse& p = static_cast<const World*>(world)->purses[size_t(side)];
+void zk_world_set_reveal(void* world, int on) { static_cast<World*>(world)->reveal_on = on != 0; }
+
+void zk_world_chickens(void* world, int team, int difficulty) { static_cast<World*>(world)->start_chickens(team, difficulty); }
+
+void zk_world_chicken_state(const void* world, float* out) { static_cast<const World*>(world)->chicken_state(out); }
+
+void zk_world_resources(const void* world, int team, float* out) {
+    const Purse& p = static_cast<const World*>(world)->purses[size_t(team)];
     out[0] = p.metal;
     out[1] = p.energy;
     out[2] = p.metal_income;
@@ -493,33 +545,41 @@ int zk_sizeof_site_record(void) { return int(sizeof(SiteRecord)); }
 int zk_sizeof_feature_record(void) { return int(sizeof(FeatureRecord)); }
 int zk_global_count(void) { return G_COUNT; }
 
-int zk_world_view(void* world, int side, void* records, int cap, float* glob, int commander, const float* base) {
+int zk_world_view(void* world, int team, void* records, int cap, float* glob, int commander, const float* base) {
     auto* w = static_cast<World*>(world);
     w->ensure_views();
     w->rebuild_index();
-    w->update_view(side);
-    return w->emit_view(side, static_cast<UnitRecord*>(records), cap, glob, commander, base);
+    w->update_view(w->ally_of[team]);
+    return w->emit_view(team, static_cast<UnitRecord*>(records), cap, glob, commander, base);
 }
 
-void* zk_batch_new(const void* catalog, int games, int threads) { return new Batch(static_cast<const Catalog*>(catalog), games, threads); }
+void* zk_batch_new(const void* catalog, int games, int threads, int teams) {
+    return new Batch(static_cast<const Catalog*>(catalog), games, threads, teams);
+}
 
 void zk_batch_free(void* batch) { delete static_cast<Batch*>(batch); }
 
 void zk_batch_set_threads(void* batch, int threads) { static_cast<Batch*>(batch)->set_threads(threads); }
 
-void zk_batch_reset(void* batch, int g, const void* map, uint64_t seed, int behaviour, int n, const int* type, const int* side,
-                    const float* x, const float* z, const float* heading, const float* hp_frac, const float* build_frac,
-                    const int* commander, const float* base) {
+void zk_batch_reset(void* batch, int g, const void* map, uint64_t seed, int behaviour, int n_teams, const int32_t* ally_of_team,
+                    int n, const int* type, const int* team, const float* x, const float* z, const float* heading,
+                    const float* hp_frac, const float* build_frac, const int* commander, const float* base) {
     auto* b = static_cast<Batch*>(batch);
     Game& game = b->games[size_t(g)];
     game.world = std::make_unique<World>(b->cat, static_cast<const Map*>(map), seed, behaviour);
-    game.world->role_of_type = b->role_of_type;
-    for (int i = 0; i < n; ++i) game.world->add(type[i], side[i], x[i], z[i], heading[i], hp_frac[i], build_frac[i]);
-    game.world->ready_weapons();
-    game.world->ensure_views();
-    game.commander[0] = commander[0];
-    game.commander[1] = commander[1];
-    std::copy(base, base + 4, game.base);
+    World& w = *game.world;
+    w.set_teams(std::min(n_teams, b->slots), ally_of_team);
+    w.role_of_type = b->role_of_type;
+    w.reveal_on = b->reveal;
+    for (int i = 0; i < n; ++i)
+        if (team[i] >= 0 && team[i] < w.n_teams) w.add(type[i], team[i], x[i], z[i], heading[i], hp_frac[i], build_frac[i]);
+    w.ready_weapons();
+    w.ensure_views();
+    for (int t = 0; t < ZK_MAX_TEAMS; ++t) {
+        game.commander[t] = t < w.n_teams ? commander[t] : -1;
+        game.base[2 * t] = t < w.n_teams ? base[2 * t] : 0.0f;
+        game.base[2 * t + 1] = t < w.n_teams ? base[2 * t + 1] : 0.0f;
+    }
 }
 
 void* zk_batch_world(void* batch, int g) { return static_cast<Batch*>(batch)->games[size_t(g)].world.get(); }
@@ -530,6 +590,27 @@ void zk_batch_set_roles(void* batch, const int32_t* role_of_type, int n_types) {
     b->role_of_type.assign(role_of_type, role_of_type + n_types);
     for (auto& game : b->games)
         if (game.world) game.world->role_of_type = b->role_of_type;
+}
+
+void zk_batch_set_reveal(void* batch, int on) {
+    auto* b = static_cast<Batch*>(batch);
+    b->wait();
+    b->reveal = on != 0;
+    for (auto& game : b->games)
+        if (game.world) game.world->reveal_on = b->reveal;
+}
+
+void zk_batch_chickens(void* batch, int g, int team, int difficulty) {
+    auto* b = static_cast<Batch*>(batch);
+    b->wait();
+    if (World* w = b->games[size_t(g)].world.get()) w->start_chickens(team, difficulty);
+}
+
+void zk_batch_chicken_state(const void* batch, int g, float* out) {
+    auto* b = const_cast<Batch*>(static_cast<const Batch*>(batch));
+    b->wait();
+    if (const World* w = b->games[size_t(g)].world.get()) w->chicken_state(out);
+    else std::fill_n(out, ZK_CHICKEN_STATE, 0.0f);
 }
 
 void zk_batch_step(void* batch, const int* games, int n_games, const zk_order_rec* orders, const int* order_offsets,

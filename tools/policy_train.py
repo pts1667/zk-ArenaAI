@@ -112,6 +112,20 @@ class Config:
     economy_start: float = 0.0      # the share of games where the policy runs its own economy, at the start
     economy_end: float = 0.0        # and at the end, linear between
     income_weight: float = 0.0      # a zero-sum income reward (policy_sim_env.reward), faded by beta as the rest of the shaping
+    # At a decided game's end, this x the result x the share of the time limit left (policy_sim_env._time_left), not faded by beta: a
+    # win sooner is worth a little more (the user, 2026-11-10).
+    speed_weight: float = 0.0
+    # The share of training games, by iteration, that a lead can end (policy_sim_env.lead_share), linear between and the last
+    # after: 90% at first, none from iteration 100, so the policy learns to finish games (the user, 2026-11-10).  Tests keep it.
+    lead_fade: tuple[tuple[int, float], ...] = ((0, 0.9), (100, 0.0))
+    # The kinds of game played and how likely each is (policy_sim_env.GAME_KINDS), and the slots a game: 0 for what the biggest of
+    # them needs, 2 for 1v1s alone.  The headline test stays a 1v1 against the script, so that runs stay comparable; `test_kinds`
+    # adds a test of each of those kinds, the policy on team 0 and the scripts on every other (the user, 2026-11-10).
+    kinds: tuple[tuple[str, float], ...] = (("1v1", 1.0),)
+    slots: int = 0
+    test_kinds: tuple[str, ...] = ()
+    # How likely each chicken difficulty is, by name (zksim.CHICKEN_DIFFICULTIES): () for policy_sim_env.CHICKEN_DIFFICULTY_WEIGHTS.
+    chicken_difficulties: tuple[tuple[str, float], ...] = ()
     fine_sim: bool = False          # the sim steps every slot and the policy decides every decide_every of them, as the cloning
                                     # data was recorded: a clone played so had 6 extractors at 10 minutes, and 1 at decide_every 6
     z: str = "none"                 # "variant": the actor is told its side's army-script knobs as z (the counts unknown), as
@@ -583,6 +597,11 @@ class Learner:
         return self.cfg.clone_weight * fade_share(self.iteration, self.cfg.clone_fade)
 
     @property
+    def lead_share(self) -> float:
+        """The share of the training games starting now that a lead can end (Config.lead_fade)."""
+        return fade_share(self.iteration, self.cfg.lead_fade)
+
+    @property
     def advising(self) -> bool:
         """Whether the scripts should advise in what's collected now: while the cloning loss has weight this iteration or the next,
         which is when what's collected concurrently trains."""
@@ -715,7 +734,8 @@ def seat_z(env, seats: list[int], how: str) -> np.ndarray | None:
     if how == "none" or not seats:
         return None
     import policy_clone_data as cd
-    return np.stack([cd.variant_z(None if env.styles[s // 2] is None else env.styles[s // 2][s % 2]) for s in seats])
+    styles = [env.styles[env.game_of(s)] for s in seats]
+    return np.stack([cd.variant_z(None if st is None else st[env.team_of(s)]) for s, st in zip(seats, styles)])
 
 
 def _z_tensor(z: np.ndarray | None, device: str) -> torch.Tensor | None:
@@ -797,6 +817,7 @@ class Collector:
         finished: list[Trajectory] = []
         segments: list[Segment] = []
         wins: dict[str, list[float]] = {}
+        lead_rule: list[float] = []         # whether a lead could end each game that ended (policy_sim_env.lead_share)
         masked_out = actions = 0
         bonus = 0.0
         kind_counts = np.zeros(rf.KIND_COUNT, np.int64)
@@ -806,8 +827,9 @@ class Collector:
             acting = env.policy_seats_to_act()
             if acting:
                 for seat in acting:
-                    # It sat out as a script, and meanwhile its game may have moved to another map.
-                    if not current[seat].steps and current[seat].bundle is not env.bundle_of(seat):
+                    # A slot unused till its game had more teams; or it sat out as a script, and meanwhile its game may have moved
+                    # to another map.
+                    if seat not in current or (not current[seat].steps and current[seat].bundle is not env.bundle_of(seat)):
                         self._open(seat)
                 frames = [(env.frame(seat), env.bundle_of(seat), current[seat].names) for seat in acting]
                 index = torch.as_tensor(acting, device=learner.device)
@@ -844,10 +866,18 @@ class Collector:
                 if tr.steps:
                     tr.steps[-1].reward += env.reward(seat, beta(progress))
             for seat in acting:
-                bonus += float(env.bonus[seat // 2, seat % 2])
+                bonus += float(env.bonus[env.game_of(seat), env.team_of(seat)])
             for seat, mode, won in env.finished_seats():
-                wins.setdefault(mode, []).append(won)
-                tr = current[seat]
+                facts = getattr(env, "ended", {}).get(seat, {})
+                # 1v1s under the mode alone, as they always were; other kinds apart (wins_fight_ffa).
+                kind = facts.get("game_kind", "1v1")
+                wins.setdefault(mode if kind == "1v1" else f"{mode}_{kind}", []).append(won)
+                if "lead_rule" in facts:
+                    lead_rule.append(float(facts["lead_rule"]))
+                tr = current.get(seat)
+                if tr is None:      # a slot of a bigger game than any before, over before it decided
+                    self._open(seat)
+                    continue
                 tr.done = True
                 _close(tr, segments)
                 finished.append(tr)
@@ -867,7 +897,7 @@ class Collector:
         # The same horizon in game time whatever the decision rate.
         _, values, returns = finish(finished, cfg.gae ** cfg.decide_every)
         graphs = self.player.graphs.stats() if self.player.graphs is not None else {}
-        return segments, Tally(stored, masked_out, actions, bonus, kind_counts, wins, np.array(values), np.array(returns), graphs)
+        return segments, Tally(stored, masked_out, actions, bonus, kind_counts, wins, np.array(values), np.array(returns), graphs, lead_rule)
 
 
 @dataclass
@@ -882,6 +912,7 @@ class Tally:
     values: np.ndarray
     returns: np.ndarray
     graphs: dict[str, float]        # policy_graphs.Graphs.stats, so far
+    lead_rule: list[float] = field(default_factory=list)    # 1 for each game ended that a lead could have ended, else 0
 
     @staticmethod
     def merge(tallies: list["Tally"]) -> "Tally":
@@ -894,7 +925,8 @@ class Tally:
                 graphs[k] = graphs.get(k, 0) + v
         return Tally(sum(t.stored for t in tallies), sum(t.masked_out for t in tallies), sum(t.actions for t in tallies),
                      sum(t.bonus for t in tallies), np.sum([t.kind_counts for t in tallies], 0), wins,
-                     np.concatenate([t.values for t in tallies]), np.concatenate([t.returns for t in tallies]), graphs)
+                     np.concatenate([t.values for t in tallies]), np.concatenate([t.returns for t in tallies]), graphs,
+                     [x for t in tallies for x in t.lead_rule])
 
     def metrics(self) -> dict[str, float]:
         v, r, stored = self.values, self.returns, self.stored
@@ -906,6 +938,8 @@ class Tally:
         for mode, results in self.wins.items():
             metrics[f"wins_{mode}"] = float(np.mean(results))
             metrics[f"games_{mode}"] = len(results)
+        if self.lead_rule:      # of the training games that ended, the share a lead could have ended: lead_share, as drawn
+            metrics["lead_rule_games"] = float(np.mean(self.lead_rule))
         metrics.update(self.graphs)
         if self.graphs.get("graph_replays"):
             metrics["graph_steps_a_round"] = self.graphs["graph_steps"] / self.graphs["graph_replays"]
@@ -931,12 +965,14 @@ def _close(tr: Trajectory, segments: list[Segment]) -> None:
 
 
 @torch.no_grad()
-def evaluate(learner: Learner, make_env, opponent: str, games: int, seed: int, replays: dict | None = None) -> dict[str, float]:
-    """The current policy (the moving average of its weights, `Config.ema`) against a script, sampled as in training.  Each game
-    slot counts its first game only: the games that end soonest would otherwise count most, and those are not a fair sample.
-    replays: policy_replay.Capture's arguments, to keep every game for the dashboard."""
+def evaluate(learner: Learner, make_env, opponent: str, games: int, seed: int, replays: dict | None = None, kind: str = "1v1") -> dict[str, float]:
+    """The current policy (the moving average of its weights, `Config.ema`) against a script, sampled as in training, in games of
+    one kind (policy_sim_env.GAME_KINDS), the policy on team 0: a win is its alliance's result 1, as a loss is its alliance out.
+    Each game slot counts its first game only: the games that end soonest would otherwise count most, and those are not a fair
+    sample.  replays: policy_replay.Capture's arguments, to keep every game for the dashboard."""
     player = learner.evaluator
-    env = make_env(games, seed, modes=[opponent])
+    # A 1v1 test in a batch of 1v1s, whatever slots the training's games have.
+    env = make_env(games, seed, modes=[opponent], kinds={kind: 1.0}, **({"slots": 0} if kind == "1v1" else {}))
     env.policy_economy_share = learner.economy_share
     env.advise = False          # no cloning loss learns from a test
     env.begin()
@@ -978,9 +1014,12 @@ _MAP_POOLS: dict = {}
 
 
 def make_sim(games: int, seed: int, modes: list[str] | None = None, decide_every: int = 1, maps: str = "", variants: bool = False,
-             advise: bool = False, income_weight: float = 0.0, fine_sim: bool = False, threads: int = 16):
+             advise: bool = False, income_weight: float = 0.0, fine_sim: bool = False, threads: int = 16, speed_weight: float = 0.0,
+             kinds: dict[str, float] | None = None, slots: int = 0, difficulties: dict[str, float] | None = None):
     """maps: a map pool, loaded once and shared, its held-out maps left out; "" for the five training maps.  threads: the sim's
-    and the C++ scripts' each."""
+    and the C++ scripts' each.  The lead rule is on in every game (lead_share 1): the trainer lowers it for its own games.
+    kinds, slots, difficulties: policy_sim_env.SimEnv's kinds, teams (0: what the kinds need) and chicken difficulties; 1v1s and
+    the default difficulties if None."""
     import policy_sim_env
 
     pool = weights = None
@@ -994,8 +1033,8 @@ def make_sim(games: int, seed: int, modes: list[str] | None = None, decide_every
             _MAP_POOLS[maps] = (loaded, w / w.sum())
         pool, weights = _MAP_POOLS[maps]
     env = policy_sim_env.SimEnv(games, seed, modes or ["fight"], threads=threads, decide_every=1 if fine_sim else decide_every, maps=pool,
-                                weights=weights, variants=variants)
-    env.advise, env.income_weight = advise, income_weight
+                                weights=weights, variants=variants, teams=slots or None, kinds=kinds, difficulties=difficulties or None)
+    env.advise, env.income_weight, env.speed_weight = advise, income_weight, speed_weight
     env.act_every = decide_every if fine_sim else 1
     env.align = env.act_every > 1           # every seat decides on the same slots: one forward pass a decision (SimEnv.align)
     return env
@@ -1038,6 +1077,8 @@ class Ahead:
 def train(cfg: Config, run: pathlib.Path, make_env, device: str = "cuda") -> None:
     run.mkdir(parents=True, exist_ok=True)
     (run / "config.json").write_text(json.dumps(asdict(cfg), indent=1))
+    # Every env the run makes plays its kinds of game, the collectors' too; a test says its own (`evaluate`).
+    make_env = functools.partial(make_env, kinds=dict(cfg.kinds), slots=cfg.slots, difficulties=dict(cfg.chicken_difficulties))
     # With collector processes this one plays nothing: one game's env is enough for the map pool's bundles, and with no threads of
     # its own it has none running when they fork.
     env = make_env(1, cfg.seed, threads=1) if cfg.collectors else make_env(cfg.games, cfg.seed)
@@ -1056,6 +1097,7 @@ def train(cfg: Config, run: pathlib.Path, make_env, device: str = "cuda") -> Non
     rng = np.random.default_rng(cfg.seed + learner.iteration)
     learner.economy_share = cfg.economy_start + (cfg.economy_end - cfg.economy_start) * learner.progress
     if remote is None:
+        env.lead_share = learner.lead_share         # from the first games, which the collector starts
         collector = Collector(learner, env, np.random.default_rng((cfg.seed, learner.iteration)))
     else:
         remote.start(learner, cfg.seed + learner.iteration, device)
@@ -1068,6 +1110,8 @@ def train(cfg: Config, run: pathlib.Path, make_env, device: str = "cuda") -> Non
     while learner.decisions < cfg.decisions:
         learner.economy_share = cfg.economy_start + (cfg.economy_end - cfg.economy_start) * learner.progress
         env.policy_economy_share = learner.economy_share
+        # The training games' only: a test makes its own, with the rule in every game.  Collectors are sent it with each collection.
+        lead_share = env.lead_share = learner.lead_share
         t0 = time.perf_counter()
         if remote is not None:
             if not remote.collecting:
@@ -1097,7 +1141,7 @@ def train(cfg: Config, run: pathlib.Path, make_env, device: str = "cuda") -> Non
         metrics.update(iteration=learner.iteration, total_decisions=learner.decisions, collect_s=collect_s, wait_s=t1 - t0, train_s=train_s,
                        collect_rate=metrics["decisions"] / max(collect_s, 1e-9), train_rate=metrics["decisions"] * cfg.passes / train_s,
                        overall_rate=metrics["decisions"] / (t2 - t0), game_minutes=learner.decisions * cfg.decide_every / 120.0,
-                       beta=beta(learner.progress), entropy_coef=dict(learner.entropy_coef))
+                       beta=beta(learner.progress), entropy_coef=dict(learner.entropy_coef), lead_share=lead_share)
         if device == "cuda":        # the most this process's allocator has held, for sizing gpu_share's parts
             metrics["learner_reserved_gb"] = torch.cuda.max_memory_reserved() / 2**30
         if metrics["masked_out"]:
@@ -1114,6 +1158,15 @@ def train(cfg: Config, run: pathlib.Path, make_env, device: str = "cuda") -> Non
                     tests.write(json.dumps({"iteration": learner.iteration, "decisions": learner.decisions, "opponent": opponent, "games": result["records"]}) + "\n")
                 if opponent == "fight":
                     learner.self_play.note_test(result["win_rate"], learner.iteration)
+            for kind in cfg.test_kinds:         # asked for: the headline above stays the 1v1's
+                tested = time.perf_counter()
+                result = test(learner, opponent="fight", games=cfg.eval_games, seed=cfg.seed * 1000 + learner.iteration, kind=kind)
+                metrics[f"eval_fight_{kind}"] = result["win_rate"]
+                metrics[f"eval_fight_{kind}_draws"], metrics[f"eval_fight_{kind}_losses"] = result["draw_rate"], result["loss_rate"]
+                metrics[f"eval_fight_{kind}_seconds"] = time.perf_counter() - tested
+                with (run / "tests.jsonl").open("a") as tests:
+                    tests.write(json.dumps({"iteration": learner.iteration, "decisions": learner.decisions, "opponent": "fight", "kind": kind,
+                                            "games": result["records"]}) + "\n")
         if cfg.replay_hours and time.perf_counter() - last_replays >= cfg.replay_hours * 3600.0:
             tested = time.perf_counter()
             hours = (tested - began) / 3600.0
@@ -1145,6 +1198,7 @@ def check_repro(cfg: Config, run: pathlib.Path, make_env) -> None:
     """The same iteration twice from the same seed: 03-training.md, "Checkpoints and stopping"."""
     # Plain GPU scatter adds accumulate in no fixed order, and Adam magnifies the rounding on near-zero gradients.
     torch.use_deterministic_algorithms(True, warn_only=True)
+    make_env = functools.partial(make_env, kinds=dict(cfg.kinds), slots=cfg.slots, difficulties=dict(cfg.chicken_difficulties))
     sums = []
     env = make_env(cfg.games, cfg.seed)
     workers = DataWorkers(cfg.data_workers, env.bundles(), cfg.enabled_kinds)
@@ -1209,7 +1263,15 @@ def main() -> None:
     ap.add_argument("--hours", type=float, default=Config.hours, help="stop after this long as well as at --decisions")
     ap.add_argument("--eval-every", type=int, default=Config.eval_every, help="iterations between tests against the script")
     ap.add_argument("--latent-encoder", default=Config.latent_encoder, help="the trained frame encoder whose latents the actor reads")
-    ap.add_argument("--kinds", help="action kinds to allow, such as 0,3: a test of one head with nothing else to fall back on")
+    ap.add_argument("--action-kinds", help="action kinds to allow, such as 0,3: a test of one head with nothing else to fall back on")
+    ap.add_argument("--kinds", nargs="+", default=[f"{k}:{w:g}" for k, w in Config.kinds], metavar="KIND:WEIGHT",
+                    help="kinds of game and how likely each, among 1v1, teams, ffa and chicken, as 1v1:0.5 teams:0.2 ffa:0.2 chicken:0.1 "
+                         "(default: %(default)s)")
+    ap.add_argument("--slots", type=int, default=Config.slots, help="teams a game has room for; 0: what the biggest of --kinds needs")
+    ap.add_argument("--test-kinds", nargs="*", default=list(Config.test_kinds),
+                    help="kinds of game to test the policy at too, on team 0, besides the 1v1 test that's the headline")
+    ap.add_argument("--chicken-difficulties", nargs="+", metavar="NAME:WEIGHT",
+                    help="how likely each chicken difficulty is, as very-easy:1 easy:1 normal:1 (default policy_sim_env.CHICKEN_DIFFICULTY_WEIGHTS)")
     ap.add_argument("--gpu-runs", type=int, default=Config.gpu_runs, help="how many trainings share the card, this one included")
     ap.add_argument("--empty-cache", action=argparse.BooleanOptionalAction, default=Config.empty_cache, help="hand back what the allocator holds after each iteration")
     ap.add_argument("--init", default="", help="a cloning checkpoint to start the actor from (P7)")
@@ -1231,6 +1293,11 @@ def main() -> None:
     ap.add_argument("--economy-start", type=float, default=0.0, help="share of games where the policy runs its own economy, at the start")
     ap.add_argument("--economy-end", type=float, default=0.0, help="and at the end")
     ap.add_argument("--income-weight", type=float, default=0.0, help="the zero-sum income reward's weight")
+    ap.add_argument("--speed-weight", type=float, default=Config.speed_weight,
+                    help="at a decided game's end, this x the result x the share of the time limit left, not faded by beta")
+    ap.add_argument("--lead-fade", nargs="+", default=[f"{i}:{s:g}" for i, s in Config.lead_fade], metavar="ITERATION:SHARE",
+                    help="the share of training games a lead can end, by iteration, as --kl-fade; tests keep it in every game "
+                         "(default: %(default)s)")
     ap.add_argument("--diversity", type=float, default=Config.diversity)
     ap.add_argument("--fine-sim", action="store_true", help="the sim steps every slot, the policy decides every --decide-every")
     ap.add_argument("--z", choices=("none", "variant"), default=Config.z,
@@ -1249,11 +1316,18 @@ def main() -> None:
     if args.z == "variant" and not args.variants:
         ap.error("--z variant needs --variants: without them there are no knobs to tell")
     fades = {}
-    for name in ("kl_fade", "clone_fade"):
+    for name in ("kl_fade", "clone_fade", "lead_fade"):
         fade = fades[name] = tuple((int(i), float(s)) for i, s in (point.split(":") for point in getattr(args, name)))
         if any(a[0] >= b[0] for a, b in zip(fade, fade[1:])):
             ap.error(f"--{name.replace('_', '-')}'s iterations must rise")
     import policy_sim_env
+    try:
+        kinds = policy_sim_env.parse_kinds(args.kinds)
+        policy_sim_env.parse_kinds(args.test_kinds)
+        difficulties = {policy_sim_env.zksim.CHICKEN_DIFFICULTIES[d]: w for d, w in
+                        policy_sim_env.difficulty_weights(args.chicken_difficulties).items()} if args.chicken_difficulties else {}
+    except ValueError as e:
+        ap.error(str(e))
 
     cfg = Config(seed=args.seed, decisions=args.decisions, games=args.games, iteration=args.iteration, passes=args.passes, ema=args.ema,
                  segment=args.segment, token_budget=args.token_budget, data_workers=args.workers, concurrent=args.concurrent,
@@ -1262,14 +1336,15 @@ def main() -> None:
                  init=args.init, maps=args.maps, variants=args.variants, lr_start=args.lr_start, lr_end=args.lr_end, critic_lr=args.critic_lr,
                  critic_bins=args.critic_bins, critic_span=args.critic_span, entropy_floor=args.entropy_floor, critic_warmup=args.critic_warmup, kl_start=args.kl_start, **fades,
                  clone_weight=args.clone_weight, economy_start=args.economy_start, economy_end=args.economy_end,
-                 income_weight=args.income_weight, diversity=args.diversity, fine_sim=args.fine_sim, z=args.z,
+                 income_weight=args.income_weight, speed_weight=args.speed_weight, diversity=args.diversity, fine_sim=args.fine_sim, z=args.z,
                  replay_hours=args.replay_hours, replay_games=args.replay_games, replays=args.replays, graphs=args.graphs,
-                 collectors=args.collectors, collector_gb=args.collector_gb)
-    if args.kinds:
-        cfg.enabled_kinds = tuple(int(k) for k in args.kinds.split(","))
+                 collectors=args.collectors, collector_gb=args.collector_gb, kinds=tuple(kinds.items()), slots=args.slots,
+                 test_kinds=tuple(args.test_kinds), chicken_difficulties=tuple(difficulties.items()))
+    if args.action_kinds:
+        cfg.enabled_kinds = tuple(int(k) for k in args.action_kinds.split(","))
     run = pathlib.Path(args.run)
     make_env = functools.partial(make_sim, decide_every=cfg.decide_every, maps=cfg.maps, variants=cfg.variants, advise=cfg.clone_weight > 0,
-                                 income_weight=cfg.income_weight, fine_sim=cfg.fine_sim)
+                                 income_weight=cfg.income_weight, fine_sim=cfg.fine_sim, speed_weight=cfg.speed_weight)
     if args.save_forever:
         _save_forever(cfg, run)
     elif args.check_kill:

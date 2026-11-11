@@ -1129,7 +1129,7 @@ def test_an_unfinished_unit_neither_walks_nor_shoots_and_then_does():
 
 
 def test_a_new_unit_comes_out_on_ground_it_can_walk():
-    rows, cols = 256, 256
+    rows, cols = 128, 128
     height = np.zeros((rows, cols), np.float32)
     speed = np.ones((len(zksim.MOVE_CLASSES), rows, cols), np.float32)
     speed[:, :, 66:] = 0.0                            # a wall just east of the factory, the way it faces

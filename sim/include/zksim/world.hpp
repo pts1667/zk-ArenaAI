@@ -22,6 +22,12 @@ struct Catalog {
     std::vector<float> priority;
     std::vector<zk_tactics_rec> tactics;
     std::vector<uint8_t> relations;
+    // Rules from the gadgets (capi.h zk_catalog_reveal, zk_catalog_chickens): none until given.
+    float reveal_ratio = 0.0f;
+    int reveal_every = 0;
+    zk_chicken_rules chickens[6] = {};
+    bool has_chickens[6] = {};
+    std::vector<zk_egg_rec> eggs;          // per type, once given
     float target_priority(int weapon, int type) const { return priority[size_t(weapon) * types.size() + size_t(type)]; }
     uint8_t relation(int type, int enemy_type) const { return relations[size_t(type) * types.size() + size_t(enemy_type)]; }
 };
@@ -35,7 +41,7 @@ struct WalkProgress {
     int escape_ticks = 0;                    // left of aiming straight at its way out
 };
 
-// What one side has to spend.
+// What one team has to spend.
 struct Purse {
     // Income as the engine counts it: metal with its overdrive, energy after what overdrive drew.
     float metal = 0.0f, energy = 0.0f, metal_income = 0.0f, energy_income = 0.0f;
@@ -43,9 +49,10 @@ struct Purse {
     float energy_made = 0.0f;       // per second, before overdrive
     float energy_spent = 0.0f;      // by builders, since the last overdrive update
     float overdrive_metal = 0.0f, overdrive_energy = 0.0f;      // per second, as of that update
+    float overdrive_share = 1.0f;   // of its allyteam's overdrive metal, by the energy it put in at that update
     float reclaimed = 0.0f;     // metal, in the last tick
     float reclaim_income = 0.0f;    // per second, the part of metal_income that reclaim is
-    bool free_factory = true;   // a side's first ploppable factory is free and instant (start_unit_setup.lua)
+    bool free_factory = true;   // a team's first ploppable factory is free and instant (start_unit_setup.lua)
 };
 
 struct MetalSpot {
@@ -115,6 +122,41 @@ struct Rng {
     explicit Rng(uint64_t seed);
     uint64_t next();
     float uniform() { return float(next() >> 40) * (1.0f / float(1ull << 24)); }
+    // Lua's math.random(m, n): an integer from m to n, both included.
+    int between(int lo, int hi) { return hi <= lo ? lo : lo + int(double(next() >> 11) * (1.0 / 9007199254740992.0) * double(hi - lo + 1)); }
+    // ... and math.random(): a double in [0, 1).
+    double unit() { return double(next() >> 11) * (1.0 / 9007199254740992.0); }
+};
+
+// Chicken defense as unit_spawner.lua runs it (chickens.cpp): the gadget's `data` and the settings it adjusts for the players.
+struct ChickenGame {
+    const zk_chicken_rules* rules = nullptr;
+    int team = -1, ally = -1, difficulty = -1, players = 0;
+    double malus = 1.0, burrow_spawn_rate = 0.0, grace_period = 0.0, burrow_regress_time = 0.0, aggro_per_burrow = 0.0;
+    double aggro_defense_factor = 0.0, defense_per_wave = 0.0;
+    double queen_time = 0.0, base_queen_time = 0.0, queen_health_mod = 1.0;
+    double wave_schedule = 0.0;              // frame: a wave comes on the first frame past it
+    double time_of_last_spawn = 0.0;         // second the last burrow came
+    double aggro = 0.0, aggro_delta = 0.0, tech = 0.0, defense_pool = 0.0, defense_quota = 0.0;
+    int waves = 0, special_cooldown = 0, mini_queens_sent = 0;
+    int queen = -1, morph_frame = -1;
+    bool morphed = false, endgame = false, victory = false;
+    std::vector<int> burrows;                // alive, in the order they came
+    int burrows_killed = 0;
+    struct Birth {
+        int unit;
+        double second;
+    };
+    std::vector<Birth> births;               // chickens of waves, which die of old age
+    struct Egg {
+        int wreck;
+        double decay;
+    };
+    std::vector<Egg> eggs;                   // those that decay, with the second they do
+    bool have_target = false;                // targetCache: where idle chickens are sent
+    float target_x = 0.0f, target_z = 0.0f;
+    size_t fallen_seen = 0;                  // deaths the gadget has heard of
+    std::vector<int> pick;                   // ChooseTarget's working: a team's units
 };
 
 // A shot in flight: damage is scheduled, there is no projectile.
@@ -252,7 +294,7 @@ struct BlipTrack {
     float top = 0.0f;
 };
 
-// What one side knows about every unit in the game.
+// What one allyteam knows about every unit in the game.
 struct SideView {
     std::vector<uint8_t> in_los, in_radar, known, remembered;
     std::vector<int> seen_frame;
@@ -260,6 +302,9 @@ struct SideView {
     std::vector<float> ghost_hp, ghost_build;
     std::vector<BlipTrack> tracks;
     int last_contact = 0;
+    // The dead are looked at once, when they've just died (World::fallen from here on), and then only while remembered.
+    size_t fallen_seen = 0;
+    std::vector<int> memories;          // dead units it still remembers, in the order they died
 };
 
 struct World {
@@ -271,9 +316,22 @@ struct World {
     int frame = 0;
     int tick_count = 0;
 
-    // Units.
-    std::vector<int> type, side, order, order_target, nearest;
+    // Teams, who own units and pay for them, and the allyteams they're in, who share sight and don't fight each other.  Until
+    // set_teams: two teams, each its own allyteam.
+    int n_teams = 2, n_allies = 2;
+    int ally_of[ZK_MAX_TEAMS] = {0, 1, 2, 3, 4, 5, 6, 7};
+    int ally_size[ZK_MAX_TEAMS] = {1, 1, 0, 0, 0, 0, 0, 0};     // teams in each allyteam
+    bool sharing = false;                 // some allyteam has several teams, whose resources are shared (economy.cpp)
+    void set_teams(int n, const int32_t* ally_of_team);
+
+    // Units.  side: the allyteam, whom it fights and whose sight it adds to.  team: who owns it.
+    std::vector<int> type, side, team, order, order_target, nearest;
     std::vector<uint8_t> alive;
+    // Handles only grow, and a long game's dead outnumber its living, so a tick goes through these rather than every handle: the
+    // units alive at the grid's last rebuild and those added since, in handle order (some may have died since; loops look).
+    std::vector<int> live;
+    std::vector<int> fallen;             // every unit that has died, in the order it did
+    size_t fallen_pruned = 0;            // of those, how many the lists by kind have been rid of
     std::vector<float> x, z, vx, vz, heading, speed, hp, build, para, disarm, slow, damage_taken;
     std::vector<UnitAI> ai;
     std::vector<IncomingDamage> incoming;
@@ -291,11 +349,11 @@ struct World {
     // The order log: what the controller said last, as a player remembers it.
     std::vector<int> mem_kind, mem_frame, mem_target;
     std::vector<float> mem_x, mem_z, last_damage;
-    SideView views[2];
+    SideView views[ZK_MAX_TEAMS];         // per allyteam
     std::vector<int> radar_units;
     // Economy, only for worlds that turn it on.
     bool economy_on = false;
-    Purse purses[2];
+    Purse purses[ZK_MAX_TEAMS];           // per team
     std::vector<MetalSpot> spots;
     std::vector<int> work_on;             // the frame this builder or factory has started and is on, or -1
     std::vector<int> produces;            // the type this factory repeats, or -1
@@ -331,32 +389,41 @@ struct World {
     std::vector<int> live_wrecks;
     std::vector<std::vector<int>> wreck_cells;   // ids per grid cell: wrecks don't move
     // The live wrecks again, by grid cell (wreck_start, as cell_start), with their places alongside; remade when one comes or goes.
-    std::vector<int> wreck_start, wreck_ids, wreck_slot;     // wreck_slot: by id, where a live one is in wreck_ids
+    std::vector<int> wreck_start, wreck_ids;
     std::vector<float> wreck_px, wreck_pz;
     bool wreck_index_stale = true;
     std::vector<float> burn_rate, burn_frames;
     std::vector<FireArea> areas;
+    std::vector<float> damage_mult;        // of what it's dealt: 1, but for a chicken queen, whose health the gadget stretches
+    // The reveal rule (game_over.lua): on unless turned off, never in a chicken game.  revealed: the allyteams always in sight, by bit.
+    bool reveal_on = true;
+    uint32_t revealed = 0;
+    ChickenGame chickens;
+    void start_chickens(int team, int difficulty);
+    void chicken_state(float* out) const;
     // Weapons, ZK_MAX_MOUNTS per unit.
     std::vector<float> cooldown, salvo_timer;
     std::vector<int> salvo_left, weapon_target;
 
-    // Spatial index, rebuilt each tick: the live units by side, then grid cell (row by row), then handle.  Side s's units in cell c
-    // are cell_units[cell_start[k] .. cell_start[k + 1]] for k = s * grid_cells() + c, so a row of cells is one run of them.
+    // Spatial index, rebuilt each tick: the live units by allyteam, then grid cell (row by row), then handle.  Allyteam s's units in
+    // cell c are cell_units[cell_start[k] .. cell_start[k + 1]] for k = s * grid_cells() + c, so a row of cells is one run of them.
     int grid_cols = 0, grid_rows = 0;
     std::vector<int> cell_start, cell_units, unit_key;
     size_t grid_cells() const { return size_t(grid_cols) * size_t(grid_rows); }
     std::vector<uint8_t> scratch_seen;     // per unit or wreck, for a sweep that marks what's in sight
-    std::vector<int> scratch_eyes;         // a side's finished units, for the same
+    std::vector<int> scratch_eyes;         // an allyteam's finished units, for the same
+    std::vector<int> scratch_found;        // the wrecks a sweep found in sight
     struct EmitLists {
-        std::vector<int> own, seen, blips, memory, hidden;
-    } emit_lists;                          // emit_view's five kinds of record, in the order it writes them
+        std::vector<int> own, allies, seen, blips, memory, hidden;
+    } emit_lists;                          // emit_view's six kinds of record, in the order it writes them
 
     // Shots by the tick they land.
     std::vector<std::vector<Shot>> ring;
     std::vector<PierceHit> pierce_hits;
 
     World(const Catalog* c, const Map* m, uint64_t seed, int behaviour_);
-    int add(int type, int side, float x, float z, float heading, float hp_frac, float build_frac);
+    // Its allyteam is its team's.  Units may come at any time, from a caller or from the world itself (a factory's, a beacon).
+    int add(int type, int team, float x, float z, float heading, float hp_frac, float build_frac);
     void order_unit(int unit, int kind, float gx, float gz, int target);
     // Group orders (capi.h zk_group_rec): each catalog type's role, -1 for none.
     std::vector<int8_t> role_of_type;
@@ -364,13 +431,13 @@ struct World {
     void ready_weapons();
     void set_economy(int n_spots, const float* spot_triples, float metal, float energy, float innate_metal, float innate_energy, float storage);
     int add_wreck(float px, float pz, float metal, float wreck_hp, float radius, int feature_def, int heap_of);
-    int emit_features(int side, FeatureRecord* out, int cap);
+    int emit_features(int ally, FeatureRecord* out, int cap);
     void step(int ticks);
     int count() const { return int(type.size()); }
     void ensure_views();
-    void update_view(int side);
-    int emit_view(int side, UnitRecord* out, int cap, float* glob, int commander, const float* base);
-    void side_stats(int side, float* out) const;
+    void update_view(int ally);
+    int emit_view(int team, UnitRecord* out, int cap, float* glob, int commander, const float* base);
+    void team_stats(int team, float* out) const;
     void rebuild_index() { rebuild_grid(); }
     const zk_type_rec& type_of(int u) const { return cat->types[size_t(type[size_t(u)])]; }
     bool stunned(int u) const { return para[size_t(u)] > 1.0f; }
@@ -398,13 +465,48 @@ struct World {
     // Every live unit in the cells round a point, cell by cell (row by row), each cell's in handle order.
     template <class F>
     void for_near(float cx, float cz, float radius, F&& f) const;
-    // The same, of one side only: for_near with the other side's left out, in the same order.
+    // The same, of one allyteam only: for_near with the others' left out, in the same order.
     template <class F>
-    void for_side(int side, float cx, float cz, float radius, F&& f) const;
+    void for_side(int ally, float cx, float cz, float radius, F&& f) const;
+    // Those of every other allyteam, an allyteam at a time in ascending order, each as for_side.
+    template <class F>
+    void for_enemies(int ally, float cx, float cz, float radius, F&& f) const;
 
 private:
+    template <class F>
+    void side_in_box(int ally, const CellBox& b, F& f) const;
     void tick();
     void rebuild_grid();
+    void drop_the_dead();
+    void died(int u);
+    void check_reveal();
+    // chickens.cpp
+    void run_chickens();
+    void chicken_deaths();
+    void chicken_frame(int f);
+    void chicken_wave(double t);
+    void chicken_second(double t, int f);
+    void chicken_slow(double t);
+    void burrow_killed(int u, double t);
+    void lay_egg(int type, float px, float pz, double decay);
+    void kill_all_chickens();
+    void morph_queen(int f);
+    void spawn_burrow();
+    bool place_queen(float& px, float& pz);
+    int spawn_queen(int f);
+    void spawn_mini_queen();
+    void spawn_chickens(int burrow, int n, int type, double t);
+    void spawn_turret(int burrow, int type, double number, bool force, double t);
+    void spawn_support(int burrow, int type, double t);
+    void special_powers(double t);
+    void spawn_anywhere(int type, int number, float min_dist, float max_dist, const float* target);
+    int choose_kind(int role, bool tech, double t, int* other);
+    bool choose_target(int unit, float& tx, float& tz);
+    int nearest_enemy(int u) const;
+    bool player_within(float px, float pz, float r) const;
+    bool ground_blocked(int type, float px, float pz) const;
+    bool can_place(int type, float px, float pz) const;
+    int add_chicken(int type, float px, float pz);
     void find_nearest();
     void pick_targets();
     void fire_weapons();
@@ -433,7 +535,7 @@ private:
     void remove_wreck(int id);
     void index_wrecks();
     void reclaim_step(int u);
-    bool pay_energy(int s, float amount);
+    bool pay_energy(int team, float amount);
     void pay_upkeep();
     void update_cloak();
     void consider_cloak(int u);
@@ -509,15 +611,16 @@ private:
     bool sees_point(int from, float tx, float tz) const;
     void run_economy();
     void collect_income();
+    void share_overflow(const float* over, bool metal);
     void update_overdrive();
-    void overdrive_side(int s);
+    void overdrive_ally(int s);
     void run_builder(int u);
     void run_factory(int u);
     bool plate_off(int u) const;
     void run_caretaker(int u);
     void advance_frame(int builder, int frame_unit);
-    int place_frame(int t, int s, float px, float pz, float head);
-    int place_frame_only(int t, int s, float px, float pz, float head);
+    int place_frame(int t, int team, float px, float pz, float head);
+    int place_frame_only(int t, int team, float px, float pz, float head);
     float spot_income(float px, float pz) const;
     float reach_of(int u, float radius) const { return type_of(u).build_range + radius; }
     bool within(int u, float px, float pz, float reach) const;
@@ -532,18 +635,17 @@ private:
 
 inline World::CellBox World::cell_box(float cx, float cz, float radius) const {
     constexpr float CELL = 128.0f;
-    int x0 = int((cx - radius) / CELL), x1 = int((cx + radius) / CELL);
-    int z0 = int((cz - radius) / CELL), z1 = int((cz + radius) / CELL);
-    x0 = x0 < 0 ? 0 : x0;
-    z0 = z0 < 0 ? 0 : z0;
-    x1 = x1 >= grid_cols ? grid_cols - 1 : x1;
-    z1 = z1 >= grid_rows ? grid_rows - 1 : z1;
+    const float lo_x = (cx - radius) / CELL, hi_x = (cx + radius) / CELL, lo_z = (cz - radius) / CELL, hi_z = (cz + radius) / CELL;
+    // Wholly off the grid, or at no place (a shot led far past the map's edge: the dragon's slow kick), it's empty: no row, and
+    // nothing read past the index.  A box that touches the grid is as it always was.
+    if (!(hi_x > -1.0f && lo_x < float(grid_cols) && hi_z > -1.0f && lo_z < float(grid_rows))) return {0, -1, 0, -1};
+    const int x0 = lo_x < 0.0f ? 0 : int(lo_x), z0 = lo_z < 0.0f ? 0 : int(lo_z);
+    const int x1 = hi_x >= float(grid_cols) ? grid_cols - 1 : int(hi_x), z1 = hi_z >= float(grid_rows) ? grid_rows - 1 : int(hi_z);
     return {x0, x1, z0, z1};
 }
 
 template <class F>
-void World::for_side(int s, float cx, float cz, float radius, F&& f) const {
-    const CellBox b = cell_box(cx, cz, radius);
+void World::side_in_box(int s, const CellBox& b, F& f) const {
     const size_t base = size_t(s) * grid_cells();
     for (int gz = b.z0; gz <= b.z1; ++gz) {
         const size_t row = base + size_t(gz) * size_t(grid_cols);
@@ -553,27 +655,59 @@ void World::for_side(int s, float cx, float cz, float radius, F&& f) const {
 }
 
 template <class F>
+void World::for_side(int s, float cx, float cz, float radius, F&& f) const {
+    side_in_box(s, cell_box(cx, cz, radius), f);
+}
+
+template <class F>
+void World::for_enemies(int s, float cx, float cz, float radius, F&& f) const {
+    const CellBox b = cell_box(cx, cz, radius);
+    for (int e = 0; e < n_allies; ++e)
+        if (e != s) side_in_box(e, b, f);
+}
+
+template <class F>
 void World::for_near(float cx, float cz, float radius, F&& f) const {
     const CellBox b = cell_box(cx, cz, radius);
-    const size_t other = grid_cells();
+    const size_t cells = grid_cells();
     for (int gz = b.z0; gz <= b.z1; ++gz) {
         const size_t row = size_t(gz) * size_t(grid_cols);
         const size_t first = row + size_t(b.x0), last = row + size_t(b.x1) + 1;
-        // A row with one side in it is that side's run; otherwise each cell's two runs go together by handle.
-        if (cell_start[other + first] == cell_start[other + last]) {
-            for (int i = cell_start[first]; i < cell_start[last]; ++i) f(cell_units[size_t(i)]);
+        // The allyteams with someone in this stretch of the row.  One alone is its run; otherwise each cell's runs go together by
+        // handle: two as a merge, more by taking the lowest of their heads each time.
+        size_t with[ZK_MAX_TEAMS];
+        int k = 0;
+        for (int s = 0; s < n_allies; ++s)
+            if (cell_start[size_t(s) * cells + first] != cell_start[size_t(s) * cells + last]) with[k++] = size_t(s) * cells;
+        if (k == 0) continue;
+        if (k == 1) {
+            for (int i = cell_start[with[0] + first]; i < cell_start[with[0] + last]; ++i) f(cell_units[size_t(i)]);
             continue;
         }
-        if (cell_start[first] == cell_start[last]) {
-            for (int i = cell_start[other + first]; i < cell_start[other + last]; ++i) f(cell_units[size_t(i)]);
+        if (k == 2) {
+            const size_t one = with[0], other = with[1];
+            for (size_t c = first; c < last; ++c) {
+                int i = cell_start[one + c], j = cell_start[other + c];
+                const int i_end = cell_start[one + c + 1], j_end = cell_start[other + c + 1];
+                while (i < i_end && j < j_end) f(cell_units[size_t(cell_units[size_t(i)] < cell_units[size_t(j)] ? i++ : j++)]);
+                while (i < i_end) f(cell_units[size_t(i++)]);
+                while (j < j_end) f(cell_units[size_t(j++)]);
+            }
             continue;
         }
         for (size_t c = first; c < last; ++c) {
-            int i = cell_start[c], j = cell_start[other + c];
-            const int i_end = cell_start[c + 1], j_end = cell_start[other + c + 1];
-            while (i < i_end && j < j_end) f(cell_units[size_t(cell_units[size_t(i)] < cell_units[size_t(j)] ? i++ : j++)]);
-            while (i < i_end) f(cell_units[size_t(i++)]);
-            while (j < j_end) f(cell_units[size_t(j++)]);
+            int at[ZK_MAX_TEAMS], end[ZK_MAX_TEAMS];
+            for (int r = 0; r < k; ++r) {
+                at[r] = cell_start[with[r] + c];
+                end[r] = cell_start[with[r] + c + 1];
+            }
+            for (;;) {
+                int pick = -1;
+                for (int r = 0; r < k; ++r)
+                    if (at[r] < end[r] && (pick < 0 || cell_units[size_t(at[r])] < cell_units[size_t(at[pick])])) pick = r;
+                if (pick < 0) break;
+                f(cell_units[size_t(at[pick]++)]);
+            }
         }
     }
 }

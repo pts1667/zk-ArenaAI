@@ -474,6 +474,10 @@ def _unit_record(u: dict, weapon_index: dict[str, int], weapons_by_id: dict[int,
         "name": u["name"], "cost": u["cost"], "hp": u["health"], "speed": speed,
         "accel": u["maxAcc"], "brake": u["maxDec"], "turn_rate": turn, "slow_turn_speed": slow_turn,
         "footprint_radius": footprint, "hit_radius": hit_radius,
+        # What the game tests a build against (CGameHelper::TestUnitBuildSquare): the footprint's rectangle, here its half sizes
+        # in x and z (xsize and zsize are in 8-elmo squares), with every square within max_height_dif of the height at its middle.
+        "foot_x": u.get("xsize", 2.0) * 4.0, "foot_z": u.get("zsize", u.get("xsize", 2.0)) * 4.0,
+        "max_height_dif": float(u.get("maxHeightDif", 0.0)),
         "armored_mult": u.get("armoredMultiple", 1.0), "idle_regen": float(custom.get("idle_regen") or 0.0) / FRAMES, "idle_time": u.get("idleTime") or 0.0,
         "max_range": max_range, "armor_class": int(u["armorType"]), "move_class": _move_class(u),
         "def_id": int(u["id"]), "los_radius": u.get("losRadius", 0.0), "air_los_radius": u.get("airLosRadius", 0.0),

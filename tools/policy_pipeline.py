@@ -3,7 +3,7 @@
     ~/zkml/bin/python tools/policy_pipeline.py --root /mnt/d/zk-learned/runs/full-1 --train-encoder
     ~/zkml/bin/python tools/policy_pipeline.py --root /mnt/d/zk-learned/runs/full-1 --dry-run     # the commands, nothing run
 
-Each stage is one of the tools' own commands (HANDOFF.md, "Running"), run one at a time, so no two load the map pool at once and
+Each stage is one of the tools' own commands (AGENTS.md, "Running"), run one at a time, so no two load the map pool at once and
 each hands the GPU back when it ends.  Its output goes to ROOT/logs/STAGE.out.  ROOT/pipeline.json lists the stages done, so the
 same command again carries on from the first that isn't; --redo STAGE runs that one and every one after it again.  The encoder
 (frame_vae) and PPO resume from their own checkpoints; a cloning stage starts over, its old log.jsonl kept beside the new one.
@@ -17,19 +17,27 @@ ROOT/replays/STAGE: 4 games of each closed-loop test (record-N, eval) and 4 ever
 It ends with the pipeline; tools/policy_dashboard.py --root ROOT serves it again, during the run or after.
 
 The stages:
+  record       if --data holds no finished recording: the scripts' games recorded there (policy_clone_data.py record), as army-6
+               was, --record-decisions of them, in the kinds of game --kinds says
   frames       with --train-encoder, if --frames has no manifest.json: frame_data.py collect, pool5's recipe (1M frames each of
-               the frame games, scenarios and the C++ scripts' games; 03-training.md, "Frame data")
+               the frame games, scenarios and the C++ scripts' games; 03-training.md, "Frame data"), the army games of --kinds
   encoder      with --train-encoder: frame_vae.py train with encoder-big's settings, 25,000 steps, to ROOT/encoder
   zindex       the cloning data's z.npz, if it has none
   clone        policy_clone_train.py with clone-8's settings (z, the economy at 2.5, the last 10% on winners), to ROOT/clone
   record-N     DAgger round N: the last clone plays the army script, told its variant as z, with the scripts advising it, and
-               --dagger-games of its games are kept (policy_clone_eval.py --record).  Every round's go into ROOT/dagger, so each
-               round learns from them all.  The first 64 games are the last clone's closed-loop eval too: ROOT/evals/record-N.json
+               --dagger-games of its games are kept (policy_clone_eval.py --record), of the kinds --kinds says.  Every round's go
+               into ROOT/dagger, so each round learns from them all.  The first 64 games are the last clone's closed-loop eval too:
+               ROOT/evals/record-N.json, by kind where there's more than 1v1s
   zindex-N     z.npz over every round's games
   dagger-N     policy_clone_train.py --init the last clone: half its samples from ROOT/dagger, half from --data, to ROOT/dagger-N
-  eval         the last clone against the army script, z from its variant: ROOT/evals/final.json
+  eval         the last clone against the army script, z from its variant, in 1v1s, the headline: ROOT/evals/final.json
+  eval-KIND    the same in games of each of --test-kinds alone: ROOT/evals/final-KIND.json
   ppo          policy_train.py --init the last clone, --z variant, --fine-sim, with the PPO smoke run's flags (03-training.md,
-               "From a clone") at a run's size, to ROOT/ppo
+               "From a clone") at a run's size, playing --kinds and testing --test-kinds besides the 1v1 test, to ROOT/ppo
+
+Every stage that plays games plays the kinds of game --kinds says (1v1s, team games, free-for-alls, chicken games:
+policy_sim_env.GAME_KINDS), in batches with --slots teams a game, and chicken games at --chicken-difficulties.  The tests' headline
+stays a 1v1 against the script, so that runs stay comparable; --test-kinds adds a test of each kind it names.
 
 --clone-args, --dagger-args and --ppo-args are added at the end of those commands, so they override what's set here.
 """
@@ -54,15 +62,20 @@ ENCODER_FLAGS = ["--autoencoder", "--region-pool", "32", "--two-part", "--questi
 # pool5's (03-training.md, "Frame data").
 FRAMES_FLAGS = ["--script-frames", "1000000", "--scenario-frames", "1000000", "--army-frames", "1000000", "--games", "256",
                 "--workers", "8"]
-# clone-8's (03-training.md, "Cloning"), at the actor's decision every 3 s.
-CLONE_FLAGS = ["--decide-every", "6", "--samples", "8", "--accumulate", "8", "--workers", "15", "--z", "--z-dropout", "0.2",
+# army-6's (03-training.md, "Script data"): 12 batches of 64 games, each side's army script its own knobs.
+RECORD_FLAGS = ["--games", "64", "--workers", "12", "--threads", "12", "--seed", "6", "--variants"]
+# clone-8's (03-training.md, "Cloning"), at the actor's decision every 3 s; but 4 samples a pass and 16 passes a step, where clone-8
+# had 8 and 8: the same 64 samples a step.  A sample from late in an 80-minute game takes 1.3 to 2 GB of the card, so 8 ran out of
+# 85% of it (measured 2026-11-10), and 4 fit even with every cap full.
+CLONE_FLAGS = ["--decide-every", "6", "--samples", "4", "--accumulate", "16", "--workers", "15", "--z", "--z-dropout", "0.2",
                "--economy-weight", "2.5"]
 # The PPO smoke run's (03-training.md, "From a clone"): a learning rate of 1e-4 drifted from the clone too far; a token budget of 165,000
 # didn't fit in 85% of the card.  The new critic learns at 3e-4, as every earlier critic did: at the actor's 1e-5 it learned nothing.
+# A win sooner is worth up to 0.1 more (the user, 2026-11-10); the lead rule fades by policy_train's default --lead-fade.
 PPO_FLAGS = ["--variants", "--z", "variant", "--fine-sim", "--decide-every", "6", "--segment", "16", "--token-budget", "40000",
              "--no-concurrent", "--critic-bins", "51", "--critic-span", "1.5", "--kl-start", "0.5",
              "--clone-weight", "0.5", "--economy-start", "0.25", "--economy-end", "1", "--income-weight", "0.5",
-             "--lr-start", "1e-5", "--lr-end", "3e-6", "--critic-lr", "3e-4", "--entropy-floor", "0"]
+             "--speed-weight", "0.1", "--lr-start", "1e-5", "--lr-end", "3e-6", "--critic-lr", "3e-4", "--entropy-floor", "0"]
 
 
 @dataclass
@@ -90,6 +103,32 @@ def fresh(directory: pathlib.Path):
             sys.exit(f"{directory} holds shards but no manifest.json, from a collection that didn't finish: clear it, or give "
                      f"--frames another directory, and run again")
     return run, f"check that {directory} holds no shards"
+
+
+def no_games(directory: pathlib.Path):
+    """A recording goes into a directory with no games: the recorder numbers its files from 0 again, and doesn't carry on."""
+    def run() -> None:
+        if next(directory.glob("game-*"), None) is not None:
+            sys.exit(f"{directory} holds games but no summary.json or sides.npz, from a recording that didn't finish: clear it, or "
+                     f"give --data another directory, and run again")
+    return run, f"check that {directory} holds no games"
+
+
+def recorded(data: pathlib.Path) -> bool:
+    """Whether --data holds a finished recording: the recorder's summary.json, or the sides.npz that reading it leaves (army-6
+    was stopped before it wrote its summary)."""
+    return (data / "summary.json").exists() or (data / "sides.npz").exists()
+
+
+def kinds_flags(args: argparse.Namespace, kinds: list[str] | None = None, difficulties: bool = True, slots: bool = True) -> list:
+    """A stage's flags for the kinds of game it plays: the run's (--kinds), or these; and, where the tool takes them, the slots
+    a game and the chicken difficulties."""
+    out = ["--kinds", *(args.kinds if kinds is None else kinds)]
+    if slots and args.slots:
+        out += ["--slots", args.slots]
+    if difficulties and args.chicken_difficulties:
+        out += ["--chicken-difficulties", *args.chicken_difficulties]
+    return out
 
 
 def set_aside(path: pathlib.Path):
@@ -127,17 +166,21 @@ def drop_replays(directory: pathlib.Path):
 def stages(args: argparse.Namespace) -> list[Stage]:
     root = args.root
     out: list[Stage] = []
+    data = pathlib.Path(args.data)
+    if not recorded(data):
+        out.append(Stage("record", tool("policy_clone_data.py", "record", "--out", data, "--maps", args.maps, "--decisions",
+                                        args.record_decisions, *RECORD_FLAGS, *kinds_flags(args)), before=[no_games(data)]))
     if args.train_encoder:
         frames = args.frames or root / "frames"
         if not (frames / "manifest.json").exists():
-            out.append(Stage("frames", tool("frame_data.py", "collect", "--maps", args.maps, "--out", frames, *FRAMES_FLAGS),
-                             before=[fresh(frames)]))
+            # frame_data.py's army games take the kinds (its own --kinds), not the slots or the chicken difficulties.
+            out.append(Stage("frames", tool("frame_data.py", "collect", "--maps", args.maps, "--out", frames, *FRAMES_FLAGS,
+                                            *kinds_flags(args, difficulties=False, slots=False)), before=[fresh(frames)]))
         out.append(Stage("encoder", tool("frame_vae.py", "train", "--data", frames, "--run", root / "encoder", "--steps",
                                          args.encoder_steps, *ENCODER_FLAGS), own=root / "encoder"))
         encoder = str(root / "encoder" / "vae-last.pt")
     else:
         encoder = args.encoder or default_encoder()
-    data = pathlib.Path(args.data)
     if not (data / "z.npz").exists():
         out.append(Stage("zindex", tool("policy_clone_data.py", "zindex", "--data", data, "--workers", 15)))
     clone = root / "clone"
@@ -153,7 +196,7 @@ def stages(args: argparse.Namespace) -> list[Stage]:
         out.append(Stage(f"record-{r}", tool("policy_clone_eval.py", "--actor", last, "--maps", args.maps, "--encoder", encoder,
                                              "--games", 64, "--record-games", args.dagger_games, "--workers", 12, "--z", "variant",
                                              "--record", dagger, "--record-prefix", prefix, "--out", evals / f"record-{r}.json",
-                                             *replays(args, f"record-{r}", last)),
+                                             *kinds_flags(args), *replays(args, f"record-{r}", last)),
                          before=[drop_round(dagger, prefix), drop_replays(root / "replays" / f"record-{r}")]))
         out.append(Stage(f"zindex-{r}", tool("policy_clone_data.py", "zindex", "--data", dagger, "--workers", 15)))
         run = root / f"dagger-{r}"
@@ -166,13 +209,20 @@ def stages(args: argparse.Namespace) -> list[Stage]:
     out.append(Stage("eval", tool("policy_clone_eval.py", "--actor", last, "--maps", args.maps, "--encoder", encoder, "--games", 64,
                                   "--workers", 12, "--z", "variant", "--out", evals / "final.json", *replays(args, "eval", last)),
                      before=[drop_replays(root / "replays" / "eval")]))
+    for kind in args.test_kinds:
+        out.append(Stage(f"eval-{kind}", tool("policy_clone_eval.py", "--actor", last, "--maps", args.maps, "--encoder", encoder,
+                                              "--games", 64, "--workers", 12, "--z", "variant", "--out", evals / f"final-{kind}.json",
+                                              *kinds_flags(args, [kind]), *replays(args, f"eval-{kind}", last)),
+                         before=[drop_replays(root / "replays" / f"eval-{kind}")]))
     if args.ppo:
         ppo = root / "ppo"
         out.append(Stage("ppo", tool("policy_train.py", "--run", ppo, "--init", last, "--latent-encoder", encoder, "--maps", args.maps,
                                      "--games", args.ppo_games, "--iteration", args.ppo_iteration, "--decisions", args.ppo_decisions,
                                      "--hours", args.ppo_hours, "--critic-warmup", args.ppo_critic_warmup,
                                      "--replays", root / "replays" / "ppo", "--replay-hours", args.replay_hours if args.replay_games else 0,
-                                     "--replay-games", args.replay_games, *PPO_FLAGS, *shlex.split(args.ppo_args)), own=ppo))
+                                     "--replay-games", args.replay_games, *kinds_flags(args),
+                                     *(["--test-kinds", *args.test_kinds] if args.test_kinds else []), *PPO_FLAGS,
+                                     *shlex.split(args.ppo_args)), own=ppo))
     return out
 
 
@@ -203,7 +253,19 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--root", type=pathlib.Path, required=True, help="the run's directory: every stage's output goes under it")
     ap.add_argument("--maps", default="/mnt/d/zk-learned/maps")
-    ap.add_argument("--data", default="/mnt/d/zk-learned/clone/army-6", help="the scripts' recorded games to clone")
+    ap.add_argument("--data", default="/mnt/d/zk-learned/clone/army-6", help="the scripts' recorded games to clone, recorded there "
+                    "first if it holds no finished recording (the record stage)")
+    ap.add_argument("--record-decisions", type=int, default=100_000_000, help="the record stage's size, in decisions of every side "
+                    "together: army-6 is 300M, 105 GB at 375 bytes a decision; games of several teams take about 1,000 bytes")
+    ap.add_argument("--kinds", nargs="+", default=["1v1:0.5", "teams:0.2", "ffa:0.2", "chicken:0.1"], metavar="KIND:WEIGHT",
+                    help="the kinds of game every stage that plays games plays, and how likely each (policy_sim_env.GAME_KINDS) "
+                         "(default: %(default)s)")
+    ap.add_argument("--slots", type=int, default=0, help="teams a game has room for in those stages; 0: what the biggest of --kinds needs")
+    ap.add_argument("--test-kinds", nargs="*", default=[], help="kinds of game the last clone (eval-KIND) and PPO are tested at too, "
+                    "besides the 1v1 test that's the headline")
+    ap.add_argument("--chicken-difficulties", nargs="+", metavar="NAME:WEIGHT",
+                    help="how likely each chicken difficulty is, as very-easy:1 easy:1 normal:1 (default the tools' own, "
+                         "policy_sim_env.CHICKEN_DIFFICULTY_WEIGHTS)")
     ap.add_argument("--train-encoder", action="store_true", help="train the frame encoder first, and read it after")
     ap.add_argument("--frames", type=pathlib.Path, help="with --train-encoder, the frames to train it on, collected there first if "
                     "they aren't yet (default ROOT/frames).  Frames are stored featurized: after a change to featurize, such as "
@@ -236,6 +298,15 @@ def main() -> None:
     ap.add_argument("--dry-run", action="store_true", help="print the stages' commands and what's done; run nothing")
     args = ap.parse_args()
     args.root = args.root.resolve()
+    sys.path[:0] = [str(ROOT / "bots"), str(TOOLS), str(ROOT / "sim" / "py")]
+    import policy_sim_env       # what the stages will be given, checked now rather than hours in
+    try:
+        policy_sim_env.parse_kinds(args.kinds)
+        policy_sim_env.parse_kinds(args.test_kinds)
+        if args.chicken_difficulties:
+            policy_sim_env.difficulty_weights(args.chicken_difficulties)
+    except ValueError as e:
+        ap.error(str(e))
 
     plan = stages(args)
     names = [s.name for s in plan]

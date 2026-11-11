@@ -34,6 +34,7 @@ struct Ground {
     std::vector<std::vector<uint8_t>> masks;
     std::vector<std::vector<float>> sites;
     std::vector<std::vector<int16_t>> labels;
+    std::vector<float> height;  // rows x cols
     int largest[ZKS_MOVE_CLASSES] = {};
 
     int part_at(int c, double x, double z) const;
@@ -41,21 +42,20 @@ struct Ground {
         int p = part_at(c, a.x, a.z);
         return p >= 0 && p == part_at(c, b.x, b.z);
     }
-    bool fits(double x, double z, double radius, int mask) const;
+    bool fits(double x, double z, double half_x, double half_z, double height_dif, int mask) const;
 };
 
 struct Data {
     int rows = 0, unknown = 0;
     std::vector<int32_t> row_of_def;
     std::vector<uint32_t> bits;
-    std::vector<float> cost, range, energy, pylon, needs_link, radius;
+    std::vector<float> cost, range, energy, pylon, needs_link, half_x, half_z, height_dif;
     std::vector<int8_t> move_class;
     std::vector<int32_t> catalog_row, role, footing, best_missile, generators, option_offsets, options, menu, row_of_catalog;
     std::vector<int32_t> plate_of;     // a factory row's plate row, -1 for none
     std::vector<int8_t> kind;           // R_* of a row's role, -1 for any other
     std::vector<int8_t> special_of;     // X_* of a row, -1 for none
     std::vector<uint8_t> air_plant;     // a factory whose fighters fly: the army script has its own mix for those
-    std::vector<double> footing_radius;
     int n_roles = 0;
     int role_ids[10] = {};
     int special[7] = {};
@@ -63,7 +63,7 @@ struct Data {
     int caretaker = -1;
     double group_radii[ZKS_GROUP_RADII] = {};
     double cerberus_reach = 0.0, missile_reach = 0.0;
-    float extractor_radius = 24.0f;
+    float spot_half = 24.0f;
     int n_footings = 0;
     std::vector<std::unique_ptr<Ground>> maps;     // by pointer: seats keep theirs while maps are added
 
@@ -127,12 +127,32 @@ struct View {
     int size() const { return (int)uid.size(); }
 };
 
+// Who is in a game: each team's allyteam, whether the scripts play it, and its start.
+struct Game {
+    int n_teams = 0;
+    int32_t ally_of[ZKS_MAX_TEAMS] = {};
+    uint32_t players = 0;        // zks_reset's script_teams: a team without its bit (the chickens) has no base
+    P2 starts[ZKS_MAX_TEAMS] = {};
+    bool player(int t) const { return (players >> t) & 1u; }
+    // A chicken game's chickens: the first team the scripts don't play, -1 for none.
+    int chickens() const {
+        for (int t = 0; t < n_teams; t++)
+            if (!player(t)) return t;
+        return -1;
+    }
+};
+
+// Chicken defense as the players see it this step (zks_step_args.chickens): anger 0 and the queen far off without it.
+struct Chickens {
+    bool known = false;
+    double anger = 0.0, until_queen = INFINITY;
+    bool queen = false;     // alive now
+};
+
 // One seat's inputs for one step.
 struct Ctx {
-    const Rec* own_frame;        // the seat's frame
-    int own_n;
-    const Rec* enemy_frame;      // the other side's frame
-    int enemy_n;
+    const Rec* frames[ZKS_MAX_TEAMS];    // every team's frame of the game, by team, the seat's own among them
+    int frame_n[ZKS_MAX_TEAMS];
     const float* glob;           // the seat's
     double reclaim;              // metal a second of the glob's income that's reclaim
     int64_t busy;
@@ -141,6 +161,7 @@ struct Ctx {
     bool groups;                 // zks_step_args.group_orders
     const zk::FeatureRecord* features = nullptr;   // what the seat sees to reclaim
     int feature_n = 0;
+    Chickens chickens;           // in a chicken game
 };
 
 struct Job {
@@ -151,16 +172,23 @@ struct Job {
 struct GridOf;
 struct Pass;
 
-// One side of one game.  Memory of own units is in arrays indexed by uid (a game's handles are small integers that only
+// One team of one game.  Memory of own units is in arrays indexed by uid (a game's handles are small integers that only
 // grow), one array a field.
 struct Seat {
     const Data* data = nullptr;
     const Ground* ground = nullptr;
-    int side = 0;
+    int team = 0, ally = 0;
+    Game game;
     bool active = false, economy = false, aimer = false;
     int flags = 0;     // this step's ZKS_SEAT_*
     zks_style style{};                  // the army script's knobs (standard_style unless the game gave its own)
+    // The enemy teams, their starts nearest our base first (ties to the lower team).  `foe` is the first of them that still
+    // has units this step, else the first, -1 with none; `enemy_base` is its start (the map's middle with none).  With one
+    // enemy, they're it and its start.
+    int foes[ZKS_MAX_TEAMS] = {};
+    int n_foes = 0, foe = -1;
     P2 base{}, enemy_base{}, rally{};
+    P2 march{};                         // where the army walks this step (Seat::fight)
     P2 waypoints[4];
 
     // By own uid.
@@ -170,6 +198,7 @@ struct Seat {
     std::vector<int8_t> way;            // ArmyScript.way, -1 when absent
     std::vector<int32_t> squad_of;      // -1 when absent
     std::vector<int32_t> current;       // -1 when absent
+    std::vector<double> still_x, still_z, still_since;  // where a fighter last moved off to, and when: NAN when absent (Seat::fight)
     std::vector<uint8_t> born;          // ArmyScript.seen: uids the mix has counted
     std::vector<uint8_t> patrol;
     std::vector<int64_t> helps;         // Economy.helps: INT64_MIN when absent
@@ -217,10 +246,14 @@ struct Seat {
     int finished[7] = {};
     Draws draws;
 
-    // This step's inputs, filtered, and outputs.
-    std::vector<const Rec*> own, enemies;
-    std::vector<int> own_rows, enemy_rows;
-    std::vector<int64_t> seen;   // sorted
+    // This step's inputs, filtered, and outputs.  Enemies are every enemy team's own units, read from its frame, a team after
+    // another; allies' units are in our frame, and are neither own nor enemies.
+    std::vector<const Rec*> own, enemies, allies;
+    std::vector<int> own_rows, enemy_rows, ally_rows;
+    int units_of[ZKS_MAX_TEAMS] = {};   // each enemy's and ally's units this step
+    std::vector<P2> bases;              // the enemy bases our half is measured against (Seat::ours)
+    std::vector<std::pair<int, P2>> partners;   // the allied players with units, and their starts: they have the spots nearer them
+    std::vector<int64_t> seen;   // sorted: enemies in our sight or radar
     View view;
     std::vector<zk_order_rec> army_out, eco_out, pre, post;
     std::vector<zk_group_rec> groups;   // the army script's group orders
@@ -228,7 +261,7 @@ struct Seat {
     std::vector<int32_t> anchor_of;     // by army_out index: the group order it's the anchor of, -1 for none
     std::vector<int32_t> mine_of, member_of;    // group_plans' scratch, by uid
 
-    void reset(const Data* d, const Ground* g, int side, P2 base, P2 enemy, P2 rally, bool economy, bool aimer, uint64_t seed,
+    void reset(const Data* d, const Ground* g, const Game& game, int team, P2 rally, bool economy, bool aimer, uint64_t seed,
                const zks_style* knobs);
     void grow(int64_t uid);
     void run(const Ctx& c);
@@ -238,9 +271,10 @@ struct Seat {
     void observe();
     void births_and_forget();
     void produce(const Ctx& c, double metal_income);
-    int choose(int factory_row, double seconds, int constructors, double metal_income) const;
+    int choose(int factory_row, double seconds, int constructors, double metal_income, bool queen_due) const;
     void make_view();
     void fight(const Ctx& c, std::vector<Fighter>& f, const std::vector<P2>& extractors);
+    P2 guard_goal(const Ctx& c, P2 centre) const;
     void raids(const Ctx& c, std::vector<Fighter>& f, const std::vector<int>& raiders, const std::vector<uint8_t>& retreat,
                const std::vector<P2>& extractors, std::vector<Plan>& plans);
     int nearest(const std::vector<uint8_t>& mask, P2 p, double below = INFINITY) const;
@@ -257,16 +291,17 @@ struct Seat {
 
     // eco.cpp
     void eco(const Ctx& c);
-    std::vector<uint8_t> stuck(const Ctx& c, const std::vector<uint8_t>& builders);
+    std::vector<uint8_t> stuck(const Ctx& c, const std::vector<uint8_t>& builders, P2 home);
     bool avoided(double x, double z) const;
     bool stalled(double seconds) const;
     int have(int x, double seconds) const;
     bool ours(P2 p) const;
+    bool our_spot(float x, float z) const;
     P2 front() const;
     bool silo_site(P2& site) const;
     bool turret(int& row, P2& site) const;
     bool project(const Ctx& c, double income, const GridOf& grid, int& prow, P2& at);
-    bool site(int mask, double radius, P2 near, const std::vector<float>& taken, double spread, P2& place);
+    bool site(int row, P2 near, const std::vector<float>& taken, double spread, P2& place);
     Job build(int64_t uid, int row, P2 near, const std::vector<float>& taken, double spread, const GridOf* grid, int on,
               int by_class, P2 by_at, bool use_by);
     Job job(const Ctx& c, int i, const GridOf& grid, bool has_project, int prow, P2 pat, Pass& pass, double income);

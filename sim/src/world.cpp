@@ -46,19 +46,38 @@ World::World(const Catalog* c, const Map* m, uint64_t seed, int behaviour_)
     : cat(c), map(m), rng(seed), behaviour(behaviour_), ring(RING_SLOTS) {
     grid_cols = std::max(1, int(std::ceil(m->width() / GRID_CELL)));
     grid_rows = std::max(1, int(std::ceil(m->depth() / GRID_CELL)));
-    cell_start.resize(2 * grid_cells() + 1);
+    cell_start.resize(size_t(n_allies) * grid_cells() + 1);
     for (const auto& t : c->types) cat_max_footprint = std::max(cat_max_footprint, t.footprint_radius);
 }
 
-int World::add(int t, int s, float px, float pz, float head, float hp_frac, float build_frac) {
+void World::set_teams(int n, const int32_t* ally_of_team) {
+    n_teams = std::clamp(n, 1, ZK_MAX_TEAMS);
+    n_allies = 0;
+    std::fill(std::begin(ally_size), std::end(ally_size), 0);
+    for (int t = 0; t < ZK_MAX_TEAMS; ++t) {
+        ally_of[t] = t < n_teams && ally_of_team ? std::clamp(int(ally_of_team[t]), 0, ZK_MAX_TEAMS - 1) : t;
+        if (t >= n_teams) continue;
+        ++ally_size[ally_of[t]];
+        n_allies = std::max(n_allies, ally_of[t] + 1);
+    }
+    sharing = false;
+    for (int s = 0; s < n_allies; ++s) sharing = sharing || ally_size[s] > 1;
+    cell_start.assign(size_t(n_allies) * grid_cells() + 1, 0);
+    // Anything already here goes with its team's new allyteam.
+    for (int u = 0; u < count(); ++u) side[size_t(u)] = ally_of[team[size_t(u)]];
+}
+
+int World::add(int t, int owner, float px, float pz, float head, float hp_frac, float build_frac) {
     const auto& d = cat->types[size_t(t)];
     const int u = count();
     type.push_back(t);
-    side.push_back(s);
+    side.push_back(ally_of[owner]);
+    team.push_back(owner);
     order.push_back(ZK_ORDER_NONE);
     order_target.push_back(-1);
     nearest.push_back(-1);
     alive.push_back(1);
+    live.push_back(u);
     x.push_back(px);
     z.push_back(pz);
     vx.push_back(0.0f);
@@ -89,7 +108,7 @@ int World::add(int t, int s, float px, float pz, float head, float hp_frac, floa
         ai.push_back(a);
     }
     incoming.emplace_back();
-    views[0].updated_frame = views[1].updated_frame = -1;
+    for (int s = 0; s < n_allies; ++s) views[s].updated_frame = -1;
     goal_x.push_back(px);
     goal_z.push_back(pz);
     order_wait.push_back(0);
@@ -102,6 +121,7 @@ int World::add(int t, int s, float px, float pz, float head, float hp_frac, floa
     mem_z.push_back(0.0f);
     burn_rate.push_back(0.0f);
     burn_frames.push_back(0.0f);
+    damage_mult.push_back(1.0f);
     work_on.push_back(-1);
     produces.push_back(-1);
     extracts.push_back(d.metal_make + (d.extract_mult > 0.0f ? d.extract_mult * spot_income(px, pz) : 0.0f));
@@ -170,11 +190,14 @@ void World::ready_weapons() {
 int World::order_group(const zk_group_rec& g) {
     if (g.anchor < 0 || g.anchor >= count() || !alive[size_t(g.anchor)]) return 0;
     const float r2 = g.radius * g.radius, cx = x[size_t(g.anchor)], cz = z[size_t(g.anchor)];
-    const int s = side[size_t(g.anchor)];
+    // A player's box selects only its own units, never an ally's.
+    const int owner = team[size_t(g.anchor)];
     int n = 0;
-    for (int u = 0; u < count(); ++u) {
+    for (size_t k = 0; k < live.size(); ++k) {
+        const int u = live[k];
+        if (!alive[size_t(u)]) continue;
         if (u != g.anchor) {
-            if (!alive[size_t(u)] || side[size_t(u)] != s || build[size_t(u)] < 1.0f || !(type_of(u).flags & ZK_U_MOBILE)) continue;
+            if (!alive[size_t(u)] || team[size_t(u)] != owner || build[size_t(u)] < 1.0f || !(type_of(u).flags & ZK_U_MOBILE)) continue;
             const size_t t = size_t(type[size_t(u)]);
             const int role = t < role_of_type.size() ? role_of_type[t] : -1;
             if (role < 0 || role >= 32 || !((g.roles >> role) & 1u)) continue;
@@ -220,7 +243,7 @@ void World::order_unit(int u, int kind, float gx, float gz, int target) {
     }
     if (kind == ZK_ORDER_PLACE_BEACON && d.teleport_rate <= 0.0f) return;
     if (kind == ZK_ORDER_WAIT_AT_BEACON) {
-        // Either the beacon or who it belongs to.  Nothing that stands still can go, nor anything to the other side's.
+        // Either the beacon or who it belongs to.  Nothing that stands still can go, nor anything to another allyteam's.
         const Teleporter* via = target >= 0 && target < count() ? teleporter_of(target) : nullptr;
         if (via) target = via->beacon;
         bool beacon = false;
@@ -239,6 +262,8 @@ void World::order_unit(int u, int kind, float gx, float gz, int target) {
     }
     if (kind == ZK_ORDER_JUMP && (d.jump_range <= 0.0f || !can_land_at(u, gx, gz))) return;
     if ((kind == ZK_ORDER_BUILD || kind == ZK_ORDER_ASSIST) && d.build_speed <= 0.0f) return;
+    // An ally's frame or factory can be helped, as in the game, and no enemy's.
+    if (kind == ZK_ORDER_ASSIST && target >= 0 && target < count() && side[size_t(target)] != side[size_t(u)]) return;
     if (kind == ZK_ORDER_RECLAIM && (d.reclaim_speed <= 0.0f || (d.flags & ZK_U_FACTORY))) return;
     if (!(d.flags & ZK_U_FACTORY)) work_on[size_t(u)] = -1;
     // Thrown, it's only falling, and does what it was told once it's down.
@@ -281,15 +306,14 @@ void World::step(int ticks) {
 }
 
 void World::tick() {
-    { ZK_PROF(GRID); rebuild_grid(); }
+    { ZK_PROF(GRID); drop_the_dead(); rebuild_grid(); }
     if (tick_count % 3 == 0) {  // the engine's 15-frame weapon update
         { ZK_PROF(CLOAK); update_cloak(); }
         if (behaviour == ZK_BEHAVIOUR_ADVANCE) { ZK_PROF(NEAREST); find_nearest(); }
         if (behaviour == ZK_BEHAVIOUR_ORDERS) {
-            // Targeting goes by what a side knows, so fog runs for every world with orders.
+            // Targeting goes by what an allyteam knows, so fog runs for every world with orders.
             ensure_views();
-            update_view(0);
-            update_view(1);
+            for (int s = 0; s < n_allies; ++s) update_view(s);
             ZK_PROF(UNIT_AI);
             update_unit_ai();
         }
@@ -315,44 +339,96 @@ void World::tick() {
     // After deaths: a build step adds health, and mustn't bring back what this tick killed.
     if (economy_on) { ZK_PROF(ECONOMY); run_economy(); }
     { ZK_PROF(STATUS); update_status(); update_shields(); }
+    // The gadgets, for the frames this tick has gone through.
+    if (chickens.rules) {
+        ZK_PROF(CHICKENS);
+        run_chickens();
+    } else if (reveal_on && !revealed && cat->reveal_every > 0) {
+        for (int f = frame + 1; f <= frame + ZK_TICK_FRAMES; ++f)
+            if (f % cat->reveal_every == 0) check_reveal();
+    }
     frame += ZK_TICK_FRAMES;
     ++tick_count;
 }
 
+// game_over.lua's ProcessLastAlly: with two alliances alive, one worth more than so many times the other has the other's units always
+// visible from then on, cloaked or not (modrules alwaysVisibleOverridesCloaked).  The gadget also destroys what it has outside the
+// map, where nothing can be here.  It doesn't look again once it has revealed.  Alive and worth: finished units that count, by metal.
+void World::check_reveal() {
+    double value[ZK_MAX_TEAMS] = {};
+    int units[ZK_MAX_TEAMS] = {};
+    for (const int u : live) {
+        const size_t i = size_t(u);
+        const auto& d = type_of(u);
+        if (!alive[i] || build[i] < 1.0f || (d.flags & ZK_U_DONT_COUNT)) continue;
+        value[side[i]] += double(d.metal_cost);
+        ++units[side[i]];
+    }
+    int alliance[2] = {-1, -1}, n = 0;
+    for (int s = 0; s < n_allies; ++s)
+        if (units[s] > 0 && n++ < 2) alliance[n - 1] = s;
+    if (n != 2) return;
+    const double ratio = double(cat->reveal_ratio), one = value[alliance[0]], other = value[alliance[1]];
+    const int supreme = one > ratio * other ? alliance[0] : other > ratio * one ? alliance[1] : -1;
+    if (supreme < 0) return;
+    for (int s = 0; s < n_allies; ++s)
+        if (s != supreme) revealed |= 1u << s;
+}
+
+void World::died(int u) {
+    alive[size_t(u)] = 0;
+    fallen.push_back(u);
+}
+
+// The lists by kind lose their dead, keeping their order, when someone has died since they last did.  Not the area cloakers, whose
+// being there at all makes update_cloak look at everyone, nor teleporters or silos' missiles, which keep more than a handle.  Shields
+// keep links by place in their list, and lose their dead only as the links are made again (update_shields).
+void World::drop_the_dead() {
+    if (fallen_pruned == fallen.size()) return;
+    fallen_pruned = fallen.size();
+    const auto dead = [this](int u) { return !alive[size_t(u)]; };
+    for (std::vector<int>* list : {&builders, &earners, &upkeepers, &aircraft, &pads, &personal_cloakers, &burrowers, &jumpers, &throwers, &droppers})
+        list->erase(std::remove_if(list->begin(), list->end(), dead), list->end());
+}
+
 void World::rebuild_grid() {
-    const int n = count();
     const size_t cells = grid_cells();
     std::fill(cell_start.begin(), cell_start.end(), 0);
-    unit_key.resize(size_t(n));
-    int live = 0;
-    for (int u = 0; u < n; ++u) {
+    unit_key.resize(size_t(count()));
+    // The living go on in handle order, and the dead leave the list for good.
+    size_t kept = 0;
+    for (size_t k = 0; k < live.size(); ++k) {
+        const int u = live[k];
         if (!alive[size_t(u)]) continue;
+        live[kept++] = u;
         int gx = int(x[size_t(u)] / GRID_CELL), gz = int(z[size_t(u)] / GRID_CELL);
         gx = gx < 0 ? 0 : (gx >= grid_cols ? grid_cols - 1 : gx);
         gz = gz < 0 ? 0 : (gz >= grid_rows ? grid_rows - 1 : gz);
         const int key = int(size_t(side[size_t(u)]) * cells + size_t(gz) * size_t(grid_cols) + size_t(gx));
         unit_key[size_t(u)] = key;
         ++cell_start[size_t(key)];
-        ++live;
     }
+    live.resize(kept);
     // Each key's end, then filled backwards so that each key's begin is left behind with its units in handle order.  The sum is
     // kept in a register: through memory, each add would wait on the store before it.
     int sum = 0;
     for (int& c : cell_start) c = sum += c;
-    cell_units.resize(size_t(live));
-    for (int u = n; u-- > 0;)
-        if (alive[size_t(u)]) cell_units[size_t(--cell_start[size_t(unit_key[size_t(u)])])] = u;
+    cell_units.resize(kept);
+    for (size_t k = kept; k-- > 0;) {
+        const int u = live[k];
+        cell_units[size_t(--cell_start[size_t(unit_key[size_t(u)])])] = u;
+    }
 }
 
 void World::find_nearest() {
-    const int n = count();
-    for (int u = 0; u < n; ++u) {
+    for (size_t k = 0, n = live.size(); k < n; ++k) {
+        const int u = live[k];
         nearest[size_t(u)] = -1;
         if (!alive[size_t(u)] || !(type_of(u).flags & ZK_U_MOBILE)) continue;
         // Fights are small and the grid coarse: widen until something turns up.
         float best = 1e18f;
         for (float r : NEAREST_RADII) {
-            for_side(1 - side[size_t(u)], x[size_t(u)], z[size_t(u)], r, [&](int e) {
+            for_enemies(side[size_t(u)], x[size_t(u)], z[size_t(u)], r, [&](int e) {
                 if (!can_be_aimed_at(side[size_t(u)], e)) return;
                 const float dx = x[size_t(e)] - x[size_t(u)], dz = z[size_t(e)] - z[size_t(u)];
                 const float d = dx * dx + dz * dz;
@@ -367,9 +443,9 @@ void World::find_nearest() {
 }
 
 void World::update_status() {
-    const int n = count();
     const float frames = float(ZK_TICK_FRAMES);
-    for (int u = 0; u < n; ++u) {
+    for (size_t k = 0, n = live.size(); k < n; ++k) {
+        const int u = live[k];
         if (!alive[size_t(u)]) continue;
         const auto& d = type_of(u);
         recent_damage[size_t(u)] *= RECENT_DAMAGE_KEPT;
@@ -380,7 +456,7 @@ void World::update_status() {
             const float made = frames * (1.0f - slow_now(u));
             // Both resources, and all of a step or none of it.  A world with no economy has nothing to pay with, and stockpiles free.
             const float cost = economy_on ? d.stockpile_cost * made / d.stockpile_frames : 0.0f;
-            Purse& purse = purses[size_t(side[size_t(u)])];
+            Purse& purse = purses[size_t(team[size_t(u)])];
             if (purse.metal >= cost && purse.energy >= cost) {
                 purse.metal -= cost;
                 purse.energy -= cost;
@@ -394,7 +470,7 @@ void World::update_status() {
         }
         slow[size_t(u)] = std::max(0.0f, slow[size_t(u)] - frames / SLOW_DECLINE_FRAMES);
         if (burn_frames[size_t(u)] > 0.0f) {
-            const float amount = burn_rate[size_t(u)] * std::min(frames, burn_frames[size_t(u)]);
+            const float amount = burn_rate[size_t(u)] * std::min(frames, burn_frames[size_t(u)]) * damage_mult[size_t(u)];
             hp[size_t(u)] -= amount;
             damage_taken[size_t(u)] += amount;
             recent_damage[size_t(u)] += amount;

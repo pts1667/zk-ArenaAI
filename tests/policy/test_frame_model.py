@@ -190,16 +190,25 @@ def test_everything_in_a_scenario_stands_where_it_can(scenarios, slot):
 
 def test_structures_never_stand_on_each_other(scenarios):
     _, bundle, facts = se.pool()[0]
-    roster, cat, table = scenarios.roster, se.catalog(), scenarios.table
+    roster, table = scenarios.roster, scenarios.table
     rows = np.tile(roster.structures[table.cost[roster.structures] < 300.0][:6], 6)
     rows = np.concatenate((rows, np.full(5, roster.extractor)))
     start = tuple(float(v) for v in bundle.spot_list[0, :2])
     built, x, z = fd._place_structures(np.random.default_rng(1), fd.Ground(bundle, facts), roster, rows, start, (start[0] + 2000.0, start[1]))
-    radius = np.array([cat.units[cat.index[table.names[r]]]["footprint_radius"] for r in built])
-    d = np.hypot(x[:, None] - x[None], z[:, None] - z[None]) - radius[:, None] - radius[None]
+    # Footprints are rectangles: apart along x or along z.
+    half = roster.half[built]
+    along_x = np.abs(x[:, None] - x[None]) - half[:, None, 0] - half[None, :, 0]
+    along_z = np.abs(z[:, None] - z[None]) - half[:, None, 1] - half[None, :, 1]
+    d = np.maximum(along_x, along_z)
     np.fill_diagonal(d, 1.0)
     assert (d >= -1e-3).all()
     assert len(built) >= 5
+    # Nor on what a team drawn before has built.
+    placed = fd.footprints(x, z, half[:, 0], half[:, 1])
+    more, mx, mz = fd._place_structures(np.random.default_rng(2), fd.Ground(bundle, facts), roster, rows, start, (start[0] + 2000.0, start[1]), placed)
+    for r, px, pz in zip(more, mx, mz):
+        assert fd.apart(placed, float(px), float(pz), *roster.half[r])
+    assert len(more) >= 5
 
 
 def test_a_scenarios_budget_holds(scenarios):
@@ -228,18 +237,105 @@ def test_scenarios_play_on_every_map_and_change_as_they_go():
     env.begin()
     maps = {id(b) for b in env.bundle}
     assert len(maps) == len(se.pool())
-    before = [env.frame(s).units[["uid", "x"]].copy() for s in range(0, 8)]
+    seats = [g * env.slots + t for g in range(4) for t in range(2)]
+    before = [env.frame(s).units[["uid", "x"]].copy() for s in seats]
     for _ in range(8):
         env.step(0.0)
         env.finished_seats()
     # By uid, as what's on the board changes too.
     moved = []
-    for s, was in enumerate(before):
+    for s, was in zip(seats, before):
         now = env.frame(s).units
         moved += [not np.array_equal(now["x"][now["uid"] == uid], was["x"][was["uid"] == uid]) for uid in np.intersect1d(was["uid"], now["uid"])]
     assert any(moved)
     assert (env.batch.counts >= 0).all()
     assert env.frame(0).glob[rf.G["frame"]] >= env.batch.frame(0, 0).glob[rf.G["frame"]]
+
+
+def _own(env, g: int) -> list[np.ndarray]:
+    return [units for units, _ in env._team_units(g)]
+
+
+def test_scenarios_are_1v1s_team_games_and_chicken_games_within_what_a_frame_holds():
+    env = fd.ScenarioEnv(48, 21, threads=4)
+    env.begin()
+    assert set(env.kind) == {"1v1", "teams", "chicken"} and env.slots == 8        # the training maps have two boxes: no free-for-all
+    table, burrow = env.table, se.catalog().rules["chickens"]["burrow"]
+    is_chicken = np.array([name.startswith("chicken") or name == burrow for name in table.names] + [False])
+    seen = {"burrows": 0, "armies": 0, "allies": 0}
+    for g in range(env.count):
+        n, c, own = int(env.n_teams[g]), int(env.chickens[g]), _own(env, g)
+        assert sum(len(u) for u in own) <= fz.CAP_UNITS and all(len(u) <= fz.CAP_CONTROLLABLE for u in own)
+        assert len(env.scripts[g]) == len(env.bases[g]) == len(env.scouted[g]) == n
+        for t in range(n):
+            assert is_chicken[table.rows(own[t]["def_id"])].all() == (t == c) or not len(own[t])
+            assert (env.scripts[g][t] is None) == (env.bases[g][t] is None) == (t == c)
+            assert env.ally[g, env.facing[g, t]] != env.ally[g, t]
+        if env.kind[g] == "teams":
+            assert n in (4, 6, 8) and env.ally[g, :n].tolist() == [0] * (n // 2) + [1] * (n // 2) and c < 0
+            seen["allies"] += 1
+        elif env.kind[g] == "chicken":
+            assert c == n - 1 and 2 <= n <= 5 and env.ally[g, :n].tolist() == [0] * c + [1]
+            assert env.batch.chicken_state(g)["team"] == c and [env.plays(g, t) for t in range(n)] == ["script"] * c + ["chickens"]
+            names = [table.names[r] for r in table.rows(own[c]["def_id"])]
+            seen["burrows"] += burrow in names
+            seen["armies"] += any(table.mobile[r] for r in table.rows(own[c]["def_id"]))
+            # A burrow is no nearer a player's start than the spawner would put one.
+            near = se.catalog().rules["chickens"]["difficulties"][int(env.difficulty[g])]["min_base_distance"]
+            starts = env.starts[g, :2 * c].reshape(c, 2)
+            for u in own[c][[name == burrow for name in names]]:
+                assert np.hypot(starts[:, 0] - u["x"], starts[:, 1] - u["z"]).min() >= near - 1.0
+        else:
+            assert n == 2 and c < 0
+    assert seen["allies"] and seen["burrows"] >= 3 and seen["armies"] >= 3, seen
+    # They play: the sim sends the chickens at the players, as in a chicken game, and every player's scripts give orders.
+    games = [g for g in range(env.count) if env.kind[g] == "chicken"]
+    before = {g: _own(env, g)[int(env.chickens[g])][["uid", "x", "z"]].copy() for g in games}
+    ordered = set()
+    for _ in range(12):
+        env.step(0.0)
+        ordered |= {seat for seat, orders in env.script_record.items() if len(orders)}
+    moved = 0
+    for g in games:
+        now = _own(env, g)[int(env.chickens[g])]
+        both, a, b = np.intersect1d(before[g]["uid"], now["uid"], return_indices=True)
+        moved += int((np.hypot(before[g]["x"][a] - now["x"][b], before[g]["z"][a] - now["z"][b]) > 16.0).sum())
+    assert moved > 10
+    assert {s % env.slots for s in ordered} >= {0, 1, 2, 3}, "allies past the first two have scripts too"
+
+
+def test_a_free_for_all_scenario_has_an_alliance_a_box_and_every_seat_makes_a_frame():
+    from test_sim_env import _ffa_maps
+    env = fd.ScenarioEnv(6, 4, fd.ScenarioRules(shapes=(("ffa", 1.0),)), threads=2, maps=_ffa_maps(4))
+    env.begin()
+    is_extractor = fd.extractors(env.table)
+    for _ in range(6):
+        env.step(0.0)
+    for g in range(env.count):
+        n = int(env.n_teams[g])
+        assert env.kind[g] == "ffa" and n in (3, 4) and env.ally[g, :n].tolist() == list(range(n)) and env.n_allies[g] == n
+        own = _own(env, g)
+        assert sum(len(u) > 0 for u in own) >= n - 1
+        for t in range(n):
+            seat = g * env.slots + t
+            tensors = fz.featurize(fd.with_site_status(env.frame(seat), env.table, is_extractor), env.bundle_of(seat), env.table, economy=True)
+            assert len(set(tensors.unit_ally.tolist())) <= n and np.isfinite(tensors.unit_x).all()
+    # Only what the maps hold and the catalog has: no free-for-all on the training maps, which have two boxes.
+    assert set(fd.scenario_kinds(fd.ScenarioRules(), se.pool(), se.catalog())) == {"1v1", "teams", "chicken"}
+    assert fd.scenario_kinds(fd.ScenarioRules(shapes=(("ffa", 1.0),)), se.pool(), se.catalog()) == {"1v1": 1.0}
+
+
+def test_no_game_frames_are_collected_from_ends_on_a_lead(tmp_path, monkeypatch):
+    """The late game is what the encoder would otherwise hardly see (the user, 2026-11-10)."""
+    envs = []
+    monkeypatch.setattr(fd.Collector, "run", lambda self, frames: envs.append(self.env))
+    for source in fd.SOURCES:
+        fd._collect_part(fd.Part(tmp_path, source, 1, 2, 3, 2, 6, fd.ScenarioRules(), 60), se.pool())
+    assert [env.lead_share for env in envs] == [0.0, 0.0, 0.0]
+    for env in envs:
+        env.begin()
+        assert not env.lead_rule.any() or env.early_end > env.time_limit
+    assert se.SimEnv(1, 3, ["scripts"], threads=1).lead_share == 1.0, "everywhere else it's on"
 
 
 def test_extractors_placed_at_the_start_earn():
@@ -324,7 +420,12 @@ def test_collected_data_has_every_source_and_good_links(data):
             at = s["later"][linked]
             assert (s["game"][at] == s["game"][linked]).all() and (s["seat"][at] == s["seat"][linked]).all()
             assert (s["decision"][at] > s["decision"][linked]).all()
-    assert set(fm.Shards._read(sorted(data.glob("scenario-*.npz"))[0])["seat"].tolist()) == {0, 1}
+    # Scenarios are of several kinds of game, and a frame is a player's: never the chickens', who are a chicken game's last team.
+    scenario = [fm.Shards._read(p) for p in sorted(data.glob("scenario-*.npz"))]
+    kind, seat, teams = (np.concatenate([s[k] for s in scenario]) for k in ("kind", "seat", "teams"))
+    chicken = kind == fd.GAME_KINDS.index("chicken")
+    assert {fd.GAME_KINDS[k] for k in set(kind.tolist())} == {"1v1", "teams", "chicken"}     # the training maps have two boxes: no free-for-all
+    assert (seat < teams - chicken).all() and {0, 1} <= set(seat.tolist()) and seat.max() >= 2
 
 
 def test_a_later_frame_cant_coincide_with_the_next_one():
@@ -356,3 +457,48 @@ def test_sampling_stays_off_the_held_out_map(data):
         assert (s["map"][s["anchors"]] != 4).all()
     now, later = shards.sample(8)
     assert now.unit_x.shape[0] == 8 and later.glob_x.shape[0] == 8
+
+
+# Games of more than two -----------------------------------------------------------------------------------------------------------------------------------
+
+
+def test_kinds_parse_as_policy_train_spells_them_and_army_games_leave_out_what_simenv_lacks(capsys):
+    kinds = fd.parse_kinds(fd.KINDS)
+    assert kinds == {"1v1": 0.5, "teams": 0.2, "ffa": 0.2, "chicken": 0.1}
+    assert fd.parse_kinds("teams ffa:0") == {"teams": 1.0}
+    with pytest.raises(ValueError):
+        fd.parse_kinds(["duel:1"])
+    played = fd.army_kinds(kinds)
+    assert set(played) == set(kinds) & set(se.GAME_KINDS) and fd.army_kinds(None) is None
+    if "chicken" not in se.GAME_KINDS:
+        assert "chicken" in capsys.readouterr().err
+
+
+def test_army_team_games_give_frames_of_every_seat_with_each_teams_own_outcome(tmp_path):
+    facts = fd.collect(tmp_path, 0, 0, games=4, seed=3, threads=2, script_every=6, frames_per_shard=400, army_frames=400, kinds={"teams": 1.0})
+    assert facts["army_kinds"] == {"teams": 1.0} and facts["game_kinds"][0] == "1v1"
+    s = fm.Shards._read(sorted(tmp_path.glob("army-*.npz"))[0])
+    teams = int(s["teams"][0])
+    assert teams >= 4 and (s["kind"] == fd.GAME_KINDS.index("teams")).all() and (s["alliances"] == 2).all()
+    assert (s["seat"] < s["teams"]).all() and len(set(s["seat"].tolist())) > 2
+    fd.write_manifest(tmp_path, {7: np.array([1.0, -1.0], np.float32), 3: np.array([-0.5, 1.0, -0.5], np.float32)}, {})
+    with np.load(tmp_path / "outcomes.npz") as ends:
+        assert ends["game"].tolist() == [3, 7] and ends["result"].tolist() == [-0.5, 1.0]
+        assert ends["results"][0].tolist() == [-0.5, 1.0, -0.5] and ends["results"][1, :2].tolist() == [1.0, -1.0] and np.isnan(ends["results"][1, 2])
+
+
+def test_the_outcome_probe_reads_each_teams_own_result():
+    """With several teams a seat's result isn't team 0's turned round: a free-for-all of three gives 1, -1/2, -1/2."""
+    rng = np.random.default_rng(3)
+    games = np.repeat(np.arange(400, dtype=np.int64), 3)
+    seat = np.tile([0, 1, 2], 400)
+    results = np.full((400, 3), -0.5, np.float32)
+    results[np.arange(400), rng.integers(0, 3, 400)] = 1.0
+    z = rng.normal(size=(len(games), 4))
+    z[:, 0] = results[games, seat]
+    sample = {"z": z, "map": (games % 3).astype(np.int32), "source": np.zeros(len(games), np.int32), "seat": seat, "game": games, "probes": z[:, :1].astype(np.float32)}
+    assert fm.probe_report(sample, ("a",), (np.arange(400, dtype=np.int64), results), held_out=2)["r2_outcome"] > 0.99
+
+
+def test_a_scenarios_clock_can_claim_up_to_a_whole_game():
+    assert fd.ScenarioRules().longest_clock == se.TIME_LIMIT_DECISIONS / 2.0 == 4800.0

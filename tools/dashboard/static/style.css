@@ -1,10 +1,16 @@
 /* The training dashboard, on top of Simple.css (cdn.simplecss.org): its variables (--bg, --accent-bg, --text, --text-light,
    --border, --accent) and element styles do the base; this adds what it has no notion of: a full-width layout, the stage
-   timeline, result tiles, charts, the log and the replay viewer.  Colours Simple.css has no slot for (the two sides, statuses,
-   chart series, hairlines) sit beside its variables and switch with the same prefers-color-scheme. */
+   timeline, result tiles, charts, the log and the replay viewer.  Colours Simple.css has no slot for (the two sides, the teams,
+   statuses, chart series, hairlines) sit beside its variables and switch with the same prefers-color-scheme. */
 :root {
   --side0: #2a78d6;           /* side 0, the policy: blue */
   --side1: #eb6834;           /* side 1, the army script: orange */
+  /* A replay's teams by number: the chart series in their order, which keeps neighbours apart for colour-blind readers in both
+     themes (checked with the dataviz palette validator, 2026-11-10); no eight colours do so two by two, so the viewer marks
+     alliances by shape too.  The chickens a neutral, away from all eight in both themes. */
+  --team0: var(--s1); --team1: var(--s2); --team2: var(--s3); --team3: var(--s4);
+  --team4: var(--s5); --team5: var(--s6); --team6: var(--s7); --team7: var(--s8);
+  --chickens: #4f4a43;
   --good: #0ca30c;
   --good-text: #006300;
   --warn: #fab219;
@@ -27,6 +33,7 @@
     --wash: rgba(255, 179, 0, 0.16);       /* Simple.css's dark --accent is amber */
     --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
     --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
+    --chickens: #c8c0ae;
   }
   .v-comp img, .v-stage img { opacity: 1; }
 }
@@ -194,6 +201,10 @@ article.card { margin: 0; padding: 0; min-width: 0; }
 .sw { display: inline-block; width: 0.6rem; height: 0.6rem; border-radius: 2px; margin-right: 0.3rem; vertical-align: -1px; }
 .sw.a, .sw.s0 { background: var(--side0); }
 .sw.s, .sw.s1 { background: var(--side1); }
+.sw.t0 { background: var(--team0); } .sw.t1 { background: var(--team1); } .sw.t2 { background: var(--team2); } .sw.t3 { background: var(--team3); }
+.sw.t4 { background: var(--team4); } .sw.t5 { background: var(--team5); } .sw.t6 { background: var(--team6); } .sw.t7 { background: var(--team7); }
+.sw.chickens { background: var(--chickens); }
+svg.mark { width: 0.7rem; height: 0.7rem; fill: currentColor; vertical-align: -1px; margin-right: 0.3rem; flex: none; }
 .how { margin-top: 0.4rem; color: var(--text-light); font-size: 0.8rem; }
 .econ-head { display: flex; justify-content: space-between; gap: 0.8rem; flex-wrap: wrap; margin-bottom: 0.25rem; }
 .econ-table td.pairs { width: 24%; }
@@ -254,6 +265,10 @@ a.replay:hover { border-color: var(--accent); background: var(--accent-bg); }
 .rside { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto; gap: 0.25rem; align-items: center; white-space: nowrap; }
 .rside .rname { font-weight: 600; }
 .rside .dim { overflow: hidden; text-overflow: ellipsis; }
+.rkind { font-size: 0.75rem; color: var(--text-light); white-space: nowrap; }
+.rlineup { display: flex; flex-wrap: wrap; align-items: center; gap: 0.2rem 0.4rem; }
+.rlineup .rally { white-space: nowrap; }
+.rlineup .sw { margin-right: 0.1rem; }
 
 /* Replay viewer (static/viewer.js) */
 .viewer { position: fixed; inset: 0; z-index: 100; background: var(--bg); display: grid; grid-template-rows: auto minmax(0, 1fr) auto; font-size: var(--dense); }
@@ -261,7 +276,7 @@ a.replay:hover { border-color: var(--accent); background: var(--accent-bg); }
 .v-top { display: flex; align-items: center; gap: 0.8rem; padding: 0.35rem 0.8rem; background: var(--accent-bg); border-bottom: 1px solid var(--border); min-width: 0; }
 .v-title { font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .v-result { white-space: nowrap; }
-.v-mid { display: grid; grid-template-columns: minmax(0, 1fr) 21rem; min-height: 0; }
+.v-mid { display: grid; grid-template-columns: minmax(0, 1fr) 23rem; min-height: 0; }
 .v-stage { position: relative; min-width: 0; min-height: 0; background: #15161a; overflow: hidden; cursor: grab; }
 .v-stage.dragging { cursor: grabbing; }
 .v-stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
@@ -272,16 +287,30 @@ a.replay:hover { border-color: var(--accent); background: var(--accent-bg); }
 .v-zoom { position: absolute; right: 0.6rem; top: 0.6rem; display: flex; flex-direction: column; gap: 0.25rem; }
 .v-zoom button { width: 1.8rem; height: 1.8rem; padding: 0; font-size: 1rem; background: rgba(20,20,24,.8); color: #eee; border-color: rgba(255,255,255,.25); }
 .v-zoom button:enabled:hover { background: rgba(40,40,48,.95); color: #fff; }
-.v-side { background: var(--bg); border-left: 1px solid var(--border); overflow: auto; padding: 0.6rem 0.8rem; display: grid; gap: 0.8rem; align-content: start; }
-.v-sidecard { display: grid; gap: 0.25rem; }
-.v-sidehead { display: flex; align-items: center; gap: 0.4rem; font-weight: 700; }
-.v-sidehead .sw { width: 0.75rem; height: 0.75rem; border-radius: 50%; }
-.v-sidehead .won { margin-left: auto; font-size: 0.72rem; color: var(--good-text); }
+.v-side { background: var(--bg); border-left: 1px solid var(--border); overflow: auto; padding: 0.6rem 0.8rem; display: grid; gap: 0.7rem; align-content: start; }
+.v-kind { font-size: 0.78rem; }
+.v-who { white-space: nowrap; }
 .v-sub { color: var(--text-light); font-size: 0.8rem; }
-.v-stats { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 0.25rem; }
-.v-stat { background: var(--accent-bg); border-radius: 4px; padding: 0.1rem 0.3rem; min-width: 0; }
-.v-stat .k { color: var(--text-light); font-size: 0.65rem; white-space: nowrap; }
-.v-stat .v { font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; font-size: 0.85rem; }
+/* The teams, by alliance: Simple.css's table, without its zebra (a team's holdings row sits under it) and packed tighter */
+table.v-teams { margin: 0; width: 100%; font-size: 0.8rem; table-layout: fixed; }
+table.v-teams thead th.num { width: 3.1rem; }
+table.v-teams tr { background: transparent; }
+table.v-teams th, table.v-teams td { padding: 0.1rem 0.3rem; border: 0; border-bottom: 1px solid var(--hair); background: transparent; }
+table.v-teams thead th { font-size: 0.68rem; font-weight: 600; color: var(--text-light); }
+table.v-teams th.num { text-align: right; }
+.v-allyrow th { padding-top: 0.4rem; font-size: 0.75rem; font-weight: 700; }
+.v-allyrow .won, tr.v-team .won { margin-left: 0.5rem; font-weight: 600; font-size: 0.72rem; color: var(--text-light); }
+tr.v-team { cursor: pointer; }
+tr.v-team:hover td, tr.v-team:focus-visible td { background: var(--accent-bg); }
+tr.v-team:focus-visible { outline: none; }
+tr.v-team[aria-pressed="true"] td:first-child { box-shadow: inset 3px 0 var(--accent); }
+tr.v-team .nm { display: flex; align-items: center; gap: 0.1rem; font-weight: 600; min-width: 0; }
+tr.v-team .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+tr.v-team .sw { width: 0.7rem; height: 0.7rem; border-radius: 50%; flex: none; }
+tr.v-team .v-sub { font-size: 0.7rem; line-height: 1.25; max-width: 11rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+tr.v-team td.num { font-size: 0.78rem; }
+tr.v-comprow td { padding: 0.15rem 0.3rem 0.35rem; }
+.v-mini .cur .sw { width: 0.55rem; height: 0.55rem; border-radius: 50%; margin-right: 0.2rem; }
 .v-comp { display: flex; flex-wrap: wrap; gap: 0.2rem; min-height: 1.4rem; }
 .v-comp span { display: inline-flex; align-items: center; gap: 0.1rem; background: var(--accent-bg); border-radius: 4px; padding: 0 0.3rem 0 0.05rem; font-size: 0.72rem; font-variant-numeric: tabular-nums; }
 .v-comp img { width: 1.15rem; height: 1.15rem; border-radius: 0; }

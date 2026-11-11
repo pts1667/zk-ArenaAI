@@ -110,7 +110,7 @@ class _Serving:
             getattr(self, command)(**args)
 
     def start(self, size: dict, vocabulary: int, games: int, seed: int, iteration: int, play: Weights, test: Weights, threads: int,
-              device: str, gb: float, economy: float, self_play: float) -> None:
+              device: str, gb: float, economy: float, self_play: float, lead: float) -> None:
         cfg = self.cfg
         if device == "cuda":
             torch.cuda.set_per_process_memory_fraction(min(1.0, gb * 2**30 / torch.cuda.mem_get_info()[1]))
@@ -124,7 +124,7 @@ class _Serving:
         self.play.read(self.nets)
         self.make_env = functools.partial(self.make_env, threads=threads)
         env = self.make_env(games, seed)
-        env.policy_economy_share, env.self_play_share = economy, self_play
+        env.policy_economy_share, env.self_play_share, env.lead_share = economy, self_play, lead
         self.index = {id(b): i for i, b in enumerate(env.bundles())}
         self.shell = Shell(cfg, actor, critic, device, vocabulary, env.bundles(), cfg.graphs)
         self.collector = pt.Collector(self.shell, env, np.random.default_rng((cfg.seed, iteration, self.k)))
@@ -133,22 +133,22 @@ class _Serving:
     def _memory(self) -> dict[str, float]:
         return {"collector_reserved_gb": torch.cuda.max_memory_reserved() / 2**30} if self.device == "cuda" else {}
 
-    def collect(self, want: int, progress: float, economy: float, self_play: float, advising: bool) -> None:
+    def collect(self, want: int, progress: float, economy: float, self_play: float, advising: bool, lead: float) -> None:
         began = time.perf_counter()
         self.play.read(self.nets)
         weights = fingerprint(self.nets)
         self.shell.progress, self.shell.economy_share, self.shell.advising = progress, economy, advising
         env = self.collector.env
-        env.policy_economy_share, env.self_play_share = economy, self_play
+        env.policy_economy_share, env.self_play_share, env.lead_share = economy, self_play, lead
         segments, tally = self.collector.collect_tally(want)
         segments = [replace(s, bundle=self.index[id(s.bundle)]) for s in segments]
         self.conn.send(("collected", {"segments": segments, "tally": tally, "seconds": time.perf_counter() - began, "weights": weights,
                                       **self._memory()}))
 
-    def evaluate(self, opponent: str, games: int, seed: int, economy: float, replays: dict | None) -> None:
+    def evaluate(self, opponent: str, games: int, seed: int, economy: float, replays: dict | None, kind: str = "1v1") -> None:
         self.test.read(self.nets)
         self.shell.economy_share = economy
-        result = pt.evaluate(self.shell, self.make_env, opponent, games, seed, replays)
+        result = pt.evaluate(self.shell, self.make_env, opponent, games, seed, replays, kind)
         self.conn.send(("evaluated", result))
 
 
@@ -224,7 +224,8 @@ class Collectors:
         for k, games in enumerate(split(self.cfg.games, self.count)):
             self._send(k, ("start", {"size": asdict(learner.actor.size), "vocabulary": learner.vocabulary, "games": games, "seed": seed_of(seed, k),
                                  "iteration": learner.iteration, "play": self.play, "test": self.test, "threads": threads, "device": device,
-                                 "gb": self.cfg.collector_gb, "economy": learner.economy_share, "self_play": learner.self_play.share}))
+                                 "gb": self.cfg.collector_gb, "economy": learner.economy_share, "self_play": learner.self_play.share,
+                                 "lead": learner.lead_share}))
         for k in range(self.count):
             self._expect(k, "started")
 
@@ -236,7 +237,7 @@ class Collectors:
         self.sent_weights = fingerprint(nets)
         for k, part in enumerate(split(want, self.count)):
             self._send(k, ("collect", {"want": part, "progress": learner.progress, "economy": learner.economy_share, "self_play": learner.self_play.share,
-                                       "advising": learner.advising}))
+                                       "advising": learner.advising, "lead": learner.lead_share}))
         self.collecting, self.sent = True, time.perf_counter()
 
     def result(self) -> tuple[list[pt.Segment], dict[str, float], float]:
@@ -254,14 +255,14 @@ class Collectors:
             metrics["collector_reserved_gb"] = max(part.get("collector_reserved_gb", 0.0) for part in parts)
         return segments, metrics, max(seconds)
 
-    def evaluate(self, learner: pt.Learner, opponent: str, games: int, seed: int, replays: dict | None = None) -> dict:
+    def evaluate(self, learner: pt.Learner, opponent: str, games: int, seed: int, replays: dict | None = None, kind: str = "1v1") -> dict:
         """policy_train.evaluate, its games shared out; with replays, all in the first collector, whose games the replays number."""
         self.test.write(self._nets(learner.evaluator))
         shares = [games] if replays is not None else split(games, self.count)
         asked = [k for k, n in enumerate(shares) if n]
         for k in asked:
             self._send(k, ("evaluate", {"opponent": opponent, "games": shares[k], "seed": seed_of(seed, k), "economy": learner.economy_share,
-                                             "replays": replays}))
+                                             "replays": replays, "kind": kind}))
         parts = [self._expect(k, "evaluated") for k in asked]
         total = sum(p["games"] for p in parts)
         out = {name: sum(p[name] * p["games"] for p in parts) / max(total, 1) for name in ("win_rate", "draw_rate", "loss_rate")}

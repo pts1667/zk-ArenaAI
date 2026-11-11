@@ -10,18 +10,24 @@ a process of its own.  So no two stages load the map pool at once, and each hand
 
 | Stage | What | Settings from |
 |---|---|---|
-| `frames` | with `--train-encoder`, if `--frames` (default `ROOT/frames`) has no `manifest.json`: `frame_data.py collect`, 1M frames each from the frame games, scenarios and the C++ scripts' games | `pool5` |
+| `record` | if `--data` holds no finished recording: the scripts' games recorded there, `--record-decisions` (100M) of them, in the kinds of game `--kinds` says | `army-6` |
+| `frames` | with `--train-encoder`, if `--frames` (default `ROOT/frames`) has no `manifest.json`: `frame_data.py collect`, 1M frames each from the frame games, scenarios and the C++ scripts' games, the last in the kinds `--kinds` says | `pool5` |
 | `encoder` | with `--train-encoder`: `frame_vae.py train`, 25,000 steps, to `ROOT/encoder`.  Later stages read its `vae-last.pt`; otherwise they read `--encoder` (default `policy_latent.ENCODER`) | `encoder-big` |
 | `zindex` | the data's `z.npz`, if it has none | |
 | `clone` | `policy_clone_train.py` on `--data` (`army-6`), 10,000 steps, checked and saved every 500 | `clone-8`: `--z --z-dropout 0.2 --economy-weight 2.5 --finish-winners 0.1`, lr 6e-4, Muon 0.008 |
-| `record-N` | the last clone plays the army script, told its variant, with the scripts advising it, until 256 of its games are kept.  Its first 64 are an eval (`evals/record-N.json`) | DAgger |
+| `record-N` | the last clone plays the army script, told its variant, with the scripts advising it, in the kinds `--kinds` says, until 256 of its games are kept.  Its first 64 are an eval (`evals/record-N.json`, by kind where there's more than 1v1s) | DAgger |
 | `zindex-N` | `z.npz` over every round's games | |
 | `dagger-N` | 500 steps from the last clone, half the samples from every round's games and half from `army-6`; lr 2e-4, Muon 0.003 | DAgger |
-| `eval` | the last clone, 64 games: `evals/final.json` | |
-| `ppo` | `policy_train.py --init` the last clone, 64 games, 4,096 decisions an iteration, 2M decisions (`--ppo-decisions`; `--ppo-hours` caps it), the critic alone for 10 iterations at its own rate | the PPO smoke run, `full-1` |
+| `eval` | the last clone, 64 1v1s, the headline: `evals/final.json` | |
+| `eval-KIND` | the same in games of each of `--test-kinds` alone: `evals/final-KIND.json` | |
+| `ppo` | `policy_train.py --init` the last clone, 64 games of `--kinds`, 4,096 decisions an iteration, 2M decisions (`--ppo-decisions`; `--ppo-hours` caps it), the critic alone for 10 iterations at its own rate; tested in 1v1s and in each of `--test-kinds` | the PPO smoke run, `full-1` |
 
 * **Options**: `--dagger-rounds` (2).  `--clone-args`, `--dagger-args` and `--ppo-args` go at the end of their commands, so they
   override what's set.
+* **Kinds of game** (the user, 2026-11-10): every stage that plays games plays what `--kinds` says, by default
+  `1v1:0.5 teams:0.2 ffa:0.2 chicken:0.1` (01-simulator.md, "The game in the sim"), in batches with `--slots` teams a game
+  (0: what the biggest kind needs) and chicken games at `--chicken-difficulties`.  The tests' headline stays a 1v1 against
+  the script, so that runs stay comparable; `--test-kinds` adds a test of each kind it names.
 * **State**: logs go to `ROOT/logs/STAGE.out`, and `ROOT/pipeline.json` lists finished stages with their times and exit codes.
 * **Re-running**: the same command again carries on from the first stage not done.  `--redo STAGE` runs it and every stage after
   it again.  The encoder and PPO resume from their checkpoints.  A cloning stage starts over, and sets its old `log.jsonl` aside.
@@ -44,24 +50,36 @@ a process of its own.  So no two stages load the map pool at once, and each hand
 * **Times** (`full-1`, 2026-11-10): frames 15 minutes, the encoder 74, cloning 6.2 hours (1,528 decisions a second), each round
   25-32 minutes of recording and 18 of fine-tuning, the eval 7.  PPO: see "Speed".
 
-**Until a new encoder exists, run with `--train-encoder`.**  `FEATURE_VERSION` 7 (64 players, 8 allyteams) made `encoder-big`,
-every clone and `frames/pool5` unloadable, so the pipeline has to collect fresh frames (about 51 GB, as `pool5`, the same recipe, took).
+**Until a new encoder exists, run with `--train-encoder`.**  `FEATURE_VERSION` 8 (the raised caps; 7 was 64 players and 8
+allyteams) made every encoder, clone and frame pool unloadable, `full-1`'s among them, so the pipeline has to collect fresh
+frames (51 GB at the old caps, by the same recipe) and train an encoder on them.  The scripts changed as well, and play new
+kinds of game, so give `--data` a new directory: the `record` stage fills it.
 
 ## Frame data (`tools/frame_data.py`)
 
-The encoder learns from frames of many kinds of game, on the map pool with its held-out maps left out.  Both seats of a game are
-used, under fog, with the economy on.  Frames are stored featurized (about 13 kB each), with probe values: the truth the seat
-can't see, and each game's outcome.
+The encoder learns from frames of many kinds of game, on the map pool with its held-out maps left out.  Every player's seat of a
+game is used, under fog, with the economy on.  Frames are stored featurized (about 13 kB each at the caps before
+`FEATURE_VERSION` 8), with probe values: the truth the seat can't see, and each game's outcome, its own team's.  A shard's
+`kind` column says which kind of game each frame is from.  No game here ends on a lead (the user, 2026-11-10): the lead
+rule is off in all three sources, so that frames of lopsided and late games are there to learn from.
 
 * **`script`**: whole games of Python scripts (`frame_world.FrameGames`).  The opening's factory suits the map: water factories
   are 3x likelier on wet maps.  A base script changes production every 30-120 s and keeps idle builders busy.  A fight script
   (`FrameFight`) keeps orders on reachable ground, jumps, throws, pushes and pulls, and uses beacons and silos.
-* **`scenario`**: random set-ups played for 24 s.  Each side has 150-40,000 metal (log-uniform) in 1-3 clusters, a base, wear,
-  wrecks, and partial memory of the enemy's base.  What stands where follows the unit data (water depth, floating).  60% are
-  themed: air battles 20%, air raids against AA 10%, fleets 10%, heavies 10%, swarms 10%.
-* **`army`**: the C++ army and economy scripts' games, with variants: what the actor is cloned from.
+* **`scenario`**: random set-ups played for 24 s.  Each team has 150-40,000 metal (log-uniform) in 1-3 clusters, a base, wear,
+  wrecks, and partial memory of its enemies' bases.  What stands where follows the unit data (water depth, floating), and
+  buildings the placement rule (01-simulator.md, "Where a building can go").  60% are themed: air battles 20%, air raids
+  against AA 10%, fleets 10%, heavies 10%, swarms 10%.
+  * **Its kinds** (`ScenarioRules.shapes`): 1v1s 40%, team games, free-for-alls and chicken games 20% each, as far as the
+    maps hold them.  Teams, alliances and starts are drawn as `SimEnv` draws a game's, and an alliance shares its theme.
+  * **Against chickens**: 1 to 12 burrows away from the players, half of them defended, an army of 1 to 3 kinds worth
+    300-60,000, and the queen or a White Dragon on the board in 15% each.  The sim's spawner orders them.
+  * **Caps**: a team has at most 480 units, and all the teams together 1,216, so that a frame's tokens hold them.
+  * The shape weights, the 480 and the chicken numbers are first guesses, not measured against real games.
+* **`army`**: the C++ army and economy scripts' games, with variants: what the actor is cloned from.  In the kinds `--kinds`
+  says, every player's seat of each.
 
-`pool5` (1M frames of each) is the newest.  Aircraft are in 23% of `script` frames, 48% of `scenario` frames and 0.2% of
+`pool5` (1M frames of each, 1v1s only, deleted since) was the last collected.  Aircraft were in 23% of `script` frames, 48% of `scenario` frames and 0.2% of
 `army` frames, so the encoder's knowledge of air comes from scenarios.  `pool4` (script and scenario only) is the held-out set
 the encoders were compared on.
 
@@ -112,13 +130,16 @@ How the recipe was reached, each a short run on held-out maps:
 ## Script data (`tools/policy_clone_data.py`)
 
     policy_clone_data.py record --out /mnt/d/zk-learned/clone/NAME --games 32 --decisions N --workers 12 --threads 12 --seed S \
-        --variants --maps /mnt/d/zk-learned/maps
+        --variants --maps /mnt/d/zk-learned/maps [--kinds 1v1:0.5 teams:0.2 ffa:0.2 chicken:0.1]
     policy_clone_data.py check --data DIR --maps /mnt/d/zk-learned/maps      # kinds, orders that can't be said, bytes a decision
     policy_clone_data.py zindex --data DIR --workers 15                     # z.npz, for --z
 
-* **Games**: the C++ army and economy scripts against themselves, both looking every 6 slots, on the pool's training maps.
-* **Recording**: the recorder (`sim/record`, `zkrecord.h`) takes the batch's arrays by pointer and writes one `.zkr` file a
-  game, both sides (data version 6).
+* **Games**: the C++ army and economy scripts against themselves, all looking every 6 slots, on the pool's training maps, in
+  the kinds `--kinds` says (1v1s if not given).  They keep the lead rule.
+* **Recording**: the recorder (`sim/record`, `zkrecord.h`, files headed `ZKREC002`) takes the batch's arrays by pointer and
+  writes one `.zkr` file a game, every player's side (data version 7).  A file's header lists its sides and each one's team;
+  its meta has the game's teams, alliances, kind, how it ended and when each side went out; a chicken game has its players'
+  sides alone, with its difficulty.  Version 6 files (`army-6`, two sides) still read.
   * A unit is 40 bytes.  Positions are 16-bit fractions of the map, and floats are halved where that's lossless enough.
   * Each record is stored as a change from the unit's last record.  Columns go a byte plane at a time, zstd'd in chunks of 64
     frames.
@@ -132,7 +153,9 @@ How the recipe was reached, each a short run on held-out maps:
   * whether the knobs are known, and whether the counts are;
   * the army script's 7 role weights (logs) and 5 knobs, and its preset;
   * in hindsight, the side's extractors, energy, factories, defences and army at minutes 3, 6 and 10.
-* `sides.npz` caches each file's side and frame counts, so a run starts in seconds.
+* `sides.npz` caches each file's side and frame counts, so a run starts in seconds.  `z.npz` has a row a side.
+* **Known**: `policy_clone_train` holds out one file in 50 by hash, so a recording of under about 50 games can have none held
+  out, and fails.
 
 **`army-6`** (`/mnt/d/zk-learned/clone/army-6`): 83,820 games, 300.6M decisions (both sides), 105 GB.  It was stopped at 75% of
 the 400M asked.  Per look, the economy script gives 1.13 orders and the army script 1.11 actions.  Together they exceed 16 in
@@ -229,7 +252,7 @@ fine-tunes on them mixed with the original data.
 
 ### Reward
 
-For side A against side B at decision t:
+In a 1v1, for side A against side B at decision t:
 
     V(t)   = the side's value: cost x build progress over its real units and structures (not blips or memories)
     raw(t) = (V_A - V_B) / (V_A + V_B + 1000)
@@ -244,6 +267,19 @@ For side A against side B at decision t:
   decayed counts over the batch.  At the default it's about 2% of the shaped reward a game, and 14% at most.
 * **The income term** is `inc = (a - b) / (a + b + 5)` on metal income, overdrive included.  `--income-weight` 0.5 in the
   pipeline.
+* **With A alliances** the same terms are zero-sum over them, and every team of an alliance gets its alliance's reward:
+  * `raw` is an alliance's value less the mean of the other live alliances', over all of theirs and 1,000.  That's
+    (A share - 1) / (A - 1), where share is its part of the total, and at two the formula above.  Income goes the same way;
+  * the result: an alliance that goes out gets -1 / (A - 1) at once, and its seats finish.  At the game's end the S
+    alliances still in share what the others lost, (A - S) / ((A - 1) S) each: 1 for a sole winner, 0 if all are in at the
+    time limit.  In a chicken game the players win when the queen dies, lose when they're out, and draw at the limit.
+* **The speed term** (`--speed-weight`, 0.1 in the pipeline; the user, 2026-11-10): an alliance that goes out also pays the
+  weight x the share of the time limit left / (A - 1), and those still in at the end share what was paid, as the result.
+  It isn't faded by beta, so a sooner win is worth a little more all through a run.
+* **The lead rule fades** (`--lead-fade`, default `0:0.9 100:0`; the user, 2026-11-10): the share of training games a lead
+  can end (01-simulator.md, "The game in the sim") goes from 90% at iteration 0 to none from iteration 100, linear
+  between, so that the policy learns to finish games.  Tests keep the rule in every game.  `metrics.jsonl` has
+  `lead_share` and `lead_rule_games`.
 * **Discounting**: gamma is 1 and GAE lambda 0.95.  With gamma below 1 the sum of potential changes would stop meaning "who's
   ahead".  Returns are bounded, so there's no reward or value normalisation; advantages are normalised per minibatch.
 
@@ -303,6 +339,12 @@ and losses logged (`metrics.jsonl`, `tests.jsonl`).  `SelfPlay` then moves to se
 * it **pauses** while those two tests are under 70%.
 
 The test stays against the script throughout, so it stays comparable.
+
+**Kinds of game** (`--kinds`, `--slots`, `--test-kinds`, `--chicken-difficulties`; the flag for action kinds is now
+`--action-kinds`).  Against the scripts the policy plays team 0, and scripts play every other team, its allies too; in
+self-play it plays every team.  The headline test stays the 1v1; each of `--test-kinds` is tested as well, on team 0.
+`metrics.jsonl` has `wins_{mode}_{kind}`, `games_{mode}_{kind}` and `eval_fight_{kind}`, and each line of `tests.jsonl` its
+`kind`.  No run has trained on the new kinds yet.
 
 ### Checkpoints and stopping
 

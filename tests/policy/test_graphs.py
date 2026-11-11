@@ -46,11 +46,14 @@ def _padded(items: list[fz.Tensors], rows: int = 0, more: int = 0) -> pm.Batch:
     return pm.collate(items, sizes={k: v + more for k, v in sizes.items()}, rows=max(n, rows))
 
 
-def test_the_ladder_holds_each_width_and_pads_the_capped_groups_to_their_caps():
+def test_the_ladder_holds_each_width_and_pads_the_small_capped_groups_to_their_caps():
     assert [pg.bucket(n) for n in (1, 3, 13, 33, 600, 2048)] == [1, 4, 16, 48, 768, 2048]
     assert pg.bucket(3000) == 3072
     rows, sizes = pg.padded({"u": 20, "r": 40, "s": 3, "f": 1, "c": 30, "e": 5, "h": 2, "p": 9}, 5)
-    assert rows == 8 and sizes == {"u": 32, "r": 48, "s": fz.CAP_SITES, "f": fz.CAP_FEATURES, "c": 32, "e": 8, "h": fz.CAP_HIDDEN, "p": 12}
+    assert rows == 8 and sizes == {"u": 32, "r": 48, "s": fz.CAP_SITES, "f": 1, "c": 32, "e": 8, "h": fz.CAP_HIDDEN, "p": 12}
+    # Feature tokens take the ladder, up to their cap: padded to it always, a frame of none would cost 512 of them.
+    assert pg.padded({"u": 1, "r": 1, "s": 1, "f": 33, "c": 1, "e": 1, "h": 1, "p": 1}, 1)[1]["f"] == 48
+    assert pg.padded({"u": 1, "r": 1, "s": 1, "f": fz.CAP_FEATURES, "c": 1, "e": 1, "h": 1, "p": 1}, 1)[1]["f"] == fz.CAP_FEATURES
 
 
 def test_a_padded_batch_decides_as_the_plain_one(actor, encoder_path):
@@ -108,25 +111,41 @@ def test_weights_in_shared_memory_load_into_other_nets_in_place(actor, encoder_p
     assert all(torch.equal(mine[k], theirs[k]) for k in mine)
 
 
-def _short_sim(games, seed, modes=None, threads=2, **kw):
-    """Games of six decisions, so that tests end."""
+def _train_with_collectors(run: pathlib.Path, encoder_path: pathlib.Path, device: str, **config) -> None:
+    """A short policy_train.train with two collector processes, its games six decisions long, in a process of its own: one that
+    forks them before it has started a thread or CUDA, as a real run does.  A test process can't: it has the threads of every
+    test before, and a collector forked from it may wait for ever on a lock one of them held."""
+    tools = pathlib.Path(__file__).resolve().parent.parent.parent / "tools"
+    code = f"""
+import functools, pathlib, sys
+sys.path.insert(0, {str(tools)!r})
+import policy_train as pt
+
+def short(games, seed, modes=None, threads=2, **kw):
     env = pt.make_sim(games, seed, modes, threads=threads, **kw)
     env.time_limit = 6
     return env
 
+cfg = pt.Config(decisions=24, iteration=8, games=2, passes=1, segment=4, token_budget=4000, data_workers=0, eval_every=1, eval_games=2,
+                checkpoint_every=10**6, latent_encoder={str(encoder_path)!r}, collectors=2, **{config!r})
+pt.train(cfg, pathlib.Path({str(run)!r}), functools.partial(short, speed_weight=cfg.speed_weight), device={device!r})
+"""
+    subprocess.run([sys.executable, "-c", code], check=True, timeout=300)
 
-@pytest.mark.parametrize("concurrent", (False, True))
-def test_collector_processes_play_train_and_test(tmp_path, encoder_path, concurrent):
-    """Each collection is checked against the weights sent for it (policy_collectors.fingerprint)."""
-    cfg = pt.Config(decisions=24, iteration=8, games=2, passes=1, segment=4, token_budget=4000, data_workers=0, eval_every=1, eval_games=2,
-                    checkpoint_every=10**6, latent_encoder=str(encoder_path), collectors=2, concurrent=concurrent, replay_hours=1e-9, replay_games=1)
-    pt.train(cfg, tmp_path, _short_sim, device="cpu")
+
+def test_collector_processes_play_train_and_test(tmp_path, encoder_path):
+    """Each collection is checked against the weights sent for it (policy_collectors.fingerprint).  The lead rule's share reaches
+    the collectors' training games (none here), and the tests keep the rule in every game.  Not collecting while it trains, as
+    policy_pipeline runs; the CUDA test below does."""
+    _train_with_collectors(tmp_path, encoder_path, "cpu", concurrent=False, replay_hours=1e-9, replay_games=1, lead_fade=((0, 0.0),), speed_weight=0.1)
     rows = [json.loads(line) for line in (tmp_path / "metrics.jsonl").read_text().splitlines()]
     assert len(rows) == 3 and all(r["masked_out"] == 0 and r["decisions"] >= 8 for r in rows)
     assert all("eval_fight" in r and "collector_seconds_max" in r for r in rows)
     assert sum(r.get("games_fight", 0) for r in rows) > 0         # games ended while collecting, and counted
+    assert all(r["lead_share"] == 0.0 and r.get("lead_rule_games", 0.0) == 0.0 for r in rows) and any("lead_rule_games" in r for r in rows)
     tests = [json.loads(line) for line in (tmp_path / "tests.jsonl").read_text().splitlines()]
     assert len(tests) == 3 and all(len(t["games"]) == 2 for t in tests)
+    assert all(g["lead_rule"] for t in tests for g in t["games"])
     assert len(list((tmp_path / "replays").rglob("*.json.gz"))) == 3
 
 
@@ -181,24 +200,8 @@ def test_a_graph_decides_as_the_plain_forward_pass_and_follows_the_weights(encod
 
 @pytest.mark.skipif(not CUDA, reason="needs CUDA")
 def test_collector_processes_play_as_graphs_on_cuda(tmp_path, encoder_path):
-    """As the trainer runs, in a process that hasn't started CUDA when it forks them (this one has): each collector plays its
-    games as CUDA graphs, by the weights sent for each collection (policy_collectors.fingerprint)."""
-    tools = pathlib.Path(__file__).resolve().parent.parent.parent / "tools"
-    code = f"""
-import pathlib, sys
-sys.path.insert(0, {str(tools)!r})
-import policy_train as pt
-
-def short(games, seed, modes=None, threads=2, **kw):
-    env = pt.make_sim(games, seed, modes, threads=threads, **kw)
-    env.time_limit = 6
-    return env
-
-cfg = pt.Config(decisions=24, iteration=8, games=2, passes=1, segment=4, token_budget=4000, data_workers=0, eval_every=1, eval_games=2,
-                checkpoint_every=10**6, latent_encoder={str(encoder_path)!r}, collectors=2, concurrent=True)
-pt.train(cfg, pathlib.Path({str(tmp_path)!r}), short, device="cuda")
-"""
-    subprocess.run([sys.executable, "-c", code], check=True, timeout=600)
+    """Each collector plays its games as CUDA graphs, by the weights sent for each collection (policy_collectors.fingerprint)."""
+    _train_with_collectors(tmp_path, encoder_path, "cuda", concurrent=True)
     rows = [json.loads(line) for line in (tmp_path / "metrics.jsonl").read_text().splitlines()]
     assert len(rows) == 3 and all(r["masked_out"] == 0 and r["graphs_captured"] >= 2 and r["collector_reserved_gb"] > 0 for r in rows)
     assert all("eval_fight" in r for r in rows)

@@ -5,8 +5,15 @@
     python tools/map_gen.py generate --count 200 --out D:/zk-learned/maps
     python tools/map_gen.py look --out results/maps --count 12      pictures of what `generate` would make
     python tools/map_gen.py stats --dir D:/zk-learned/maps          how the two kinds compare
+    python tools/map_gen.py modes --dir D:/zk-learned/maps --out D:/zk-learned/maps-next      every map's facts with its kinds of game
+    python tools/map_gen.py rampart --out D:/zk-learned/maps-next   Violet Rampart for 3 to 8 bases, 3 seeds each
 
-Run these on Windows: reading a real map's archive takes 7-Zip, and `look` takes matplotlib.
+Run `real` on Windows: reading a real map's archive takes 7-Zip, and `look` takes matplotlib.
+
+Every map's facts say which kinds of game it holds (`modes`, by the rules in tools/map_modes.py).  Violet Rampart makes its
+ground when a game starts, so `real` leaves it out and `rampart` makes it with the map's own generator (tools/map_rampart.py),
+checked against the map's Lua run in lupa with both drawing from map_rampart.LuaRandom: the same heights, spots and boxes,
+exactly, for 3 to 11 bases.
 
 Made-up maps are heights like a map file's, so they go through what a real map does (terrain_map.build, sim_data.export_map), and a frame can't tell them apart by what it's made of.
 A map is a landform (rolling, plateaus, ridges, craters, canyons), then water (none, lakes, a river, a central sea, a coast, islands, nearly all sea), then flat ground at the starts, then ramps until a walker
@@ -30,6 +37,8 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT / "sim" / "py"))
 sys.path.insert(0, str(ROOT / "bots"))
+import map_modes  # noqa: E402
+import map_rampart  # noqa: E402
 import sim_data  # noqa: E402
 import terrain_map as tm  # noqa: E402
 from zkbot import terrain as tr  # noqa: E402
@@ -502,13 +511,21 @@ def tm_buildable(ground: Ground, x: float, z: float, room: float = 48.0) -> bool
 # Writing maps out ---------------------------------------------------------------------------------------------------------------------------------------
 
 
+def _area(width: float, depth: float) -> float:
+    """In map units²."""
+    return width * depth / (SIDE * SIDE)
+
+
 def write_entry(mf: tm.MapFile, kind: str, layouts: list, features: list, out: pathlib.Path, style: dict | None = None) -> tr.TerrainMap:
-    """Beside the sim's and the policy's files, which classes can reach each other, and what's known about the map."""
+    """Beside the sim's and the policy's files, which classes can reach each other, and what's known about the map, with the
+    kinds of game it holds (map_modes.py)."""
     terrain = sim_data.export_map(mf, mf.name, out)
     slug = sim_data._slug(mf.name)
     np.savez_compressed(out / f"{slug}.reach.npz", **{name: labels.astype(np.int16) for name, labels in terrain.comp.items()})
     summary = terrain.summary()
+    area = _area((mf.corners.shape[1] - 1) * tr.SQUARE, (mf.corners.shape[0] - 1) * tr.SQUARE)
     facts = {"name": mf.name, "kind": kind, "layouts": layouts, "features": features, "water": float(summary["water"]), "liquid": summary["liquid"], "style": style or {}}
+    facts["modes"] = map_modes.of_facts(facts, area, map_modes.catalog())
     (out / f"{slug}.facts.json").write_text(json.dumps(facts), "utf8")
     return terrain
 
@@ -539,9 +556,17 @@ def _one_real(job: tuple[str, str, dict, str]) -> str:
 
 
 def export_real(facts_file: pathlib.Path, out: pathlib.Path, workers: int) -> None:
+    """The maps of the install that a game has given facts of and that `out` hasn't yet: a map's files are named by its
+    archive's name.  Maps that play nothing (map_modes.UNPLAYABLE) and those made otherwise now (REPLACED) are left out."""
     table = json.loads(facts_file.read_text("utf8"))
-    jobs = [(name, str(path), table[sim_data._slug(name)], str(out)) for name, path in tm.find_maps([])
-            if sim_data._slug(name) in table and not (out / f"{sim_data._slug(name)}.facts.json").exists()]
+    jobs = []
+    for name, path in tm.find_maps([]):
+        if sim_data._slug(name) not in table or (out / f"{sim_data._slug(path.stem)}.facts.json").exists():
+            continue
+        if map_modes.unplayable(name, path.stem) or sim_data._slug(path.stem) in REPLACED:
+            print(f"{name}: {'plays nothing' if map_modes.unplayable(name, path.stem) else 'made by `rampart`'}, left out", flush=True)
+            continue
+        jobs.append((name, str(path), table[sim_data._slug(name)], str(out)))
     print(f"{len(jobs)} real maps to export", flush=True)
     with concurrent.futures.ProcessPoolExecutor(workers) as pool:
         for line in pool.map(_one_real, jobs):
@@ -600,6 +625,90 @@ def stats(directory: pathlib.Path) -> None:
             print(f"  {name:12s} " + " ".join(f"{v:8.2f}" for v in np.percentile(t[:, i], (10, 50, 90))))
 
 
+# Kinds of game, and Violet Rampart ------------------------------------------------------------------------------------------------
+
+
+REPLACED = (sim_data._slug(map_rampart.NAME),)      # pool maps that are wrong and made otherwise now: `rampart`
+RAMPART_BASES = (3, 4, 5, 6, 7, 8)                  # up to the sim's most teams
+RAMPART_SEEDS = (271828, 314159, 161803)            # a spade turned a little, more, and the other way, and three turns of the whole
+
+
+def _tally(counts: dict, facts: dict) -> None:
+    m = facts["modes"]
+    c = counts.setdefault(facts["kind"], {"maps": 0, "1v1": 0, "teams": {}, "ffa": {}, "chickens": 0, "chickens_or_teams": 0, "none": 0})
+    c["maps"] += 1
+    c["1v1"] += m["1v1"]
+    c["chickens"] += m["chickens"]
+    c["chickens_or_teams"] += m["chickens_or_teams"]
+    for key in ("teams", "ffa"):
+        if m[key]:
+            c[key][m[key]] = c[key].get(m[key], 0) + 1
+    c["none"] += not (m["1v1"] or m["teams"] or m["ffa"] or m["chickens"])
+
+
+def _print_tally(counts: dict) -> None:
+    for kind, c in sorted(counts.items()):
+        print(f"{kind}: {c['maps']} maps; 1v1 {c['1v1']}; teams {sum(c['teams'].values())} (a side: {dict(sorted(c['teams'].items()))}); "
+              f"ffa {sum(c['ffa'].values())} (alliances: {dict(sorted(c['ffa'].items()))}); chickens {c['chickens']}, "
+              f"or teams {c['chickens_or_teams']}; none {c['none']}")
+
+
+def update_modes(directory: pathlib.Path, out: pathlib.Path) -> None:
+    """Every map's facts in `directory` with its kinds of game, written to `out` under the same names (`out` may be
+    `directory`).  Maps in REPLACED, and maps that play nothing, are left out.  Reads each map's facts and its size from its
+    bundle, nothing larger."""
+    table = map_modes.catalog()
+    out.mkdir(parents=True, exist_ok=True)
+    counts: dict = {}
+    for path in sorted(directory.glob("*.facts.json")):
+        if path.name[:-len(".facts.json")] in REPLACED:
+            print(f"{path.name}: left out, as `rampart` makes it now")
+            continue
+        facts = json.loads(path.read_text("utf8"))
+        with np.load(path.with_name(path.name.replace(".facts.json", ".bundle.npz"))) as b:
+            area = _area(float(b["map_w"]), float(b["map_h"]))
+        known = map_modes.known(facts, area, table)
+        if known.unplayable:
+            print(f"{facts['name']}: plays nothing, left out: delete its files from the pool")
+            continue
+        if facts["kind"] == "real" and not known.listing and not known.chicken_map:
+            print(f"{facts['name']}: Zero-K lists it for no mode, so from its boxes")
+        facts["modes"] = map_modes.modes(known)
+        (out / path.name).write_text(json.dumps(facts), "utf8")
+        _tally(counts, facts)
+    _print_tally(counts)
+
+
+def rampart_name(bases: int, seed: int) -> str:
+    return f"violet_rampart_{bases}_bases_seed_{seed}"
+
+
+def _one_rampart(job: tuple[int, int, str]) -> str:
+    bases, seed, out = job
+    started = time.time()
+    try:
+        r = map_rampart.generate(bases, seed)
+        mf = tm.MapFile(rampart_name(bases, seed), r.corners.astype(np.float32), np.zeros((r.corners.shape[0] // 2, r.corners.shape[1] // 2), np.uint8),
+                        water_damage=map_rampart.WATER_DAMAGE, spots=r.spots, spot_source="generator", cluster_radius=map_rampart.CLUSTER_RADIUS)
+        layouts = [[{"polygons": [[list(p) for p in box]], "startpoints": [list(start)]} for box, start in r.boxes]]
+        style = {"generator": map_rampart.NAME, "bases": bases, "seed": seed, "initial_angle": r.initial_angle, "spade_angle": r.spade_angle,
+                 "geos": [list(g) for g in r.geos]}
+        s = _quiet_write(mf, "real", layouts, [], pathlib.Path(out), style)
+        return f"{mf.name}: spade turned {math.degrees(r.spade_angle):.1f} degrees, {len(r.spots)} spots, {s['land']} land regions, " \
+               f"{s['walls']:.0%} walls, {s['water']:.0%} {s['liquid']}, {time.time() - started:.0f} s"
+    except Exception as e:      # one map that won't go shouldn't cost the rest
+        return f"{rampart_name(bases, seed)}: failed, {type(e).__name__}: {e}"
+
+
+def rampart(out: pathlib.Path, bases: list[int], seeds: list[int], workers: int) -> None:
+    """Violet Rampart's own maps: one for each number of bases and seed."""
+    jobs = [(b, s, str(out)) for b in bases for s in seeds if not (out / f"{rampart_name(b, s)}.facts.json").exists()]
+    print(f"{len(jobs)} maps to make", flush=True)
+    with concurrent.futures.ProcessPoolExecutor(workers) as pool:
+        for line in pool.map(_one_rampart, jobs):
+            print(line, flush=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -618,6 +727,15 @@ def main() -> None:
     k.add_argument("--out", type=pathlib.Path, default=ROOT / "results" / "maps")
     s = sub.add_parser("stats")
     s.add_argument("--dir", type=pathlib.Path, required=True)
+    m = sub.add_parser("modes")
+    m.add_argument("--dir", type=pathlib.Path, required=True)
+    m.add_argument("--out", type=pathlib.Path, required=True)
+    v = sub.add_parser("rampart")
+    v.add_argument("--out", type=pathlib.Path, required=True)
+    v.add_argument("--bases", type=int, nargs="+", default=list(RAMPART_BASES))
+    # Large ones, as the map's own are (1 to 1,000,000): LuaRandom's first draws from a small seed are nearly the seed's multiples.
+    v.add_argument("--seeds", type=int, nargs="+", default=list(RAMPART_SEEDS))
+    v.add_argument("--workers", type=int, default=6)
     a = parser.parse_args()
     if a.command == "real":
         export_real(a.facts, a.out, a.workers)
@@ -625,6 +743,10 @@ def main() -> None:
         generate(a.count, a.out, a.seed, a.workers)
     elif a.command == "look":
         look(a.out, a.count, a.seed)
+    elif a.command == "modes":
+        update_modes(a.dir, a.out)
+    elif a.command == "rampart":
+        rampart(a.out, a.bases, a.seeds, a.workers)
     else:
         stats(a.dir)
 

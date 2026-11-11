@@ -2,11 +2,18 @@
 from __future__ import annotations
 
 import functools
+import os
 import pathlib
 import sys
 
 import numpy as np
 import pytest
+
+# One of several test processes (pytest-xdist) keeps its maths to one thread: 8 of them with a thread a core each ran slower than
+# one process alone.  Set here because it has to be before anything imports torch.
+if os.environ.get("PYTEST_XDIST_WORKER"):
+    for _name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS"):
+        os.environ.setdefault(_name, "1")
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent.parent / "bots"))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent.parent / "tools"))

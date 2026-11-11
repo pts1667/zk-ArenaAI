@@ -4,7 +4,8 @@ files.  zkrecord.h describes the file.
 The library is looked for at ZKRECORD_LIB, else beside ZKSIM_LIB (one build makes both), else ~/zksim/build/libzkrecord.so.
 
 `Writer` wraps a recorder: `begin` a slot's run, `frames` then `orders` every step, `finish` it to a file, and `wait` for the files.  `read` gives a file back
-as frames, orders and its meta for each side, as `rawframe.Frame`s: what was narrowed comes back within its rounding (zkrecord.h).
+as its meta and, for each side it holds, its frames and orders, as `rawframe.Frame`s: what was narrowed comes back within its rounding (zkrecord.h).
+A side is one of the game's teams, those the run was begun with, in that order.  Files of ABI 1 ("ZKREC001") read as two sides, teams 0 and 1.
 """
 from __future__ import annotations
 
@@ -18,8 +19,9 @@ import numpy as np
 import zksim
 from zkbot.policy import rawframe
 
-ABI_VERSION = 1
-MAGIC = b"ZKREC001"
+ABI_VERSION = 2
+MAGIC = b"ZKREC002"
+MAGIC_TWO_SIDES = b"ZKREC001"       # ABI 1's: both sides of a game, teams 0 and 1, and no count of them
 CLAMP_NAMES = ("x", "z", "y", "ord_x", "ord_z", "build_frac", "ord_age", "half", "feature_xz")
 GLOBALS = len(rawframe.GLOBAL_FIELDS)
 SUFFIX = ".zkr"
@@ -58,9 +60,9 @@ def lib() -> ct.CDLL:
         vp, i32p = ct.c_void_p, ct.POINTER(ct.c_int32)
         L.zkr_abi_version.restype = ct.c_int
         L.zkr_new.restype = vp
-        L.zkr_new.argtypes = [ct.c_int, ct.c_int, ct.c_int, ct.c_int]
+        L.zkr_new.argtypes = [ct.c_int, ct.c_int, ct.c_int, ct.c_int, ct.c_int]
         L.zkr_free.argtypes = [vp]
-        L.zkr_begin.argtypes = [vp, ct.c_int, ct.c_float, ct.c_float, ct.c_float, ct.c_float, vp, ct.c_int]
+        L.zkr_begin.argtypes = [vp, ct.c_int, ct.c_float, ct.c_float, ct.c_float, ct.c_float, vp, ct.c_int, ct.c_int, i32p]
         L.zkr_frames.argtypes = [vp, ct.POINTER(FramesArgs)]
         L.zkr_orders.argtypes = [vp, ct.c_int, i32p, vp, i32p]
         L.zkr_finish.restype = ct.c_int
@@ -92,23 +94,30 @@ def height_range(heights: np.ndarray) -> tuple[float, float]:
 
 
 class Writer:
-    """libzkrecord's recorder, for the games of a `zksim.Batch`: a slot a game, at the game's position in the batch."""
+    """libzkrecord's recorder, for the games of a `zksim.Batch`: a slot a game, at the game's position in the batch.  teams: the
+    batch's teams a game (its arrays' second dimension), so a seat is slot * teams + team."""
 
-    def __init__(self, slots: int, threads: int = 1, level: int = 3, chunk_frames: int = 64):
-        self.lib, self.slots = lib(), slots
-        self.handle = self.lib.zkr_new(slots, threads, level, chunk_frames)
+    def __init__(self, slots: int, threads: int = 1, level: int = 3, chunk_frames: int = 64, teams: int = 2):
+        self.lib, self.slots, self.teams = lib(), slots, teams
+        self.handle = self.lib.zkr_new(slots, threads, level, chunk_frames, teams)
 
     def __del__(self):
         if getattr(self, "handle", None) and _LIB is not None:
             _LIB.zkr_free(self.handle)
             self.handle = None
 
-    def begin(self, slot: int, map_w: float, map_h: float, y_range: tuple[float, float], sites: np.ndarray) -> None:
+    def begin(self, slot: int, map_w: float, map_h: float, y_range: tuple[float, float], sites: np.ndarray, teams=None) -> None:
+        """teams: which of the game's teams the file holds, in its order, as its sides (every team of the batch's if None)."""
         sites = np.ascontiguousarray(sites, rawframe.SITE_DTYPE)
-        self.lib.zkr_begin(self.handle, slot, map_w, map_h, y_range[0], y_range[1], sites.ctypes.data if len(sites) else None, len(sites))
+        teams = np.ascontiguousarray(range(self.teams) if teams is None else teams, np.int32)
+        if ((teams < 0) | (teams >= self.teams)).any():
+            raise ValueError(f"zkrecord: teams {teams.tolist()} aren't all among the recorder's {self.teams}")
+        self.lib.zkr_begin(self.handle, slot, map_w, map_h, y_range[0], y_range[1], sites.ctypes.data if len(sites) else None, len(sites),
+                           len(teams), _i32(teams))
 
     def frames(self, batch: zksim.Batch, games: np.ndarray) -> None:
-        """Both sides' present frames of these games, read from the batch's arrays."""
+        """The recorded teams' present frames of these games, read from the batch's arrays."""
+        assert batch.counts.shape[1] == self.teams, "the batch's teams a game are the recorder's"
         games = np.ascontiguousarray(games, np.int32)
         args = FramesArgs(n=len(games), games=_i32(games), records=batch.records.ctypes.data, cap=batch.cap, counts=_i32(batch.counts),
                           globs=batch.globs.ctypes.data_as(ct.POINTER(ct.c_float)), features=batch.features.ctypes.data,
@@ -116,11 +125,12 @@ class Writer:
         self.lib.zkr_frames(self.handle, ct.byref(args))
 
     def orders(self, games: np.ndarray, orders: np.ndarray, offsets: np.ndarray) -> None:
-        """The orders given at the frames last taken: seat s's are orders[offsets[s]:offsets[s + 1]], over every seat."""
+        """The orders given at the frames last taken: seat s's (slot * teams + team) are orders[offsets[s]:offsets[s + 1]], over
+        every seat."""
         games = np.ascontiguousarray(games, np.int32)
         orders = np.ascontiguousarray(orders, zksim.ORDER_DTYPE)
         offsets = np.ascontiguousarray(offsets, np.int32)
-        assert len(offsets) == 2 * self.slots + 1
+        assert len(offsets) == self.teams * self.slots + 1
         self.lib.zkr_orders(self.handle, len(games), _i32(games), orders.ctypes.data if len(orders) else None, _i32(offsets))
 
     def finish(self, slot: int, path: pathlib.Path, meta: dict) -> None:
@@ -254,19 +264,30 @@ def _packed(dtype) -> int:
     return dtype.itemsize if dtype.names is None else sum(_packed(dtype[name]) for name in dtype.names)
 
 
+def _teams(c: _Cursor, magic: bytes, path) -> tuple[int, ...]:
+    """The teams a file's sides are, in its order, read from just after the header's numbers."""
+    if magic == MAGIC_TWO_SIDES:
+        return (0, 1)
+    if magic != MAGIC:
+        raise ValueError(f"{path}: not a zkrecord file")
+    return tuple(int(t) for t in c.array("<i4", int(c.array("<i4", 1)[0])))
+
+
 def read(path: str | os.PathLike, side: int | None = None, until: int | None = None) -> tuple[dict, list[tuple[list[rawframe.Frame], list[np.ndarray]]]]:
-    """A file's meta, and for side 0 and side 1 its frames and the orders given at each.  side: only that one's (the other's are
-    empty); until: only the frames before it, at least (records are deltas along the game, so a frame needs all before it, and
-    reading stops after the chunk that holds frame until - 1)."""
+    """A file's meta, and for each side it holds, in order, its frames and the orders given at each.  side: only that one's (the
+    others' are empty); until: only the frames before it, at least (records are deltas along the game, so a frame needs all before
+    it, and reading stops after the chunk that holds frame until - 1)."""
     c = _Cursor(pathlib.Path(path).read_bytes())
-    if c.take(8) != MAGIC:
+    magic = c.take(8)
+    if magic not in (MAGIC, MAGIC_TWO_SIDES):
         raise ValueError(f"{path}: not a zkrecord file")
     meta = json.loads(c.take(int(c.array("<u4", 1)[0])))
     map_w, map_h, y_lo, y_hi = (float(v) for v in c.array("<f4", 4))
     frames, chunks, _, n_sites = (int(v) for v in c.array("<i4", 4))
+    n_sides = len(_teams(c, magic, path))
     sites = np.frombuffer(_unzstd(c.take(int(c.array("<u4", 1)[0]))), rawframe.SITE_DTYPE, n_sites).copy()
     parts: list[dict[str, list]] = [{k: [] for k in ("units", "features", "orders", "globs", "unit_back", "feature_back", "unit_counts",
-                                                     "feature_counts", "order_counts")} for _ in range(2)]
+                                                     "feature_counts", "order_counts")} for _ in range(n_sides)]
     read_frames = 0
     for _ in range(chunks):
         if until is not None and read_frames >= until:
@@ -305,10 +326,24 @@ def read(path: str | os.PathLike, side: int | None = None, until: int | None = N
     return meta, out
 
 
-def frame_count(path: str | os.PathLike) -> int:
-    """Frames of each side, from the header alone."""
+def header(path: str | os.PathLike) -> tuple[int, tuple[int, ...]]:
+    """Frames of each side, and the teams the sides are in the file's order, from the header alone."""
     with open(path, "rb") as f:
-        if f.read(8) != MAGIC:
+        magic = f.read(8)
+        if magic not in (MAGIC, MAGIC_TWO_SIDES):
             raise ValueError(f"{path}: not a zkrecord file")
         f.seek(int(np.frombuffer(f.read(4), "<u4")[0]) + 16, os.SEEK_CUR)
-        return int(np.frombuffer(f.read(4), "<i4")[0])
+        frames = int(np.frombuffer(f.read(4), "<i4")[0])
+        f.seek(12, os.SEEK_CUR)
+        if magic == MAGIC_TWO_SIDES:
+            return frames, (0, 1)
+        n = int(np.frombuffer(f.read(4), "<i4")[0])
+        teams = np.frombuffer(f.read(4 * n), "<i4")
+        if len(teams) != n:
+            raise ValueError(f"{path}: the file ends early")
+        return frames, tuple(int(t) for t in teams)
+
+
+def frame_count(path: str | os.PathLike) -> int:
+    """Frames of each side, from the header alone."""
+    return header(path)[0]

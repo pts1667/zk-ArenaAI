@@ -1,0 +1,1450 @@
+{
+ "dont_count": [
+  "amphbomb",
+  "asteroid",
+  "cloakbomb",
+  "fakeunit_los",
+  "generic_tech",
+  "gunshipbomb",
+  "pw_artefact",
+  "pw_bomberfac",
+  "pw_dropfac",
+  "pw_estorage",
+  "pw_estorage2",
+  "pw_garrison",
+  "pw_gaspowerstation",
+  "pw_generic",
+  "pw_grid",
+  "pw_guerilla",
+  "pw_hq_attacker",
+  "pw_hq_attacker_extra",
+  "pw_hq_defender",
+  "pw_hq_defender_extra",
+  "pw_inhibitor",
+  "pw_interception",
+  "pw_metal",
+  "pw_mine",
+  "pw_mine2",
+  "pw_mine3",
+  "pw_mstorage2",
+  "pw_relay",
+  "pw_storage",
+  "pw_techlab",
+  "pw_warpgate",
+  "pw_warpgatealt",
+  "pw_warpjammer",
+  "pw_wormhole",
+  "pw_wormhole2",
+  "shieldbomb",
+  "spiderscout",
+  "starlight_satellite",
+  "statictempshield",
+  "tele_beacon",
+  "terraunit",
+  "wolverine_mine"
+ ],
+ "reveal": {
+  "value_ratio": 25.0,
+  "every_frames": 45
+ },
+ "chickens": {
+  "burrow": "roost",
+  "no_target": [
+   "roost",
+   "terraunit",
+   "wolverine_mine"
+  ],
+  "test_building": "energypylon",
+  "test_building_queen": "chicken_dragon",
+  "max_tries": 500,
+  "max_tries_small": 100,
+  "difficulties": [
+   {
+    "name": "Beginner",
+    "level": 1,
+    "spawn_square": 150.0,
+    "spawn_square_increment": 1.0,
+    "max_burrows": 4.0,
+    "min_base_distance": 700.0,
+    "max_base_distance": 3500.0,
+    "max_age": 300.0,
+    "egg_decay_time": 180.0,
+    "burrow_eggs": 15.0,
+    "player_malus": 1.0,
+    "burrow_spawn_rate": 180.0,
+    "chicken_spawn_rate": 180.0,
+    "wave_ratio": 0.6,
+    "base_wave_size": 2.5,
+    "wave_size_mult": 0.5,
+    "queen_spawn_mult": 4.0,
+    "defense_per_wave": 0.5,
+    "defense_per_burrow_kill": 0.5,
+    "grace_period": 450.0,
+    "grace_penalty": 15.0,
+    "grace_period_min": 90.0,
+    "ramp_up_time": 1200.0,
+    "queen_time": 3600.0,
+    "queen_health_mod": 1.0,
+    "end_mini_queen_waves": 7.0,
+    "burrow_queen_time": 15.0,
+    "burrow_wave_size": 1.2,
+    "burrow_respawn_chance": 0.15,
+    "burrow_regress_time": 30.0,
+    "human_aggro_per_burrow": 1.0,
+    "human_aggro_decay": 0.25,
+    "human_aggro_min": -100.0,
+    "human_aggro_max": 100.0,
+    "human_aggro_wave_factor": 1.0,
+    "human_aggro_wave_max": 5.0,
+    "human_aggro_defense_factor": 0.5,
+    "human_aggro_tech_time_progress": 20.0,
+    "human_aggro_tech_time_regress": 0.0,
+    "human_aggro_queen_time_factor": 1.0,
+    "human_aggro_queen_time_min": 0.0,
+    "human_aggro_queen_time_max": 8.0,
+    "tech_accel_per_player": 1.3,
+    "tech_time_floor_factor": 0.2,
+    "tech_time_max": 999999.0,
+    "time_spawn_bonus": 0.00016666666666666666,
+    "queen": "chicken_dragon",
+    "queen_morph": null,
+    "mini_queen": "chicken_tiamat",
+    "mini_queen_time": [],
+    "queen_morph_frames": [
+     1800.0,
+     3600.0
+    ],
+    "offense": [
+     {
+      "unit": "chicken",
+      "time": -3600.0,
+      "obsolete": 1500.0,
+      "squad_size": 3.0
+     },
+     {
+      "unit": "chicken_blimpy",
+      "time": 2880.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.2
+     },
+     {
+      "unit": "chicken_pigeon",
+      "time": 660.0,
+      "obsolete": 2100.0,
+      "squad_size": 1.4
+     },
+     {
+      "unit": "chicken_roc",
+      "time": 1680.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.4
+     },
+     {
+      "unit": "chicken_sporeshooter",
+      "time": 1920.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.5
+     },
+     {
+      "unit": "chicken_tiamat",
+      "time": 999999.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.2
+     },
+     {
+      "unit": "chickena",
+      "time": 1080.0,
+      "obsolete": 2400.0,
+      "squad_size": 0.5
+     },
+     {
+      "unit": "chickenblobber",
+      "time": 2400.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.3
+     },
+     {
+      "unit": "chickenc",
+      "time": 2400.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.5
+     },
+     {
+      "unit": "chickenf",
+      "time": 1920.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.5
+     },
+     {
+      "unit": "chickenr",
+      "time": 1440.0,
+      "obsolete": 2700.0,
+      "squad_size": 1.2
+     },
+     {
+      "unit": "chickens",
+      "time": 720.0,
+      "obsolete": 2100.0,
+      "squad_size": 1.0
+     },
+     {
+      "unit": "chickenwurm",
+      "time": 1680.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.7
+     }
+    ],
+    "defense": [
+     {
+      "unit": "chicken_dodo",
+      "time": 1500.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 2.0,
+      "cost": 1.0
+     },
+     {
+      "unit": "chicken_rafflesia",
+      "time": 1500.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.4,
+      "cost": 2.0
+     },
+     {
+      "unit": "chickend",
+      "time": 600.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.6,
+      "cost": 1.0
+     }
+    ],
+    "support": [
+     {
+      "unit": "chicken_dodo",
+      "time": 1500.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 2.0
+     },
+     {
+      "unit": "chicken_shield",
+      "time": 1800.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.4
+     },
+     {
+      "unit": "chicken_spidermonkey",
+      "time": 1200.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.6
+     }
+    ],
+    "special": []
+   },
+   {
+    "name": "Very Easy",
+    "level": 2,
+    "spawn_square": 150.0,
+    "spawn_square_increment": 1.0,
+    "max_burrows": 10.0,
+    "min_base_distance": 700.0,
+    "max_base_distance": 3500.0,
+    "max_age": 300.0,
+    "egg_decay_time": 180.0,
+    "burrow_eggs": 15.0,
+    "player_malus": 1.0,
+    "burrow_spawn_rate": 90.0,
+    "chicken_spawn_rate": 90.0,
+    "wave_ratio": 0.6,
+    "base_wave_size": 2.5,
+    "wave_size_mult": 0.6,
+    "queen_spawn_mult": 4.0,
+    "defense_per_wave": 0.5,
+    "defense_per_burrow_kill": 0.5,
+    "grace_period": 300.0,
+    "grace_penalty": 15.0,
+    "grace_period_min": 90.0,
+    "ramp_up_time": 900.0,
+    "queen_time": 2400.0,
+    "queen_health_mod": 1.0,
+    "end_mini_queen_waves": 7.0,
+    "burrow_queen_time": 15.0,
+    "burrow_wave_size": 1.2,
+    "burrow_respawn_chance": 0.15,
+    "burrow_regress_time": 30.0,
+    "human_aggro_per_burrow": 1.0,
+    "human_aggro_decay": 0.25,
+    "human_aggro_min": -100.0,
+    "human_aggro_max": 100.0,
+    "human_aggro_wave_factor": 1.0,
+    "human_aggro_wave_max": 5.0,
+    "human_aggro_defense_factor": 0.5,
+    "human_aggro_tech_time_progress": 20.0,
+    "human_aggro_tech_time_regress": 0.0,
+    "human_aggro_queen_time_factor": 1.0,
+    "human_aggro_queen_time_min": 0.0,
+    "human_aggro_queen_time_max": 8.0,
+    "tech_accel_per_player": 2.0,
+    "tech_time_floor_factor": 0.4,
+    "tech_time_max": 999999.0,
+    "time_spawn_bonus": 0.0004166666666666667,
+    "queen": "chicken_dragon",
+    "queen_morph": null,
+    "mini_queen": "chicken_tiamat",
+    "mini_queen_time": [],
+    "queen_morph_frames": [
+     1800.0,
+     3600.0
+    ],
+    "offense": [
+     {
+      "unit": "chicken",
+      "time": -3600.0,
+      "obsolete": 1500.0,
+      "squad_size": 3.0
+     },
+     {
+      "unit": "chicken_blimpy",
+      "time": 2880.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.2
+     },
+     {
+      "unit": "chicken_pigeon",
+      "time": 480.0,
+      "obsolete": 2100.0,
+      "squad_size": 1.4
+     },
+     {
+      "unit": "chicken_roc",
+      "time": 1680.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.4
+     },
+     {
+      "unit": "chicken_sporeshooter",
+      "time": 1920.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.5
+     },
+     {
+      "unit": "chicken_tiamat",
+      "time": 999999.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.2
+     },
+     {
+      "unit": "chickena",
+      "time": 1080.0,
+      "obsolete": 2400.0,
+      "squad_size": 0.5
+     },
+     {
+      "unit": "chickenblobber",
+      "time": 2400.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.3
+     },
+     {
+      "unit": "chickenc",
+      "time": 2400.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.5
+     },
+     {
+      "unit": "chickenf",
+      "time": 1920.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.5
+     },
+     {
+      "unit": "chickenr",
+      "time": 1440.0,
+      "obsolete": 2700.0,
+      "squad_size": 1.2
+     },
+     {
+      "unit": "chickens",
+      "time": 720.0,
+      "obsolete": 2100.0,
+      "squad_size": 1.0
+     },
+     {
+      "unit": "chickenwurm",
+      "time": 1680.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.7
+     }
+    ],
+    "defense": [
+     {
+      "unit": "chicken_dodo",
+      "time": 1500.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 2.0,
+      "cost": 1.0
+     },
+     {
+      "unit": "chicken_rafflesia",
+      "time": 1500.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.4,
+      "cost": 2.0
+     },
+     {
+      "unit": "chickend",
+      "time": 600.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.6,
+      "cost": 1.0
+     }
+    ],
+    "support": [
+     {
+      "unit": "chicken_dodo",
+      "time": 1500.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 2.0
+     },
+     {
+      "unit": "chicken_shield",
+      "time": 1800.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.4
+     },
+     {
+      "unit": "chicken_spidermonkey",
+      "time": 1200.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.6
+     }
+    ],
+    "special": []
+   },
+   {
+    "name": "Easy",
+    "level": 3,
+    "spawn_square": 150.0,
+    "spawn_square_increment": 1.0,
+    "max_burrows": 50.0,
+    "min_base_distance": 700.0,
+    "max_base_distance": 3500.0,
+    "max_age": 300.0,
+    "egg_decay_time": 180.0,
+    "burrow_eggs": 15.0,
+    "player_malus": 1.0,
+    "burrow_spawn_rate": 50.0,
+    "chicken_spawn_rate": 60.0,
+    "wave_ratio": 0.6,
+    "base_wave_size": 2.5,
+    "wave_size_mult": 0.8,
+    "queen_spawn_mult": 4.0,
+    "defense_per_wave": 0.5,
+    "defense_per_burrow_kill": 0.5,
+    "grace_period": 180.0,
+    "grace_penalty": 15.0,
+    "grace_period_min": 90.0,
+    "ramp_up_time": 480.0,
+    "queen_time": 3600.0,
+    "queen_health_mod": 0.5,
+    "end_mini_queen_waves": 7.0,
+    "burrow_queen_time": 15.0,
+    "burrow_wave_size": 1.2,
+    "burrow_respawn_chance": 0.15,
+    "burrow_regress_time": 30.0,
+    "human_aggro_per_burrow": 1.0,
+    "human_aggro_decay": 0.25,
+    "human_aggro_min": -100.0,
+    "human_aggro_max": 100.0,
+    "human_aggro_wave_factor": 1.0,
+    "human_aggro_wave_max": 5.0,
+    "human_aggro_defense_factor": 0.5,
+    "human_aggro_tech_time_progress": 20.0,
+    "human_aggro_tech_time_regress": 0.0,
+    "human_aggro_queen_time_factor": 1.0,
+    "human_aggro_queen_time_min": 0.0,
+    "human_aggro_queen_time_max": 8.0,
+    "tech_accel_per_player": 4.0,
+    "tech_time_floor_factor": 0.5,
+    "tech_time_max": 999999.0,
+    "time_spawn_bonus": 0.0005,
+    "queen": "chickenflyerqueen",
+    "queen_morph": "chickenlandqueen",
+    "mini_queen": "chicken_dragon",
+    "mini_queen_time": [],
+    "queen_morph_frames": [
+     1800.0,
+     3600.0
+    ],
+    "offense": [
+     {
+      "unit": "chicken",
+      "time": -3600.0,
+      "obsolete": 1500.0,
+      "squad_size": 3.0
+     },
+     {
+      "unit": "chicken_blimpy",
+      "time": 2880.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.2
+     },
+     {
+      "unit": "chicken_pigeon",
+      "time": 360.0,
+      "obsolete": 2100.0,
+      "squad_size": 1.4
+     },
+     {
+      "unit": "chicken_roc",
+      "time": 1680.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.4
+     },
+     {
+      "unit": "chicken_sporeshooter",
+      "time": 1920.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.5
+     },
+     {
+      "unit": "chicken_tiamat",
+      "time": 3300.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.2
+     },
+     {
+      "unit": "chickena",
+      "time": 1080.0,
+      "obsolete": 2400.0,
+      "squad_size": 0.5
+     },
+     {
+      "unit": "chickenblobber",
+      "time": 2400.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.3
+     },
+     {
+      "unit": "chickenc",
+      "time": 2400.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.5
+     },
+     {
+      "unit": "chickenf",
+      "time": 1920.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.5
+     },
+     {
+      "unit": "chickenr",
+      "time": 1440.0,
+      "obsolete": 2700.0,
+      "squad_size": 1.2
+     },
+     {
+      "unit": "chickens",
+      "time": 720.0,
+      "obsolete": 2100.0,
+      "squad_size": 1.0
+     },
+     {
+      "unit": "chickenwurm",
+      "time": 1680.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.7
+     }
+    ],
+    "defense": [
+     {
+      "unit": "chicken_dodo",
+      "time": 1500.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 2.0,
+      "cost": 1.0
+     },
+     {
+      "unit": "chicken_rafflesia",
+      "time": 1500.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.4,
+      "cost": 2.0
+     },
+     {
+      "unit": "chickend",
+      "time": 600.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.6,
+      "cost": 1.0
+     }
+    ],
+    "support": [
+     {
+      "unit": "chicken_dodo",
+      "time": 1500.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 2.0
+     },
+     {
+      "unit": "chicken_shield",
+      "time": 1800.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.4
+     },
+     {
+      "unit": "chicken_spidermonkey",
+      "time": 1200.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.6
+     }
+    ],
+    "special": [
+     {
+      "name": "Digger Ambush",
+      "unit": "chicken_digger",
+      "time": 900.0,
+      "obsolete": 2400.0,
+      "max_aggro": -2.0,
+      "count": null,
+      "burrow_ratio": 1.25,
+      "min_dist": 100,
+      "max_dist": 450,
+      "cooldown": 3.0,
+      "target_human": true,
+      "tie_to_burrow": false
+     },
+     {
+      "name": "Spire Sprout",
+      "unit": "chickenspire",
+      "time": 1200.0,
+      "obsolete": 1000000000.0,
+      "max_aggro": -4.5,
+      "count": null,
+      "burrow_ratio": 0.15,
+      "min_dist": null,
+      "max_dist": null,
+      "cooldown": 3.0,
+      "target_human": false,
+      "tie_to_burrow": true
+     },
+     {
+      "name": "Rising Dragon",
+      "unit": "chicken_dragon",
+      "time": 1800.0,
+      "obsolete": 1000000000.0,
+      "max_aggro": -8.0,
+      "count": null,
+      "burrow_ratio": 0.08333333333333333,
+      "min_dist": 250,
+      "max_dist": 1200,
+      "cooldown": 5.0,
+      "target_human": true,
+      "tie_to_burrow": false
+     }
+    ]
+   },
+   {
+    "name": "Normal",
+    "level": 4,
+    "spawn_square": 150.0,
+    "spawn_square_increment": 1.0,
+    "max_burrows": 50.0,
+    "min_base_distance": 700.0,
+    "max_base_distance": 3500.0,
+    "max_age": 300.0,
+    "egg_decay_time": 180.0,
+    "burrow_eggs": 15.0,
+    "player_malus": 1.0,
+    "burrow_spawn_rate": 45.0,
+    "chicken_spawn_rate": 50.0,
+    "wave_ratio": 0.6,
+    "base_wave_size": 2.5,
+    "wave_size_mult": 1.0,
+    "queen_spawn_mult": 4.0,
+    "defense_per_wave": 0.5,
+    "defense_per_burrow_kill": 0.5,
+    "grace_period": 180.0,
+    "grace_penalty": 15.0,
+    "grace_period_min": 90.0,
+    "ramp_up_time": 0.0,
+    "queen_time": 3600.0,
+    "queen_health_mod": 1.0,
+    "end_mini_queen_waves": 7.0,
+    "burrow_queen_time": 15.0,
+    "burrow_wave_size": 1.2,
+    "burrow_respawn_chance": 0.15,
+    "burrow_regress_time": 30.0,
+    "human_aggro_per_burrow": 1.0,
+    "human_aggro_decay": 0.25,
+    "human_aggro_min": -100.0,
+    "human_aggro_max": 100.0,
+    "human_aggro_wave_factor": 1.0,
+    "human_aggro_wave_max": 5.0,
+    "human_aggro_defense_factor": 0.5,
+    "human_aggro_tech_time_progress": 20.0,
+    "human_aggro_tech_time_regress": 0.0,
+    "human_aggro_queen_time_factor": 1.0,
+    "human_aggro_queen_time_min": 0.0,
+    "human_aggro_queen_time_max": 8.0,
+    "tech_accel_per_player": 4.0,
+    "tech_time_floor_factor": 0.5,
+    "tech_time_max": 999999.0,
+    "time_spawn_bonus": 0.0006666666666666666,
+    "queen": "chickenflyerqueen",
+    "queen_morph": "chickenlandqueen",
+    "mini_queen": "chicken_dragon",
+    "mini_queen_time": [
+     0.6
+    ],
+    "queen_morph_frames": [
+     1800.0,
+     3600.0
+    ],
+    "offense": [
+     {
+      "unit": "chicken",
+      "time": -3600.0,
+      "obsolete": 1500.0,
+      "squad_size": 3.0
+     },
+     {
+      "unit": "chicken_blimpy",
+      "time": 2880.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.2
+     },
+     {
+      "unit": "chicken_pigeon",
+      "time": 360.0,
+      "obsolete": 2100.0,
+      "squad_size": 1.4
+     },
+     {
+      "unit": "chicken_roc",
+      "time": 1680.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.4
+     },
+     {
+      "unit": "chicken_sporeshooter",
+      "time": 1920.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.5
+     },
+     {
+      "unit": "chicken_tiamat",
+      "time": 3300.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.2
+     },
+     {
+      "unit": "chickena",
+      "time": 1080.0,
+      "obsolete": 2400.0,
+      "squad_size": 0.5
+     },
+     {
+      "unit": "chickenblobber",
+      "time": 2400.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.3
+     },
+     {
+      "unit": "chickenc",
+      "time": 2400.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.5
+     },
+     {
+      "unit": "chickenf",
+      "time": 1920.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.5
+     },
+     {
+      "unit": "chickenr",
+      "time": 1440.0,
+      "obsolete": 2700.0,
+      "squad_size": 1.2
+     },
+     {
+      "unit": "chickens",
+      "time": 720.0,
+      "obsolete": 2100.0,
+      "squad_size": 1.0
+     },
+     {
+      "unit": "chickenwurm",
+      "time": 1680.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.7
+     }
+    ],
+    "defense": [
+     {
+      "unit": "chicken_dodo",
+      "time": 1500.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 2.0,
+      "cost": 1.0
+     },
+     {
+      "unit": "chicken_rafflesia",
+      "time": 1500.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.4,
+      "cost": 2.0
+     },
+     {
+      "unit": "chickend",
+      "time": 600.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.6,
+      "cost": 1.0
+     }
+    ],
+    "support": [
+     {
+      "unit": "chicken_dodo",
+      "time": 1500.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 2.0
+     },
+     {
+      "unit": "chicken_shield",
+      "time": 1800.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.4
+     },
+     {
+      "unit": "chicken_spidermonkey",
+      "time": 1200.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.6
+     }
+    ],
+    "special": [
+     {
+      "name": "Digger Ambush",
+      "unit": "chicken_digger",
+      "time": 900.0,
+      "obsolete": 2400.0,
+      "max_aggro": -2.0,
+      "count": null,
+      "burrow_ratio": 1.25,
+      "min_dist": 100,
+      "max_dist": 450,
+      "cooldown": 3.0,
+      "target_human": true,
+      "tie_to_burrow": false
+     },
+     {
+      "name": "Spire Sprout",
+      "unit": "chickenspire",
+      "time": 1200.0,
+      "obsolete": 1000000000.0,
+      "max_aggro": -4.5,
+      "count": null,
+      "burrow_ratio": 0.15,
+      "min_dist": null,
+      "max_dist": null,
+      "cooldown": 3.0,
+      "target_human": false,
+      "tie_to_burrow": true
+     },
+     {
+      "name": "Rising Dragon",
+      "unit": "chicken_dragon",
+      "time": 1800.0,
+      "obsolete": 1000000000.0,
+      "max_aggro": -8.0,
+      "count": null,
+      "burrow_ratio": 0.08333333333333333,
+      "min_dist": 250,
+      "max_dist": 1200,
+      "cooldown": 5.0,
+      "target_human": true,
+      "tie_to_burrow": false
+     }
+    ]
+   },
+   {
+    "name": "Hard",
+    "level": 5,
+    "spawn_square": 150.0,
+    "spawn_square_increment": 1.0,
+    "max_burrows": 50.0,
+    "min_base_distance": 700.0,
+    "max_base_distance": 3500.0,
+    "max_age": 300.0,
+    "egg_decay_time": 180.0,
+    "burrow_eggs": 15.0,
+    "player_malus": 1.0,
+    "burrow_spawn_rate": 45.0,
+    "chicken_spawn_rate": 45.0,
+    "wave_ratio": 0.6,
+    "base_wave_size": 2.5,
+    "wave_size_mult": 1.2,
+    "queen_spawn_mult": 5.0,
+    "defense_per_wave": 0.5,
+    "defense_per_burrow_kill": 0.5,
+    "grace_period": 180.0,
+    "grace_penalty": 15.0,
+    "grace_period_min": 90.0,
+    "ramp_up_time": 0.0,
+    "queen_time": 3600.0,
+    "queen_health_mod": 1.5,
+    "end_mini_queen_waves": 7.0,
+    "burrow_queen_time": 15.0,
+    "burrow_wave_size": 1.4,
+    "burrow_respawn_chance": 0.15,
+    "burrow_regress_time": 30.0,
+    "human_aggro_per_burrow": 1.0,
+    "human_aggro_decay": 0.25,
+    "human_aggro_min": -100.0,
+    "human_aggro_max": 100.0,
+    "human_aggro_wave_factor": 1.0,
+    "human_aggro_wave_max": 5.0,
+    "human_aggro_defense_factor": 0.5,
+    "human_aggro_tech_time_progress": 20.0,
+    "human_aggro_tech_time_regress": 0.0,
+    "human_aggro_queen_time_factor": 1.0,
+    "human_aggro_queen_time_min": 0.0,
+    "human_aggro_queen_time_max": 8.0,
+    "tech_accel_per_player": 5.0,
+    "tech_time_floor_factor": 0.5,
+    "tech_time_max": 999999.0,
+    "time_spawn_bonus": 0.0008333333333333334,
+    "queen": "chickenflyerqueen",
+    "queen_morph": "chickenlandqueen",
+    "mini_queen": "chicken_dragon",
+    "mini_queen_time": [
+     0.5
+    ],
+    "queen_morph_frames": [
+     1800.0,
+     3600.0
+    ],
+    "offense": [
+     {
+      "unit": "chicken",
+      "time": -3150.0,
+      "obsolete": 1312.5,
+      "squad_size": 3.0
+     },
+     {
+      "unit": "chicken_blimpy",
+      "time": 2520.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.2
+     },
+     {
+      "unit": "chicken_pigeon",
+      "time": 315.0,
+      "obsolete": 1837.5,
+      "squad_size": 1.4
+     },
+     {
+      "unit": "chicken_roc",
+      "time": 1470.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.4
+     },
+     {
+      "unit": "chicken_sporeshooter",
+      "time": 1680.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.5
+     },
+     {
+      "unit": "chicken_tiamat",
+      "time": 2887.5,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.2
+     },
+     {
+      "unit": "chickena",
+      "time": 945.0,
+      "obsolete": 2100.0,
+      "squad_size": 0.5
+     },
+     {
+      "unit": "chickenblobber",
+      "time": 2100.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.3
+     },
+     {
+      "unit": "chickenc",
+      "time": 2100.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.5
+     },
+     {
+      "unit": "chickenf",
+      "time": 1680.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.5
+     },
+     {
+      "unit": "chickenr",
+      "time": 1260.0,
+      "obsolete": 2362.5,
+      "squad_size": 1.2
+     },
+     {
+      "unit": "chickens",
+      "time": 630.0,
+      "obsolete": 1837.5,
+      "squad_size": 1.0
+     },
+     {
+      "unit": "chickenwurm",
+      "time": 1470.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.7
+     }
+    ],
+    "defense": [
+     {
+      "unit": "chicken_dodo",
+      "time": 1312.5,
+      "obsolete": 1000000000.0,
+      "squad_size": 2.0,
+      "cost": 1.0
+     },
+     {
+      "unit": "chicken_rafflesia",
+      "time": 1312.5,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.4,
+      "cost": 2.0
+     },
+     {
+      "unit": "chickend",
+      "time": 525.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.6,
+      "cost": 1.0
+     }
+    ],
+    "support": [
+     {
+      "unit": "chicken_dodo",
+      "time": 1312.5,
+      "obsolete": 1000000000.0,
+      "squad_size": 2.0
+     },
+     {
+      "unit": "chicken_shield",
+      "time": 1575.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.4
+     },
+     {
+      "unit": "chicken_spidermonkey",
+      "time": 1050.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.6
+     }
+    ],
+    "special": [
+     {
+      "name": "Digger Ambush",
+      "unit": "chicken_digger",
+      "time": 900.0,
+      "obsolete": 2400.0,
+      "max_aggro": -2.0,
+      "count": null,
+      "burrow_ratio": 1.25,
+      "min_dist": 100,
+      "max_dist": 450,
+      "cooldown": 3.0,
+      "target_human": true,
+      "tie_to_burrow": false
+     },
+     {
+      "name": "Spire Sprout",
+      "unit": "chickenspire",
+      "time": 1200.0,
+      "obsolete": 1000000000.0,
+      "max_aggro": -4.5,
+      "count": null,
+      "burrow_ratio": 0.15,
+      "min_dist": null,
+      "max_dist": null,
+      "cooldown": 3.0,
+      "target_human": false,
+      "tie_to_burrow": true
+     },
+     {
+      "name": "Rising Dragon",
+      "unit": "chicken_dragon",
+      "time": 1800.0,
+      "obsolete": 1000000000.0,
+      "max_aggro": -8.0,
+      "count": null,
+      "burrow_ratio": 0.08333333333333333,
+      "min_dist": 250,
+      "max_dist": 1200,
+      "cooldown": 5.0,
+      "target_human": true,
+      "tie_to_burrow": false
+     }
+    ]
+   },
+   {
+    "name": "Suicidal",
+    "level": 6,
+    "spawn_square": 150.0,
+    "spawn_square_increment": 1.0,
+    "max_burrows": 50.0,
+    "min_base_distance": 700.0,
+    "max_base_distance": 3500.0,
+    "max_age": 300.0,
+    "egg_decay_time": 180.0,
+    "burrow_eggs": 15.0,
+    "player_malus": 1.0,
+    "burrow_spawn_rate": 40.0,
+    "chicken_spawn_rate": 45.0,
+    "wave_ratio": 0.6,
+    "base_wave_size": 2.5,
+    "wave_size_mult": 1.5,
+    "queen_spawn_mult": 5.0,
+    "defense_per_wave": 0.5,
+    "defense_per_burrow_kill": 0.5,
+    "grace_period": 150.0,
+    "grace_penalty": 15.0,
+    "grace_period_min": 30.0,
+    "ramp_up_time": 0.0,
+    "queen_time": 3000.0,
+    "queen_health_mod": 2.0,
+    "end_mini_queen_waves": 6.0,
+    "burrow_queen_time": 15.0,
+    "burrow_wave_size": 1.6,
+    "burrow_respawn_chance": 0.25,
+    "burrow_regress_time": 30.0,
+    "human_aggro_per_burrow": 1.0,
+    "human_aggro_decay": 0.25,
+    "human_aggro_min": -100.0,
+    "human_aggro_max": 100.0,
+    "human_aggro_wave_factor": 1.0,
+    "human_aggro_wave_max": 5.0,
+    "human_aggro_defense_factor": 0.5,
+    "human_aggro_tech_time_progress": 20.0,
+    "human_aggro_tech_time_regress": 0.0,
+    "human_aggro_queen_time_factor": 1.0,
+    "human_aggro_queen_time_min": 0.0,
+    "human_aggro_queen_time_max": 8.0,
+    "tech_accel_per_player": 6.0,
+    "tech_time_floor_factor": 0.5,
+    "tech_time_max": 999999.0,
+    "time_spawn_bonus": 0.001,
+    "queen": "chickenflyerqueen",
+    "queen_morph": "chickenlandqueen",
+    "mini_queen": "chicken_dragon",
+    "mini_queen_time": [
+     0.45
+    ],
+    "queen_morph_frames": [
+     1800.0,
+     3600.0
+    ],
+    "offense": [
+     {
+      "unit": "chicken",
+      "time": -2700.0,
+      "obsolete": 1125.0,
+      "squad_size": 3.0
+     },
+     {
+      "unit": "chicken_blimpy",
+      "time": 2160.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.2
+     },
+     {
+      "unit": "chicken_pigeon",
+      "time": 270.0,
+      "obsolete": 1575.0,
+      "squad_size": 1.4
+     },
+     {
+      "unit": "chicken_roc",
+      "time": 1260.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.4
+     },
+     {
+      "unit": "chicken_sporeshooter",
+      "time": 1440.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.5
+     },
+     {
+      "unit": "chicken_tiamat",
+      "time": 2475.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.2
+     },
+     {
+      "unit": "chickena",
+      "time": 810.0,
+      "obsolete": 1800.0,
+      "squad_size": 0.5
+     },
+     {
+      "unit": "chickenblobber",
+      "time": 1800.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.3
+     },
+     {
+      "unit": "chickenc",
+      "time": 1800.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.5
+     },
+     {
+      "unit": "chickenf",
+      "time": 1440.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.5
+     },
+     {
+      "unit": "chickenr",
+      "time": 1080.0,
+      "obsolete": 2025.0,
+      "squad_size": 1.2
+     },
+     {
+      "unit": "chickens",
+      "time": 540.0,
+      "obsolete": 1575.0,
+      "squad_size": 1.0
+     },
+     {
+      "unit": "chickenwurm",
+      "time": 1260.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.7
+     }
+    ],
+    "defense": [
+     {
+      "unit": "chicken_dodo",
+      "time": 1125.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 2.0,
+      "cost": 1.0
+     },
+     {
+      "unit": "chicken_rafflesia",
+      "time": 1125.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.4,
+      "cost": 2.0
+     },
+     {
+      "unit": "chickend",
+      "time": 450.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.6,
+      "cost": 1.0
+     }
+    ],
+    "support": [
+     {
+      "unit": "chicken_dodo",
+      "time": 1125.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 2.0
+     },
+     {
+      "unit": "chicken_shield",
+      "time": 1350.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.4
+     },
+     {
+      "unit": "chicken_spidermonkey",
+      "time": 900.0,
+      "obsolete": 1000000000.0,
+      "squad_size": 0.6
+     }
+    ],
+    "special": [
+     {
+      "name": "Digger Ambush",
+      "unit": "chicken_digger",
+      "time": 900.0,
+      "obsolete": 2400.0,
+      "max_aggro": -2.0,
+      "count": null,
+      "burrow_ratio": 1.25,
+      "min_dist": 100,
+      "max_dist": 450,
+      "cooldown": 3.0,
+      "target_human": true,
+      "tie_to_burrow": false
+     },
+     {
+      "name": "Spire Sprout",
+      "unit": "chickenspire",
+      "time": 1200.0,
+      "obsolete": 1000000000.0,
+      "max_aggro": -4.5,
+      "count": null,
+      "burrow_ratio": 0.15,
+      "min_dist": null,
+      "max_dist": null,
+      "cooldown": 3.0,
+      "target_human": false,
+      "tie_to_burrow": true
+     },
+     {
+      "name": "Rising Dragon",
+      "unit": "chicken_dragon",
+      "time": 1800.0,
+      "obsolete": 1000000000.0,
+      "max_aggro": -8.0,
+      "count": null,
+      "burrow_ratio": 0.08333333333333333,
+      "min_dist": 250,
+      "max_dist": 1200,
+      "cooldown": 5.0,
+      "target_human": true,
+      "tie_to_burrow": false
+     }
+    ]
+   }
+  ],
+  "eggs": {
+   "chicken_blimpy": {
+    "feature": 67,
+    "metal": 150.0,
+    "hp": 10000.0,
+    "radius": 8.8410978317
+   },
+   "chicken_dodo": {
+    "feature": 68,
+    "metal": 30.0,
+    "hp": 10000.0,
+    "radius": 8.8410978317
+   },
+   "chicken_dragon": {
+    "feature": 69,
+    "metal": 1000.0,
+    "hp": 10000.0,
+    "radius": 16.0
+   },
+   "chicken": {
+    "feature": 70,
+    "metal": 10.0,
+    "hp": 10000.0,
+    "radius": 5.8881793022
+   },
+   "chicken_leaper": {
+    "feature": 71,
+    "metal": 20.0,
+    "hp": 10000.0,
+    "radius": 5.6133985519
+   },
+   "chicken_pigeon": {
+    "feature": 72,
+    "metal": 15.0,
+    "hp": 10000.0,
+    "radius": 8.4200963974
+   },
+   "chicken_rafflesia": {
+    "feature": 73,
+    "metal": 150.0,
+    "hp": 10000.0,
+    "radius": 5.8881793022
+   },
+   "chicken_roc": {
+    "feature": 74,
+    "metal": 175.0,
+    "hp": 10000.0,
+    "radius": 5.8940691948
+   },
+   "chicken_shield": {
+    "feature": 75,
+    "metal": 150.0,
+    "hp": 10000.0,
+    "radius": 5.8940691948
+   },
+   "chicken_spidermonkey": {
+    "feature": 76,
+    "metal": 150.0,
+    "hp": 10000.0,
+    "radius": 5.8881793022
+   },
+   "chicken_sporeshooter": {
+    "feature": 77,
+    "metal": 60.0,
+    "hp": 10000.0,
+    "radius": 4.4576425552
+   },
+   "chicken_tiamat": {
+    "feature": 78,
+    "metal": 300.0,
+    "hp": 10000.0,
+    "radius": 4.4576425552
+   },
+   "chickena": {
+    "feature": 79,
+    "metal": 100.0,
+    "hp": 10000.0,
+    "radius": 7.8587555885
+   },
+   "chickenblobber": {
+    "feature": 80,
+    "metal": 200.0,
+    "hp": 10000.0,
+    "radius": 8.4200963974
+   },
+   "chickenc": {
+    "feature": 81,
+    "metal": 200.0,
+    "hp": 10000.0,
+    "radius": 8.8410978317
+   },
+   "chickend": {
+    "feature": 82,
+    "metal": 125.0,
+    "hp": 10000.0,
+    "radius": 8.8410978317
+   },
+   "chickenf": {
+    "feature": 83,
+    "metal": 100.0,
+    "hp": 10000.0,
+    "radius": 4.4576425552
+   },
+   "chickenr": {
+    "feature": 84,
+    "metal": 80.0,
+    "hp": 10000.0,
+    "radius": 8.4200963974
+   },
+   "chickens": {
+    "feature": 85,
+    "metal": 30.0,
+    "hp": 10000.0,
+    "radius": 5.8940691948
+   },
+   "chickenspire": {
+    "feature": 86,
+    "metal": 300.0,
+    "hp": 10000.0,
+    "radius": 5.8940691948
+   },
+   "chickenwurm": {
+    "feature": 87,
+    "metal": 150.0,
+    "hp": 10000.0,
+    "radius": 5.6133985519
+   }
+  }
+ }
+}
