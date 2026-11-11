@@ -16,8 +16,8 @@ This builds three libraries in `~/zksim/build` (`ZKSIM_LIB` overrides where they
 
 | Library | What | Python side |
 |---|---|---|
-| `libzksim.so` | the sim (`sim/src`, `sim/include/zksim`, C ABI in `capi.h`, ABI 20) | `sim/py/zksim.py` (`Batch`), `sim/py/zknav.py` (routes) |
-| `libzkscripts.so` | the army and economy scripts (`sim/scripts`, `zkscripts.h`, ABI 11) | `tools/policy_scripts_cpp.py` |
+| `libzksim.so` | the sim (`sim/src`, `sim/include/zksim`, C ABI in `capi.h`, ABI 21) | `sim/py/zksim.py` (`Batch`), `sim/py/zknav.py` (routes) |
+| `libzkscripts.so` | the army and economy scripts (`sim/scripts`, `zkscripts.h`, ABI 12) | `tools/policy_scripts_cpp.py` |
 | `libzkrecord.so` | the game recorder (`sim/record`, `zkrecord.h`, ABI 2), needs `libzstd-dev` | `sim/py/zkrecord.py` |
 
 `sim/include/zksim/rawframe.hpp` is generated from `bots/zkbot/policy/rawframe.py` (`python tools/policy_schema.py`), and a test
@@ -58,19 +58,22 @@ Speed, `tools/sim_step_bench.py`, 128 games on 8 threads, measured before the si
   (Faultline makes half its spots that way).  A map may also draw its boxes differently on each load, so `facts` loads each map
   several times and keeps every layout it sees.
 * **The five training maps** (`TRAINING_MAPS`): Agalta, Faultline, FrostyCove, Red Comet and TitanDuel.
-* **The map pool** (`/mnt/d/zk-learned/maps`, `tools/map_gen.py`): 315 maps.  115 are real, 18 of them Violet Rampart; 200
-  are made up (relief, water and symmetry drawn per map, with starts made reachable).  23 are held out (`held_out_maps`):
-  TitanDuel and a tenth by the hash of the name.  The pool loaded in 37 s to about 7.5 GB at 298 maps, so load it once
-  before forking workers, and never in two jobs at once.  `policy_sim_env.share_maps` builds each map's derived data before
+* **The map pool** (`/mnt/d/zk-learned/maps`, `tools/map_gen.py`): 404 maps.  204 are real, 18 of them Violet Rampart; 200
+  are made up (relief, water and symmetry drawn per map, with starts made reachable).  31 are held out (`held_out_maps`):
+  TitanDuel and a tenth by the hash of the name.  The pool loads in 61 s to 10.8 GB (11.6 GB once games have run on every
+  map), so load it once before forking workers, and never in two jobs at once.  `policy_sim_env.share_maps` builds each map's derived data before
   the fork too, so workers share it.
 * **What each pool map can play** is its facts' `modes` (`tools/map_modes.py`; `python tools/map_gen.py modes` writes them):
-  * `1v1`: any playable map with two start boxes or more (296 maps);
-  * `teams`: players a side (261 maps).  Whether it's a team map is Zero-K's listing (`maps.json`), or two boxes on a map
+  * `1v1`: any playable map with two start boxes or more (381 maps);
+  * `teams`: players a side (332 maps).  Whether it's a team map is Zero-K's listing (`maps.json`), or two boxes on a map
     Zero-K doesn't list; how many a side is the map's area over 48 square map units, 2 at least and 4 at most, since Zero-K
     doesn't say;
-  * `ffa`: alliances (51 maps): Zero-K's "up to N", or the boxes of an unlisted map with more than two, up to its boxes and 8;
-  * `chickens`: a map named `Chicken...`, or listed for chicken defense and nothing else, plays nothing else (1 map).
-    `chickens_or_teams` adds the team maps, where chicken games are drawn too (262).
+  * `ffa`: alliances (64 maps): Zero-K's "up to N", or the boxes of an unlisted map with more than two, up to its boxes and 8;
+  * `chickens`: a map named `Chicken...`, or listed for chicken defense and for no other kind of game, plays nothing else
+    (5 maps).  "Special", Zero-K's mark for an unusual map, isn't a kind of game: Requiem Outpost has both, and is a
+    chicken map.  `chickens_or_teams` adds the team maps, where chicken games are drawn too (337).
+  
+  A map Zero-K lists for no kind of game at all (18 of them) goes by its boxes, as an unlisted one does.
   
   Maps named `THISspace...` or `ZeroWars...` play nothing (the user, 2026-11-10).
 * **Violet Rampart** makes its terrain at game start, by its number of bases and a seed.  `tools/map_rampart.py` is a port of
@@ -79,8 +82,18 @@ Speed, `tools/sim_step_bench.py`, 128 games on 8 threads, measured before the si
   three seeds.  They're free-for-all maps only, and the maps of one base count share one map's weight in a draw.
 * **New maps** need the engine: `zk-maps.ps1` to fetch them, `python tools/sim_engine.py facts ... --out
   D:/zk-learned/maps/real_facts.json` (which starts the engine six times a new map), then `python tools/map_gen.py real
-  --facts ... --out D:/zk-learned/maps --workers 6`.  `Chicken_Roast_v1` isn't in the pool: its facts have one start box, and
-  `real` keeps layouts of two or more.
+  --facts ... --out D:/zk-learned/maps --workers 6`, then `python tools/map_gen.py modes`.
+* **Not in the pool**, of the install's maps (2026-11-11, when 89 were added):
+  * THISspace and ZeroWars Crossfire, which play nothing;
+  * Violet Rampart Generator, which `rampart` makes instead, and five more that make their terrain when the game starts
+    and have no port: Alphabet Siege Dry, Fickle Rivers, LimeQuat Republic, Rainbow Comet and Random Plateaus;
+  * `Chicken_Roast_v1` and `duck`, whose facts have no layout of two start boxes;
+  * `Valles_Marineris_v2`, whose facts timed out twice.
+* **Every kind plays on every new map** (2026-11-11): one scripted game to 8 minutes of each kind a map holds.  They're no
+  different from the old ones: in 1v1s a side still had 3 units or fewer at 8 minutes on 2 of 85 new maps, 1 of 96 old
+  ones and 2 of 200 made ones, and the poorer side's income was a median 26 metal a second against 29.  Some of those
+  were start points a commander can't stand on, since moved ("The game in the sim", Start): 12 games on Esker Creek
+  then left no side stuck.  The rates weren't measured again.
 
 ## What's modelled
 
@@ -139,6 +152,28 @@ Tags in this section: what's left out is listed under "Known gaps", and what was
 * Thunderbird's run is 80 lightning bolts.  Odin's thermite is a burning area.
 * **Strafing gunships** circle their target at 0.8 of their combat range.
 * The strider hub is a factory here, and needs a grid of 50 energy like a Cerberus.
+
+### Transports (`sim/src/transport.cpp`)
+
+The gunship plant's Charon and Hercules carry one unit each (the user, 2026-11-11), by Zero-K's
+`unit_transport_load_unload.lua`, `unit_transport_speed.lua` and the engine's `MobileCAI`.
+
+* **What's lifted** is by the load's class, which is by its cost (`unitdefs_post.lua`): light, medium
+  (`requiremediumtrans`) or heavy (`requireheavytrans`).  A Charon flies at 0.7 of its speed with a light load and 0.4 with
+  a medium one, and lifts no heavy one; a Hercules at 1.0, 0.75 and 0.5.  Nothing lifts a building, an aircraft, or a
+  unit marked `cantBeTransported`.  The catalog has each type's `load_class`, `load_height` and `load_size`, and a
+  transport's three shares and `lift_size`.
+* **LOAD** (order 22, a unit): the transport flies to it, comes down to the load's height within 220 elmos, and picks it
+  up within 16.  One of its own team stops for it once the transport is within 80.  Any other unit, an ally's too, is
+  picked up only in sight, uncloaked and all but still (0.5 elmos a frame): so an enemy that stands can be taken.
+* **Carried**, a unit does nothing and nothing can shoot it; it's seen when its transport is.  The frame flags it
+  `CARRIED` and its transport `LOADED`.
+* **UNLOAD** (order 23, a place the load can stand): the transport comes down within 198 elmos and sets it down unhurt.
+* **DROP** (order 24, Drop Cargo): the load is let go at once, keeps the transport's speed and falls, hurt by
+  `unit_fall_damage.lua` as anything thrown is: a Jack from a Charon in flight loses about a tenth of its health, an
+  Ogre a fifth.  The button reloads for 7 s.  A transport that dies drops its load the same way.
+* **Flight**: a transport on a LOAD or UNLOAD order heads straight for its goal.  The turning gunship model circled a goal
+  inside its turning circle and never came down on it.
 
 ### Abilities
 
@@ -257,8 +292,12 @@ free-for-alls (the padding costs about 90 MB at 64 games, and no speed).  A seat
 
 * **Start**: each alliance in one of the map's start boxes, drawn as Zero-K's `allshuffle` does; on a map with more boxes than
   alliances some stay empty.  An alliance of one starts at the box's start point half the time, otherwise anywhere level in
-  the box.  Allies start at the box's start points, or apart in it.  In a chicken game the players share one box and the
-  burrows come up away from them.
+  the box.  Allies start at the box's start points, or apart in it.  A start point the commander can't stand on becomes the
+  nearest place in the box with room for a base (`StartBox.at_point`), as Zero-K drops a commander at the nearest spot it
+  can stand on (`start_unit_setup.lua`, `GetClosestValidSpawnSpot`): Esker Creek's, Pools of Ilys's and Acidic Quarry's
+  points are on ground only spiders climb, and a commander started there never moved.  In a chicken game the players share one box and the
+  burrows come up away from them.  On a chicken map that box is the first: it's the players' ("Robot Defenders", with the
+  map's metal; the other is the hive's), and Zero-K, which doesn't shuffle a game of one player alliance, gives it to them.
 * **Out**: an alliance with no team that has a unit keeping it in ("Teams and alliances") is out, and its seats finish at once.
   A dead team in a live alliance stops acting, and its seat finishes with its alliance.
 * **End**: one alliance left; or the lead rule; or the time limit at 80 minutes (the user, 2026-11-10; it was 20).  A chicken
@@ -316,7 +355,7 @@ It finishes by a median of 152 s.  A step that takes over 2 minutes is given up.
   * raiders only to 4 minutes, falling to 35% by 60;
   * riots from 10 minutes, assaults from 6, artillery from 18;
   * skirmishers once a riot or assault has been seen, AA once air has, and snipers once a slow heavy has (after 8 minutes);
-  * one scout from 2 minutes, and a second from 10.
+  * one scout from 2 minutes, and a second from 10 (a gunship plant has none: its Charon is a transport).
   
   Air plants have their own mix, which counts only what flies.
 * **Raiders** move in squads of three.  A squad goes for extractors, then other buildings, and takes a target only when its
@@ -334,6 +373,25 @@ It finishes by a median of 152 s.  A step that takes over 2 minutes is given up.
   brings the queen no sooner.  From minute 30 it hunts whatever the anger, to bring her on while it's strongest against them.
   Once she's come it goes for her, and plants add AA (0.35 of their mix) from 5 minutes before she's due.  Before this posture
   the scripts killed about 45 burrows in 9 minutes, met the queen at minute 8 to 10 and lost at Normal.
+* **Transports** (`Seat::lifts`, the user, 2026-11-11).  A plant that can make them makes one for every two assaults or
+  riots the side has that it could carry and no cheaper transport could, up to four of a kind: so a gunship plant makes
+  Charons for Jacks, Knights, Reavers and Ogres, and a Hercules only for what a Charon can't lift (a Grizzly, a strider).
+  * **The wing**: each free transport fetches one such unit, the dearest first, that isn't retreating and has no armed
+    enemy within 600 elmos.  The loaded wait up to 45 s for those still fetching.
+  * **Its target** is the enemy building worth most (cost, four times for what the aimer counts valuable) among those
+    whose cover the wing's metal can take, as a raiding squad's target is taken: a high-value building, or an
+    undefended one.
+  * **Coming down**: a load that Drop Cargo would cost at most 15% of its health (`ScriptData.fall_loss`: a Jack 9%, a
+    Knight 11%, a Dante 13%) is dropped at the last look before its transport is within 200 elmos of the target;
+    any other (a Reaver 26%, an Ogre 20%) is set down 120 elmos short of it.
+  * **Then** the unit attacks the target, then the nearest building within 1,000 elmos, one after another, and is the
+    army's again when none is left.  The transport goes back for another.
+  * With nothing the wing could take, it fetches nothing and sets down at the rally what it has.  It does nothing
+    against chickens.
+  * Left out: only the target's cover is weighed, not what could shoot the wing down on its straight way there.  It
+    carries none of an ally's units and picks up no enemy.
+  * The scripts' second factory is a gunship plant in 3 games of 10 that get one, and there's no third: so a script
+    never has a strider hub and a Hercules together, and its Hercules carries a first factory's heavies.
 * **Re-ordering**: a unit is re-ordered only when its job or goal changes.
 * **Groups**: orders that are the same to the letter go as one group order (`Seat::group_plans`), and take in units already
   told that order.
@@ -453,7 +511,9 @@ What's left out on purpose, so it isn't mistaken for modelled:
   the way.
 * **Economy:** repair, Duck's faster healing under water, nanoframe rate limits, commander morph, capture, resurrect.  Reclaim is
   costed in metal alone.
-* **Air:** no crashing, fighter pull-up or vertical swarm.  Transports carry nothing, and no drones are made.
+* **Air:** no crashing, fighter pull-up or vertical swarm, and no drones are made.
+* **Transports:** a carried unit can't be shot (Zero-K's `targetableTransportedUnits` lets it be), a load isn't checked
+  against what's in the way where it's set down, and there are no ground or sea transports.
 * **Unmodelled weapons:** capture, spawned units and area impulse (`bomberassault`, `dronecarry`, `hoverminer`,
   `jumpblackhole`, `veharty`, `vehcapture`, `zenith`).  These units stand in frames without their weapon doing what it does,
   and are kept out of armies.

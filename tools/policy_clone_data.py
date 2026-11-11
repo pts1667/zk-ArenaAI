@@ -470,7 +470,7 @@ def check(args: argparse.Namespace) -> None:
 def rf_name(kind: int) -> str:
     names = {rf.KEEP: "keep", rf.MOVE: "move", rf.FIGHT: "fight", rf.ATTACK_UNIT: "attack", rf.ATTACK_GROUND: "attack_ground", rf.STOP: "stop",
              rf.MANUAL_FIRE: "manual_fire", rf.JUMP: "jump", rf.CLOAK_ON: "cloak_on", rf.CLOAK_OFF: "cloak_off", rf.PRODUCE: "produce",
-             rf.BUILD: "build", rf.ASSIST: "assist", rf.RECLAIM: "reclaim"}
+             rf.BUILD: "build", rf.ASSIST: "assist", rf.RECLAIM: "reclaim", rf.LOAD: "load", rf.UNLOAD: "unload", rf.DROP: "drop"}
     return names.get(kind, str(kind))
 
 

@@ -1,5 +1,7 @@
 """The army and economy scripts (C++: sim/scripts, tools/policy_scripts_cpp.py): the tables they're given, what they do in short sim
-games, the same games whatever the thread count, runners that don't share anything; and that frame games play their own scripts."""
+games (a wing of transports among it), the same games whatever the thread count, runners that don't share anything; and that
+frame games play their own scripts."""
+import copy
 import sys
 import threading
 from pathlib import Path
@@ -20,7 +22,7 @@ import policy_script as ps  # noqa: E402
 import policy_sim_env as se  # noqa: E402
 import zksim  # noqa: E402
 from zkbot import catalog as bc  # noqa: E402
-from zkbot.policy import actions, groups, rawframe as rf  # noqa: E402
+from zkbot.policy import actions, featurize as fz, groups, rawframe as rf  # noqa: E402
 
 
 def _play(env: se.SimEnv, decisions: int) -> list:
@@ -188,13 +190,17 @@ def test_policy_seats_get_the_economy_but_not_the_army_script():
 # The tables the C++ is given.
 
 def test_each_role_on_a_roster_is_its_cheapest_modelled_unit():
-    """Of what goes on land and doesn't blow itself up: no ships from a strider hub, no Blastwings or Imps."""
+    """Of what goes on land, doesn't blow itself up and isn't a transport: no ships from a strider hub, no Blastwings or Imps, and
+    no Charon as a gunship plant's scout."""
     data = ps.ScriptData(se.tables.table(), se.catalog())
     for factory in ("factorycloak", "factoryveh", "factorygunship", "striderhub"):
         menu = pm.menu(data, data.row_of_name[factory])
         for name in bc.roster(factory):
             row = data.row_of_name.get(name)
             if row is None or not data.modelled[row] or not data.on_land[row] or data.kamikaze[row]:
+                continue
+            if data.table.transport[row]:
+                assert row not in menu.values()
                 continue
             assert data.role_of[row] in menu
             assert data.table.cost[menu[data.role_of[row]]] <= data.table.cost[row]
@@ -224,6 +230,77 @@ def test_a_factory_is_told_what_to_build_only_when_that_changes_and_it_is_its_ow
                 told += 1
                 assert env.script_data.role_of[env.script_data.row_of_name[name]] in pm.ROLE_ORDER + (pm.SCOUT, pm.BUILDER)
     assert told > 0
+
+
+def test_a_plant_makes_the_transport_that_lifts_what_there_is_and_it_brings_it_to_an_enemy_building():
+    """Each game: a gunship plant and one unit to carry, a map away from an enemy fusion that nothing guards.  A Jack and an Ogre
+    get a Charon, a Dante a Hercules (in the third game it has one already: the plant takes two minutes over it).  The Jack and
+    the Dante are dropped in flight and land hurt, by what the scripts' table says the fall costs; the Ogre, which it would cost a
+    fifth of its health, is set down whole.  Each then goes for the fusion, and kills it.  Every order a transport is given reads
+    as a choice of the policy's, for cloning."""
+    cases = (("jumpassault", (), ["gunshiptrans"], zksim.ORDER_DROP), ("tankriot", (), ["gunshiptrans"], zksim.ORDER_UNLOAD),
+             ("striderdante", ("gunshipheavytrans",), [], zksim.ORDER_DROP), ("striderdante", (), ["gunshipheavytrans"], None))
+    cat = se.catalog()
+    lifts = (zksim.ORDER_LOAD, zksim.ORDER_UNLOAD, zksim.ORDER_DROP)
+
+    class Wing(se.SimEnv):
+        def _start_armies(env, g, world_map, bundle, x0, z0, x1, z1):
+            load, extra = cases[g][:2]
+            names = ["factorygunship", load, *extra, "energyfusion", "staticmex"]
+            lx, lz = se.place(bundle, env.rng, env.table.move_class[[env.table.names.index(load)]].astype(np.int32), x0 + 200.0, z0)
+            inward = 300.0 if x1 < bundle.map_w / 2 else -300.0
+            x = np.array([x0, lx[0], *[x0] * len(extra), x1, x1 + inward], np.float32)
+            z = np.array([z0, lz[0], *[z0 + 200.0] * len(extra), z1, z1], np.float32)
+            env.batch.reset(g, world_map, 1, np.array([cat.index[n] for n in names], np.int32), np.array([0] * (len(names) - 2) + [1, 1]), x, z,
+                            base=(x0, z0, x1, z1), sites=bundle.sites())
+            env.batch.economy(g, bundle.spot_list, metal=50000.0, energy=50000.0)
+            env.cpp.reset(g, env.grounds[id(bundle)], (x0, z0, x1, z1), (x0, z0, x1, z1), economy=False, aimer=False)
+
+    env = Wing(len(cases), 3, ["scripts"], units=1, threads=2)
+    env.early_end = 10 ** 9
+    env.begin()
+    transports = {cat.index[n]: n for n in ("gunshiptrans", "gunshipheavytrans")}
+    made, told, landed, labelled = [[] for _ in cases], [[] for _ in cases], [None] * len(cases), set()
+    fusion = [2 + len(extra) for _, extra, _, _ in cases]
+    for _ in range(400):
+        looked = {g: copy.deepcopy(env.frame(g * env.slots)) for g in range(3) if landed[g] is None and env.decisions[g] % env.script_every == 0}
+        env.step(0.0)
+        for g in range(len(cases)):
+            if landed[g] is not None:
+                continue
+            given = []
+            for o in env.script_record.get(g * env.slots, ()):
+                unit, kind, target = int(o["unit"]), int(o["kind"]), int(o["target"])
+                if kind == zksim.ORDER_PRODUCE and target in transports:
+                    made[g].append(transports[target])
+                elif kind in lifts:
+                    told[g].append((kind, target))
+                    given.append(o)
+                elif unit == 1 and kind == zksim.ORDER_ATTACK and told[g]:      # brought there, it's told what to go for
+                    own = env.batch.records[g, 0, :int(env.batch.counts[g, 0])]
+                    landed[g] = (target, float(own[own["uid"] == 1]["hp_frac"][0]))
+            if given and g in looked:
+                t = fz.featurize(looked[g], env.bundle_of(g * env.slots), env.table, enabled_kinds=se.KINDS)
+                x, z = actions.world_positions(t, env.bundle_of(g * env.slots))
+                read, missed = actions.encode(se.policy_orders(np.array(given)), t, env.bundle_of(g * env.slots), x, z)
+                assert missed == 0 and [se._TRANSPORT_ORDERS[int(k)] for k in read.kind if k != rf.KEEP] == [int(o["kind"]) for o in given]
+                labelled.update(int(o["kind"]) for o in given)
+        theirs = [env.batch.records[g, 1, :int(env.batch.counts[g, 1])]["uid"].tolist() for g in range(3)]
+        if all(landed[g] is not None and fusion[g] not in theirs[g] for g in range(3)):
+            break
+    else:
+        raise AssertionError((made, told, landed))
+    assert made[3][0] == "gunshipheavytrans" and "gunshiptrans" not in made[3]      # a Charon doesn't lift a Dante
+    assert labelled == set(lifts)
+    table = env.script_data
+    for g, (load, extra, makes, way) in enumerate(cases[:3]):
+        # One transport for the one load, of the kind that lifts it; it loads it, flies it there, and drops it or sets it down.
+        assert made[g] == makes
+        assert told[g] == [(zksim.ORDER_LOAD, 1), (zksim.ORDER_UNLOAD, -1)] + [(zksim.ORDER_DROP, -1)] * (way == zksim.ORDER_DROP)
+        carrier = extra[0] if extra else makes[0]
+        loss = float(table.fall_loss[list(table.table.names[t] for t in table.transports).index(carrier), table.row_of_name[load]])
+        assert (loss <= 0.15) == (way == zksim.ORDER_DROP)
+        assert landed[g] == (fusion[g], pytest.approx(1.0 - loss if way == zksim.ORDER_DROP else 1.0, abs=0.02))
 
 
 def test_in_sim_games_the_economy_grows_and_its_orders_are_not_the_scripts():

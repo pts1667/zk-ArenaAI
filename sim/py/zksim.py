@@ -19,16 +19,18 @@ sys.path.insert(0, str(ROOT / "py"))
 sys.path.insert(0, str(ROOT.parent / "bots"))
 import zknav  # noqa: E402
 from zkbot.policy import rawframe  # noqa: E402
-ABI_VERSION = 20
+ABI_VERSION = 21
 MAX_MOUNTS = 8
 MAX_TEAMS = 8                       # players in a game, and so allyteams too
 TICK_FRAMES = 5
 FRAMES_PER_SECOND = 30
+GRAVITY = 120.0 / 900.0       # elmos a frame squared (world.hpp)
 MOVE_CLASSES = ("kbot", "tank", "spider", "amph", "hover", "ship")
 ADVANCE, HOLD, ORDERS, SCRIPTED = 0, 1, 2, 3
 ORDER_NONE, ORDER_MOVE, ORDER_FIGHT, ORDER_ATTACK, ORDER_MANUAL_FIRE, ORDER_JUMP, ORDER_CLOAK_ON, ORDER_CLOAK_OFF = 0, 1, 2, 3, 6, 7, 8, 9
 ORDER_BUILD, ORDER_ASSIST, ORDER_RECLAIM, ORDER_PRODUCE, ORDER_MOVE_STATE, ORDER_FIRE_STATE, ORDER_UNIT_AI, ORDER_SELF_DESTRUCT = 10, 11, 13, 14, 15, 16, 17, 18
 ORDER_PLACE_BEACON, ORDER_WAIT_AT_BEACON, ORDER_ON_OFF = 19, 20, 21
+ORDER_LOAD, ORDER_UNLOAD, ORDER_DROP = 22, 23, 24        # an air transport's (sim/src/transport.cpp)
 MOBILE, AIR, ARMED, FIREPROOF, FACTORY, PLOPPABLE, COMMANDER, CAN_CLOAK, STARTS_CLOAKED, FIRES_CLOAKED, AREA_CLOAK_ON, LEAVES_GHOST, KAMIKAZE_BLIND, FLOATS = 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192
 MISSILE, NEUTRAL, PLANE, LANDS, STRAFES, DONT_COUNT = 16384, 32768, 65536, 131072, 262144, 524288
 FEATURES_PER_SIDE = 512             # records a frame can hold, as many as featurize keeps; past it, those with the most metal left (sim/src/views.cpp)
@@ -66,9 +68,10 @@ class TypeRec(ct.Structure):
         "reclaim_speed", "wreck_metal", "wreck_hp", "heap_metal", "heap_hp", "energy_upkeep", "stockpile_cost", "close_frames",
         "cloak_cost", "cloak_cost_moving", "decloak_distance", "bestowed_decloak", "area_cloak_radius", "area_cloak_upkeep",
         "perceived_range", "heat_per_shot", "heat_decay", "heat_max_slow", "heat_initial", "bait_cost", "kamikaze_distance", "detonate_reach", "drop_height", "drop_gravity", "jump_range", "jump_speed", "jump_height", "jump_reload", "jump_delay", "burrow_speed", "mass", "push_scale", "needed_link", "throw_radius", "teleport_rate", "beacon_frames",
-        "cruise_height", "vertical_speed", "turn_speed", "strafe_radius", "strafe_speed", "reammo_frames", "reammo_energy", "pad_bp")] + [(n, ct.c_int32) for n in (
+        "cruise_height", "vertical_speed", "turn_speed", "strafe_radius", "strafe_speed", "reammo_frames", "reammo_energy", "pad_bp",
+        "lift_light", "lift_medium", "lift_heavy", "lift_size", "load_size", "load_height")] + [(n, ct.c_int32) for n in (
             "move_state", "fire_state", "no_chase", "bait_level", "bait_target", "bait_target_armor",
-            "def_id", "wreck_feature", "heap_feature", "armor_class", "move_class", "category", "flags", "explode_weapon", "n_mounts", "landing_weapon", "drop_weapon", "missile_pads", "beacon_type", "ammo", "pad_count", "plate_parent")] + [
+            "def_id", "wreck_feature", "heap_feature", "armor_class", "move_class", "category", "flags", "explode_weapon", "n_mounts", "landing_weapon", "drop_weapon", "missile_pads", "beacon_type", "ammo", "pad_count", "plate_parent", "load_class")] + [
         ("mount_weapon", ct.c_int32 * MAX_MOUNTS), ("mount_only", ct.c_int32 * MAX_MOUNTS),
         ("mount_bad", ct.c_int32 * MAX_MOUNTS)]
 
@@ -85,7 +88,7 @@ class TacticsRec(ct.Structure):
 class UnitState(ct.Structure):
     _fields_ = [(n, ct.c_float) for n in (
         "x", "z", "vx", "vz", "heading", "speed", "hp", "damage_taken", "para", "shield", "disarm", "build", "heat", "jump_charge", "altitude")] + [
-        (n, ct.c_int32) for n in ("alive", "order", "target", "stock", "cloaked", "chasing", "dodging", "shots_fired", "jumping", "skidding", "low_power", "deployed", "beacon", "pulling", "ammo", "air_state")]
+        (n, ct.c_int32) for n in ("alive", "order", "target", "stock", "cloaked", "chasing", "dodging", "shots_fired", "jumping", "skidding", "low_power", "deployed", "beacon", "pulling", "ammo", "air_state", "carrier", "cargo")]
 
 
 class ChickenKind(ct.Structure):
@@ -481,6 +484,18 @@ class World:
     def wait_at_beacon(self, unit: int, beacon: int) -> None:
         """beacon: it, or the teleporter it belongs to."""
         _lib.zk_world_order(self.handle, unit, ORDER_WAIT_AT_BEACON, 0.0, 0.0, beacon)
+
+    def load(self, transport: int, unit: int) -> None:
+        """An air transport: fly to a unit it can lift, of any team, and pick it up."""
+        _lib.zk_world_order(self.handle, transport, ORDER_LOAD, 0.0, 0.0, unit)
+
+    def unload(self, transport: int, x: float, z: float) -> None:
+        """Set its load down there, if that's a place the load can stand."""
+        _lib.zk_world_order(self.handle, transport, ORDER_UNLOAD, x, z, -1)
+
+    def drop(self, transport: int) -> None:
+        """Drop Cargo: let its load fall from where it is.  Its other orders stay."""
+        _lib.zk_world_order(self.handle, transport, ORDER_DROP, 0.0, 0.0, -1)
 
     def count(self) -> int:
         """Handles given out so far, the dead included."""

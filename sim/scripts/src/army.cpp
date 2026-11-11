@@ -85,6 +85,16 @@ constexpr double QUEEN_CALL = 1800.0;   // game seconds
 constexpr double DEFEND_REACH = 800.0;  // a chicken this near one of our buildings is one the army goes for
 constexpr double QUEEN_PREP = 300.0;    // seconds before the queen is due
 constexpr double QUEEN_AA = 0.35;       // AA's share of a plant's mix from then, on top of any it has
+// Transports (Seat::lifts)
+constexpr int MOST_TRANSPORTS = 4;          // of one kind
+constexpr int LOADS_A_TRANSPORT = 2;        // a plant makes one for every two units of ours it could carry
+constexpr double DROP_LOSS = 0.15;          // of its health: a load the fall costs at most this is dropped, not set down
+constexpr double DROP_NEAR = 200.0;         // elmos from the target: inside it a transport comes down to set its load down
+constexpr double SET_DOWN_SHORT = 120.0;    // a load is set down this far short of the target
+constexpr double WING_WAIT = 45.0;          // seconds the loaded wait for those still fetching
+constexpr double LANDED_REACH = 900.0;      // come down this near the target, a load goes for it
+constexpr double NEXT_REACH = 1000.0;       // ... and then for the buildings this near it, one after another
+constexpr double NOT_IN_A_FIGHT = 600.0;    // a unit with an armed enemy this near isn't fetched
 // policy_eco.py Aimer
 constexpr double FIRE_AGAIN = 60.0;
 constexpr float NUKE_VALUE_REACH = 960.0f;
@@ -142,7 +152,7 @@ void Seat::births_and_forget() {
     const Data& d = *data;
     for (size_t i = 0; i < own.size(); i++) {
         int r = own_rows[i];
-        if (!d.has(r, ZKS_FIGHTS)) continue;
+        if (!d.has(r, ZKS_FIGHTS) || d.has(r, ZKS_TRANSPORT)) continue;     // a transport isn't in the mix (transport_due)
         int64_t uid = own[i]->uid;
         if (!born[uid]) {
             born[uid] = 1;
@@ -160,6 +170,9 @@ void Seat::births_and_forget() {
         current[u] = -1;
         patrol[u] = 0;
         still_since[u] = NAN;
+        lift_load[u] = -1;
+        lifted[u] = 0;
+        drop_goal[u] = -1;
     }
     std::vector<uint8_t> used(squad_live.size(), 0);
     for (size_t u = 0; u < squad_of.size(); u++)
@@ -168,10 +181,11 @@ void Seat::births_and_forget() {
         if (squad_live[s] && !used[s]) squad_live[s] = 0, since_has[s] = 0;
 }
 
-int Seat::choose(int factory_row, double seconds, int constructors, double metal_income, bool queen_due) const {
+int Seat::choose(int factory_row, double seconds, int constructors, double metal_income, bool queen_due, int transport) const {
     const Data& d = *data;
     int builder = d.menu_of(factory_row, R_BUILDER);
     if (builder >= 0 && constructors < constructor_quota(seconds, metal_income, floating)) return builder;
+    if (transport >= 0) return transport;
     int scout = d.menu_of(factory_row, R_SCOUT);
     if (scout >= 0 && made[d.role_ids[R_SCOUT]] < scout_quota(seconds)) return scout;
     // shares(), in its dict's order: the schedule's roles, then those added once seen
@@ -234,7 +248,7 @@ void Seat::produce(const Ctx& c, double metal_income) {
         if ((u->flags & zk::UF_BEING_BUILT) || !d.has(r, ZKS_FACTORY)) continue;
         int frame_on = u->ord_kind == K_PRODUCE ? d.row_of(u->ord_target) : -1;
         int on = current[u->uid] >= 0 ? current[u->uid] : (frame_on >= 0 && frame_on != d.unknown ? frame_on : -1);
-        int due = choose(r, c.seconds, constructors, metal_income, queen_due);
+        int due = choose(r, c.seconds, constructors, metal_income, queen_due, transport_due(r));
         if (due < 0 || due == on || held(u)) {
             if (on >= 0) current[u->uid] = on;
             continue;
@@ -293,20 +307,281 @@ void Seat::army(const Ctx& c) {
     observe();
     births_and_forget();
     produce(c, metal_income);
+    make_view();
+    lifts(c);
     std::vector<Fighter> fighters;
     std::vector<P2> extractors;
     for (size_t i = 0; i < own.size(); i++) {
         const Rec* u = own[i];
         int r = own_rows[i];
         if (u->flags & zk::UF_BEING_BUILT) continue;
-        if (d.has(r, ZKS_FIGHTS))
+        // Not the wing, nor what it carries or has brought somewhere: those are Seat::lifts'.
+        const bool lift = d.has(r, ZKS_TRANSPORT) || (u->flags & zk::UF_CARRIED) || drop_goal[u->uid] >= 0;
+        if (d.has(r, ZKS_FIGHTS) && !lift)
             fighters.push_back({u->uid, d.kind[r], r, (double)u->x, (double)u->z, (double)u->hp_frac, (double)d.cost[r],
                                 (double)d.range[r], (u->flags & zk::UF_IDLE) != 0});
         if (d.has(r, ZKS_EXTRACTOR)) extractors.push_back({(double)u->x, (double)u->z});
     }
-    make_view();
     if (!fighters.empty()) fight(c, fighters, extractors);
     if (aimer) aim(c);
+}
+
+// A unit of ours a transport might carry for the army: a finished assault or riot that walks.
+bool Seat::load_for_lift(size_t i) const {
+    const Data& d = *data;
+    const int r = own_rows[i];
+    return (d.kind[r] == R_ASSAULT || d.kind[r] == R_RIOT) && d.has(r, ZKS_FIGHTS) && !d.has(r, ZKS_AIR) && d.load_class[r] > 0 &&
+           !(own[i]->flags & zk::UF_BEING_BUILT);
+}
+
+// The transport this plant should make now, -1 for none: one for every LOADS_A_TRANSPORT units of ours that it could carry
+// and no cheaper transport of the plant's could, up to MOST_TRANSPORTS of a kind, counting those being built.  So a gunship
+// plant makes Charons for Jacks and Ogres, and a Hercules only for what a Charon can't lift.  None against the chickens.
+int Seat::transport_due(int factory_row) const {
+    const Data& d = *data;
+    if (!d.n_transports || game.chickens() >= 0) return -1;
+    std::vector<int> kinds;
+    for (int k = d.option_offsets[factory_row]; k < d.option_offsets[factory_row + 1]; k++)
+        if (d.has(d.options[k], ZKS_TRANSPORT)) kinds.push_back(d.options[k]);
+    std::sort(kinds.begin(), kinds.end(), [&](int a, int b) { return d.cost[a] < d.cost[b] || (d.cost[a] == d.cost[b] && a < b); });
+    for (size_t k = 0; k < kinds.size(); k++) {
+        int loads = 0, have = 0;
+        for (size_t i = 0; i < own.size(); i++) {
+            have += own_rows[i] == kinds[k];
+            if (!load_for_lift(i) || !d.lifts(kinds[k], own_rows[i])) continue;
+            bool cheaper = false;
+            for (size_t j = 0; j < k; j++) cheaper |= d.lifts(kinds[j], own_rows[i]);
+            loads += !cheaper;
+        }
+        if (have < std::min(MOST_TRANSPORTS, (loads + LOADS_A_TRANSPORT - 1) / LOADS_A_TRANSPORT)) return kinds[k];
+    }
+    return -1;
+}
+
+// One unit's order by `_emit`'s rule: not again while it's on its way to the same.  Whether it was sent.
+bool Seat::tell(const Rec* u, int kind, double x, double z, int64_t target) {
+    const int64_t uid = u->uid;
+    if (ordered_kind[uid] == kind && py_hypot(ordered_x[uid] - x, ordered_z[uid] - z) <= REORDER) {
+        if (!(u->flags & zk::UF_IDLE) || py_hypot(u->x - x, u->z - z) <= AT_GOAL) return false;
+    }
+    ordered_kind[uid] = (int8_t)kind;
+    ordered_x[uid] = x;
+    ordered_z[uid] = z;
+    army_out.push_back(order(uid, kind, x, z, target));
+    return true;
+}
+
+// Where a load of this move class can be set down for `at` by a transport coming from `from`: SET_DOWN_SHORT short of it, or
+// else the first of a ring of points about it, on ground the class can stand on.  false for nowhere.
+bool Seat::landing(int move_class, P2 at, P2 from, P2& out) const {
+    const Ground& g = *ground;
+    auto stands = [&](P2 p) {
+        if (p.x < 0.0 || p.z < 0.0 || p.x >= g.map_w || p.z >= g.map_h) return false;
+        if (move_class < 0 || move_class >= ZKS_MOVE_CLASSES || g.labels[move_class].empty()) return true;
+        const int i = std::min((int)(p.z / g.cell), g.rows - 1), j = std::min((int)(p.x / g.cell), g.cols - 1);
+        return g.labels[move_class][(size_t)i * g.cols + j] >= 0;
+    };
+    const P2 first = along(at, from, SET_DOWN_SHORT);
+    if (stands(first)) {
+        out = first;
+        return true;
+    }
+    for (int k = 0; k < 8; k++) {
+        const double a = k * (3.14159265358979 / 4.0);
+        const P2 p{at.x + SET_DOWN_SHORT * std::cos(a), at.z + SET_DOWN_SHORT * std::sin(a)};
+        if (stands(p)) {
+            out = p;
+            return true;
+        }
+    }
+    return false;
+}
+
+// Transports (the sim's are sim/src/transport.cpp: Charon and Hercules).  A plant that can make them makes a few once the side
+// has assaults or riots to carry (transport_due).  Those it has are a wing.  Each free one fetches one of those units, the
+// dearest first, by the cheapest transport that lifts it.  The wing goes for the enemy building worth most (as the aimer
+// counts worth) among those whose cover the metal it carries can take, as a raiding squad's target is taken, and brings its
+// loads there: dropped in flight (Drop Cargo) when the fall costs the load at most DROP_LOSS of its health, as it does a Jack
+// or a Dante, and set down beside the target otherwise, as a Reaver or an Ogre is.  A load is dropped at the last look
+// before its transport would be within DROP_NEAR of the target, so it lands short of it by up to a look's flight less its
+// fall's.  The loaded wait up to WING_WAIT for those still fetching, so that they come together.  A unit brought there goes for the target, then for the buildings near it, and
+// is the army's again when none is left.  With nothing the wing could take it fetches nothing, and what's aboard is set down
+// at the rally.
+//
+// Left out: only the target's cover is weighed, not what could shoot the wing down on its way, which is a straight line; it
+// carries no ally's unit and picks up no enemy.
+void Seat::lifts(const Ctx& c) {
+    const Data& d = *data;
+    if (!d.n_transports) return;
+    struct Wing {
+        const Rec* u;
+        int row;
+        bool loaded;
+    };
+    std::vector<Wing> wing;
+    for (size_t i = 0; i < own.size(); i++)
+        if (d.has(own_rows[i], ZKS_TRANSPORT) && !(own[i]->flags & zk::UF_BEING_BUILT))
+            wing.push_back({own[i], own_rows[i], (own[i]->flags & zk::UF_LOADED) != 0});
+    int target = view_of(lift_target);
+    // Who's up, and who has come down: near what the wing went for, it goes for that.
+    for (size_t i = 0; i < own.size(); i++) {
+        const Rec* u = own[i];
+        const int64_t uid = u->uid;
+        if (u->flags & zk::UF_CARRIED) {
+            lifted[uid] = 1;
+        } else if (lifted[uid]) {
+            lifted[uid] = 0;
+            for (const Wing& w : wing)
+                if (lift_load[w.u->uid] == uid) lift_load[w.u->uid] = -1;
+            if (target >= 0 && std::hypot(view.x[target] - u->x, view.z[target] - u->z) <= LANDED_REACH) {
+                drop_goal[uid] = lift_target;
+                ordered_kind[uid] = 0;
+            }
+        }
+    }
+    for (size_t i = 0; i < own.size(); i++) {
+        const Rec* u = own[i];
+        const int64_t uid = u->uid;
+        if (drop_goal[uid] < 0 || (u->flags & zk::UF_CARRIED)) continue;
+        int e = view_of(drop_goal[uid]);
+        if (e < 0) {
+            e = nearest(view.building, {u->x, u->z}, NEXT_REACH);
+            ordered_kind[uid] = 0;
+            if (e < 0) {
+                drop_goal[uid] = -1;
+                state[uid] = S_SENT;
+                continue;
+            }
+            drop_goal[uid] = view.uid[e];
+        }
+        tell(u, K_ATTACK_UNIT, view.x[e], view.z[e], view.uid[e]);
+    }
+    if (wing.empty()) {
+        lift_target = -1;
+        lift_waiting = NAN;
+        return;
+    }
+    // What each has, aboard or to fetch, as an index into `own`.
+    std::vector<int> load(wing.size(), -1), fetch(wing.size(), -1);
+    std::vector<uint8_t> taken(own.size(), 0);
+    auto ours = [&](int64_t uid) { return uid >= 0 && uid < (int64_t)stamp.size() && stamp[uid] == call; };
+    for (size_t k = 0; k < wing.size(); k++) {
+        const Wing& w = wing[k];
+        int32_t& l = lift_load[w.u->uid];
+        if (l >= 0 && !ours(l)) l = -1;
+        const bool aboard = l >= 0 && (own[own_at[l]]->flags & zk::UF_CARRIED);
+        if (w.loaded && !aboard) {
+            // Not what it was sent for: whatever of ours hangs where it is.
+            l = -1;
+            for (size_t i = 0; i < own.size() && l < 0; i++)
+                if ((own[i]->flags & zk::UF_CARRIED) && own[i]->x == w.u->x && own[i]->z == w.u->z) l = (int32_t)own[i]->uid;
+        } else if (!w.loaded && l >= 0 && (aboard || drop_goal[l] >= 0 || state[l] == S_RETREATING)) {
+            l = -1;     // another's, brought already, or hurt
+        }
+        if (l >= 0) load[k] = own_at[l], taken[own_at[l]] = 1;
+    }
+    const bool guards = game.chickens() >= 0;       // against the chickens the army guards, and the wing fetches nothing
+    if (!guards) {
+        std::vector<int> wanted;
+        for (size_t i = 0; i < own.size(); i++) {
+            const int64_t uid = own[i]->uid;
+            if (taken[i] || !load_for_lift(i) || (own[i]->flags & zk::UF_CARRIED) || drop_goal[uid] >= 0 || state[uid] == S_RETREATING) continue;
+            if (nearest(view.threat, {own[i]->x, own[i]->z}, NOT_IN_A_FIGHT) >= 0) continue;
+            wanted.push_back((int)i);
+        }
+        std::stable_sort(wanted.begin(), wanted.end(), [&](int a, int b) { return d.cost[own_rows[a]] > d.cost[own_rows[b]]; });
+        for (int i : wanted) {
+            int best = -1;
+            double best_cost = 0.0, best_away = 0.0;
+            for (size_t k = 0; k < wing.size(); k++) {
+                if (wing[k].loaded || load[k] >= 0 || fetch[k] >= 0 || !d.lifts(wing[k].row, own_rows[i])) continue;
+                const double cost = d.cost[wing[k].row], away = std::hypot(wing[k].u->x - own[i]->x, wing[k].u->z - own[i]->z);
+                if (best < 0 || cost < best_cost || (cost == best_cost && away < best_away)) best = (int)k, best_cost = cost, best_away = away;
+            }
+            if (best >= 0) fetch[best] = i;
+        }
+    }
+    // What the wing carries and would fetch, and what that can take.
+    double metal = 0.0, reach = 0.0;
+    for (size_t k = 0; k < wing.size(); k++) {
+        const int i = load[k] >= 0 ? load[k] : fetch[k];
+        if (i >= 0) metal += d.cost[own_rows[i]], reach = std::max(reach, (double)d.range[own_rows[i]]);
+    }
+    if (guards || metal <= 0.0) {
+        lift_target = -1;
+    } else if (!acceptable(lift_target, metal, reach)) {
+        lift_target = -1;
+        std::vector<int> at;
+        std::vector<double> ax, az, cv;
+        std::vector<uint8_t> hv;
+        for (int e = 0; e < view.size(); e++)
+            if (view.building[e]) at.push_back(e), ax.push_back(view.x[e]), az.push_back(view.z[e]);
+        cover(ax.data(), az.data(), (int)at.size(), reach, true, cv, hv);
+        int best = -1;
+        double best_worth = 0.0, best_away = 0.0;
+        for (size_t k = 0; k < at.size(); k++) {
+            if (hv[k] || cv[k] > metal / style.commit) continue;
+            const double worth = view.cost[at[k]] * (d.has(enemy_rows[at[k]], ZKS_VALUABLE) ? 4.0 : 1.0);
+            const double away = std::hypot(ax[k] - rally.x, az[k] - rally.z);
+            if (best < 0 || worth > best_worth || (worth == best_worth && away < best_away)) best = (int)k, best_worth = worth, best_away = away;
+        }
+        if (best >= 0) lift_target = view.uid[at[best]];
+    }
+    target = view_of(lift_target);
+    // The loaded that haven't been sent wait for those still fetching, up to WING_WAIT.
+    int held = 0, fetching = 0;
+    for (size_t k = 0; k < wing.size(); k++) {
+        if (wing[k].loaded) held += load[k] >= 0 && ordered_kind[wing[k].u->uid] == K_LOAD;
+        else fetching += target >= 0 && (load[k] >= 0 || fetch[k] >= 0);
+    }
+    if (!(held && fetching)) lift_waiting = NAN;
+    else if (std::isnan(lift_waiting)) lift_waiting = c.seconds;
+    const bool go = !fetching || c.seconds - lift_waiting >= WING_WAIT;
+    for (size_t k = 0; k < wing.size(); k++) {
+        const Rec* u = wing[k].u;
+        const int64_t uid = u->uid;
+        const P2 at{u->x, u->z};
+        if (!wing[k].loaded) {
+            const int i = target >= 0 ? (load[k] >= 0 ? load[k] : fetch[k]) : -1;
+            lift_load[uid] = i >= 0 ? (int32_t)own[i]->uid : -1;
+            if (i < 0) {
+                tell(u, K_MOVE, rally.x, rally.z, -1);      // nothing to fetch: home
+            } else if (ordered_kind[uid] != K_LOAD || ordered_x[uid] != (double)own[i]->uid || (u->flags & zk::UF_IDLE)) {
+                ordered_kind[uid] = (int8_t)K_LOAD;
+                ordered_x[uid] = (double)own[i]->uid;
+                ordered_z[uid] = 0.0;
+                army_out.push_back(order(uid, K_LOAD, own[i]->x, own[i]->z, own[i]->uid));
+            }
+            continue;
+        }
+        if (load[k] < 0) {      // nothing of ours: let go of it
+            army_out.push_back(order(uid, K_DROP, 0.0, 0.0, -1));
+            continue;
+        }
+        const int row = own_rows[load[k]];
+        P2 down;
+        if (target < 0) {       // nowhere to take it: home, and down
+            if (landing(d.move_class[row], rally, at, down)) tell(u, K_UNLOAD, down.x, down.z, -1);
+            else tell(u, K_MOVE, rally.x, rally.z, -1);
+            continue;
+        }
+        if (ordered_kind[uid] == K_LOAD && !go) continue;
+        const P2 goal{view.x[target], view.z[target]};
+        // It flies over and drops its load whatever the fall costs where the load can't be set down, or the sim wouldn't have
+        // it (told to set down and idle), and once that's so it stays so.
+        bool over = !landing(d.move_class[row], goal, at, down);
+        over = over || (ordered_kind[uid] == K_UNLOAD && (u->flags & zk::UF_IDLE) && py_hypot(ordered_x[uid] - down.x, ordered_z[uid] - down.z) <= REORDER);
+        over = over || (ordered_kind[uid] == K_MOVE && py_hypot(ordered_x[uid] - goal.x, ordered_z[uid] - goal.z) <= REORDER);
+        const double ahead = std::hypot(u->vx, u->vz) * c.army_frames;      // how far it flies before the next look
+        if (std::hypot(goal.x - at.x, goal.z - at.z) <= DROP_NEAR + ahead && (over || d.dropped(wing[k].row, row) <= DROP_LOSS)) {
+            ordered_kind[uid] = (int8_t)K_DROP;
+            army_out.push_back(order(uid, K_DROP, 0.0, 0.0, -1));
+        } else if (over) {
+            tell(u, K_MOVE, goal.x, goal.z, -1);
+        } else {
+            tell(u, K_UNLOAD, down.x, down.z, -1);
+        }
+    }
 }
 
 int Seat::nearest(const std::vector<uint8_t>& mask, P2 p, double below) const {

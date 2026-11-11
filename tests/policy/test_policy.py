@@ -330,12 +330,13 @@ def test_stage_2_masks_off_construction(small_map, table):
     assert not run(make_units({"uid": 1}), small_map, table, enabled_kinds=(0, 1)).kind_mask[0, 2:].any()
 
 
-def test_only_finished_ground_combat_units_and_constructors_are_controllable(small_map, table):
+def test_only_finished_fighters_constructors_and_transports_are_controllable(small_map, table):
     units = make_units({"uid": 1, "name": "cloakcon"}, {"uid": 2, "name": "staticmex"}, {"uid": 3, "name": "gunshipraid"},
+                       {"uid": 7, "name": "gunshiptrans"}, {"uid": 8, "name": "staticradar"},
                        {"uid": 4, "flags": rf.IN_LOS | rf.TYPE_KNOWN | rf.BEING_BUILT}, {"uid": 5, "flags": rf.IN_LOS | rf.TYPE_KNOWN | rf.RESERVED},
                        {"uid": 6})
     t = run(units, small_map, table)
-    assert t.controllable == 2 and sorted(t.uids[:2].tolist()) == [1, 6]
+    assert sorted(t.uids[:t.controllable].tolist()) == [1, 3, 6, 7]
 
 
 def test_every_unit_of_every_type_has_a_legal_kind_and_target(small_map, table):

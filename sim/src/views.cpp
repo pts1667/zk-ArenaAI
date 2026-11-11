@@ -95,7 +95,10 @@ void World::update_view(int s) {
         const auto& d = type_of(e);
         // LosHandler.cpp: a cloaked enemy isn't in sight, and unit_stealth.lua keeps it off radar too.  One the reveal rule shows is
         // in everyone's sight (check_reveal).
-        const bool los = sighted[i] != 0 || ((revealed >> side[i]) & 1u) != 0;
+        // What a transport carries is seen when the transport is, and by whoever carries it.
+        const int by = carrier[i];
+        const bool in_view = by < 0 ? sighted[i] != 0 : (side[size_t(by)] == s || sighted[size_t(by)] != 0);
+        const bool los = in_view || ((revealed >> side[i]) & 1u) != 0;
         bool radar = false;
         if (!cloaked[i] && !los)
             for (int o : radar_units) {
@@ -177,7 +180,7 @@ int World::emit_view(int viewer, UnitRecord* out, int cap, float* glob, int comm
         r.x = x[i];
         r.z = z[i];
         const bool water_top = d.move_class == 4 || d.move_class == 5 || (d.flags & ZK_U_FLOATS);   // hovers, ships and what floats ride on the water
-        r.y = (water_top ? surface(*map, x[i], z[i]) : map->height_at(x[i], z[i])) + flight_height(u) + jump_altitude(u);
+        r.y = (water_top ? surface(*map, x[i], z[i]) : map->height_at(x[i], z[i])) + flight_height(u) + (carrier[i] >= 0 ? carried_altitude(u) : jump_altitude(u));
         r.vx = vx[i];
         r.vz = vz[i];
         r.hp_frac = hp[i] / d.hp;
@@ -194,6 +197,8 @@ int World::emit_view(int viewer, UnitRecord* out, int cap, float* glob, int comm
         r.ord_kind = -1;
         if (build[i] < 1.0f) flags |= UF_BEING_BUILT;
         if (stunned(u)) flags |= UF_PARALYZED;
+        // Not of a radar dot or a memory, which show neither.
+        if (knowledge != KNOW_RADAR && knowledge != KNOW_MEMORY) flags |= (carrier[i] >= 0 ? UF_CARRIED : 0) | (cargo[i] >= 0 ? UF_LOADED : 0);
         if (cloaked[i] && side[i] == s) flags |= UF_CLOAKED;     // an ally knows its friends are hidden
         r.flags = uint16_t(flags);
         return r;

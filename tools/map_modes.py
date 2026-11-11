@@ -4,7 +4,7 @@ chicken defense.
 The rules, the user's (2026-11-10), by a map's names and Zero-K's listing rather than by a list of maps, as more maps come:
 * A map whose name begins with one of UNPLAYABLE plays nothing, and stays out of the pool.
 * A chicken map plays chicken games only: one whose name begins with one of CHICKEN_MAPS, or that Zero-K lists for chickens and
-  nothing else.
+  for no other kind of game ("special", its mark for an unusual map, isn't one: Requiem Outpost, a survival outpost, has both).
 * Any other map with two boxes or more is a 1v1 map.  How many a side a team game has, and how many alliances a free-for-all,
   is from Zero-K's list (maps.json's `Modes`, the lobby's map data) where it has the map, else from the boxes: two make a team
   map, more a free-for-all of up to that many.  Zero-K doesn't say how many a side a team map holds, so that's from the map's
@@ -26,7 +26,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 SIDE = 512.0                # elmos in one of a map's size units
 UNPLAYABLE = ("thisspace", "zerowars")      # name prefixes, in lower case
 CHICKEN_MAPS = ("chicken",)
-CHICKEN_LISTING = ("chickens",)             # what Zero-K lists a map made for chickens for, and nothing else
+NO_KIND = ("special",)                      # in Zero-K's listing, a mark for an unusual map rather than a kind of game
 MOST_A_SIDE = 4             # players a side of a team game
 MOST_ALLIANCES = 8          # of a free-for-all: the sim's ZK_MAX_TEAMS
 # Map units² each player of a team game has at least: half what a 1v1 on a 10 x 10 map gives each, so 2 a side there, 3 on
@@ -82,7 +82,7 @@ class Known:
 
     @property
     def chicken_map(self) -> bool:
-        return any(n.lower().startswith(CHICKEN_MAPS) for n in self.names) or (bool(self.listing) and set(self.listing) <= set(CHICKEN_LISTING))
+        return any(n.lower().startswith(CHICKEN_MAPS) for n in self.names) or (set(self.listing or ()) - set(NO_KIND) == {"chickens"})
 
 
 def team_size(area: float, points: int = 1) -> int:

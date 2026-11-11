@@ -50,8 +50,8 @@ a process of its own.  So no two stages load the map pool at once, and each hand
 * **Times** (`full-1`, 2026-11-10): frames 15 minutes, the encoder 74, cloning 6.2 hours (1,528 decisions a second), each round
   25-32 minutes of recording and 18 of fine-tuning, the eval 7.  PPO: see "Speed".
 
-**Until a new encoder exists, run with `--train-encoder`.**  `FEATURE_VERSION` 8 (the raised caps; 7 was 64 players and 8
-allyteams) made every encoder, clone and frame pool unloadable, `full-1`'s among them, so the pipeline has to collect fresh
+**Until a new encoder exists, run with `--train-encoder`.**  `FEATURE_VERSION` 9 (air transports; 8 was the raised caps, 7
+64 players and 8 allyteams) made every encoder, clone and frame pool unloadable, `full-1`'s among them, so the pipeline has to collect fresh
 frames (51 GB at the old caps, by the same recipe) and train an encoder on them.  The scripts changed as well, and play new
 kinds of game, so give `--data` a new directory: the `record` stage fills it.
 

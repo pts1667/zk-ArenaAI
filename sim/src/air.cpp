@@ -99,7 +99,8 @@ bool World::climb_or_land(int u, bool wants_to_go) {
                 a.phase = AIR_LANDING;
                 return false;
             }
-            a.height += std::clamp(d.cruise_height - a.height, -climb, climb);
+            // A transport comes down to what it loads or unloads (transport.cpp).
+            a.height += std::clamp((a.want >= 0.0f ? a.want : d.cruise_height) - a.height, -climb, climb);
             return true;
     }
 }

@@ -314,7 +314,7 @@ def kind_in(kind: torch.Tensor, kinds: tuple[int, ...]) -> torch.Tensor:
 
 def region_legal(b: Batch, scores: torch.Tensor, kind: torch.Tensor) -> torch.Tensor:
     """The region scores, with what each unit's kind can't go to taken out."""
-    reach = kind_in(kind, (rf.JUMP, rf.THROW))[:, :, None]
+    reach = kind_in(kind, fz.REACH_KINDS)[:, :, None]
     legal = torch.where(reach, b.ptr_jump, torch.where((kind == rf.WAIT_AT_BEACON)[:, :, None], b.ptr_wait, b.ptr_region))
     return scores.masked_fill(~legal, ILLEGAL)
 

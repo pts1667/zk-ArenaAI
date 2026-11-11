@@ -23,20 +23,22 @@ except ImportError:         # pragma: no cover - the live bot may run without it
 # rawframe's numbers, written out: numba's cache knows only this file, so it would keep code compiled with numbers since changed
 # elsewhere.  Checked against rawframe on import.
 BEING_BUILT, CLOAKED, PARALYZED, IN_LOS, IDLE, TYPE_KNOWN, DAMAGED, RESERVED, JUMP_READY, PULLING = 1, 2, 4, 8, 16, 32, 64, 128, 256, 512
+CARRIED, LOADED = 1024, 2048
 KNOW_LOS, KNOW_RADAR, KNOW_MEMORY, KNOW_HIDDEN = 0, 1, 2, 3
 KEEP, MOVE, FIGHT, ATTACK_UNIT, ATTACK_GROUND, STOP, MANUAL_FIRE, JUMP, CLOAK_ON, CLOAK_OFF = range(10)
 BUILD, ASSIST, REPAIR, RECLAIM, PRODUCE, RESERVED_KIND = range(10, 16)
 THROW, PUSH, PULL, PLACE_BEACON, WAIT_AT_BEACON = range(16, 21)
-ORDER_SLOTS, KIND_COUNT = 16, 21
-_MIRRORED = ("BEING_BUILT CLOAKED PARALYZED IN_LOS IDLE TYPE_KNOWN DAMAGED RESERVED JUMP_READY PULLING KNOW_LOS KNOW_RADAR KNOW_MEMORY "
+LOAD, UNLOAD, DROP = range(21, 24)
+ORDER_SLOTS, KIND_COUNT = 16, 24
+_MIRRORED = ("BEING_BUILT CLOAKED PARALYZED IN_LOS IDLE TYPE_KNOWN DAMAGED RESERVED JUMP_READY PULLING CARRIED LOADED KNOW_LOS KNOW_RADAR KNOW_MEMORY "
              "KNOW_HIDDEN KEEP MOVE FIGHT ATTACK_UNIT ATTACK_GROUND STOP MANUAL_FIRE JUMP CLOAK_ON CLOAK_OFF BUILD ASSIST REPAIR RECLAIM "
-             "PRODUCE RESERVED_KIND THROW PUSH PULL PLACE_BEACON WAIT_AT_BEACON ORDER_SLOTS KIND_COUNT").split()
+             "PRODUCE RESERVED_KIND THROW PUSH PULL PLACE_BEACON WAIT_AT_BEACON LOAD UNLOAD DROP ORDER_SLOTS KIND_COUNT").split()
 _CHANGED = [name for name in _MIRRORED if globals()[name] != getattr(rf, name)]
 if _CHANGED:
     raise ImportError(f"rawframe's {_CHANGED} changed: update featurize_kernels' copies")
 
 # unit_x after the type stats (whose width, from the catalog, the stats array brings): instance, order memory, rays, summary.
-INSTANCE_COLS = 19
+INSTANCE_COLS = 21
 ORDER_COLS = ORDER_SLOTS + 7
 RAY_COLS = 24
 RAY_CELLS = 12            # 32-elmo steps, to 400 elmos
@@ -47,14 +49,17 @@ ALTITUDE_DEAD_ZONE = 40.0
 PASS_CELL = 16.0          # bundle's, checked there
 
 # The table packed for the kernels (featurize._table_pack): one float matrix and one bool matrix, with these columns.
-T_COST, T_SPEED, T_RANGE, T_DPS_GROUND, T_DPS_AIR, T_MANUAL_RANGE, T_MANUAL_RELOAD, T_JUMP_RANGE, T_THROW_RADIUS, T_THROW_REACH = range(10)
+(T_COST, T_SPEED, T_RANGE, T_DPS_GROUND, T_DPS_AIR, T_MANUAL_RANGE, T_MANUAL_RELOAD, T_JUMP_RANGE, T_THROW_RADIUS, T_THROW_REACH,
+ T_LIFT_LIGHT, T_LIFT_MEDIUM, T_LIFT_HEAVY, T_LIFT_SIZE, T_LOAD_CLASS, T_LOAD_SIZE) = range(16)
 (B_MOBILE, B_AIR, B_ARMED, B_HIT_GROUND, B_HIT_AIR, B_BUILDER, B_FACTORY, B_COMBAT, B_MANUALFIRE, B_JUMP, B_CLOAK, B_SWITCHES,
- B_TELEPORTS, B_BEACON, B_MISSILE, B_LAUNCHER, B_ACTS_IN_PLACE, B_CONSTRUCTOR, B_PRODUCES, B_BUILDS) = range(20)
+ B_TELEPORTS, B_BEACON, B_MISSILE, B_LAUNCHER, B_ACTS_IN_PLACE, B_CONSTRUCTOR, B_PRODUCES, B_BUILDS, B_TRANSPORT) = range(21)
 
 _F0, _F1, _F2, _F4 = np.float32(0.0), np.float32(1.0), np.float32(2.0), np.float32(4.0)
 _F6, _F15, _F30 = np.float32(6.0), np.float32(15.0), np.float32(30.0)
 _F150, _F200, _F300 = np.float32(150.0), np.float32(200.0), np.float32(300.0)
 _F1_5 = np.float32(1.5)
+_STILL = np.float32(0.5)          # elmos a frame: an enemy faster than this can't be picked up (unit_transport_load_unload.lua)
+_AT_ITS_TRANSPORT = np.float32(32.0)      # a carried unit is this near its transport, across: the sim says the same place
 _PASS_CELL = np.float32(PASS_CELL)
 _LEAST_COST = np.float32(LEAST_COST)
 _DEAD_ZONE = np.float32(ALTITUDE_DEAD_ZONE)
@@ -216,8 +221,8 @@ def select(units, row_of_def, tf, tb, player, ally, cap_controllable, cap_units)
         flags = u["flags"]
         mine = u["player"] == player
         fights = tb[r, B_COMBAT] and tb[r, B_MOBILE]
-        can[i] = (mine and (flags & BEING_BUILT) == 0 and (fights or tb[r, B_ACTS_IN_PLACE] or tb[r, B_CONSTRUCTOR])
-                  and not tb[r, B_AIR] and (flags & RESERVED) == 0)
+        can[i] = (mine and (flags & BEING_BUILT) == 0 and (fights or tb[r, B_ACTS_IN_PLACE] or tb[r, B_CONSTRUCTOR] or tb[r, B_TRANSPORT])
+                  and (flags & RESERVED) == 0)
         if can[i] and tb[r, B_MOBILE]:      # a turret isn't where the army is
             goes[ng] = i
             ng += 1
@@ -305,6 +310,15 @@ def _instance_row(u, r, i, stats, tf, height, cell, map_w, map_h, out):
     # A remembered structure's ord_age says how long ago it was seen.
     out[i, at + 17] = np.log1p(_max(u["ord_age"], _F0) / _F30) / _F6 if u["knowledge"] == KNOW_MEMORY else _F0
     out[i, at + 18] = _F1 if (flags & JUMP_READY) != 0 else _F0
+    out[i, at + 19] = _F1 if (flags & CARRIED) != 0 else _F0
+    out[i, at + 20] = _F1 if (flags & LOADED) != 0 else _F0
+
+
+@njit(cache=True)
+def _lifts(tf, me, load):
+    """Whether a transport of row `me` can carry a unit of row `load`: a class it lifts, and a width it takes (tables.py)."""
+    k = np.int64(tf[load, T_LOAD_CLASS])
+    return k > 0 and tf[me, T_LIFT_LIGHT + k - 1] > _F0 and tf[load, T_LOAD_SIZE] <= tf[me, T_LIFT_SIZE]
 
 
 @njit(cache=True)
@@ -346,6 +360,12 @@ def unit_block(units, rows, all_units, stats, tf, tb, move_class, label, height,
     order = np.argsort(aim_uid)
     sorted_uid = aim_uid[order]
 
+    # With a transport of ours among them, what of ours it could pick up is a target too.
+    carries = False
+    for i in range(n):
+        u = units[i]
+        carries = carries or (u["player"] == player and tb[rows[i], B_TRANSPORT] and (u["flags"] & BEING_BUILT) == 0)
+
     rows_p, cols_p = passable.shape
     for i in range(n):
         u = units[i]
@@ -361,8 +381,9 @@ def unit_block(units, rows, all_units, stats, tf, tb, move_class, label, height,
         built = (flags & BEING_BUILT) == 0
         is_own[i] = own
         is_foe[i] = hostile
-        # A target is any other alliance's in sight or on radar, or one of ours to help: being built, or a factory.
-        is_target[i] = (hostile and (u["knowledge"] == KNOW_LOS or u["knowledge"] == KNOW_RADAR)) or (own and (not built or tb[r, B_FACTORY]))
+        # A target is any other alliance's in sight or on radar, or one of ours to help (being built, or a factory) or to carry.
+        loads = carries and built and tf[r, T_LOAD_CLASS] > _F0 and (flags & CARRIED) == 0
+        is_target[i] = (hostile and (u["knowledge"] == KNOW_LOS or u["knowledge"] == KNOW_RADAR)) or (own and (not built or tb[r, B_FACTORY] or loads))
         is_beacon[i] = own and tb[r, B_BEACON] and built
 
         # Order memory.
@@ -498,7 +519,7 @@ def masks(units, rows, region, targets, foes, beacons, features, locked, c, tf, 
     e = len(targets)
     t = len(producible)
     kind = np.zeros((c, KIND_COUNT), np.bool_)
-    ptr_enemy = np.zeros((4, c, e), np.bool_)
+    ptr_enemy = np.zeros((5, c, e), np.bool_)
     ptr_region = np.zeros((c, r), np.bool_)
     ptr_jump = np.zeros((c, r), np.bool_)
     ptr_wait = np.zeros((c, r), np.bool_)
@@ -525,10 +546,17 @@ def masks(units, rows, region, targets, foes, beacons, features, locked, c, tf, 
         flags = u["flags"]
         free = not locked[i]
         mobile, armed = tb[me, B_MOBILE], tb[me, B_ARMED]
-        cls = np.int64(move_class[me])
+        flies = tb[me, B_AIR]
+        cls = np.int64(-1) if flies else np.int64(move_class[me])
         here = np.int64(region[i])
-        # Regions it can walk to, by its class; its own always counts, so a unit always has a legal MOVE.
-        if cls >= 0 and here >= 0:
+        # Regions it can walk to, by its class; its own always counts, so a unit always has a legal MOVE.  What flies goes
+        # anywhere, straight there.
+        if flies and mobile:
+            speed = _max(tf[me, T_SPEED], _F1)
+            for k in range(r):
+                ptr_region[i, k] = True
+                route[i, k] = np.float32(np.hypot(centre[k, 0] - u["x"], centre[k, 1] - u["z"])) / speed
+        elif cls >= 0 and here >= 0:
             speed = _max(tf[me, T_SPEED], _F1)
             for k in range(r):
                 w = walk[cls, here, k]
@@ -541,7 +569,8 @@ def masks(units, rows, region, targets, foes, beacons, features, locked, c, tf, 
         for k in range(r):
             can_go = can_go or ptr_region[i, k]
 
-        any0 = any1 = any2 = any3 = False
+        any0 = any1 = any2 = any3 = any4 = False
+        lifts = tb[me, B_TRANSPORT] and (flags & LOADED) == 0
         for j in range(e):
             tk = targets[j]
             tr = rows[tk]
@@ -561,8 +590,11 @@ def masks(units, rows, region, targets, foes, beacons, features, locked, c, tf, 
                 p2 = not air_target and foe and dist <= tf[me, T_MANUAL_RANGE]
             # ASSIST: a constructor helps build one of ours anywhere (it walks there), or helps a factory with what it makes.
             p3 = tb[me, B_CONSTRUCTOR] and not foe and tk != i
-            ptr_enemy[0, i, j], ptr_enemy[1, i, j], ptr_enemy[2, i, j], ptr_enemy[3, i, j] = p0, p1, p2, p3
-            any0, any1, any2, any3 = any0 or p0, any1 or p1, any2 or p2, any3 or p3
+            # LOAD: a transport with nothing in it, at one of ours it can carry, or at another alliance's in sight that stands still.
+            p4 = (lifts and tk != i and _lifts(tf, me, tr) and (tu["flags"] & (BEING_BUILT | CARRIED)) == 0
+                  and (not foe or (in_los and np.hypot(tu["vx"], tu["vz"]) <= _STILL)))
+            ptr_enemy[0, i, j], ptr_enemy[1, i, j], ptr_enemy[2, i, j], ptr_enemy[3, i, j], ptr_enemy[4, i, j] = p0, p1, p2, p3, p4
+            any0, any1, any2, any3, any4 = any0 or p0, any1 or p1, any2 or p2, any3 or p3, any4 or p4
 
         kind[i, KEEP] = (flags & IDLE) == 0 or not mobile
         kind[i, MOVE] = free and mobile and can_go
@@ -598,6 +630,25 @@ def masks(units, rows, region, targets, foes, beacons, features, locked, c, tf, 
                     can_land = can_land or ptr_jump[i, k]
         kind[i, JUMP] = free and charged and can_land
         kind[i, THROW] = free and throws and can_land
+        # UNLOAD: a loaded transport sets its load down where the load can stand, which goes by the load's class: the carried unit
+        # at its place.  Not among the tokens, any region something can stand in.  DROP lets it fall, whatever else it's doing: the
+        # button's 7 s of reload aren't in the frame, and a drop too soon does nothing.
+        loaded = tb[me, B_TRANSPORT] and (flags & LOADED) != 0
+        can_set = False
+        if loaded:
+            load_cls = np.int64(-1)
+            for j in range(len(units)):
+                o = units[j]
+                if ((o["flags"] & CARRIED) != 0 and abs(o["x"] - u["x"]) <= _AT_ITS_TRANSPORT and abs(o["z"] - u["z"]) <= _AT_ITS_TRANSPORT
+                        and not tb[rows[j], B_AIR]):
+                    load_cls = np.int64(move_class[rows[j]])
+                    break
+            for k in range(r):
+                ptr_jump[i, k] = ((region_cells[k] >> load_cls) & 1) != 0 if load_cls >= 0 else region_cells[k] != 0
+                can_set = can_set or ptr_jump[i, k]
+        kind[i, LOAD] = free and any4
+        kind[i, UNLOAD] = free and loaded and can_set
+        kind[i, DROP] = loaded
         cloaked = (flags & CLOAKED) != 0
         kind[i, CLOAK_ON] = free and tb[me, B_CLOAK] and not cloaked
         kind[i, CLOAK_OFF] = free and tb[me, B_CLOAK] and cloaked

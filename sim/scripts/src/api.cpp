@@ -170,6 +170,9 @@ void Seat::reset(const Data* d, const Ground* g, const Game& game_, int team_, P
     ordered_x.clear(), ordered_z.clear(), squad_of.clear(), current.clear(), born.clear(), patrol.clear(), helps.clear(), builds.clear();
     reclaims.clear(), still_x.clear(), still_z.clear(), still_since.clear();
     noted.clear(), stamp.clear(), fighter_of.clear(), raider_stamp.clear(), view_stamp.clear(), view_index.clear();
+    lift_load.clear(), lifted.clear(), drop_goal.clear(), own_at.clear();
+    lift_target = -1;
+    lift_waiting = NAN;
     call = 0;
     squad_live.clear(), squad_target.clear(), since_has.clear(), since_t.clear(), since_d.clear();
     next_squad = 0;
@@ -213,6 +216,10 @@ void Seat::grow(int64_t uid) {
     reclaims.resize(n, INT64_MIN);
     builds.resize(n, -1);
     noted.resize(n, 0);
+    lift_load.resize(n, -1);
+    lifted.resize(n, 0);
+    drop_goal.resize(n, -1);
+    own_at.resize(n, 0);
     stamp.resize(n, -1);
     fighter_of.resize(n, 0);
     raider_stamp.resize(n, -1);
@@ -275,7 +282,7 @@ void Seat::run(const Ctx& c) {
     std::sort(seen.begin(), seen.end());
     if (most >= 0) grow(most);
     call++;
-    for (const Rec* u : own) stamp[u->uid] = call;
+    for (size_t i = 0; i < own.size(); i++) stamp[own[i]->uid] = call, own_at[own[i]->uid] = (int32_t)i;
     if (c.army_due) army(c);
     if (c.eco_due) eco(c);
     draws.end_step();
@@ -406,6 +413,13 @@ zks_data* zks_data_new(const zks_data_desc* s) {
     d.n_roles = s->n_roles;
     d.menu.assign(s->menu, s->menu + (size_t)n * s->n_roles);
     d.plate_of.assign(s->plate_of, s->plate_of + n);
+    d.lift.assign(s->lift, s->lift + 3 * (size_t)n);
+    d.load_class.assign(s->load_class, s->load_class + n);
+    d.n_transports = s->n_transports;
+    d.fall_loss.assign(s->fall_loss, s->fall_loss + (size_t)s->n_transports * n);
+    d.transport_of.assign(n, -1);
+    for (int r = 0, k = 0; r < n; r++)
+        if (d.has(r, ZKS_TRANSPORT)) d.transport_of[r] = k < d.n_transports ? k++ : -1;
     std::memcpy(d.role_ids, s->role_ids, sizeof d.role_ids);
     std::memcpy(d.special, s->special, sizeof d.special);
     std::memcpy(d.second_factories, s->second_factories, sizeof d.second_factories);
@@ -516,6 +530,7 @@ int zks_step(zks_runner* r, const zks_step_args* a, zk_order_rec* out, int out_c
         c.seconds = (double)d * a->ticks * a->tick_frames / a->frames_per_second;
         c.army_due = (a->seat_flags[s] & (ZKS_SEAT_ARMY | ZKS_SEAT_ARMY_LABEL)) && d % a->script_every == 0;
         c.eco_due = seat.economy && d % a->eco_every == 0;
+        c.army_frames = (double)a->script_every * a->ticks * a->tick_frames;
         c.groups = a->group_orders != 0 && !(a->seat_flags[s] & ZKS_SEAT_ARMY_LABEL);
         if (a->features) {
             c.features = (const zk::FeatureRecord*)a->features + at * a->feature_cap;

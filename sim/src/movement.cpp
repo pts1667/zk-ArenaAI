@@ -24,6 +24,7 @@ constexpr int ESCAPE_MAX_DOUBLINGS = 3;
 constexpr float AT_CENTRE = 64.0f;             // near enough: a turning circle can keep a unit from getting closer
 constexpr float BACK_ON_LINE = 64.0f;          // MobileCAI.cpp: going back to a fight's line is over this close to it
 constexpr float BEACON_WALK_TO = 150.0f;       // unit_teleporter.lua: BEACON_WAIT_RANGE_MOVE
+constexpr float OVER_ITS_LOAD = 2.0f;          // a transport flies to right over what it loads, or where it unloads
 
 float wrap(float a) {
     while (a > PI) a -= 2.0f * PI;
@@ -140,6 +141,8 @@ bool World::wants_to_walk(int u, float& gx, float& gz) {
     UnitAI& a = ai[size_t(u)];
     a.speed_limit = 0.0f;
     if (jump[size_t(u)].stranded) return false;
+    // A transport of its own allyteam is about to pick it up: it waits (unit_transport_load_unload.lua).
+    if (held_for_lift[size_t(u)] == frame) return false;
     if (a.dodging) {
         gx = a.dodge_x;
         gz = a.dodge_z;
@@ -171,6 +174,25 @@ bool World::wants_to_walk(int u, float& gx, float& gz) {
         gx = goal_x[size_t(u)];
         gz = goal_z[size_t(u)];
         return std::hypot(gx - x[size_t(u)], gz - z[size_t(u)]) >= d.jump_range;
+    }
+    if (o == ZK_ORDER_LOAD) {
+        const int t = order_target[size_t(u)];
+        if (t < 0 || !alive[size_t(t)] || carrier[size_t(t)] >= 0) {
+            order[size_t(u)] = ZK_ORDER_NONE;
+            return false;
+        }
+        gx = x[size_t(t)];
+        gz = z[size_t(t)];
+        return std::hypot(gx - x[size_t(u)], gz - z[size_t(u)]) > OVER_ITS_LOAD;
+    }
+    if (o == ZK_ORDER_UNLOAD) {
+        if (cargo[size_t(u)] < 0) {
+            order[size_t(u)] = ZK_ORDER_NONE;
+            return false;
+        }
+        gx = goal_x[size_t(u)];
+        gz = goal_z[size_t(u)];
+        return std::hypot(gx - x[size_t(u)], gz - z[size_t(u)]) > OVER_ITS_LOAD;
     }
     if (o == ZK_ORDER_WAIT_AT_BEACON) {
         const int t = order_target[size_t(u)];
@@ -279,7 +301,8 @@ void World::move_one(int u) {
     float h = heading[size_t(u)], v = speed[size_t(u)], px = x[size_t(u)], pz = z[size_t(u)];
     // Some units are slower until their main weapon has reloaded (cloakskirm.lua, cloaksnipe.lua).
     const float reload_mult = cooldown[size_t(u) * ZK_MAX_MOUNTS] > 0.0f ? d.reload_move_penalty : 1.0f;
-    const float slow_mult = (1.0f - slow_now(u)) * reload_mult;
+    // A loaded transport is slower, by its load's class (unit_transport_speed.lua).
+    const float slow_mult = (1.0f - slow_now(u)) * reload_mult * loaded_speed(u);
     const float speed_limit = ai[size_t(u)].speed_limit;
     int& wait = order_wait[size_t(u)];
     int& lag = order_lag[size_t(u)];
@@ -292,6 +315,9 @@ void World::move_one(int u) {
     // A gunship goes up before it goes anywhere, and one that lands does when it has nothing to do (air.cpp).
     const bool flies = (d.flags & ZK_U_AIR) != 0;
     const bool busy = walking || order[size_t(u)] != ZK_ORDER_NONE || ai[size_t(u)].chasing >= 0 || !(d.flags & ZK_U_LANDS);
+    // A transport coming to its load, or to where it sets it down, flies straight there whichever way it faces, as the engine's
+    // hovering aircraft do (HoverAirMoveType).  Turning as it goes, as the rest here do, it would circle what lies inside its turn.
+    const bool straight = flies && (order[size_t(u)] == ZK_ORDER_LOAD || order[size_t(u)] == ZK_ORDER_UNLOAD);
     for (int f = 0; f < ZK_TICK_FRAMES; ++f) {
         if (flies && !climb_or_land(u, busy)) {
             v = 0.0f;
@@ -306,8 +332,8 @@ void World::move_one(int u) {
         // What flies comes to a stop at its goal, rather than getting there at full speed and coming back.
         if (cls < 0 && walking) top = std::min(top, std::sqrt(2.0f * d.brake * std::hypot(gx - px, gz - pz)));
         const float diff = (go || !walking) ? wrap(wanted - h) : 0.0f;
-        const float limit = std::fabs(diff) > SLOW_TURN_ANGLE ? std::min(top, d.slow_turn_speed) : top;
-        h = wrap(h + std::clamp(diff, -d.turn_rate, d.turn_rate));
+        const float limit = !straight && std::fabs(diff) > SLOW_TURN_ANGLE ? std::min(top, d.slow_turn_speed) : top;
+        h = straight ? wanted : wrap(h + std::clamp(diff, -d.turn_rate, d.turn_rate));
         v += std::clamp(limit - v, -d.brake, d.accel);
         sin_h = std::sin(h);
         cos_h = std::cos(h);
@@ -342,6 +368,14 @@ void World::move_one(int u) {
     z[size_t(u)] = pz;
     heading[size_t(u)] = h;
     speed[size_t(u)] = v;
+    // What it carries is where it is, going as it goes.
+    if (const int c = cargo[size_t(u)]; c >= 0) {
+        x[size_t(c)] = px;
+        z[size_t(c)] = pz;
+        vx[size_t(c)] = vx[size_t(u)];
+        vz[size_t(c)] = vz[size_t(u)];
+        speed[size_t(c)] = v;
+    }
 }
 
 void World::separate() {
@@ -349,7 +383,7 @@ void World::separate() {
         const int u = live[k];
         if (!alive[size_t(u)]) continue;
         const auto& d = type_of(u);
-        if (!(d.flags & ZK_U_MOBILE) || (d.flags & ZK_U_AIR) || jump[size_t(u)].flying) continue;
+        if (!(d.flags & ZK_U_MOBILE) || (d.flags & ZK_U_AIR) || jump[size_t(u)].flying || carrier[size_t(u)] >= 0) continue;
         float push_x = 0.0f, push_z = 0.0f;
         // Nothing can reach further than this, so what's further needn't be looked at.
         const float widest = d.footprint_radius + cat_max_footprint, widest2 = widest * widest;
@@ -380,7 +414,7 @@ void World::separate() {
 
 void World::move_units() {
     for (size_t k = 0, n = live.size(); k < n; ++k)
-        if (const int u = live[k]; alive[size_t(u)] && (type_of(u).flags & ZK_U_MOBILE)) {
+        if (const int u = live[k]; alive[size_t(u)] && (type_of(u).flags & ZK_U_MOBILE) && carrier[size_t(u)] < 0) {
             if (type_of(u).flags & ZK_U_PLANE)
                 fly_plane(u);
             else

@@ -167,6 +167,25 @@ def test_a_start_is_in_its_box_on_ground_a_factory_could_use():
                 assert x % se.START_GRID == 0.0 and z % se.START_GRID == 0.0
 
 
+def test_a_start_point_its_commander_cannot_stand_on_becomes_the_nearest_place_in_the_box_with_room():
+    """Esker Creek's start points are on a ridge only spiders climb.  Here, Agalta's first with a ridge made round it."""
+    import dataclasses
+    _, bundle, facts = se.pool()[0]
+    box, amph, spider = facts.layouts[0][0], se.bd.MOVE_CLASSES.index("amph"), se.bd.MOVE_CLASSES.index("spider")
+    x, z = box.point
+    assert box.at_point(bundle, box.point, amph) == box.point
+    passable = bundle.passable.copy()
+    i, j = int(z / se.bd.PASS_CELL), int(x / se.bd.PASS_CELL)
+    passable[i - 6:i + 7, j - 6:j + 7] = 1 << spider         # about 100 elmos each way
+    ridge = dataclasses.replace(bundle, passable=passable)
+    moved = box.at_point(ridge, box.point, amph)
+    assert _in_box(box, *moved) and po.is_buildable(ridge, *moved, se.START_ROOM)
+    assert 100.0 < np.hypot(moved[0] - x, moved[1] - z) < 100.0 + se.START_ROOM + 2 * se.START_GRID      # just off the ridge
+    assert box.at_point(ridge, box.point, spider) == box.point and box.at_point(ridge, box.point, None) == box.point
+    rng = np.random.default_rng(1)
+    assert moved in {box.pick(rng, ridge, amph) for _ in range(20)} and box.picks(rng, ridge, 1, amph) == [moved]
+
+
 def _near_box(box: se.StartBox, x: float, z: float) -> bool:
     """The env's starts are 32-bit floats by now."""
     return np.hypot(x - box.point[0], z - box.point[1]) < 1.0 or any(se._inside(polygon, x, z) for polygon in box.polygons)
@@ -638,6 +657,18 @@ def test_a_chicken_game_starts_its_players_in_one_box_and_the_chickens_after_the
         assert len({next(i for i, box in enumerate(layout) if _near_box(box, float(x), float(z))) for x, z in starts}) == 1
     seats = [g * 5 + t for g in range(2) for t in range(int(env.n_teams[g]) - 1)]
     assert env.policy_seats() == seats == env.policy_seats_to_act()
+
+
+def test_on_a_chicken_map_the_players_take_its_first_box_which_is_theirs():
+    import dataclasses
+    world, bundle, facts = se.pool()[0]
+    chicken_map = dataclasses.replace(facts, modes={"1v1": False, "teams": 0, "ffa": 0, "chickens": True, "chickens_or_teams": True})
+    env = se.SimEnv(8, 4, ["mirror"], threads=2, maps=[(world, bundle, chicken_map)], kinds={"chicken": 1.0})
+    env.begin()
+    first = [layout[0] for layout in facts.layouts]
+    for g in range(8):
+        starts = env.starts[g, :2 * (int(env.n_teams[g]) - 1)].reshape(-1, 2)
+        assert all(any(_near_box(box, float(x), float(z)) for box in first) for x, z in starts), g
 
 
 def test_a_chicken_game_is_won_when_the_queen_dies_and_until_then_its_chickens_are_in_with_no_unit_at_all():

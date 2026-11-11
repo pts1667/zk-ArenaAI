@@ -191,6 +191,7 @@ def test_a_map_named_for_chickens_or_made_for_them_plays_chicken_games_only_what
     chickens = _modes(False, 0, 0, True)
     assert _of(2, 96.0, ["chickens"]) == _of(4, 96.0, None, names=("chicken_nuggets_v5",)) == chickens
     assert _of(1, 96.0, ["1v1", "teams"], names=("x", "Chicken Coop v2")) == chickens
+    assert _of(2, 288.0, ["chickens", "special"]) == chickens and _of(2, 256.0, ["special"]) == _modes(True, 0, 0)
     # Listed for chickens among other things, it plays those too.
     assert _of(2, 196.0, ["1v1", "teams", "chickens"]) == {**_modes(True, 4, 0), "chickens": True}
 

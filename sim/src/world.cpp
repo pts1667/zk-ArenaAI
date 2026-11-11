@@ -150,6 +150,11 @@ int World::add(int t, int owner, float px, float pz, float head, float hp_frac, 
     low_power.push_back(d.needed_link > 0.0f ? 1 : 0);     // until the first look at the grids
     pulling.push_back(0);
     wait_since.push_back(-1);
+    carrier.push_back(-1);
+    cargo.push_back(-1);
+    drop_ready.push_back(0);
+    held_for_lift.push_back(-1);
+    if (d.lift_light > 0.0f || d.lift_medium > 0.0f || d.lift_heavy > 0.0f) transports.push_back(u);
     if (d.throw_radius > 0.0f) throwers.push_back(u);
     if (d.teleport_rate > 0.0f) teleporters.push_back(Teleporter{u});
     if (d.drop_weapon >= 0) droppers.push_back(u);
@@ -241,6 +246,13 @@ void World::order_unit(int u, int kind, float gx, float gz, int target) {
         pulling[size_t(u)] = target == 0;
         return;
     }
+    if (kind == ZK_ORDER_DROP) {
+        drop_cargo(u);
+        return;
+    }
+    // A transport with room, and something it can lift that nothing carries; or one with a load, and a place that load can stand.
+    if (kind == ZK_ORDER_LOAD && (target < 0 || target >= count() || !alive[size_t(target)] || cargo[size_t(u)] >= 0 || carrier[size_t(target)] >= 0 || !can_lift(u, target))) return;
+    if (kind == ZK_ORDER_UNLOAD && (cargo[size_t(u)] < 0 || !can_land_at(cargo[size_t(u)], gx, gz))) return;
     if (kind == ZK_ORDER_PLACE_BEACON && d.teleport_rate <= 0.0f) return;
     if (kind == ZK_ORDER_WAIT_AT_BEACON) {
         // Either the beacon or who it belongs to.  Nothing that stands still can go, nor anything to another allyteam's.
@@ -285,12 +297,14 @@ void World::order_unit(int u, int kind, float gx, float gz, int target) {
         try_jump(u);
     }
     // The net has kinds for what it can tell a unit to do, and these aren't among them: it sees a unit going somewhere.
-    mem_kind[size_t(u)] = kind == ZK_ORDER_PLACE_BEACON || kind == ZK_ORDER_WAIT_AT_BEACON ? int(ZK_ORDER_MOVE) : kind;
+    const bool goes = kind == ZK_ORDER_PLACE_BEACON || kind == ZK_ORDER_WAIT_AT_BEACON || kind == ZK_ORDER_LOAD || kind == ZK_ORDER_UNLOAD;
+    mem_kind[size_t(u)] = goes ? int(ZK_ORDER_MOVE) : kind;
     mem_frame[size_t(u)] = frame;
     // A build's target is a type, an assist's is one of ours and a reclaim's is a feature: none is what the net means by an aim.
-    mem_target[size_t(u)] = kind == ZK_ORDER_BUILD || kind == ZK_ORDER_ASSIST || kind == ZK_ORDER_RECLAIM || kind == ZK_ORDER_WAIT_AT_BEACON ? -1 : target;
-    mem_x[size_t(u)] = gx;
-    mem_z[size_t(u)] = gz;
+    mem_target[size_t(u)] = kind == ZK_ORDER_BUILD || kind == ZK_ORDER_ASSIST || kind == ZK_ORDER_RECLAIM || kind == ZK_ORDER_WAIT_AT_BEACON || kind == ZK_ORDER_LOAD ? -1 : target;
+    // What it is to load is where it goes.
+    mem_x[size_t(u)] = kind == ZK_ORDER_LOAD ? x[size_t(target)] : gx;
+    mem_z[size_t(u)] = kind == ZK_ORDER_LOAD ? z[size_t(target)] : gz;
     // Battery: a plain move order stops the unit until its next slow update.  A fight order doesn't.
     if (kind == ZK_ORDER_MOVE) {
         const int until = (SLOW_UPDATE_PHASE + u - frame) % SLOW_UPDATE_FRAMES;
@@ -332,6 +346,7 @@ void World::tick() {
             update_teleporters();
             update_jumps();
             update_air();
+            update_transports();
         }
         move_units();
     }
@@ -378,6 +393,13 @@ void World::check_reveal() {
 void World::died(int u) {
     alive[size_t(u)] = 0;
     fallen.push_back(u);
+    // A dead transport lets its load fall from where it was, as its script does when it crashes (ForceDropUnit); and a dead
+    // load leaves its transport empty.
+    if (cargo[size_t(u)] >= 0) let_go(u, true);
+    if (carrier[size_t(u)] >= 0) {
+        cargo[size_t(carrier[size_t(u)])] = -1;
+        carrier[size_t(u)] = -1;
+    }
 }
 
 // The lists by kind lose their dead, keeping their order, when someone has died since they last did.  Not the area cloakers, whose
@@ -387,7 +409,7 @@ void World::drop_the_dead() {
     if (fallen_pruned == fallen.size()) return;
     fallen_pruned = fallen.size();
     const auto dead = [this](int u) { return !alive[size_t(u)]; };
-    for (std::vector<int>* list : {&builders, &earners, &upkeepers, &aircraft, &pads, &personal_cloakers, &burrowers, &jumpers, &throwers, &droppers})
+    for (std::vector<int>* list : {&builders, &earners, &upkeepers, &aircraft, &pads, &personal_cloakers, &burrowers, &jumpers, &throwers, &droppers, &transports})
         list->erase(std::remove_if(list->begin(), list->end(), dead), list->end());
 }
 
@@ -396,11 +418,17 @@ void World::rebuild_grid() {
     std::fill(cell_start.begin(), cell_start.end(), 0);
     unit_key.resize(size_t(count()));
     // The living go on in handle order, and the dead leave the list for good.
-    size_t kept = 0;
+    size_t kept = 0, on_grid = 0;
     for (size_t k = 0; k < live.size(); ++k) {
         const int u = live[k];
         if (!alive[size_t(u)]) continue;
         live[kept++] = u;
+        // What a transport carries is off the grid: nothing that looks around a place finds it (transport.cpp).
+        if (carrier[size_t(u)] >= 0) {
+            unit_key[size_t(u)] = -1;
+            continue;
+        }
+        ++on_grid;
         int gx = int(x[size_t(u)] / GRID_CELL), gz = int(z[size_t(u)] / GRID_CELL);
         gx = gx < 0 ? 0 : (gx >= grid_cols ? grid_cols - 1 : gx);
         gz = gz < 0 ? 0 : (gz >= grid_rows ? grid_rows - 1 : gz);
@@ -413,10 +441,10 @@ void World::rebuild_grid() {
     // kept in a register: through memory, each add would wait on the store before it.
     int sum = 0;
     for (int& c : cell_start) c = sum += c;
-    cell_units.resize(kept);
+    cell_units.resize(on_grid);
     for (size_t k = kept; k-- > 0;) {
         const int u = live[k];
-        cell_units[size_t(--cell_start[size_t(unit_key[size_t(u)])])] = u;
+        if (unit_key[size_t(u)] >= 0) cell_units[size_t(--cell_start[size_t(unit_key[size_t(u)])])] = u;
     }
 }
 

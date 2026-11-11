@@ -19,7 +19,7 @@
 extern "C" {
 #endif
 
-#define ZKS_ABI_VERSION 11
+#define ZKS_ABI_VERSION 12
 #define ZKS_MAX_TEAMS 8              /* ZK_MAX_TEAMS: the most teams a game has room for */
 #define ZKS_MOVE_CLASSES 6
 #define ZKS_ROLE_KNOBS 7             /* raid, riot, assault, skirm, arty, aa, snipe: the roles ROLE_ORDER of policy_mix.py has */
@@ -46,7 +46,8 @@ enum {
     ZKS_VALUABLE = 1 << 15,      /* EcoData.valuable */
     ZKS_CONSTRUCTOR = 1 << 16,   /* counted by the mix as a constructor: role "builder" and mobile */
     ZKS_SINGULARITY = 1 << 17,   /* energy of 100 or more: EcoData.finished["singularity"] */
-    ZKS_QUEEN = 1 << 18          /* the chicken queen, in either form (rules.json's chickens: each difficulty's queen and queen_morph) */
+    ZKS_QUEEN = 1 << 18,         /* the chicken queen, in either form (rules.json's chickens: each difficulty's queen and queen_morph) */
+    ZKS_TRANSPORT = 1 << 19      /* tables.transport: it carries units, and isn't one of the army's fighters (army.cpp, "Transports") */
 };
 
 /* What the type table and the scripts' data say, by row.  Row `rows - 1` is the unknown type.  Arrays have `rows` entries
@@ -75,6 +76,12 @@ typedef struct {
     int n_roles;
     const int32_t* menu;            /* rows x n_roles: Mix.menu of a factory row, -1 where there's none */
     const int32_t* plate_of;        /* a factory row's plate row (the catalog's plate_parent, EcoData.plate_of), -1 for none */
+    const float* lift;              /* rows x 3: tables.lift, a transport's speed with a light, a medium and a heavy load as a share
+                                       of its own, 0 for a class it can't lift */
+    const int8_t* load_class;       /* tables.load_class: 1 light, 2 medium, 3 heavy, 0 for what can't be carried */
+    int n_transports;               /* rows with ZKS_TRANSPORT */
+    const float* fall_loss;         /* n_transports x rows: ScriptData.fall_loss, the share of its health a unit loses when this
+                                       transport, of the transports in row order, drops it in flight */
     /* Role indices, -1 where the table has none: raid, riot, assault, skirm, arty, aa, snipe, scout, builder, bomb */
     int32_t role_ids[10];
     /* Special rows, -1 where absent: staticarty, turretantiheavy, staticmissilesilo, staticnuke, energyfusion, energypylon, staticradar */

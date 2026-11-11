@@ -78,7 +78,7 @@ bool World::identified(int s, int t) const {
 
 // LOS or radar, and not cloaked.  Worlds without fog have only the cloak to go by.
 bool World::can_be_aimed_at(int s, int t) const {
-    if (cloaked[size_t(t)]) return false;
+    if (cloaked[size_t(t)] || carrier[size_t(t)] >= 0) return false;     // nor what a transport carries (transport.cpp)
     if (behaviour != ZK_BEHAVIOUR_ORDERS) return true;
     const SideView& v = views[size_t(s)];
     return v.in_los[size_t(t)] || v.in_radar[size_t(t)];

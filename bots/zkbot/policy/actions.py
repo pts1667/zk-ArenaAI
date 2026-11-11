@@ -146,7 +146,7 @@ def decode(decision: Decision, t: fz.Tensors, bundle: Bundle, unit_x: np.ndarray
         elif kind == rf.RECLAIM:
             f = int(decision.place[i])
             order = Order(uid, kind, float(t.feat_pos[f, 0]), float(t.feat_pos[f, 1]), int(t.feat_ids[f]))
-        elif kind in (rf.ATTACK_UNIT, rf.MANUAL_FIRE, rf.ASSIST):
+        elif kind in (rf.ATTACK_UNIT, rf.MANUAL_FIRE, rf.ASSIST, rf.LOAD):
             token = int(t.enemy_tokens[decision.enemy[i]])
             order = Order(uid, kind, float(unit_x[token]), float(unit_z[token]), int(t.uids[token]))
         elif kind == rf.ATTACK_GROUND:
@@ -223,7 +223,7 @@ def encode(orders: list[Order], t: fz.Tensors, bundle: Bundle, unit_x: np.ndarra
             continue
         k = int(o.kind)
         if k in fz.KINDS_WITH_REGION:
-            mask = t.ptr_jump if k in (rf.JUMP, rf.THROW) else t.ptr_wait if k == rf.WAIT_AT_BEACON else t.ptr_region
+            mask = t.ptr_jump if k in fz.REACH_KINDS else t.ptr_wait if k == rf.WAIT_AT_BEACON else t.ptr_region
             x, z = o.x, o.z
             if k == rf.WAIT_AT_BEACON:
                 beacon = token_of.get(int(o.target), -1)
@@ -235,7 +235,7 @@ def encode(orders: list[Order], t: fz.Tensors, bundle: Bundle, unit_x: np.ndarra
             legal = np.repeat(mask[i][:, None], options.shape[1], 1)
             region[i], option = _nearest(options, legal, x, z)
             fine[i] = option if k in fz.KINDS_WITH_FINE else -1
-        elif k in (rf.ATTACK_UNIT, rf.MANUAL_FIRE, rf.ATTACK_GROUND, rf.ASSIST):
+        elif k in fz.ENEMY_POINTER_KINDS:
             pointer = fz.ENEMY_POINTER_KINDS.index(k)
             if k == rf.ATTACK_GROUND:
                 legal = t.ptr_enemy[pointer, i]

@@ -14,7 +14,8 @@ simulator (`sim/`): first by cloning scripted players, then DAgger, then PPO.
 * **Nothing plays in the engine yet.**  `bots/zkbot` hosts the policy: it chooses a commander and sends no commands.  The rules
   bot that was there is at the tag `rules-bot-final` (local only).
 * **In the sim**, every team plays a scripted opening.  The C++ economy script runs their constructors (or the policy does, in a
-  share of PPO games).  The C++ army script, or the policy, runs their fighters, factories, missiles and the Trinity.
+  share of PPO games).  The C++ army script, or the policy, runs their fighters, factories, missiles, the Trinity
+  and air transports.
 * **The sim plays four kinds of game** (the user, 2026-11-10): 1v1s, team games of 2 to 4 a side, free-for-alls of 3 to 8,
   and chicken defense, each on the pool maps that hold it, for up to 80 minutes.  See "Variety" below: it's built and
   tested, and **nothing has been trained on it yet**.
@@ -28,7 +29,7 @@ simulator (`sim/`): first by cloning scripted players, then DAgger, then PPO.
   * DAgger took it to 13% in one round, the second adding nothing.  The stall in expansion stays: at 6 minutes it has about
     half the script's extractors;
   * PPO reached 22-31% test wins by iteration 88 (360,552 decisions), with explained variance 0.94, when the user stopped it.
-    It can't be resumed: its encoder and actor don't load since feature version 8.
+    It can't be resumed: its encoder and actor don't load since feature version 7.
 * **PPO plays as CUDA graphs** (`policy_graphs.py`), optionally with collector processes (`policy_collectors.py`): 158 and 178
   decisions a second against 92 eager.  The GPU is now the limit.  A round's action steps stop at the first cut where every
   decision is done: 6% more with 4 concurrent collectors (186 against 175 from `full-1`'s PPO actor), and no more memory.
@@ -58,13 +59,18 @@ simulator (`sim/`): first by cloning scripted players, then DAgger, then PPO.
 
 The user asked for it before the next whole run.  All of it is in the tree and described in `docs/learned-policy/`:
 
-* **Teams**: the sim, the scripts and the recorder take up to 8 teams in alliances (libzksim ABI 20, libzkscripts ABI 11,
+* **Teams**: the sim, the scripts and the recorder take up to 8 teams in alliances (libzksim ABI 21, libzkscripts ABI 12,
   libzkrecord ABI 2, clone data version 7).  A 1v1 plays bit for bit as it did.  Allies share income, overdrive and overflow.
 * **Kinds of game**: `SimEnv`, the recorder, the clone eval, the trainer and the pipeline all take `--kinds` (default
   `1v1:0.5 teams:0.2 ffa:0.2 chicken:0.1`), `--slots`, `--test-kinds` and `--chicken-difficulties`.  The policy plays team 0
   and scripts play its allies and enemies.  The headline test stays a 1v1.
 * **Maps**: each pool map's `modes` say what it plays (`tools/map_modes.py`); 18 Violet Rampart maps come from a port of
-  the map's own generator (`tools/map_rampart.py`).
+  the map's own generator (`tools/map_rampart.py`).  The pool is 404 maps since 2026-11-11, when 89 of the install's were
+  added: 381 play 1v1s, 332 teams, 64 free-for-alls, 5 chickens only.  THISspace and ZeroWars play nothing, and a map
+  made for chickens plays only them (the user).  01-simulator.md, "Data", lists what's not in the pool and why.
+* **Start points**: where a box's start point is ground the commander can't stand on (Esker Creek, Pools of Ilys, Acidic
+  Quarry: a ridge only spiders climb), the start is the nearest place in the box with room, as Zero-K does.  A commander
+  started on one never moved.
 * **Chicken defense** runs inside the sim (`sim/src/chickens.cpp`, a port of `unit_spawner.lua` at Zero-K's timings), with
   Zero-K's reveal rule and its rule for what keeps a team in the game (`sim/data/rules.json`).  The army script has a
   posture for it.  Four scripted players won at Very Easy and Easy, 1 game in 6 at Normal, none at Hard.
@@ -72,6 +78,17 @@ The user asked for it before the next whole run.  All of it is in the tree and d
   (`--speed-weight` 0.1), and the lead rule (2.5x the value) is drawn per game: 90% of PPO's games at iteration 0, none
   from 100 (`--lead-fade`); tests and recordings keep it, frame collection has it off.
 * **Caps**: a frame gives the policy 1,280 unit tokens, 512 of them controllable, and 512 wrecks (`FEATURE_VERSION` 8).
+* **Air transports** (the user, 2026-11-11; `FEATURE_VERSION` 9, raw frame schema 5):
+  * the sim has the Charon and the Hercules (`sim/src/transport.cpp`): one unit each, by its weight class; LOAD takes one
+    of its own, or anyone's that stands still in sight; UNLOAD sets it down; DROP lets it fall, hurt by its fall (a Jack
+    about a tenth of its health, an Ogre a fifth).  01-simulator.md, "Transports";
+  * the policy has the three kinds (24 in all, 20 in the sim's games), two flags on a unit (129 numbers), and aircraft
+    among its controllable units, which they weren't.  02-policy.md, "Kinds";
+  * the army script keeps a wing (`Seat::lifts`): a plant that can make transports makes one for every two assaults or
+    riots it could carry, up to 4 of a kind; they take the dearest to the enemy's dearest building the wing's metal
+    covers, drop what loses 15% or less to the fall and set the rest down, and each landed unit attacks that building,
+    then the next near it.  None in chicken games.  The scripts have no third factory, so a strider hub and a Hercules
+    never meet in their games.
 * **Frames**: army games of every kind, and hand-built scenarios with allies, several enemies and chickens
   (`frame_data.ScenarioEnv`).
 * **Building placement** follows the engine: the footprint's rectangle on ground level enough for the def, in the opening,
@@ -81,12 +98,16 @@ The user asked for it before the next whole run.  All of it is in the tree and d
 **My choices the user hasn't confirmed** (each a constant, easy to change): the scenario kinds' weights (40% 1v1s, 20%
 each of the rest) and their chicken numbers; a scenario team's 480 units at most; chicken difficulty drawn evenly from
 Very Easy, Easy and Normal, not set from the measurement above; chicken games drawn on team maps too, as Zero-K lists only
-two maps for chickens; the reward zero-sum over alliances; the speed term unfaded by beta.
+two maps for chickens; the reward zero-sum over alliances; the speed term unfaded by beta.  From the transports and the
+maps (2026-11-11): aircraft controllable by the policy (one line in `featurize_kernels.select`); the wing's numbers in
+`sim/scripts/src/army.cpp` (a transport for every 2 loads, 4 of a kind at most, a drop at 15% loss or less, 45 s of
+waiting for the rest of the wing); and Zero-K's "special" mark counting as no kind of game, which makes Requiem Outpost
+a chicken map.
 
-## Invalid since 2026-11-10 (FEATURE_VERSION 8)
+## Invalid since 2026-11-10 (FEATURE_VERSION 7, now 9)
 
 The id tables were resized for free-for-all (version 7: `featurize.MAX_PLAYERS` 64, `MAX_ALLY_TEAMS` 8), then the caps were
-raised (version 8).  So:
+raised (version 8), then air transports came (version 9, 2026-11-11).  Nothing was trained at 7 or 8.  So:
 
 * **no encoder or actor loads**: `runs/full-1`'s among them, and `runs/encoder-big`, every clone, `spo-1`;
 * frame pools were stored featurized, so none is left (`frames/pool4` and `pool5` are deleted; `full-1/frames` is rejected).
@@ -114,13 +135,13 @@ tool that loads an actor needs `--encoder`.
 
   | Path | What |
   |---|---|
-  | `maps/` | the map pool: 115 real (18 of them Violet Rampart) and 200 made-up maps, 23 held out, each with its `modes`.  It was about 7.5 GB in memory at 298 maps |
+  | `maps/` | the map pool: 204 real (18 of them Violet Rampart) and 200 made-up maps, 31 held out, each with its `modes`.  It loads in 61 s to 10.8 GB (14.3 GB after two envs had played on every map) |
   | `maps-old/` | the pool's old Violet Rampart map, set aside |
   | `clone/army-6` | what was cloned: 83,820 script 1v1s with variants, 300.6M decisions, 105 GB, data version 6, with `z.npz` and `sides.npz`.  By the scripts before the economy change |
   | `clone/army-6-test` | about 1,000 games of the same, for `check` and smoke runs |
   | `evals/` | the six closed-loop evals of `clone-7`, `clone-8` and `clone-7s` |
   | `frames/` | encoder frames: only `smoke-run` now (`pool4` and `pool5` deleted) |
-  | `runs/full-1` | the first whole pipeline run: its frames (51 GB), encoder, clone, DAgger games (530 MB) and rounds, evals, PPO (1.4 GB), replays.  None of it loads since feature version 8 |
+  | `runs/full-1` | the first whole pipeline run: its frames (51 GB), encoder, clone, DAgger games (530 MB) and rounds, evals, PPO (1.4 GB), replays.  None of it loads since feature version 7 |
   | `runs/` | every other training run; none of their encoders or actors load.  `ppo-rate`, `ppo-profile`, `ppo-aligned` and `ppo-collectors-*` are scratch timing runs |
   | `dashboard-demo/` | a made-up run directory: earlier runs' logs and 10 replays, for working on the dashboard |
   | `dashboard-cache/` | the dashboard's map pictures and icons, made once |
@@ -178,7 +199,7 @@ report, and the same command resumes it.
 `--encoder` is needed by every tool that loads an actor until `policy_latent.ENCODER` names a new encoder: its default is
 `encoder-big`, which no longer loads.
 
-**The tests** (774 pass, 3 need CUDA and are skipped without it): `pytest.ini` runs them on 8 processes, a file's tests in
+**The tests** (790 pass, 3 need CUDA and are skipped without it): `pytest.ini` runs them on 8 processes, a file's tests in
 one process so that what they share is made once, and `tests/policy/conftest.py` keeps each process's maths to one thread.
 That took the suite from 211 s to about 60 (2026-11-11), with the slowest learning runs cut down and those of paths the
 pipeline doesn't use removed: the variational encoder's fits, checkpoints from before feature version 7, the trainer's
@@ -194,8 +215,8 @@ README.md has the rules for engine games: headless at max speed, windowed only w
 1. **Run the pipeline again whole** (the user starts it): record the scripts' games with the new economy and the new kinds
    of game into a new `--data`, collect frames, train an encoder, clone, DAgger, PPO.  Before it: a small smoke run of the
    whole pipeline hasn't been done since the variety work (only `--dry-run`, the suite, and each stage's own tests), and
-   the unconfirmed choices under "Variety" are the user's to settle.  Check `wsl free -g` first: the pool is bigger, and
-   a sample from late in an 80-minute game takes 1.3 to 2 GB of the card.
+   the unconfirmed choices under "Variety" are the user's to settle.  Check `wsl free -g` first: the pool is 10.8 GB now
+   (it was 7.5), and a sample from late in an 80-minute game takes 1.3 to 2 GB of the card.
 2. **PPO's speed**: with concurrent collectors, training (about 22 s an iteration) is now longer than collecting (12 s).
    In a round's replay the decision itself (encoder, time transformer, critic: 41 ms at 64 decisions) is the bigger part; a
    step is about 1 ms of small kernels, which fusing (`torch.compile` of a step, now the shapes are fixed) could shrink.
@@ -210,7 +231,7 @@ README.md has the rules for engine games: headless at max speed, windowed only w
 
 ## Traps
 
-* **Leftover build directories**: `~/zksim/build` is the one in use (libzksim ABI 20, libzkscripts ABI 11, libzkrecord ABI 2,
+* **Leftover build directories**: `~/zksim/build` is the one in use (libzksim ABI 21, libzkscripts ABI 12, libzkrecord ABI 2,
   rebuilt 2026-11-11).  The `build-*` and `agent*` directories beside it are leftovers of comparisons and of agents' tree
   copies, safe to delete, except `agent-maps-lupa` (above).
 * **Memory**: check `wsl free -g` before a launch.  Never run two jobs that load the map pool at once.  Every GPU trainer caps

@@ -42,6 +42,9 @@ def group_metal(seconds: float) -> float:
 
 
 HURTS_NOT = 4 | 64 | 256       # sim/include/zksim/capi.h ZK_W_PARALYZER, ZK_W_SLOW_ONLY, ZK_W_DISARM_ONLY: weapons that don't take health
+# unit_fall_damage.lua, as the sim has it (abilities.cpp step_skid): a landing faster than SAFE_SPEED elmos a frame costs that much
+# of the unit's mass for each elmo a frame past it, its speed across counting for half.
+FALL_SAFE_SPEED, FALL_DAMAGE_PER_SPEED, FALL_TANGENT = 3.0, 0.6, 0.5
 
 
 class ScriptData:
@@ -96,6 +99,20 @@ class ScriptData:
                         best, most = int(m), hurts
             if best is not None:
                 self.best_missile[int(row)] = best
+        # What Drop Cargo costs a unit, as a share of its health, by the transport that carries it (their rows, in order): the
+        # fall from where it hangs under one in flight, at the speed that one flies with it.  1 for what it can't lift.
+        self.transports = np.flatnonzero(table.transport[:n])
+        self.fall_loss = np.ones((len(self.transports), n), np.float32)
+        for k, t in enumerate(self.transports):
+            carrier = cat.units[self.catalog_row[t]] if self.catalog_row[t] >= 0 else None
+            for row in np.flatnonzero((self.catalog_row[:n] >= 0) & (table.load_class[:n] > 0)):
+                share = float(table.lift[t, int(table.load_class[row]) - 1])
+                if carrier is None or share <= 0.0:
+                    continue
+                load = cat.units[self.catalog_row[row]]
+                down = np.sqrt(2.0 * zksim.GRAVITY * max(0.0, float(carrier["cruise_height"]) - float(load["load_height"])))
+                hit = np.hypot(down, FALL_TANGENT * share * float(carrier["speed"])) - FALL_SAFE_SPEED
+                self.fall_loss[k, row] = min(1.0, max(0.0, hit) * float(load["mass"]) * FALL_DAMAGE_PER_SPEED / float(load["hp"]))
         mobile = table.mobile & table.combat
         self.kitable &= mobile
         self.heavy_riot &= mobile

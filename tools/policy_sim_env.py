@@ -39,7 +39,8 @@ from policy_script import ScriptData  # noqa: E402
 import policy_variants as pv  # noqa: E402
 
 KINDS = (rf.KEEP, rf.MOVE, rf.FIGHT, rf.ATTACK_UNIT, rf.MANUAL_FIRE, rf.JUMP, rf.CLOAK_ON, rf.CLOAK_OFF,
-         rf.PRODUCE, rf.THROW, rf.PUSH, rf.PULL, rf.PLACE_BEACON, rf.WAIT_AT_BEACON, rf.BUILD, rf.ASSIST, rf.RECLAIM)
+         rf.PRODUCE, rf.THROW, rf.PUSH, rf.PULL, rf.PLACE_BEACON, rf.WAIT_AT_BEACON, rf.BUILD, rf.ASSIST, rf.RECLAIM,
+         rf.LOAD, rf.UNLOAD, rf.DROP)
 BUILD_SPREADS = (16.0, 32.0, 64.0, 128.0)     # elmos: how far round a BUILD's point a place is looked for, nearest first
 BUILD_TRIES = 8
 TICKS_PER_DECISION = 3
@@ -63,6 +64,7 @@ AT_THE_START_POINT = 0.5             # of starts: where our bot and a player who
 START_GRID = 32.0                    # elmos: starts snap to this, so that the opening's plans can be kept
 START_ROOM = 48.0                    # elmos of level ground round a start
 START_TRIES = 64
+NEAREST_START = 1024.0               # elmos: how far from a start point nobody can stand on a place is looked for
 SPREAD_CANDIDATES = 16               # places in a box tried for each ally past its start points, the one farthest from the rest kept
 
 # Kinds of game (the user, 2026-11-10), each on the maps whose `modes` hold it.
@@ -110,12 +112,30 @@ class StartBox:
         if not self.points:
             object.__setattr__(self, "points", (self.point,))
 
-    def pick(self, rng: np.random.Generator, bundle: bd.Bundle) -> tuple[float, float]:
-        """A start for the box's one player."""
+    def at_point(self, bundle: bd.Bundle, point: tuple[float, float], move_class: int | None) -> tuple[float, float]:
+        """Where a commander of this move class starts when it's to start at one of the box's points: there, or, if it
+        can't stand there, at the nearest place in the box with room for a base.  Esker Creek's points are on a ridge only
+        spiders climb, and a commander put there never moved (2026-11-11); Zero-K drops it at the nearest spot it can
+        stand on (start_unit_setup.lua, GetClosestValidSpawnSpot).  No class: there."""
+        rows, cols = bundle.passable.shape
+        cell = bundle.passable[min(int(point[1] / bd.PASS_CELL), rows - 1), min(int(point[0] / bd.PASS_CELL), cols - 1)]
+        if move_class is None or (int(cell) >> move_class) & 1:
+            return point
+        gx, gz = (round(v / START_GRID) * START_GRID for v in point)
+        for ring in range(1, int(NEAREST_START / START_GRID) + 1):
+            steps = [k * START_GRID for k in range(-ring, ring + 1)]
+            square = {(gx + dx, gz + dz) for dx in steps for dz in (steps[0], steps[-1])} | {(gx + dx, gz + dz) for dz in steps for dx in (steps[0], steps[-1])}
+            found = [(float(x), float(z)) for x, z in square if any(_inside(polygon, x, z) for polygon in self.polygons) and is_buildable(bundle, x, z, START_ROOM)]
+            if found:
+                return min(found, key=lambda p: (np.hypot(p[0] - point[0], p[1] - point[1]), p))
+        return point
+
+    def pick(self, rng: np.random.Generator, bundle: bd.Bundle, move_class: int | None = None) -> tuple[float, float]:
+        """A start for the box's one player, whose commander is of this move class (`at_point`)."""
         if rng.random() < AT_THE_START_POINT:
-            return self.point
+            return self.at_point(bundle, self.point, move_class)
         place = self._somewhere(rng, bundle)
-        return self.point if place is None else place
+        return self.at_point(bundle, self.point, move_class) if place is None else place
 
     def _somewhere(self, rng: np.random.Generator, bundle: bd.Bundle) -> tuple[float, float] | None:
         """A place inside the box with room for a base, or None if none turned up."""
@@ -128,12 +148,13 @@ class StartBox:
                 return x, z
         return None
 
-    def picks(self, rng: np.random.Generator, bundle: bd.Bundle, n: int) -> list[tuple[float, float]]:
+    def picks(self, rng: np.random.Generator, bundle: bd.Bundle, n: int, move_class: int | None = None) -> list[tuple[float, float]]:
         """Starts for an alliance of n in the box: its start points, drawn among them, where it lists enough; else every point it
-        lists and the rest apart inside it, each the farthest from those before of SPREAD_CANDIDATES places."""
+        lists and the rest apart inside it, each the farthest from those before of SPREAD_CANDIDATES places.  A point is where
+        a commander of this move class would start for it (`at_point`)."""
         if len(self.points) >= n:
-            return [self.points[int(i)] for i in rng.choice(len(self.points), n, replace=False)]
-        out = list(self.points)
+            return [self.at_point(bundle, self.points[int(i)], move_class) for i in rng.choice(len(self.points), n, replace=False)]
+        out = [self.at_point(bundle, p, move_class) for p in self.points]
         while len(out) < n:
             found = [p for p in (self._somewhere(rng, bundle) for _ in range(SPREAD_CANDIDATES)) if p is not None]
             if not found:
@@ -223,6 +244,11 @@ def share_maps(maps: list) -> None:
     _SHARED[id(maps)] = (maps, grounds, data)
 
 
+# An air transport's kinds, the policy's to the sim's and back: their numbers differ.
+_TRANSPORT_ORDERS = {rf.LOAD: zksim.ORDER_LOAD, rf.UNLOAD: zksim.ORDER_UNLOAD, rf.DROP: zksim.ORDER_DROP}
+_TRANSPORT_KINDS = {order: kind for kind, order in _TRANSPORT_ORDERS.items()}
+
+
 def sim_orders(orders: list) -> np.ndarray:
     """The policy's orders as the sim's.  Its kinds up to PRODUCE have the same numbers; a thrower's fire at the ground, and a switch's target, are the sim's own.
     A group order is its unit's, followed by a groups.GROUP_MARK record with the radius as x and the roles as target, as the scripts record theirs:
@@ -240,6 +266,8 @@ def sim_orders(orders: list) -> np.ndarray:
             kind = zksim.ORDER_PLACE_BEACON
         elif kind == rf.WAIT_AT_BEACON:
             kind = zksim.ORDER_WAIT_AT_BEACON
+        elif kind in _TRANSPORT_ORDERS:
+            kind = _TRANSPORT_ORDERS[kind]
         elif kind == rf.PRODUCE or kind == rf.BUILD:
             target = cat.index.get(table.names[target], -1)
         out[i] = (o.uid, kind, o.x, o.z, target)
@@ -285,6 +313,8 @@ def policy_orders(rows: np.ndarray) -> list:
             kind = rf.PLACE_BEACON
         elif kind == zksim.ORDER_WAIT_AT_BEACON:
             kind = rf.WAIT_AT_BEACON
+        elif kind in _TRANSPORT_KINDS:
+            kind = _TRANSPORT_KINDS[kind]
         elif kind == zksim.ORDER_PRODUCE or kind == zksim.ORDER_BUILD:
             target = table.names.index(cat.units[target]["name"])
         out.append(actions.Order(int(o["unit"]), kind, float(o["x"]), float(o["z"]), target))
@@ -491,6 +521,9 @@ class SimEnv:
         self.batch = zksim.Batch(catalog(), games, threads=threads, cap=UNIT_RECORDS, teams=self.slots)
         self.table = tables.table()
         self.script_data = ScriptData(self.table, catalog())
+        # Where a commander can stand, for its start (StartBox.at_point): they're all of one class, amphibious walkers.
+        classes = {int(self.table.move_class[self.script_data.row_of_index(c)]) for c in self.opening.commanders} if self.opening else set()
+        self.commander_class = classes.pop() if len(classes) == 1 else None
         self.eco_data = EcoData(self.table, catalog())
         self.economy = economy
         self.cpp = None         # policy_scripts_cpp.Scripts, which plays the army and economy scripts of every game
@@ -653,20 +686,25 @@ class SimEnv:
     def _draw_starts(self, kind: str, bundle: bd.Bundle, facts: MapFacts, boxes: list[StartBox]) -> tuple[list, list, list[int], np.ndarray]:
         """A game's teams: each one's start, where the others take it to be (`known`) and its alliance; and each player alliance's
         box, as an index.  As Zero-K's "allshuffle": which alliance gets which box is by chance, and on a map with more boxes than
-        alliances some stay empty.  An alliance of one starts as a 1v1's side does; allies at their box's start points, or apart
+        alliances some stay empty.  On a chicken map the players take the first box: it's theirs ("Robot Defenders", with the
+        map's metal; the other is the hive's), and Zero-K doesn't shuffle a game of one player alliance (start_boxes.lua), so
+        that's the one they get.  An alliance of one starts as a 1v1's side does; allies at their box's start points, or apart
         in it (StartBox.picks).  Where the others plan towards is the box's point, or a start point where a team has one of its
         own.  The chickens, last in a chicken game, have no start: their burrows come up away from the players.  Their place,
         which the players' openings and scripts take as the enemy's start, is the map's middle."""
         sizes = self._sizes(kind, facts, boxes)
-        chosen = self.rng.choice(len(boxes), len(sizes), replace=False)
+        if kind == "chicken" and facts.modes.get("chickens"):
+            chosen = np.arange(len(sizes))
+        else:
+            chosen = self.rng.choice(len(boxes), len(sizes), replace=False)
         starts, known, ally_of = [], [], []
         for a, (b, n) in enumerate(zip(chosen, sizes)):
             box = boxes[b]
             if n == 1:
-                starts.append(box.pick(self.rng, bundle))
+                starts.append(box.pick(self.rng, bundle, self.commander_class))
                 known.append(box.point)
             else:
-                for p in box.picks(self.rng, bundle, n):
+                for p in box.picks(self.rng, bundle, n, self.commander_class):
                     starts.append(p)
                     known.append(p if p in box.points else box.point)
             ally_of += [a] * n

@@ -365,6 +365,23 @@ def _heat(custom: dict) -> dict:
             "heat_max_slow": float(custom.get("heat_max_slow") or 0.0), "heat_initial": float(custom.get("heat_initial") or 0.0)}
 
 
+def _transport(u: dict, custom: dict, air: bool, mobile: bool) -> dict:
+    """As an air transport: its speed with a load of each class, as a share of its own (unit_transport_speed.lua), and nothing for
+    a class it can't lift (unit_transport_load_unload.lua: a light transport lifts nothing heavy).  As a load: its class, which
+    unitdefs_post.lua sets by cost, its footprint against the transport's transportSize (CUnit::CanTransport), and how far under
+    the transport it hangs."""
+    lifts = air and bool(u.get("isTransport")) and float(u.get("transportCapacity") or 0.0) > 0.0
+
+    def share(key: str) -> float:
+        return float(custom.get(key) or 1.0) if lifts else 0.0
+    carried = mobile and not air and not u.get("cantBeTransported", True)
+    return {"lift_light": share("transport_speed_light"), "lift_medium": share("transport_speed_medium"),
+            "lift_heavy": 0.0 if custom.get("islighttransport") else share("transport_speed_heavy"),
+            "lift_size": float(u.get("transportSize") or 0.0) * 8.0 if lifts else 0.0,
+            "load_size": u.get("xsize", 2.0) * 4.0, "load_height": float(u.get("height") or 0.0),
+            "load_class": 0 if not carried else 3 if custom.get("requireheavytrans") else 2 if custom.get("requiremediumtrans") else 1}
+
+
 def _unit_record(u: dict, weapon_index: dict[str, int], weapons_by_id: dict[int, dict], records: list[dict],
                  categories: dict[str, float], features: dict[str, dict], features_by_id: dict[int, dict]) -> tuple[dict, bool]:
     mounts = sorted((u.get("weapons") or {}).items(), key=lambda kv: int(kv[0]))
@@ -471,6 +488,7 @@ def _unit_record(u: dict, weapon_index: dict[str, int], weapons_by_id: dict[int,
         "reammo_energy": float(custom.get("reammodrain") or REAMMO_DRAIN) / FRAMES if custom.get("reammoseconds") else 0.0,
         "pad_count": int(custom.get("pad_count") or 1) if custom.get("ispad") else 0,
         "pad_bp": float(custom.get("pad_bp") or PAD_BP) if custom.get("ispad") else 0.0,
+        **_transport(u, custom, air, mobile),
         "name": u["name"], "cost": u["cost"], "hp": u["health"], "speed": speed,
         "accel": u["maxAcc"], "brake": u["maxDec"], "turn_rate": turn, "slow_turn_speed": slow_turn,
         "footprint_radius": footprint, "hit_radius": hit_radius,
@@ -540,7 +558,7 @@ def _link_abilities(units: list[dict], raw_units: dict[str, dict]) -> None:
 def _specials(units: list[dict], weapons: list[dict], raw_units: dict[str, dict]) -> dict:
     """What the policy's masks need to know of the few units that do something other than walk and shoot.  The bot can't read the sim's catalog."""
     by_id = {int(u["id"]): u["name"] for u in raw_units.values()}
-    out: dict = {"throwers": {}, "switches": [], "teleporters": {}, "silos": {}, "plates": {}}
+    out: dict = {"throwers": {}, "switches": [], "teleporters": {}, "silos": {}, "plates": {}, "transports": {}, "loads": {}, "wide_loads": {}}
     for u in units:
         mounts = [weapons[m] for m in u["mount_weapon"]]
         impulses = [w["impulse"] for w in mounts]
@@ -552,8 +570,16 @@ def _specials(units: list[dict], weapons: list[dict], raw_units: dict[str, dict]
             out["teleporters"][u["name"]] = units[u["beacon_type"]]["name"]
         if u["plate_parent"] >= 0:
             out["plates"][u["name"]] = units[u["plate_parent"]]["name"]
+        # An air transport: its speed with each class of load, and the widest it takes.  A load: its class.
+        if u["lift_light"] > 0.0 or u["lift_medium"] > 0.0 or u["lift_heavy"] > 0.0:
+            out["transports"][u["name"]] = {"speed": [u["lift_light"], u["lift_medium"], u["lift_heavy"]], "size": u["lift_size"]}
+        if u["load_class"] > 0:
+            out["loads"][u["name"]] = u["load_class"]
         if u["missile_pads"] > 0:
             out["silos"][u["name"]] = sorted(by_id[int(o)] for o in (raw_units[u["name"]].get("buildOptions") or {}).values())
+    # A load's width is said only where it's too much for some transport.
+    narrowest = min((t["size"] for t in out["transports"].values()), default=0.0)
+    out["wide_loads"] = {u["name"]: u["load_size"] for u in units if u["load_class"] > 0 and u["load_size"] > narrowest}
     return out
 
 

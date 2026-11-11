@@ -139,6 +139,21 @@ class TypeTable:
         self.missile = np.zeros(n, bool)
         self.missile[[row[o] for options in special["silos"].values() for o in options if o in row]] = True
         self.launcher = self.manualfire & ~self.mobile
+        # Air transports, and what each can carry (tools/sim_data.py, `_transport`).  lift: a transport's speed with a light, a
+        # medium and a heavy load, as a share of its own, and 0 for a class it can't lift.  load_class: 1 to 3 for those, 0 for
+        # what can't be carried.  A load's width counts only where it's too much for some transport (lift_size).
+        self.lift, self.lift_size = np.zeros((n, 3), np.float32), np.zeros(n, np.float32)
+        for name, facts in special.get("transports", {}).items():
+            if name in row:
+                self.lift[row[name]], self.lift_size[row[name]] = facts["speed"], facts["size"]
+        self.load_class, self.load_size = np.zeros(n, np.float32), np.zeros(n, np.float32)
+        for name, k in special.get("loads", {}).items():
+            if name in row:
+                self.load_class[row[name]] = k
+        for name, size in special.get("wide_loads", {}).items():
+            if name in row:
+                self.load_size[row[name]] = size
+        self.transport = self.lift.any(axis=1)
         # Those the policy gives orders to though they aren't fighters that walk.
         self.acts_in_place = self.switches | self.produces.any(axis=1) | self.missile | self.launcher
 

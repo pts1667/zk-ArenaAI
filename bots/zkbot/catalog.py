@@ -44,7 +44,7 @@ try:
     with (_HERE / "data" / "specials.json").open("r", encoding="utf8") as _f:
         SPECIALS: dict[str, Any] = json.load(_f)
 except OSError:
-    SPECIALS = {"throwers": {}, "switches": [], "teleporters": {}, "silos": {}, "plates": {}}
+    SPECIALS = {"throwers": {}, "switches": [], "teleporters": {}, "silos": {}, "plates": {}, "transports": {}, "loads": {}, "wide_loads": {}}
 
 COMBAT_ROLES = ("raid", "scout", "riot", "skirm", "assault", "snipe", "arty", "aa", "antiheavy", "bomb")
 

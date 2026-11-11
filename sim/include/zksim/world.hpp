@@ -231,6 +231,7 @@ struct AirState {
     int ammo = 0;                // salvos left, for what has ammo
     int pad = -1;                // the pad it's making for or sits on, or -1
     float rearmed = 0.0f;        // frames of rearming done on the pad
+    float want = -1.0f;          // the height a transport comes down to this tick, to load or unload; negative for its own
 };
 
 // A Djinn and its beacon.
@@ -384,6 +385,12 @@ struct World {
     std::vector<int> droppers;             // what drops a bomb when it goes
     std::vector<AirState> air;
     std::vector<int> aircraft, pads;       // handles of what flies, and of what planes rearm at
+    // Air transports (transport.cpp).  What's carried is out of play: stunned, as the engine has it, off the grid, so that nothing
+    // finds it to shoot or push, and where its transport is.
+    std::vector<int> carrier, cargo;       // the transport that carries it, and what it carries: -1 for none
+    std::vector<int> drop_ready;           // frame from which a transport can drop again
+    std::vector<int> held_for_lift;        // frame a transport of its allyteam, come to pick it up, last had it stand still
+    std::vector<int> transports;
     // Wrecks, by id.  One with nothing left stays in the list, so an id stays good, and leaves the others.
     std::vector<Wreck> wrecks;
     std::vector<int> live_wrecks;
@@ -440,7 +447,13 @@ struct World {
     void team_stats(int team, float* out) const;
     void rebuild_index() { rebuild_grid(); }
     const zk_type_rec& type_of(int u) const { return cat->types[size_t(type[size_t(u)])]; }
-    bool stunned(int u) const { return para[size_t(u)] > 1.0f; }
+    // What's carried is stunned too, as in the engine (CUnit::SetStunned on loading): it does nothing until it's let go.
+    bool stunned(int u) const { return para[size_t(u)] > 1.0f || carrier[size_t(u)] >= 0; }
+    // How far off the ground what's carried hangs.
+    float carried_altitude(int u) const {
+        const float h = air[size_t(carrier[size_t(u)])].height - type_of(u).load_height;
+        return h > 0.0f ? h : 0.0f;
+    }
     bool disarmed(int u) const { return disarm[size_t(u)] > 1.0f; }
     bool power_off(int u) const { return economy_on && low_power[size_t(u)]; }
     const Teleporter* teleporter_of(int u) const;
@@ -593,6 +606,12 @@ private:
     void start_run(int u);
     void drop_shot(int u, int slot, int frame_offset);
     float bomb_fall_frames(int u, const zk_weapon_rec& w, int t) const;
+    void update_transports();
+    bool can_lift(int u, int t) const;
+    float loaded_speed(int u) const;
+    void pick_up(int u, int t);
+    void drop_cargo(int u);
+    void let_go(int u, bool falls);
     void push_from(int u, int source, float impulse);
     void step_skid(int u);
     void step_air_skid(int u, float& px, float& pz);

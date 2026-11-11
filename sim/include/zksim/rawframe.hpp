@@ -5,7 +5,7 @@
 
 namespace zk {
 
-constexpr int RAWFRAME_SCHEMA = 4;
+constexpr int RAWFRAME_SCHEMA = 5;
 
 constexpr int KNOW_LOS = 0;
 constexpr int KNOW_RADAR = 1;
@@ -22,6 +22,8 @@ constexpr int UF_DAMAGED = 64;
 constexpr int UF_RESERVED = 128;
 constexpr int UF_JUMP_READY = 256;
 constexpr int UF_PULLING = 512;
+constexpr int UF_CARRIED = 1024;
+constexpr int UF_LOADED = 2048;
 
 struct UnitRecord {
     int64_t uid;

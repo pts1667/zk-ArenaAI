@@ -479,13 +479,15 @@ void zk_world_get(const void* world, int unit, zk_unit_state* out) {
     {
         const auto& flight = w->jump[u];
         const float bend = 2.0f * flight.at - 1.0f;
-        out->altitude = flight.flying ? (1.0f - bend * bend) * flight.height : w->skid[u].y + w->air[u].height;
+        out->altitude = w->carrier[u] >= 0 ? w->carried_altitude(unit) : flight.flying ? (1.0f - bend * bend) * flight.height : w->skid[u].y + w->air[u].height;
     }
     out->ammo = w->air[u].ammo;
     out->air_state = (w->type_of(unit).flags & ZK_U_AIR) ? w->air[u].phase : 0;
     out->skidding = w->skid[u].on;
     out->low_power = w->power_off(unit);
     out->pulling = w->pulling[u];
+    out->carrier = w->carrier[u];
+    out->cargo = w->cargo[u];
     {
         const Teleporter* t = w->teleporter_of(unit);
         out->deployed = t && t->deployed;

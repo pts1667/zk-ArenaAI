@@ -34,6 +34,10 @@ free-for-alls of up to 8 and chicken defense, each on the maps that hold it (01-
   the 80-minute limit, the speed term and the fading lead rule, frames and recordings of every kind of game, and building
   placement by the engine's rule.  The featurizer's caps were raised with them (`FEATURE_VERSION` 8), so no earlier encoder
   or actor loads: the next pipeline run starts from recording.
+* **Air transports** (2026-11-11, `FEATURE_VERSION` 9), likewise untrained on: the Charon and the Hercules in the sim, three
+  kinds of action for them, and a wing of them in the army script that sets assault units down on the enemy's dearest
+  building it can take (01-simulator.md, "Transports"; 02-policy.md, "Kinds").  Aircraft are the policy's to command too.
+  The map pool is 404 maps.
 * **Not built:** play in the engine.  `bots/zkbot` hosts the policy and sends no commands.  It still needs a CPU forward of the
   encoder and actor, the opening and the economy script on the engine side, and decoded orders sent as commands.
 * **Unvalidated:** the sim's fights.  The replay gate failed and the user waived it (2026-11-05; 01-simulator.md, "Validation").

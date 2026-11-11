@@ -25,10 +25,11 @@ from . import rawframe as rf
 from .bundle import PASS_CELL, Bundle
 from .tables import TYPE_DIM, TypeTable
 
-FEATURE_VERSION = 8          # what a saved encoder or actor was trained to read: raise it with any change to the tensors' meaning
+FEATURE_VERSION = 9          # what a saved encoder or actor was trained to read: raise it with any change to the tensors' meaning
                              # 7: ids sized for free-for-all, 64 players and 8 allyteams, so an unknown id reads 64 and 8 (2026-11-10)
                              # 8: caps raised for long and many-sided games, 1280 units, 512 controllable, 512 features (2026-11-10)
-ENCODER_FEATURE_VERSIONS = (8,)     # those an encoder reads alike
+                             # 9: air transports (two instance columns, LOAD, UNLOAD and DROP), and aircraft controllable (2026-11-11)
+ENCODER_FEATURE_VERSIONS = (9,)     # those an encoder reads alike
 
 # The user's, for long and many-sided games (2026-11-10): an 80-minute 1v1 had 656 records in sight on a side and 609 of its own.
 CAP_CONTROLLABLE, CAP_UNITS, CAP_HIDDEN = 512, 1280, 64
@@ -53,18 +54,20 @@ _KIND_OF_KNOWLEDGE = np.array((TK_SEEN, TK_BLIP, TK_MEMORY, TK_HIDDEN), np.int8)
 
 COMMIT_DECISIONS = 6
 DECISION_FRAMES = 15
-STAGE2_KINDS = (*range(10), rf.PRODUCE, rf.THROW, rf.PUSH, rf.PULL, rf.PLACE_BEACON, rf.WAIT_AT_BEACON)
+STAGE2_KINDS = (*range(10), rf.PRODUCE, rf.THROW, rf.PUSH, rf.PULL, rf.PLACE_BEACON, rf.WAIT_AT_BEACON, rf.LOAD, rf.UNLOAD, rf.DROP)
 
 ECONOMY_KINDS = (rf.BUILD, rf.ASSIST, rf.RECLAIM)      # a constructor's (02-policy.md, "Kinds")
 # A RECLAIM points at one of the feature tokens (wrecks and the like in sight, `feat_ids`), with the same field a BUILD's place has.
 
-# The kinds that point at a target token, in the order of `ptr_enemy`: the first three at an enemy's, ASSIST at one of our own.
-# `enemy_tokens` holds both, so one pointer, with a query per kind, serves them all.
-ENEMY_POINTER_KINDS = (rf.ATTACK_UNIT, rf.ATTACK_GROUND, rf.MANUAL_FIRE, rf.ASSIST)
+# The kinds that point at a target token, in the order of `ptr_enemy`: the first three at an enemy's, ASSIST at one of our own,
+# and a transport's LOAD at either.  `enemy_tokens` holds them all, so one pointer, with a mask per kind, serves every kind.
+ENEMY_POINTER_KINDS = (rf.ATTACK_UNIT, rf.ATTACK_GROUND, rf.MANUAL_FIRE, rf.ASSIST, rf.LOAD)
 FINE_OPTIONS = 9
 # What each kind is told besides itself.  A throw and a jump choose among the same regions: ptr_jump, where this unit's own reach lands.
-KINDS_WITH_REGION = (rf.MOVE, rf.FIGHT, rf.JUMP, rf.THROW, rf.PLACE_BEACON, rf.WAIT_AT_BEACON)
-KINDS_WITH_FINE = (rf.MOVE, rf.FIGHT, rf.JUMP, rf.ATTACK_GROUND, rf.THROW, rf.PLACE_BEACON)
+# A transport's UNLOAD chooses there too (it neither jumps nor throws): where what it carries can stand.
+KINDS_WITH_REGION = (rf.MOVE, rf.FIGHT, rf.JUMP, rf.THROW, rf.PLACE_BEACON, rf.WAIT_AT_BEACON, rf.UNLOAD)
+KINDS_WITH_FINE = (rf.MOVE, rf.FIGHT, rf.JUMP, rf.ATTACK_GROUND, rf.THROW, rf.PLACE_BEACON, rf.UNLOAD)
+REACH_KINDS = (rf.JUMP, rf.THROW, rf.UNLOAD)       # those whose regions are ptr_jump's
 # A BUILD is a type (the produce head) at a place: beside one of our unit tokens or a metal site (`place_tokens`, then the sites),
 # on it or at one of 8 compass points on each ring, north towards the enemy as for fine points; whoever obeys it finds the nearest
 # place there the type fits.  On the economy script's builds this lands p50 19 elmos from its place, 99% within 150 (02-policy.md).
@@ -103,7 +106,8 @@ class Tensors:
     kind_mask: np.ndarray         # C x KIND_COUNT
     ptr_enemy: np.ndarray         # len(ENEMY_POINTER_KINDS) x C x E: legal targets per kind
     ptr_region: np.ndarray        # C x R: where it can walk to
-    ptr_jump: np.ndarray          # C x R: where it can jump or throw to, which can be across what it can't walk
+    ptr_jump: np.ndarray          # C x R: where it can jump or throw to, which can be across what it can't walk; for a loaded
+                                  # transport, where it can set its load down
     ptr_wait: np.ndarray          # C x R: where it can walk to a beacon of ours
     ptr_produce: np.ndarray       # C x T: what it can make, by place in table.producible
     route_bias: np.ndarray        # C x R: walking seconds to each region
@@ -112,7 +116,8 @@ class Tensors:
     gate_x: np.ndarray            # G x GATE_DIM, normalised
     uids: np.ndarray              # U: uid per unit token, -1 for a summary
     enemy_tokens: np.ndarray      # E: unit-token index of each token that can be aimed at (any other alliance's, in sight or on
-                                  # radar) or helped (one of our own being built, or a factory): the targets of ptr_enemy
+                                  # radar), helped (one of our own being built, or a factory) or, with a transport of ours
+                                  # about, carried (one of ours that walks): the targets of ptr_enemy
     north: np.ndarray             # 2: from our army towards the enemy, for fine positions
     region_radius: np.ndarray     # R: half the equivalent radius, for fine positions
     own_beacons: np.ndarray       # B: unit-token index of each finished beacon of ours
@@ -144,7 +149,8 @@ def relative_id(ids: np.ndarray, own: int, count: int) -> np.ndarray:
 # What each pack is made from.  A pack is kept on its table or bundle, and made again if any of these is no longer the object it was
 # made from: a copy (copy.copy) carries the pack, and may have been given arrays of its own.
 _TABLE_SOURCES = attrgetter("row_of_def", "cost", "speed", "range", "dps_ground", "dps_air", "manual_range", "manual_reload", "jump_range",
-                            "throw_radius", "throw_reach", "mobile", "air", "armed", "can_hit_ground", "can_hit_air", "builder", "factory",
+                            "throw_radius", "throw_reach", "lift", "lift_size", "load_class", "load_size", "transport",
+                            "mobile", "air", "armed", "can_hit_ground", "can_hit_air", "builder", "factory",
                             "combat", "manualfire", "jump", "cloak", "switches", "teleports", "beacon", "missile", "launcher",
                             "acts_in_place", "move_class", "stats", "produces", "builds", "producible")
 _BUNDLE_SOURCES = attrgetter("cell", "map_w", "map_h", "passable", "centre", "area", "region_height", "sea", "tags", "access", "shares",
@@ -174,10 +180,10 @@ def _table_pack(table: TypeTable) -> _TablePack:
     if pack is None:
         t = table
         f = np.stack((t.cost, t.speed, t.range, t.dps_ground, t.dps_air, t.manual_range, t.manual_reload, t.jump_range, t.throw_radius,
-                      t.throw_reach), 1).astype(np.float32)
+                      t.throw_reach, t.lift[:, 0], t.lift[:, 1], t.lift[:, 2], t.lift_size, t.load_class, t.load_size), 1).astype(np.float32)
         b = np.stack((t.mobile, t.air, t.armed, t.can_hit_ground, t.can_hit_air, t.builder, t.factory, t.combat, t.manualfire, t.jump,
                       t.cloak, t.switches, t.teleports, t.beacon, t.missile, t.launcher, t.acts_in_place, t.constructor,
-                      t.produces.any(axis=1), t.builds.any(axis=1)), 1)
+                      t.produces.any(axis=1), t.builds.any(axis=1), t.transport), 1)
         c = np.ascontiguousarray
         pack = _TablePack(c(t.row_of_def), c(f), c(b), c(t.move_class), c(t.stats, np.float32), c(t.produces), c(t.builds),
                           c(t.producible, np.int64), _TABLE_SOURCES(t))

@@ -16,6 +16,8 @@ using Rec = zk::UnitRecord;
 
 // Order kinds, as rawframe.py and the sim number them.
 enum { K_MOVE = 1, K_FIGHT = 2, K_ATTACK_UNIT = 3, K_MANUAL_FIRE = 6, K_BUILD = 10, K_ASSIST = 11, K_RECLAIM = 13, K_PRODUCE = 14 };
+// A transport's, as the sim numbers them: rawframe.py's are one less (policy_sim_env.py turns one into the other).
+enum { K_LOAD = ZK_ORDER_LOAD, K_UNLOAD = ZK_ORDER_UNLOAD, K_DROP = ZK_ORDER_DROP };
 // policy_script.py fighter states
 enum { S_NEW = 0, S_WAITING = 1, S_SENT = 2, S_RETREATING = 3 };
 // Roles the scripts tell apart, in ROLE_ORDER first (policy_mix.py)
@@ -56,6 +58,11 @@ struct Data {
     std::vector<int8_t> kind;           // R_* of a row's role, -1 for any other
     std::vector<int8_t> special_of;     // X_* of a row, -1 for none
     std::vector<uint8_t> air_plant;     // a factory whose fighters fly: the army script has its own mix for those
+    std::vector<float> lift;            // rows x 3: a transport's speed with a load of each class, 0 for one it can't lift
+    std::vector<int8_t> load_class;     // 1 light, 2 medium, 3 heavy, 0 for what can't be carried
+    std::vector<int32_t> transport_of;  // a transport's index among the transports, -1 for any other row
+    std::vector<float> fall_loss;       // n_transports x rows
+    int n_transports = 0;
     int n_roles = 0;
     int role_ids[10] = {};
     int special[7] = {};
@@ -74,6 +81,12 @@ struct Data {
         return row_of_def[i];
     }
     bool can_build(int builder, int row) const;
+    // Whether a transport's row lifts a load's, and the share of its health the load would lose dropped from it in flight.
+    bool lifts(int transport, int load) const {
+        const int k = load_class[load];
+        return transport_of[transport] >= 0 && k > 0 && lift[(size_t)transport * 3 + (k - 1)] > 0.0f;
+    }
+    double dropped(int transport, int load) const { return fall_loss[(size_t)transport_of[transport] * rows + load]; }
     int first_extractor_option(int builder) const;
     int menu_of(int factory, int r) const {
         int id = role_ids[r];
@@ -158,6 +171,7 @@ struct Ctx {
     int64_t busy;
     double seconds;
     bool army_due, eco_due;
+    double army_frames = 0.0;    // game frames from one look of the army script to the next
     bool groups;                 // zks_step_args.group_orders
     const zk::FeatureRecord* features = nullptr;   // what the seat sees to reclaim
     int feature_n = 0;
@@ -204,6 +218,10 @@ struct Seat {
     std::vector<int64_t> helps;         // Economy.helps: INT64_MIN when absent
     std::vector<int64_t> reclaims;      // the feature it was last sent to reclaim: INT64_MIN when absent
     std::vector<int32_t> builds;        // the row it was last sent to build, -1 when absent: a frame doesn't say (World::order)
+    std::vector<int32_t> lift_load;     // a transport's load, aboard or to fetch: -1 when absent (Seat::lifts)
+    std::vector<uint8_t> lifted;        // seen carried, until it's seen down again
+    std::vector<int64_t> drop_goal;     // what a unit brought to a target goes for: -1 when absent
+    std::vector<int32_t> own_at;        // index into `own` this call, where `stamp` matches (Seat::lifts)
     std::vector<uint8_t> noted;         // Economy.finished, a bit a category
     std::vector<int32_t> stamp;         // the call that last saw this uid among its own
     std::vector<int32_t> fighter_of;    // index into the call's fighters, where the raider stamp matches
@@ -222,6 +240,9 @@ struct Seat {
     bool has_waiting_since = false;
     double waiting_since = 0.0;
     bool reached_start = false;
+    // Transports: what the wing goes for (-1 for nothing), and since when its loaded ones have waited for the rest.
+    int64_t lift_target = -1;
+    double lift_waiting = NAN;
     // Mix
     std::vector<int32_t> made;
     std::vector<int32_t> made_air;      // the part of made that flies
@@ -271,7 +292,12 @@ struct Seat {
     void observe();
     void births_and_forget();
     void produce(const Ctx& c, double metal_income);
-    int choose(int factory_row, double seconds, int constructors, double metal_income, bool queen_due) const;
+    int choose(int factory_row, double seconds, int constructors, double metal_income, bool queen_due, int transport) const;
+    int transport_due(int factory_row) const;
+    bool load_for_lift(size_t i) const;
+    void lifts(const Ctx& c);
+    bool landing(int move_class, P2 at, P2 from, P2& out) const;
+    bool tell(const Rec* u, int kind, double x, double z, int64_t target);
     void make_view();
     void fight(const Ctx& c, std::vector<Fighter>& f, const std::vector<P2>& extractors);
     P2 guard_goal(const Ctx& c, P2 centre) const;

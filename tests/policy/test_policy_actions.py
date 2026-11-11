@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 from zkbot import catalog, units
-from zkbot.policy import actions, featurize as fz, rawframe as rf
+from zkbot.policy import actions, bundle as bd, featurize as fz, rawframe as rf
 
 from conftest import BLIP, ENEMY, MEMORY, make_frame, make_units
 
@@ -34,7 +34,7 @@ def legal(t, i=0):
 def test_order_memory_keeps_its_width_when_the_policy_gains_kinds():
     """Frames on disk and encoders trained on them have 16 slots."""
     assert rf.ORDER_SLOTS == 16 and rf.KIND_COUNT > rf.ORDER_SLOTS
-    assert fz.UNIT_DIM == 127 and fz.FEATURE_VERSION == 8
+    assert fz.UNIT_DIM == 129 and fz.FEATURE_VERSION == 9
 
 
 def test_the_facts_come_from_the_generated_data(table):
@@ -143,6 +143,64 @@ def test_a_beacon_that_is_not_ours_or_not_finished_is_nowhere_to_wait(small_map,
     assert rf.WAIT_AT_BEACON not in legal(run(make_units(raider, {"uid": 3, "name": "tele_beacon", "side": ENEMY, "x": bx, "z": bz}), small_map, table))
     building = {"uid": 3, "name": "tele_beacon", "x": bx, "z": bz, "flags": PLAIN | rf.BEING_BUILT}
     assert rf.WAIT_AT_BEACON not in legal(run(make_units(raider, building), small_map, table))
+
+
+def _load_targets(t, i):
+    return {int(t.uids[k]) for k in t.enemy_tokens[t.ptr_enemy[fz.ENEMY_POINTER_KINDS.index(rf.LOAD), i]]}
+
+
+def test_a_transport_loads_what_it_can_carry_and_a_loaded_one_sets_it_down_or_drops_it(small_map, table):
+    x, z = (float(v) for v in small_map.centre[0])
+    others = ({"uid": 2, "name": "jumpassault", "x": x + 100.0, "z": z}, {"uid": 3, "name": "jumpsumo", "x": x + 150.0, "z": z},
+              {"uid": 4, "side": ENEMY, "x": x + 200.0, "z": z}, {"uid": 5, "side": ENEMY, "x": x + 250.0, "z": z, "vx": 2.0},
+              {"uid": 6, "side": BLIP, "x": x + 300.0, "z": z}, {"uid": 7, "name": "staticmex", "x": x + 350.0, "z": z},
+              {"uid": 8, "name": "jumpassault", "x": x + 400.0, "z": z, "flags": PLAIN | rf.BEING_BUILT})
+    # A Charon: one of ours of a class it lifts, or an enemy in sight that stands still.  A Hercules lifts the Sumo too.
+    t = run(make_units({"uid": 1, "name": "gunshiptrans", "x": x, "z": z}, *others), small_map, table)
+    i = int(np.flatnonzero(t.uids == 1)[0])
+    assert _load_targets(t, i) == {2, 4}
+    assert rf.LOAD in legal(t, i) and not {rf.UNLOAD, rf.DROP} & legal(t, i) and not t.ptr_jump[i].any()
+    heavy = run(make_units({"uid": 1, "name": "gunshipheavytrans", "x": x, "z": z}, *others), small_map, table)
+    assert _load_targets(heavy, int(np.flatnonzero(heavy.uids == 1)[0])) == {2, 3, 4}
+    # What flies goes to any region, straight there.
+    away = np.hypot(small_map.centre[:, 0] - x, small_map.centre[:, 1] - z)
+    assert t.ptr_region[i].all() and np.allclose(t.route_bias[i], away / table.speed[table.names.index("gunshiptrans")], rtol=1e-5)
+    # With no transport about, none of ours that are finished is a target.
+    without = run(make_units(*others), small_map, table)
+    assert {int(u) for u in without.uids[without.enemy_tokens]} == {4, 5, 6, 8}
+    # Loaded: it can set its load down wherever the load could stand, or drop it; and it loads nothing more.
+    carried = dict(others[0], x=x, flags=PLAIN | rf.CARRIED | rf.PARALYZED)
+    t = run(make_units({"uid": 1, "name": "gunshiptrans", "x": x, "z": z, "flags": PLAIN | rf.LOADED}, carried, *others[1:]), small_map, table)
+    at = {int(u): k for k, u in enumerate(t.uids)}
+    i = at[1]
+    assert {rf.UNLOAD, rf.DROP} <= legal(t, i) and rf.LOAD not in legal(t, i)
+    rows, cols = small_map.passable.shape
+    cells = small_map.passable[np.clip((small_map.centre[:, 1] / bd.PASS_CELL).astype(int), 0, rows - 1),
+                               np.clip((small_map.centre[:, 0] / bd.PASS_CELL).astype(int), 0, cols - 1)]
+    assert np.array_equal(t.ptr_jump[i], (cells >> table.move_class[table.names.index("jumpassault")]) & 1 == 1) and t.ptr_jump[i].any()
+    # Both flags are among a token's columns.
+    assert t.unit_x[i, fz._O - 2:fz._O].tolist() == [0.0, 1.0] and t.unit_x[at[2], fz._O - 2:fz._O].tolist() == [1.0, 0.0]
+
+
+def test_a_transports_orders_decode_and_read_back_as_the_same_choices(small_map, table):
+    x, z = (float(v) for v in small_map.centre[0])
+    load = make_units({"uid": 1, "name": "gunshiptrans", "x": x, "z": z}, {"uid": 2, "name": "cloakraid", "x": x + 100.0, "z": z})
+    full = make_units({"uid": 1, "name": "gunshiptrans", "x": x, "z": z, "flags": PLAIN | rf.LOADED},
+                      {"uid": 2, "name": "cloakraid", "x": x, "z": z, "flags": PLAIN | rf.CARRIED})
+    region = int(np.flatnonzero(run(full, small_map, table).ptr_jump[0])[-1])
+    for units_, chosen, want in ((load, {"kind": [rf.LOAD], "enemy": [0]}, (rf.LOAD, x + 100.0, z, 2)),
+                                 (full, {"kind": [rf.UNLOAD], "region": [region], "fine": [3]}, (rf.UNLOAD, None, None, -1)),
+                                 (full, {"kind": [rf.DROP]}, (rf.DROP, 0.0, 0.0, -1))):
+        t = run(units_, small_map, table)
+        assert int(t.uids[0]) == 1          # the dearer of the two comes first
+        px, pz = actions.world_positions(t, small_map)
+        order, = [o for o in actions.decode(decide(t, **chosen), t, small_map, px, pz) if o.uid == 1]
+        if want[0] == rf.UNLOAD:
+            want = (rf.UNLOAD, *fz.fine_point(t, small_map, region, 3), -1)
+        assert (order.kind, order.target) == (want[0], want[3]) and (order.x, order.z) == pytest.approx(want[1:3], abs=0.5)
+        back, missed = actions.encode([order], t, small_map, px, pz)
+        assert missed == 0 and back.kind[0] == want[0]
+        assert all(getattr(back, name)[0] == values[0] for name, values in chosen.items())
 
 
 def test_kinds_left_out_are_not_legal(small_map, table):
@@ -439,6 +497,40 @@ def test_the_sim_teleports_who_waits_at_the_beacon_the_policy_placed(sim, land, 
     assert came, f"it got {went:.0f} elmos from the Djinn and never came back at once"
 
 
+def test_the_sim_carries_what_the_policy_loads_and_sets_it_down_where_it_says(sim, land, table):
+    _, se = sim
+    game = Game(se, land, ["gunshiptrans", "jumpassault"], table)
+
+    def tell(**chosen):
+        t = game.tensors()
+        i = next(i for i in range(t.controllable) if table.names[t.unit_name[i]] == "gunshiptrans")
+        assert t.kind_mask[i, chosen["kind"]]
+        fields = {name: np.full(t.controllable, rf.KEEP if name == "kind" else -1, np.int64) for name in ("kind", "enemy", "region", "fine")}
+        for name, value in chosen.items():
+            fields[name][i] = value(t) if callable(value) else value
+        x, z = actions.world_positions(t, game.bundle)
+        orders = actions.decode(decide(t, **fields), t, game.bundle, x, z)
+        game.env.give_orders(0, orders)
+        game.env.give_orders(1, [])
+        game.env.step(1.0)
+        return orders[0]
+
+    jack = int(game.of("jumpassault")["uid"][0])
+    tell(kind=rf.LOAD, enemy=lambda t: next(e for e, token in enumerate(t.enemy_tokens) if t.uids[token] == jack))
+    for _ in range(40):
+        if game.of("gunshiptrans")["flags"][0] & rf.LOADED:
+            break
+        game.wait(1)
+    assert game.of("gunshiptrans")["flags"][0] & rf.LOADED and game.of("jumpassault")["flags"][0] & rf.CARRIED
+    order = tell(kind=rf.UNLOAD, region=lambda t: farthest(game, "gunshiptrans", lambda t: t.ptr_jump), fine=0)
+    for _ in range(200):
+        if not game.of("gunshiptrans")["flags"][0] & rf.LOADED:
+            break
+        game.wait(1)
+    down = game.of("jumpassault")[0]
+    assert not down["flags"] & rf.CARRIED and np.hypot(down["x"] - order.x, down["z"] - order.z) < 20.0 and down["hp_frac"] == 1.0
+
+
 def test_the_sim_makes_the_missile_the_policy_chose(sim, land, table):
     _, se = sim
     game = Game(se, land, ["staticmissilesilo"], table)
@@ -574,6 +666,10 @@ def test_every_kind_the_policy_has_is_one_the_sim_obeys(sim):
     zksim = se.zksim
     assert orders["kind"].tolist() == [zksim.ORDER_MANUAL_FIRE, zksim.ORDER_ON_OFF, zksim.ORDER_ON_OFF, zksim.ORDER_PLACE_BEACON, zksim.ORDER_WAIT_AT_BEACON]
     assert orders["target"].tolist() == [4, 1, 0, 4, 4]
+    # A transport's, whose numbers differ on the two sides: there and back, as a script's orders are read for labels.
+    lifts = [actions.Order(3, k, 1.0, 2.0, 4) for k in (rf.LOAD, rf.UNLOAD, rf.DROP)]
+    assert se.sim_orders(lifts)["kind"].tolist() == [zksim.ORDER_LOAD, zksim.ORDER_UNLOAD, zksim.ORDER_DROP]
+    assert se.policy_orders(se.sim_orders(lifts)) == lifts
     table = se.tables.table()
     row = int(table.producible[0])
     produced = se.sim_orders([actions.Order(3, rf.PRODUCE, target=row)])

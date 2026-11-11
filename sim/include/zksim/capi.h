@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define ZK_ABI_VERSION 20
+#define ZK_ABI_VERSION 21
 #define ZK_MAX_MOUNTS 8
 #define ZK_MAX_TEAMS 8     /* players in a game, and so allyteams too */
 #define ZK_ARMOR_CLASSES 5
@@ -136,6 +136,11 @@ typedef struct {
     /* Bombers (unit_bomber_command.lua, unit_refuel_pad_handler.lua): frames to rearm on a pad, and the energy a frame that takes. */
     float reammo_frames, reammo_energy;
     float pad_bp;                /* a pad's repair power for what lands on it */
+    /* Air transports (unit_transport_load_unload.lua, unit_transport_speed.lua).  lift_*: its speed, as a share of its own, while it
+       carries a load of that class, and 0 for a class it can't lift: all three for what isn't a transport.  lift_size: the widest
+       load it takes, as load_size is measured (the engine's transportSize against xsize). */
+    float lift_light, lift_medium, lift_heavy, lift_size;
+    float load_size, load_height;   /* as a load: its footprint, and how far under its transport it hangs (its model's height) */
     int32_t move_state, fire_state;   /* to start with: hold position 0, maneuver 1, roam 2; hold fire 0, return fire 1, fire at will 2 */
     int32_t no_chase;                 /* categories it doesn't go after on its own */
     int32_t bait_level;               /* unit_bait_prevention.lua: 0 shoots at anything */
@@ -152,6 +157,7 @@ typedef struct {
     int32_t pad_count;           /* planes it can rearm at once: an airpad or plane factory's */
     int32_t plate_parent;        /* a factory plate's factory type, or -1: it builds only within its build range of a finished one
                                     of its allyteam (unit_factory_plate.lua) */
+    int32_t load_class;          /* as a load: 0 can't be carried, 1 light, 2 medium, 3 heavy (unitdefs_post.lua, by its cost) */
     int32_t mount_weapon[ZK_MAX_MOUNTS];
     int32_t mount_only[ZK_MAX_MOUNTS];
     int32_t mount_bad[ZK_MAX_MOUNTS];
@@ -187,7 +193,13 @@ enum { ZK_ORDER_NONE = 0, ZK_ORDER_MOVE = 1, ZK_ORDER_FIGHT = 2, ZK_ORDER_ATTACK
        ZK_ORDER_SELF_DESTRUCT = 18,    /* a bomb goes off now, unless it's stunned.  Nothing else does. */
        ZK_ORDER_PLACE_BEACON = 19,     /* x, z: a teleporter stops and makes its beacon there, replacing the one it has.  It deploys whenever it's standing with one. */
        ZK_ORDER_WAIT_AT_BEACON = 20,   /* target: a beacon of its allyteam, or the teleporter it belongs to.  It walks there and waits its turn. */
-       ZK_ORDER_ON_OFF = 21 };         /* target: 0 is off, 1 on.  What has both pulls when off and pushes when on.  Leaves other orders alone. */
+       ZK_ORDER_ON_OFF = 21,           /* target: 0 is off, 1 on.  What has both pulls when off and pushes when on.  Leaves other orders alone. */
+       /* Air transports (transport.cpp). */
+       ZK_ORDER_LOAD = 22,             /* target: a unit it can lift, of any team.  It flies there, comes down and picks it up; one of its
+                                          own allyteam stands still for it, an enemy must be nearly still, in sight and not cloaked. */
+       ZK_ORDER_UNLOAD = 23,           /* x, z: where what it carries can stand.  It flies there, comes down and sets it down unhurt. */
+       ZK_ORDER_DROP = 24 };           /* lets go of what it carries, now, from where it is: it falls, and is hurt as a fall hurts.
+                                          Ready again 7 s later.  Leaves other orders alone. */
 /* ZK_ORDER_MANUAL_FIRE: a target, or for what throws, x, z with a target of -1. */
 
 typedef struct {
@@ -207,6 +219,8 @@ typedef struct {
     int32_t pulling;       /* what has both is pulling */
     int32_t ammo;          /* salvos left, for what has ammo */
     int32_t air_state;     /* aircraft: 0 flying, 1 landed, 2 taking off, 3 landing, 4 on a pad rearming */
+    int32_t carrier;       /* the transport that carries it, or -1 */
+    int32_t cargo;         /* what it carries, or -1 */
 } zk_unit_state;
 
 int zk_abi_version(void);

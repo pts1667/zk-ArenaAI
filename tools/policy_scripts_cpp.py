@@ -28,7 +28,7 @@ import policy_eco as eco  # noqa: E402
 from policy_mix import menu as factory_menu  # noqa: E402
 from policy_variants import ROLES, Variant  # noqa: E402
 
-ABI_VERSION = 11
+ABI_VERSION = 12
 MAX_TEAMS = 8           # ZKS_MAX_TEAMS
 MOVE_CLASSES = 6
 SEAT_ARMY = 1
@@ -40,7 +40,7 @@ SECOND_FACTORIES = ("factoryplane", "factorygunship", "striderhub")      # zks_d
 FINISHED = (eco.CERBERUS, eco.LUCIFER, eco.SILO, eco.NUKE, eco.FUSION, "singularity", "missile")   # zks_eco_stats, after checks
 LOG_WHAT = ("start", "missile at", "nuke at")
 (MOBILE, AIR, ARMED, BUILDER, FACTORY, FIGHTS, REGENERATES, EXTRACTOR, DEFENCE, KITABLE, HEAVY_RIOT, SLOW_HEAVY, MISSILE, COMMANDER,
- STATIC_ARMED, VALUABLE, CONSTRUCTOR, SINGULARITY, QUEEN) = (1 << k for k in range(19))
+ STATIC_ARMED, VALUABLE, CONSTRUCTOR, SINGULARITY, QUEEN, TRANSPORT) = (1 << k for k in range(20))
 
 P = ct.POINTER
 c_f32p, c_f64p, c_i32p, c_i8p, c_i16p, c_u8p, c_u32p = (P(ct.c_float), P(ct.c_double), P(ct.c_int32), P(ct.c_int8), P(ct.c_int16),
@@ -52,7 +52,7 @@ class DataDesc(ct.Structure):
                 ("move_class", c_i8p), ("catalog_row", c_i32p), ("role", c_i32p), ("energy", c_f32p), ("pylon", c_f32p),
                 ("needs_link", c_f32p), ("half_x", c_f32p), ("half_z", c_f32p), ("height_dif", c_f32p), ("footing", c_i32p), ("best_missile", c_i32p),
                 ("generators", c_i32p), ("option_offsets", c_i32p), ("options", c_i32p), ("n_roles", ct.c_int), ("menu", c_i32p),
-                ("plate_of", c_i32p),
+                ("plate_of", c_i32p), ("lift", c_f32p), ("load_class", c_i8p), ("n_transports", ct.c_int), ("fall_loss", c_f32p),
                 ("role_ids", ct.c_int32 * 10), ("special", ct.c_int32 * 7), ("second_factories", ct.c_int32 * 3),
                 ("caretaker", ct.c_int32),
                 ("group_radii", ct.c_double * len(groups.GROUP_RADII)), ("cerberus_reach", ct.c_double),
@@ -156,7 +156,8 @@ class ScriptsData:
         for bit, mask in ((MOBILE, t.mobile), (AIR, t.air), (ARMED, t.armed), (BUILDER, t.builder), (FACTORY, t.factory), (FIGHTS, sd.fights),
                           (REGENERATES, sd.regenerates), (EXTRACTOR, sd.extractor), (DEFENCE, sd.defence), (KITABLE, sd.kitable),
                           (HEAVY_RIOT, sd.heavy_riot), (SLOW_HEAVY, sd.slow_heavy), (MISSILE, ed.missile), (COMMANDER, ed.commander),
-                          (STATIC_ARMED, ed.armed), (VALUABLE, ed.valuable), (SINGULARITY, ed.energy >= 100.0)):
+                          (STATIC_ARMED, ed.armed), (VALUABLE, ed.valuable), (SINGULARITY, ed.energy >= 100.0),
+                          (TRANSPORT, t.transport)):
             bits[np.asarray(mask, bool)[:n]] |= bit
         bits[[r for r in range(n) if sd.role_of[r] == "builder" and t.mobile[r]]] |= CONSTRUCTOR
         # The chicken queen in either form, as rules.json names her for each difficulty.
@@ -195,7 +196,10 @@ class ScriptsData:
             half_z=np.ascontiguousarray(ed.half[:, 1], np.float32), height_dif=height_dif,
             footing=footing, best_missile=best, generators=generators,
             option_offsets=np.array(offsets, np.int32), options=np.array(options + [0], np.int32), menu=menu,
-            plate_of=np.ascontiguousarray(ed.plate_of[:n], np.int32))
+            plate_of=np.ascontiguousarray(ed.plate_of[:n], np.int32), lift=np.ascontiguousarray(t.lift[:n], np.float32),
+            load_class=np.ascontiguousarray(t.load_class[:n], np.int8),
+            fall_loss=np.ascontiguousarray(sd.fall_loss if len(sd.transports) else np.zeros((1, n)), np.float32))
+        assert (sd.transports == np.flatnonzero(bits & TRANSPORT)).all()
         a = self._arrays
         assert tuple(self.roles) == groups.roles()[0], "the policy's group roles are numbered as the scripts' are"
         desc = DataDesc(rows=n, n_def=len(a["row_of_def"]), row_of_def=_ptr(a["row_of_def"], c_i32p), bits=_ptr(bits, c_u32p),
@@ -206,7 +210,8 @@ class ScriptsData:
                         footing=_ptr(footing, c_i32p), best_missile=_ptr(best, c_i32p),
                         generators=_ptr(generators, c_i32p), option_offsets=_ptr(a["option_offsets"], c_i32p),
                         options=_ptr(a["options"], c_i32p), n_roles=len(self.roles), menu=_ptr(menu, c_i32p),
-                        plate_of=_ptr(a["plate_of"], c_i32p),
+                        plate_of=_ptr(a["plate_of"], c_i32p), lift=_ptr(a["lift"], c_f32p), load_class=_ptr(a["load_class"], c_i8p),
+                        n_transports=len(sd.transports), fall_loss=_ptr(a["fall_loss"], c_f32p),
                         cerberus_reach=float(ed.reach.get(eco.CERBERUS, 0.0)), missile_reach=float(ed.missile_reach),
                         spot_half=float(ed.spot_half), n_footings=len(self.footings))
         desc.role_ids[:] = [role_index.get(r, -1) for r in ROLE_NAMES]

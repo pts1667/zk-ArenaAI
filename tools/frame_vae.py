@@ -71,7 +71,7 @@ BESIDE_FURTHEST = 8.0       # in radii: where the places asked about beside a un
 PLACE_SPREAD = (0.005, 2.0) # of one of an answer's places
 # Of a unit's token, what can go in a description: velocity, health, build, flags, a blip's speed, a memory's age.  Not place, altitude, orders, which can aim at places,
 # or rays, which show the ground around it.  Of a wreck's only metal: its others are how far it is from the base and the army.
-UNIT_STATE = (fz._I + 3, fz._I + 19)
+UNIT_STATE = (fz._I + 3, fz._O)
 WRECK_METAL = 2
 
 

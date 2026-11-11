@@ -69,7 +69,7 @@ featurizer").  Tokens come in a fixed order:
 
     controllable units | every other unit, most important first | summaries | regions | sites | features | global
 
-* **Units**: up to 1,280, of which up to 512 are controllable, plus 12 summaries of what the caps left out.  Each has 127 numbers:
+* **Units**: up to 1,280, of which up to 512 are controllable, plus 12 summaries of what the caps left out.  Each has 129 numbers:
   * type stats from the type table;
   * instance state: place, velocity, health, build, flags;
   * its current order and the order's age;
@@ -279,9 +279,9 @@ the batch as if the actions were units.
 ```mermaid
 flowchart TB
     ME["me (each action's anchor)"]
-    K["kind head<br/>linear → 21 kinds<br/>(illegal and keep masked)"]
+    K["kind head<br/>linear → 24 kinds<br/>(illegal and keep masked)"]
     RG["region pointer<br/>(q_region(me) ‖ gain · own code) · region keys<br/>− softplus(route_scale) × route cost"]
-    EN["target pointers, one per kind:<br/>attack unit · attack ground · manual fire · assist<br/>(q_enemy(me) ‖ gain · own code) · target keys"]
+    EN["target pointers, one per kind:<br/>attack unit · attack ground · manual fire · assist · load<br/>(q_enemy(me) ‖ gain · own code) · target keys"]
     FI["fine head<br/>MLP(me ‖ target key) → 9 options"]
     PR["type head<br/>q_type(me) · type keys of producible types<br/>(what factories make and constructors build)"]
     PL["place pointer (build)<br/>(q_place(me) ‖ gain · own code) · keys of<br/>our unit tokens, then the sites"]
@@ -302,7 +302,7 @@ flowchart TB
     GR --> RO
 ```
 
-* **Kind**: one of 21 (02-policy.md, "Kinds"); the sim's games enable 17 with keep (`policy_sim_env.KINDS`).  Never keep: an
+* **Kind**: one of 24 (02-policy.md, "Kinds"); the sim's games enable 20 with keep (`policy_sim_env.KINDS`).  Never keep: an
   action tells its unit something, and a unit no action picks keeps.
 * **Pointers with place-aware keys**: a pointer's query ends in the anchor's own sine code, each band scaled by a gain it chooses
   (`gain_region`, `gain_enemy`).  Its dot product with a key's sine code is then a sum over bands of gain × cos(band × difference
@@ -315,6 +315,8 @@ flowchart TB
   over 187 producible types: 127 made by factories and silos, 60 built.
 * **Assist** is the target pointer's fourth kind: one of our units being built, or a factory (`enemy_tokens` holds those own
   tokens too).
+* **Load** is its fifth, an air transport's: one of our units it can lift, or another alliance's in sight that stands still.
+  **Unload** chooses a region and a fine option as a jump does, over where the load can stand; **drop** chooses nothing.
 * **Place and offset** (build only): the place pointer chooses one of our unit tokens or a site, with the same place-aware keys.
   The offset head then chooses where beside it, from its key: on it, or one of 8 compass points at 64, 128 or 256 elmos, north
   towards the enemy.
@@ -335,9 +337,9 @@ sequenceDiagram
     S-->>P: anchor (done ends the decision)
     H->>S: kind logits (the anchor's kind_mask, keep out)
     S-->>H: kind
-    H->>S: region logits, masked by what the kind may reach<br/>(ptr_region, ptr_jump for jump/throw, ptr_wait)
+    H->>S: region logits, masked by what the kind may reach<br/>(ptr_region, ptr_jump for jump/throw/unload, ptr_wait)
     S-->>H: region (used only by kinds with a region)
-    H->>S: the kind's target logits (attack unit / ground / manual fire / assist)
+    H->>S: the kind's target logits (attack unit / ground / manual fire / assist / load)
     S-->>H: target (used only by those kinds)
     H->>S: fine logits from me ‖ chosen target's key
     S-->>H: fine (used only by kinds with a fine option)
