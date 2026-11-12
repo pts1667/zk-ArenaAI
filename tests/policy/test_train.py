@@ -2,6 +2,7 @@
 between runs, and a short run of the actor on latents (tests/policy/test_latent_actor.py has the actor itself)."""
 from __future__ import annotations
 
+import functools
 import json
 from dataclasses import replace
 from types import SimpleNamespace
@@ -51,7 +52,8 @@ def test_a_minibatch_budgets_its_padded_size(learner):
 
 
 def test_a_minibatch_that_does_not_fit_is_done_in_runs_of_its_segments(learner, monkeypatch):
-    """Each run's loss weighed by its share of the decisions, the gradient is the whole minibatch's; and the budget shrinks."""
+    """Each run's loss weighed by its share of the decisions, the gradient is the whole minibatch's; and the budget shrinks, once
+    in an iteration however many times it runs out, as the iteration's minibatches were planned before."""
     weight = learner.trained[0]
     segments = [pt.Segment([None] * n, None, None, None, np.full(1, v)) for n, v in ((3, 1.0), (5, 2.0), (8, -1.0))]
 
@@ -62,9 +64,10 @@ def test_a_minibatch_that_does_not_fit_is_done_in_runs_of_its_segments(learner, 
         return weight.sum() * sum(len(s.steps) * float(s.names[0]) for s in run) / sum(len(s.steps) for s in run)
     monkeypatch.setattr(learner, "_loss", loss)
     budget, notes = learner.token_budget, []
+    learner.shrunk = False
     try:
-        learner._backward(segments, 0.2, lambda *a: notes.append(a))
-        assert learner.token_budget < budget
+        learner._backward(segments, 0.2, lambda *a: notes.append(a))     # runs out in 1 piece, then in 2, then fits in 3
+        assert learner.token_budget == int(budget * pt.SPLIT_SHRINK)
     finally:
         learner.token_budget = budget
     assert torch.allclose(weight.grad, torch.full_like(weight, (3 * 1.0 + 5 * 2.0 - 8 * 1.0) / 16))
@@ -189,8 +192,10 @@ def _config(encoder_path, **kw) -> pt.Config:
     return pt.Config(**{**base, **kw})
 
 
-def test_a_short_run_trains_leaves_the_encoder_alone_and_goes_on(tmp_path, encoder_path):
-    # Not concurrent, and Muon on the critic: as policy_pipeline runs it.  (Muon on the actor's matrices takes minutes on the CPU.)
+def test_a_short_run_trains_leaves_the_encoder_alone_and_goes_on(tmp_path, encoder_path, monkeypatch):
+    # Not concurrent, and Muon on the critic: as policy_pipeline runs it.  A small critic, as Muon on the CPU took 89 s of the
+    # full one's 110 (2026-11-12), and on the critic only, as on the actor's matrices it takes minutes.
+    monkeypatch.setattr(pm, "Critic", functools.partial(pm.Critic, d=64, layers=1, queries=4))
     cfg = _config(encoder_path, concurrent=False, decisions=60, iteration=30, critic_muon_lr=0.004)
     pt.train(cfg, tmp_path, pt.make_sim, device="cpu")
     rows = [json.loads(line) for line in (tmp_path / "metrics.jsonl").read_text().splitlines()]

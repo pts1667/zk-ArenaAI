@@ -157,7 +157,12 @@ MUON_DECAY = 0.01           # the critic's Muon's weight decay (--critic-muon-lr
 # latents a decision.  On full-2's first segments (2026-11-12), a decision of 165-237 tokens took 14.1-16.7 MiB whether 32 or
 # 384 were trained together, so the actor's part is about 800 tokens' worth.
 DECISION_TOKENS = 800
-SPLIT_SHRINK = 0.9          # the token budget after a minibatch didn't fit
+# The token budget follows the learner's memory: a tenth less after an iteration where a minibatch didn't fit (once, as the
+# iteration's minibatches were all planned before it), and a twentieth more, up to --token-budget, after one whose training
+# peaked under GROW_BELOW of the learner's limit.
+SPLIT_SHRINK = 0.9
+BUDGET_GROW = 1.05
+GROW_BELOW = 0.85
 ACT_PAIRS = 24_000_000      # batch x tokens^2 of one forward pass while playing: its pair table is about 20 bytes a pair
 FLAT_CHUNK = 64             # decisions a data worker featurizes at a time
 # Records past the caps become no tokens.
@@ -454,8 +459,10 @@ class Learner:
         self.decisions = 0
         self.iteration = 0
         self.entropy_coef = {h: ENTROPY_BASE for h in HEADS}
-        self.token_budget = cfg.token_budget        # shrinks by SPLIT_SHRINK each time a minibatch doesn't fit
+        self.token_budget = cfg.token_budget        # SPLIT_SHRINK, BUDGET_GROW
         self.splits = 0
+        self.shrunk = False                         # this iteration
+        self.memory_limit = 0.0                     # what the learner may reserve on the card, if it's on one
         self.self_play = SelfPlay(cfg.self_play_at, cfg.self_play_holds_below, cfg.self_play_per_iteration)
         self.autocast = torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda")
         self.graphs = cfg.graphs and not cfg.concurrent
@@ -463,7 +470,10 @@ class Learner:
         self.ema = self.frozen_player(workers, self.graphs) if cfg.ema > 0.0 else None
         if device == "cuda":
             # It empties its cache at this limit, and fails rather than spills.
-            torch.cuda.set_per_process_memory_fraction(gpu_fraction(cfg.gpu_share, cfg.gpu_runs, torch.cuda.mem_get_info()[1], collector_bytes(cfg)))
+            card = torch.cuda.mem_get_info()[1]
+            fraction = gpu_fraction(cfg.gpu_share, cfg.gpu_runs, card, collector_bytes(cfg))
+            torch.cuda.set_per_process_memory_fraction(fraction)
+            self.memory_limit = fraction * card
 
     @property
     def progress(self) -> float:
@@ -661,7 +671,9 @@ class Learner:
             torch.cuda.empty_cache()
             parts = min(2 * parts, len(batch))
             self.splits += 1
-            self.token_budget = int(self.token_budget * SPLIT_SHRINK)
+            if not self.shrunk:
+                self.shrunk = True
+                self.token_budget = int(self.token_budget * SPLIT_SHRINK)
             print(json.dumps({"split": parts, "decisions": decisions, "token_budget": self.token_budget}), flush=True)
         for a in notes:
             note(*a)
@@ -673,6 +685,9 @@ class Learner:
         p = self.progress
         eps = cfg.epsilon_start + (cfg.epsilon_end - cfg.epsilon_start) * p
         self.set_rates()
+        self.shrunk = False
+        if self.memory_limit:
+            torch.cuda.reset_peak_memory_stats()
         totals: dict[str, float] = {}
         counts: dict[str, float] = {}
 
@@ -693,6 +708,8 @@ class Learner:
                     between()
         out = {k: totals[k] / max(counts[k], 1e-9) for k in totals}
         out.update(token_budget=self.token_budget, splits=self.splits)
+        if self.memory_limit and not self.shrunk and torch.cuda.max_memory_reserved() < GROW_BELOW * self.memory_limit:
+            self.token_budget = min(cfg.token_budget, int(self.token_budget * BUDGET_GROW))
         if self.reference is not None:
             out["kl_weight"] = self.kl_weight
         if self.cfg.clone_weight:

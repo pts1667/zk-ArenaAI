@@ -356,8 +356,12 @@ In a 1v1, for side A against side B at decision t:
   token by `1 + tokens / 1200`, fitted when attention paired every token: frames grew to about 730 tokens by `full-2`'s 18th
   iteration, minibatches fell from 141 decisions to 34, and training from 252 decisions a second to 70, with most of its
   memory unused.  A minibatch that doesn't fit is done again in 2, then 4... runs of its segments, each weighed by its
-  decisions, and the budget shrinks by a tenth (`splits` and `token_budget` in `metrics.jsonl`; `learner_reserved_gb` and
-  `learner_allocated_gb` are each iteration's peaks).
+  decisions.  The budget then shrinks by a tenth, once in the iteration, as its minibatches were all planned before: shrunk at
+  each split, the first restart's went from 260,000 to 112,000 in one iteration, and its minibatches to 80 decisions.  After an
+  iteration without a split whose training peaked under 85% of the learner's limit, it grows by a twentieth, up to
+  `--token-budget`.  In that restart, 260,000 peaked at 4.38 GB at iteration 1 and ran out at iteration 2, and 112,000 peaked
+  at 2.4-2.7 GB: about 1.2 GB of nets, optimizers and copies, and 12.7 KiB a token.  `splits` and `token_budget` are in
+  `metrics.jsonl`, and `learner_reserved_gb` and `learner_allocated_gb` are each iteration's training peaks.
 
 ### From a clone
 
