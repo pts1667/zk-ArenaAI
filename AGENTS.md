@@ -100,8 +100,11 @@ The first whole run on the variety work, started by me while the user slept:
   times for it: shrinking at every split (`ppo-shrink-4`), then 800 a decision, which planned big frames' minibatches too
   big (`ppo-k800-7`, 145-222 decisions a second overall all the same), then at 04:07 as it is now.  Each minibatch's
   memory is logged in `ppo/minibatches.jsonl`, to fit the 200 to.
-* Next (the user, 2026-11-12): 50 iterations of the pipeline's PPO (Adam on the actor), then 50 with Muon on the actor's
-  hidden matrices (`--actor-muon-lr 1.3e-4`, `runs/full-2-actor-muon`), then the real PPO stage with the better of the two.
+* The A/B (the user, 2026-11-12): 50 iterations of the pipeline's PPO with Adam on the actor (04:07-04:49), then 50 with
+  Muon on its hidden matrices (`--actor-muon-lr 1.3e-4`, `runs/full-2-actor-muon`).  Adam won: wins level (tests at 20
+  and 40: 16 of 128 against 14), Muon's KL an iteration twice Adam's and rising, its cloning loss higher, 10% slower
+  (03-training.md, "PPO").  Adam's arm went on as the real PPO stage from its iteration 51, with the budget starting at
+  100,000 (fitted on its 2,042 minibatches) and growing back on what the tensors held.
 
 ## Variety (2026-11-10 and 11): built, tested, not yet trained on
 

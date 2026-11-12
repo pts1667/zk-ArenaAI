@@ -60,10 +60,11 @@ class Config:
     # themselves); it plays better than the weights it follows (Generals.io, 2606.23348).
     ema: float = 0.99
     segment: int = 32
-    # Decisions x (padded tokens + DECISION_TOKENS) in a minibatch, which is what its memory follows: 241 decisions of 480 fit the
-    # learner's 4.6 GB beside 4 collectors (full-2, 2026-11-12).  A step took about 0.5 s whether of 32 decisions or 384, so the
+    # Decisions x (padded tokens + DECISION_TOKENS) in a minibatch, which is what its memory follows: at 4.1 GB a 100,000 at
+    # worst, 100,000 fits the learner's 4.6 beside 4 collectors (full-2, 2026-11-12), where it settled at 85,000-95,000 from
+    # 130,000, which split 12 minibatches in the first iteration.  A step took about 0.5 s whether of 32 decisions or 384, so the
     # bigger the faster.  The most it may be: SPLIT_SHRINK and BUDGET_GROW keep it to what fits.
-    token_budget: int = 130_000
+    token_budget: int = 100_000
     gpu_share: float = 0.85         # of the card all runs on it may hold.  Past the card it spills into shared memory, at a fifth of the speed.
     gpu_runs: int = 1               # trainings sharing the card, each with its part of gpu_share.  The limit is per process, so it must be told.
     empty_cache: bool = True        # hand back what the allocator holds after each iteration
@@ -155,11 +156,13 @@ MUON_DECAY = 0.01           # the critic's Muon's weight decay (--critic-muon-lr
 # What a decision costs in training's memory beside its tokens, in tokens.  On full-2's first segments (2026-11-12), a decision
 # of 165-237 tokens took 14.1-16.7 MiB whether 32 or 384 were trained together, the critic about 14 KiB a token of it; but in
 # its PPO, 241 decisions of about 280 tokens fit where 151 of about 590 and 103 of about 860 didn't, so the rest grows with
-# the tokens too (the actor's reading of the units).  Each minibatch's memory is logged (minibatches.jsonl) to fit it.
+# the tokens too (the actor's reading of the units).  Fitted on the 2,042 minibatches of full-2's 50 iterations with Adam
+# (minibatches.jsonl), memory was 0.52 GB + 9.3 MiB a decision + 30.9 KiB a token, give or take 0.36 GB; the worst (95th
+# percentile) per unit of cost was level between small frames and big at 200: 4.0 and 4.1 GB a 100,000.
 DECISION_TOKENS = 200
 # The token budget follows the learner's memory: a tenth less after an iteration where a minibatch didn't fit (once, as the
 # iteration's minibatches were all planned before it), and a twentieth more, up to --token-budget, after one whose training
-# peaked under GROW_BELOW of the learner's limit.
+# peaked under GROW_BELOW of the learner's limit, in what its tensors held: what the allocator reserves stays near the limit.
 SPLIT_SHRINK = 0.9
 BUDGET_GROW = 1.05
 GROW_BELOW = 0.85
@@ -727,7 +730,7 @@ class Learner:
         if log is not None:
             log.close()
             out.update(learner_allocated_gb=peaks[0] / 2**30, learner_reserved_gb=peaks[1] / 2**30)     # training's peaks
-            if not self.shrunk and peaks[1] < GROW_BELOW * self.memory_limit:
+            if not self.shrunk and peaks[0] < GROW_BELOW * self.memory_limit:
                 self.token_budget = min(cfg.token_budget, int(self.token_budget * BUDGET_GROW))
         if self.reference is not None:
             out["kl_weight"] = self.kl_weight

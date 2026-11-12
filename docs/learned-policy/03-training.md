@@ -348,8 +348,20 @@ In a 1v1, for side A against side B at decision t:
   value's, at 0.004 falling as its Adam rate does, with weight decay 0.01; Adam for the rest of it.  The critic learns from
   nothing here, as the encoder did where Muon beat AdamW.  The actor, fine-tuned from the clone at small rates, keeps Adam
   unless `--actor-muon-lr` puts its hidden matrices on Muon too (all its linear layers' weights but the heads' answers),
-  at that rate's share of Adam's schedule and nothing during the critic's warm-up: an A/B of 50 iterations each decides.
-* **Minibatches** are filled to a token budget (`--token-budget`, 130,000 at most): a decision counts its padded tokens and
+  at that rate's share of Adam's schedule and nothing during the critic's warm-up.  Adam won the A/B (2026-11-12, 50
+  iterations each from `full-2`'s DAgger actor, the pipeline's flags, Muon at 1.3e-4).  Over iterations 11-50:
+
+  | | Adam | Muon on the actor |
+  |---|---|---|
+  | Tests at 20 and 40 (64 1v1s each) | 14%, 11% | 8%, 14% |
+  | Training games won against the script | 12.7% of 165 | 11.6% of 190 |
+  | KL an iteration / ratios past 1 ± eps | 0.0095 / 16% | 0.021 / 26% |
+  | Gradient norm | 13 | 26-30 |
+  | Cloning loss, last 10 | 2.51 | 2.67 |
+  | Decisions a second, overall | 102 | 91 |
+
+  Muon moved the policy twice as far an iteration, and its KL rose to 0.032 by iteration 40, for no more wins.
+* **Minibatches** are filled to a token budget (`--token-budget`, 100,000 at most): a decision counts its padded tokens and
   200 more (`DECISION_TOKENS`).  A step takes about 0.5 s whatever its size (on `full-2`'s first segments, 2026-11-12, 32
   decisions took 0.25 s and 384 took 0.50, at 14.1-16.7 MiB a decision), so minibatches are as big as the learner's memory
   allows.  It used to weigh a token by `1 + tokens / 1200`, fitted when attention paired every token: frames grew to about
@@ -357,11 +369,16 @@ In a 1v1, for side A against side B at decision t:
   second to 70, with most of its memory unused.
   * A minibatch that doesn't fit is done again in 2, then 4... runs of its segments, each weighed by its decisions.  The
     budget then shrinks by a tenth, once in the iteration, as its minibatches were all planned before.  After an iteration
-    without a split whose training peaked under 85% of the learner's limit, it grows by a twentieth, up to `--token-budget`.
+    without a split whose training's tensors peaked under 85% of the learner's limit, it grows by a twentieth, up to
+    `--token-budget` (what the allocator reserves stays near the limit, so it's no measure).
   * The 200: with 800, from the critic's 14 KiB a token and the first segments' 14 MiB a decision, 241 decisions of about 280
     tokens fit the learner's 4.6 GB, but 151 of about 590 and 103 of about 860 didn't, and the budget shrank to fit them, from
     260,000 to 154,000 by iteration 7.  The actor's reading of the units grows with the tokens too.  Shrunk at every split,
-    before the once-an-iteration rule, it had gone from 260,000 to 112,000 in one iteration.
+    before the once-an-iteration rule, it had gone from 260,000 to 112,000 in one iteration.  Fitted on the 2,042
+    minibatches of `full-2`'s 50 iterations with Adam, memory was 0.52 GB + 9.3 MiB a decision + 30.9 KiB a token, give or
+    take 0.36 GB.  The worst (95th percentile) per unit of cost was level between small frames and big at 200, 4.0 and 4.1 GB
+    a 100,000, so 100,000 fits the learner's 4.6 GB.  That run settled at 85,000-95,000 from 130,000, which split 12
+    minibatches in its first iteration, and played 97-233 decisions a second overall.
   * Even so, those 7 iterations played 145-222 decisions a second overall, against 124-131 at the same point before.
   * Each minibatch's decisions, padded tokens, peak memory and whether it split are in the run's `minibatches.jsonl`, to fit
     the weight to.  `metrics.jsonl` has `splits`, `token_budget`, and `learner_reserved_gb` and `learner_allocated_gb`, the
