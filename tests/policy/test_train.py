@@ -220,7 +220,7 @@ def test_the_optimisers_hold_only_what_trains_each_once_with_the_hidden_matrices
     assert id(learner.critic.reads[0].kv.weight) in muon and id(learner.critic.unit_in.weight) in muon and id(learner.actor.latent_in.weight) in muon
 
 
-def test_the_critic_learns_at_its_own_rate_falling_as_the_actors_does(tmp_path, encoder_path):
+def test_the_critic_learns_at_its_own_rate_falling_as_the_actors_does_which_also_follows_the_kl(tmp_path, encoder_path):
     cfg = replace(_config(encoder_path), lr_start=1e-5, lr_end=3e-6, critic_lr=3e-4, critic_muon_lr=0.004, actor_muon_lr=1.3e-4,
                   critic_warmup=2, decisions=1000)
     learner = pt.Learner(cfg, tmp_path, pt.DataWorkers(0, [sim_frames(1)[1]], cfg.enabled_kinds), "cpu")
@@ -232,6 +232,14 @@ def test_the_critic_learns_at_its_own_rate_falling_as_the_actors_does(tmp_path, 
     learner.set_rates()
     assert actor["lr"] == pytest.approx(6.5e-6) and critic["lr"] == pytest.approx(3e-4 * 0.65)
     assert muon["actor"]["lr"] == pytest.approx(1.3e-4 * 0.65) and muon["critic"]["lr"] == pytest.approx(0.004 * 0.65)
+    learner.follow_kl(0.05)     # past twice the target: the actor slows, the critic doesn't
+    learner.set_rates()
+    assert actor["lr"] == pytest.approx(6.5e-6 / pt.KL_SLOW) and muon["actor"]["lr"] == pytest.approx(1.3e-4 * 0.65 / pt.KL_SLOW)
+    assert critic["lr"] == pytest.approx(3e-4 * 0.65)
+    learner.follow_kl(0.001)
+    learner.follow_kl(0.001)    # under half of it: back to the schedule, and no further
+    learner.set_rates()
+    assert actor["lr"] == pytest.approx(6.5e-6)
     plain = pt.Learner(replace(cfg, critic_lr=0.0, critic_muon_lr=0.0, actor_muon_lr=0.0, critic_warmup=0), tmp_path, learner.workers, "cpu")
     plain.set_rates()
     assert [g["lr"] for g in plain.optimizer.param_groups] == pytest.approx([1e-5, 1e-5])

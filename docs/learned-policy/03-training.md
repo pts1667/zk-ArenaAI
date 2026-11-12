@@ -361,6 +361,12 @@ In a 1v1, for side A against side B at decision t:
   | Decisions a second, overall | 102 | 91 |
 
   Muon moved the policy twice as far an iteration, and its KL rose to 0.032 by iteration 40, for no more wins.
+* **The actor's rate follows the KL** (`--kl-target`, 0.01; the user, 2026-11-12): after an iteration whose KL passed
+  twice the target, the actor's rate (Adam's and Muon's) is 1.5x slower; after one under half of it, 1.5x faster, never
+  past the schedule.  The critic's isn't touched.  The scale is checkpointed and in `metrics.jsonl` (`lr_scale`).  In
+  `full-2` the fade took the KL to the clone's weight from 0.48 to 0.094 by iteration 126, and PPO's KL an iteration rose
+  with it from about 0.009 to 0.052, ratios past 1 ± eps from 15% to 36%, the policy loss from 0.04 to 0.2-0.3; the tests
+  at 100 and 120 won 8% and 9%, against 11-16% from 20 to 80.  It was rolled back to iteration 80 and went on with this.
 * **Minibatches** are filled to a token budget (`--token-budget`, 100,000 at most): a decision counts its padded tokens and
   200 more (`DECISION_TOKENS`).  A step takes about 0.5 s whatever its size (on `full-2`'s first segments, 2026-11-12, 32
   decisions took 0.25 s and 384 took 0.50, at 14.1-16.7 MiB a decision), so minibatches are as big as the learner's memory

@@ -105,6 +105,11 @@ The first whole run on the variety work, started by me while the user slept:
   and 40: 16 of 128 against 14), Muon's KL an iteration twice Adam's and rising, its cloning loss higher, 10% slower
   (03-training.md, "PPO").  Adam's arm went on as the real PPO stage from its iteration 51, with the budget starting at
   100,000 (fitted on its 2,042 minibatches) and growing back on what the tensors held.
+* At about 100 decisions a second.  As the fade took the KL to the clone's weight to 0.094, PPO's KL an iteration rose to
+  0.052 by iteration 126, with 36% of ratios past 1 ± eps; tests at 100 and 120 won 8% and 9%, against 11-16% before.  I
+  stopped it at 127 (kept as `ppo-kl-127`).  The user chose: the actor's rate slows 1.5x after an iteration past twice
+  `--kl-target` 0.01 and comes back after one under half of it, and a rollback to iteration 80 (best test, 15.6%).
+  Resumed from 80 at 15:11 (`results/rollback_ppo.sh` cut the logs there).
 
 ## Variety (2026-11-10 and 11): built, tested, not yet trained on
 

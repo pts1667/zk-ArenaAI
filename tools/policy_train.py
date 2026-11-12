@@ -70,6 +70,10 @@ class Config:
     empty_cache: bool = True        # hand back what the allocator holds after each iteration
     lr_start: float = 3e-4
     lr_end: float = 1e-4
+    # The actor's rate follows the iteration's KL as well as the schedule (the user, 2026-11-12): KL_SLOW slower after an
+    # iteration past twice this, back toward the schedule (never past it) after one under half of it; 0: the schedule alone.
+    # In full-2, as the KL to the clone faded from 0.48 to 0.094, PPO's KL an iteration rose from 0.009 to 0.052.
+    kl_target: float = 0.01
     # The critic's rate at the start, falling as the actor's does; 0: the actor's.  A clone's actor wants a small rate, and a new
     # critic at it learns nothing: at 1e-5 its explained variance stayed at 0.0000 for 19 iterations (full-1, 2026-11-10).
     critic_lr: float = 0.0
@@ -164,6 +168,7 @@ DECISION_TOKENS = 200
 # iteration's minibatches were all planned before it), and a twentieth more, up to --token-budget, after one whose training
 # peaked under GROW_BELOW of the learner's limit, in what its tensors held: what the allocator reserves stays near the limit.
 SPLIT_SHRINK = 0.9
+KL_SLOW = 1.5               # Config.kl_target's step
 BUDGET_GROW = 1.05
 GROW_BELOW = 0.85
 ACT_PAIRS = 24_000_000      # batch x tokens^2 of one forward pass while playing: its pair table is about 20 bytes a pair
@@ -470,6 +475,7 @@ class Learner:
         self.iteration = 0
         self.entropy_coef = {h: ENTROPY_BASE for h in HEADS}
         self.token_budget = cfg.token_budget        # SPLIT_SHRINK, BUDGET_GROW
+        self.lr_scale = 1.0                         # the actor's rate's share of its schedule's (Config.kl_target)
         self.splits = 0
         self.shrunk = False                         # this iteration
         self.memory_limit = 0.0                     # what the learner may reserve on the card, if it's on one
@@ -652,7 +658,7 @@ class Learner:
         """The actor's rate on its schedule, or 0 while the critic warms up; the critic's scaled as the actor's falls."""
         cfg = self.cfg
         lr = cfg.lr_start + (cfg.lr_end - cfg.lr_start) * self.progress
-        actor = 0.0 if self.iteration < cfg.critic_warmup else lr
+        actor = 0.0 if self.iteration < cfg.critic_warmup else lr * self.lr_scale
         self.optimizer.param_groups[0]["lr"] = actor
         self.optimizer.param_groups[1]["lr"] = cfg.critic_lr * lr / cfg.lr_start if cfg.critic_lr else lr
         for group in self.muon.param_groups if self.muon is not None else ():
@@ -726,7 +732,8 @@ class Learner:
                 if between is not None:
                     between()
         out = {k: totals[k] / max(counts[k], 1e-9) for k in totals}
-        out.update(token_budget=self.token_budget, splits=self.splits)
+        out.update(token_budget=self.token_budget, splits=self.splits, lr_scale=self.lr_scale)
+        self.follow_kl(out.get("kl"))
         if log is not None:
             log.close()
             out.update(learner_allocated_gb=peaks[0] / 2**30, learner_reserved_gb=peaks[1] / 2**30)     # training's peaks
@@ -737,6 +744,16 @@ class Learner:
         if self.cfg.clone_weight:
             out["clone_weight"] = self.clone_weight
         return out
+
+    def follow_kl(self, kl: float | None) -> None:
+        """The actor's rate for the next iteration, from this one's KL (Config.kl_target)."""
+        target = self.cfg.kl_target
+        if not target or kl is None or self.iteration < self.cfg.critic_warmup:
+            return
+        if kl > 2.0 * target:
+            self.lr_scale /= KL_SLOW
+        elif kl < 0.5 * target:
+            self.lr_scale = min(1.0, self.lr_scale * KL_SLOW)
 
     def adjust_entropy(self, metrics: dict[str, float]) -> None:
         """Keeps each head above a share of its maximum, so none collapses."""
@@ -763,7 +780,7 @@ class Learner:
         muon = {"muon": self.muon.state_dict()} if self.muon is not None else {}
         torch.save({"actor": self.actor.state_dict(), "critic": self.critic.state_dict(), "optimizer": self.optimizer.state_dict(), **ema, **muon,
                     "size": asdict(self.actor.size), "critic_size": self.critic.size,
-                    "iteration": self.iteration, "decisions": self.decisions, "entropy_coef": self.entropy_coef, "self_play": asdict(self.self_play)}, temp)
+                    "iteration": self.iteration, "decisions": self.decisions, "entropy_coef": self.entropy_coef, "self_play": asdict(self.self_play), "lr_scale": self.lr_scale}, temp)
         os.replace(temp, directory / name)
         marker = self.run / "latest.json.tmp"
         marker.write_text(json.dumps({"checkpoint": f"ckpt/{name}", "iteration": self.iteration, "decisions": self.decisions}))
@@ -784,6 +801,7 @@ class Learner:
             self.ema.critic.load_state_dict(state.get("ema_critic", state["critic"]))
         self.iteration, self.decisions = state["iteration"], state["decisions"]
         self.entropy_coef = state["entropy_coef"]
+        self.lr_scale = state.get("lr_scale", 1.0)
         if "self_play" in state:
             self.self_play = SelfPlay(**state["self_play"])
         return True
@@ -1377,6 +1395,7 @@ def main() -> None:
     ap.add_argument("--variants", action="store_true", help="each side's army script draws its knobs (policy_variants.py)")
     ap.add_argument("--lr-start", type=float, default=Config.lr_start)
     ap.add_argument("--lr-end", type=float, default=Config.lr_end)
+    ap.add_argument("--kl-target", type=float, default=Config.kl_target, help="the actor's rate slows when an iteration's KL passes twice this; 0: off")
     ap.add_argument("--critic-lr", type=float, default=Config.critic_lr, help="the critic's rate at the start, scaled as the actor's falls; 0: the actor's")
     ap.add_argument("--critic-muon-lr", type=float, default=Config.critic_muon_lr,
                     help="above 0, Muon trains the critic's hidden matrices at this rate at the start, scaled as the actor's falls")
@@ -1435,7 +1454,7 @@ def main() -> None:
                  segment=args.segment, token_budget=args.token_budget, data_workers=args.workers, concurrent=args.concurrent,
                  decide_every=args.decide_every, hours=args.hours, eval_every=args.eval_every, gpu_runs=args.gpu_runs, empty_cache=args.empty_cache,
                  latent_encoder=args.latent_encoder, enabled_kinds=policy_sim_env.KINDS,     # what the sim obeys
-                 init=args.init, maps=args.maps, variants=args.variants, lr_start=args.lr_start, lr_end=args.lr_end, critic_lr=args.critic_lr, critic_muon_lr=args.critic_muon_lr, actor_muon_lr=args.actor_muon_lr,
+                 init=args.init, maps=args.maps, variants=args.variants, lr_start=args.lr_start, lr_end=args.lr_end, kl_target=args.kl_target, critic_lr=args.critic_lr, critic_muon_lr=args.critic_muon_lr, actor_muon_lr=args.actor_muon_lr,
                  critic_bins=args.critic_bins, critic_span=args.critic_span, entropy_floor=args.entropy_floor, critic_warmup=args.critic_warmup, kl_start=args.kl_start, **fades,
                  clone_weight=args.clone_weight, economy_start=args.economy_start, economy_end=args.economy_end,
                  income_weight=args.income_weight, speed_weight=args.speed_weight, diversity=args.diversity, fine_sim=args.fine_sim, z=args.z,
