@@ -147,7 +147,8 @@ def test_a_blip_without_identity_has_no_type_stats(small_map, table):
 
 
 def test_caps_summarise_what_they_drop(small_map, table):
-    many = [{"uid": i + 1, "x": 300.0 + i % 40, "z": 300.0 + i // 40} for i in range(fz.CAP_CONTROLLABLE + 22)]
+    # Health below zero (a unit in the frame it dies) once summed to a NaN in the summary token.
+    many = [{"uid": i + 1, "x": 300.0 + i % 40, "z": 300.0 + i // 40, "hp_frac": -0.5} for i in range(fz.CAP_CONTROLLABLE + 22)]
     room = fz.CAP_UNITS - fz.CAP_CONTROLLABLE
     foes = [{"uid": 1000 + i, "side": ENEMY, "x": 800.0 + i % 30} for i in range(room + 16)]
     t = run(make_units(*many, *foes), small_map, table)
@@ -159,6 +160,7 @@ def test_caps_summarise_what_they_drop(small_map, table):
     # The count of the 22 own units left over comes back out of the summary token, which says whose they are.
     assert np.expm1(t.unit_x[summaries[0], fz._S] * 5.0) == pytest.approx(22, abs=0.01)
     assert t.unit_ally[summaries].tolist() == [0, 1] and t.unit_player[summaries[0]] == 0
+    assert np.isfinite(t.unit_x).all()
 
 
 def test_sorted_tokens_do_not_depend_on_record_order(small_map, table):

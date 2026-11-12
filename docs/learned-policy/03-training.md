@@ -15,7 +15,7 @@ a process of its own.  So no two stages load the map pool at once, and each hand
 | `encoder` | with `--train-encoder`: `frame_vae.py train`, 25,000 steps, to `ROOT/encoder`.  Later stages read its `vae-last.pt`; otherwise they read `--encoder` (default `policy_latent.ENCODER`) | `encoder-big` |
 | `zindex` | the data's `z.npz`, if it has none | |
 | `clone` | `policy_clone_train.py` on `--data` (`army-6`), 10,000 steps, checked and saved every 500 | `clone-8`: `--z --z-dropout 0.2 --economy-weight 2.5 --finish-winners 0.1`, lr 6e-4, Muon 0.008 |
-| `record-N` | the last clone plays the army script, told its variant, with the scripts advising it, in the kinds `--kinds` says, until 256 of its games are kept.  Its first 64 are an eval (`evals/record-N.json`, by kind where there's more than 1v1s) | DAgger |
+| `record-N` | the last clone plays the army script, told its variant, with the scripts advising it, in the kinds `--kinds` says, as CUDA graphs, until 256 of its games are kept (see "DAgger").  Its first 64 are an eval (`evals/record-N.json`, by kind where there's more than 1v1s) | DAgger |
 | `zindex-N` | `z.npz` over every round's games | |
 | `dagger-N` | 500 steps from the last clone, half the samples from every round's games and half from `army-6`; lr 2e-4, Muon 0.003 | DAgger |
 | `eval` | the last clone, 64 1v1s, the headline: `evals/final.json` | |
@@ -147,6 +147,11 @@ How the recipe was reached, each a short run on held-out maps:
     and decode one side only.
 * **Only whole games** are recorded: once the budget is reached, running games are played out.  Workers share the map pool and
   each map's derived data, loaded before they fork.  One process records 62,600 decisions a second.
+* **Memory**: a writer holds each running game's compressed chunks until it ends.  Since 2026-11-11 each chunk is its own buffer
+  of just its size, a game's sides are freed when it's written, the uncompressed chunk is one buffer a thread, and the heap
+  is trimmed after each file.  Before that, 12 workers of the default kinds (8-team, 80-minute games) grew without end and
+  filled 40 GB in 5 minutes.  A worker of 64 games on 60 maps went from +2.3 GB to about +1 GB, following the games it holds.
+  On the full pool, 12 workers leave about 6 GB of 39 available.
 * **Labels**: the army script's orders, then the economy script's, and `GROUP_MARK` records for group orders.  They are kept
   raw, not as choices, so the data outlives featurizer changes.  `actions.encode` makes the choices when the data is read.
 * **z** (`Z_*`, 32 numbers a side):
@@ -168,7 +173,14 @@ the 400M asked.  Per look, the economy script gives 1.13 orders and the army scr
         --z --z-dropout 0.2 --economy-weight 2.5 --finish-winners 0.1
 
 * **A sample** is a stretch of 48 of the actor's decisions, with the frames of its reach before it.  The actor decides every 6
-  slots, at the frames where the scripts looked.  A step is `--samples` stretches a pass, over `--accumulate` passes.
+  slots, at the frames where the scripts looked.  A step is `--samples` x `--accumulate` stretches (64 in the pipeline), drawn
+  at random from `--mix-pool` made (256).
+* **Passes by size** (`--pass-gb 7`, 2026-11-11): a step's stretches go into forward passes smallest first, as many to a pass
+  as `pass_gb` says fit in 7 GB of the card.  That model, fitted to 200 passes of `army-7`, is 0.14 GB off on average and
+  at most 1.0 under.  A pass costs about the same few thousand kernel launches whatever it holds, and half the stretches
+  have under 171 unit tokens and 40 controllable units, against caps of 1,280 and 512: passes hold about 8 on `army-7`.
+  Each pass's loss is the mean of its labels', weighed by its share of the step's stretches.  `--pass-gb 0` is `--samples` a
+  pass, as before.
 * **Labels**: at each decision, the scripts' orders become actions in a random order, at most 16, then done.  The orders have
   no order of their own.  So an action's anchor scores as the sum over every unit still to be told (the set loss), and done
   scores once none is left.  The action tokens are built from all the orders.
@@ -179,8 +191,24 @@ the 400M asked.  Per look, the economy script gives 1.13 orders and the army scr
 * **`--z`**: the side's z is added to every token.  With `--z-dropout 0.2` the whole z is unknown (zeros) in that share of
   samples, and the counts alone in as many again.
 * **`--finish-winners 0.1`**: the last 10% of steps draw only the winning sides of decided games.
-* **Workers** featurize ahead of the GPU.  Each cuts 4 stretches one after another from a game it decodes (`--per-read`).  The
-  time transformer uses flex attention on CUDA (`--attention flex`).
+* **Workers** featurize ahead of the GPU.  Each cuts 8 stretches one after another from a game it decodes (`--per-read`; it
+  was 4), and sends them as one tensor of shared memory each.  The time transformer uses flex attention on CUDA
+  (`--attention flex`).
+* **A pass past the card's memory** is undone, the gradients as they were before it, and its stretches go in two halves, each
+  weighed by its share.  One too big alone is left out, and the report counts both (`split_passes`, `too_big`); a held-out
+  chunk is measured a stretch at a time.  On `army-7`, at 4 stretches a pass, a pass took 3.3 GB of the card at the median and
+  8.6 GB at most in 80, padded to every cap (2026-11-11), and one stretch at most 1.9 GB.  `full-2`'s first clone ran out
+  of its 10.2 GB within 5 minutes.
+* **A pass whose loss isn't finite** skips its step, and its stretches' games are written to `nonfinite.jsonl`; so does a
+  gradient that isn't finite (`nonfinite_passes`, `skipped_steps`).  The losses stay on the GPU and are read once a step, so
+  that the host never waits for a pass to finish.  `full-2`'s first clone went NaN between steps 500 and 1000.  The cause
+  was found when two later attempts logged the same stretch: a summary token's health, summed over its units, came below
+  -1 with units in the frame they die (health below zero), and its `log1p` was NaN.  Featurizing now counts such a unit's
+  health as 0, as a unit token does.
+* **`--compile dynamic`** (the pipeline's) compiles the encoder, the action tokens, each time block and the heads, with
+  symbolic shapes.  A graph has a few versions, each compiled once: with gradients and without, a pass of one stretch, and
+  sizes past Inductor's thresholds.  It's about 5 minutes of compiling, the first time on a machine (Inductor caches in
+  `/tmp`), and 13% faster after.
 * **Held-out checks** use 96 stretches from 50 held-out files:
   * `anchor_right`: the likeliest anchor is a unit still to be told;
   * `kind_right`;
@@ -235,6 +263,17 @@ with variants on both sides.  Each slot's first game counts.
 clone's side the scripts only advise: libzkscripts' label seats get the army script's orders, and the economy script's where the
 policy runs its economy, as labels that are never sent.  `policy_clone_train.py --mix DIR --mix-share 0.5 --init RUN/actor.pt`
 fine-tunes on them mixed with the original data.
+
+**Speed** (2026-11-12).  `full-2`'s `record-1` took 97 minutes for 320 games.  Its one busy thread spent 77% of its time choosing
+actions eagerly, a kernel at a time (each launch an `ioctl` in WSL), 15% in the recorder's step and the sim, and its last 38
+minutes playing out the 64 games still running when the 256th was written.  Since then:
+* it plays as CUDA graphs (`--graphs`, on by default, as PPO plays): on 19 maps it reached 20,000 decisions in 194 s against
+  312 eagerly (1.6x), with 3.6 GB of the card against 2.6;
+* the recorder packs and compresses games' frames on 4 threads (`WRITE_THREADS`), 5.7% of the thread before;
+* it stops starting games to keep once those written and those running come to `--record-games` (`Recorder.close_when`), so
+  a round writes 256 games, not 320.  Every game started till then is still played out, so the data isn't biased towards
+  short games;
+* it prints a line of progress every 5 minutes.
 
 **In `full-1`** (2026-11-10), each eval 64 games against the army script, told its variant:
 
@@ -394,6 +433,33 @@ every seat that decides.
   * `/mnt/d` is about 15% slower than WSL's own disk.
   
   With numba, `full-1`'s cloning ran at 1,528 a second.
+* **On the variety's games** (`army-7`: teams, free-for-alls, chickens, 80 minutes, the raised caps) `full-2`'s first clone made
+  323 decisions a second, 9.6 s a step.  Measured on 2026-11-11 and changed, to about 750 (steady, 80 steps):
+  * **decoding held the workers to 268 a second**: a late stretch of a long game decodes every frame of its side before it.
+    `zkrecord.read` now reads a file only as far as it needs (it read all of it, up to 140 MB), undoes the deltas in one
+    numba pass (the chains' sort was a third of decoding), and makes only the frames a stretch reads (`keep`: a quarter).
+    Together a side decodes in about half the time, byte for byte the same; and 8 stretches a read, not 4.  12 a read
+    measured 742 a second from the workers alone, and about 7% more in training than 8, with 9.9 GB of samples in shared
+    memory;
+  * **receiving a sample took the main process 85 ms**: through the pool's pipe, 64 KB at a time, while a second pool
+    thread spun on the readable pipe.  As one shared tensor, a sample is a handle;
+  * **4 stretches a pass**: a pass's kernel launches, about 3,000, cost the CPU about 85 ms in WSL whatever it holds.  Passes
+    by size hold about 8;
+  * **the frame encoder's attention** took PyTorch's math kernel, its heads being 36 wide: padded to 40 (`policy_model.attention`),
+    5 times faster at a pass's sizes, the same to bf16's rounding.
+  
+  Then, the same day, to about 1,070 (steps 60-140 of 140):
+  * **the host waited for the GPU** at every pass: the loss read back, and two small copies from pageable memory (the
+    strategy z, and a table of kinds).  Without them nothing waits but the step's end, which alone gained nothing: the main
+    process was idle 35% of its time for other reasons;
+  * **reads were taken in order**: with a slow one first (a late stretch of an 80-minute game), the trainer waited 14% of its
+    time while the reads after it were done and the workers idle.  Taken as they're done, about 940 a second;
+  * **compiled** (`--compile dynamic`), 13% more.  Three things had to change for it: `kind_in` built a table on the host
+    inside the graph, `F.one_hot` fixed the count of units (a graph for every count), and each call's new layout recompiled
+    a time block every call.
+
+  What's left: the main process waits a quarter of its time while the backward pass is launched, and unmaps the last
+  step's samples (5%).
 * **What made cloning 18x faster** (52 to about 950 decisions a second):
   * deciding every 3 s, not every slot;
   * decoding only the side and the part of a game a sample needs;
@@ -479,7 +545,7 @@ every seat that decides.
 | Per-unit actions: every unit choosing at once | Zero-K's unit AI needs little micro, and a player gives a few orders to groups.  Actions in turn, as Pluto's | git history |
 | The raider-only fight script as RL opponent | The factory drawn decided games | `frame_world.FrameFight` (frames only) |
 | The Python army and economy scripts | The C++ ones are 17x faster with the same orders | git `8e9bca7` |
-| `torch.compile` in PPO | No speed-up, and a hang after a recompile | (in cloning, `--compile` exists and adds little) |
+| `torch.compile` in PPO | No speed-up, and a hang after a recompile | (in cloning, `--compile dynamic` adds 13%: "Speed") |
 | The age bias as flex attention's score_mod | 2.4x slower than dense: its gradient came a pair of tokens at a time | `TimeBlock.bias_dims` instead |
 | Linear attention (DeltaNet and others) for memory | The gain was from dropping memory, not from linear attention | |
 | GRPO (no critic) | It needs branching the sim, costs the group size in collection, and loses the privileged critic | |

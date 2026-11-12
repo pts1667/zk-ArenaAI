@@ -1,6 +1,6 @@
 # zk-ArenaAI, the learned policy: where it stands
 
-Updated 2026-11-11.  Branch `learned-policy-plan`.  Repo: `C:/Users/Thoma/Documents/sources/zk-ArenaAI`.  This file was
+Updated 2026-11-12.  Branch `learned-policy-plan`.  Repo: `C:/Users/Thoma/Documents/sources/zk-ArenaAI`.  This file was
 `HANDOFF.md`.
 
 The current state only.  How things got here is in git history.  How everything works, with its numbers, is in
@@ -54,6 +54,40 @@ simulator (`sim/`): first by cloning scripted players, then DAgger, then PPO.
     being built in their reach, as Zero-K's default widget has them patrol).  01-simulator.md, "Economy" and "The economy script".
   * Plates are factories in the policy's type table (masks only, and no new feature version for it, since no data held one).
   * `clone/army-6` was recorded by the old scripts, so a clone of it learns factory copies: new recordings are needed first.
+
+## `runs/full-2` (started 2026-11-11 04:15)
+
+The first whole run on the variety work, started by me while the user slept:
+
+    policy_pipeline.py --root /mnt/d/zk-learned/runs/full-2 --train-encoder --data /mnt/d/zk-learned/clone/army-7 \
+        --clone-steps 5000 --ppo-decisions 4000000 --ppo-args "--collectors 4 --concurrent --economy-start 1 --economy-end 1"
+
+* The policy runs its own economy in every PPO game (economy share 1 throughout, the user), for 4M decisions.
+* Its first attempt filled WSL's 40 GB in 5 minutes of recording: the recorder's buffers, fixed in `sim/record/src/record.cpp`
+  (03-training.md, "Script data").
+* The critic sees up to 256 hidden enemies, not 64 (the user, 2026-11-11; 02-policy.md, "Kinds").
+* Record 87 minutes (11,938 games, 110M decisions, 156 GB), frames 27, encoder 163 (held-out region R² 0.966), `zindex` 28.
+* The clone ran out of the card in 5 minutes, at 4 samples a pass.  Resumed with passes split when they run out, it made 323
+  decisions a second (27 hours for 10,000 steps), and went NaN between steps 500 and 1000; I stopped it.  The user's PC
+  restarted.  Then, the user asked, cloning was made faster, to about 750 a second (03-training.md, "Speed"), and its
+  fixes kept: passes by size, splitting, a non-finite pass logged in `clone/nonfinite.jsonl`.
+* The clone is 5,000 steps, not 10,000 (the user, 2026-11-11: about 5-6 hours): `--clone-steps 5000`.
+* Stopped at 15:48, the user asked, to make it faster still: no waiting on the GPU each pass, reads taken as they're done, and
+  `--compile dynamic` (the pipeline's now), to about 1,070 a second.  Restarted at 17:08: about 4 hours for the clone.
+* The NaN's cause, found from `nonfinite.jsonl` at 17:40: dying units' health below zero made a summary token's `log1p`
+  NaN (`featurize._summaries`, fixed).  The running clone's workers featurize as before the fix, so such a stretch still
+  skips its step there (1 in its first 500); every later stage featurizes with the fix.
+* The clone finished at 21:12 (245 minutes, 5 steps of 5,000 skipped): held out, the unit the scripts told 84%, the kind
+  96%.  In 64 games against the army script (by kind: 38 1v1s, 9 team games, 9 free-for-alls, 8 chicken games), told its
+  variant and running its own economy:
+
+  | Actor | Wins / draws / losses | 1v1 wins | Extractors at 6 min (script's) |
+  |---|---|---|---|
+  | clone | 9% / 5% / 86% | 5% | 5.2 (9.2) |
+  | after DAgger round 1 | 17% / 2% / 81% | 11% | 5.2 (8.6) |
+
+  The stall in expansion stays.  `record-1` and `record-2` took 97 and 128 minutes; recording is faster since (03-training.md,
+  "DAgger").  `dagger-2` was done at 02:03 on 2026-11-12; then the final eval, then PPO.
 
 ## Variety (2026-11-10 and 11): built, tested, not yet trained on
 
@@ -199,7 +233,7 @@ report, and the same command resumes it.
 `--encoder` is needed by every tool that loads an actor until `policy_latent.ENCODER` names a new encoder: its default is
 `encoder-big`, which no longer loads.
 
-**The tests** (790 pass, 3 need CUDA and are skipped without it): `pytest.ini` runs them on 8 processes, a file's tests in
+**The tests** (791 pass, 3 more need CUDA and are skipped without it): `pytest.ini` runs them on 8 processes, a file's tests in
 one process so that what they share is made once, and `tests/policy/conftest.py` keeps each process's maths to one thread.
 That took the suite from 211 s to about 60 (2026-11-11), with the slowest learning runs cut down and those of paths the
 pipeline doesn't use removed: the variational encoder's fits, checkpoints from before feature version 7, the trainer's
@@ -223,7 +257,8 @@ README.md has the rules for engine games: headless at max speed, windowed only w
 3. **The stall in expansion** survived DAgger.  Whether PPO's economy share (the policy running its own economy in more games)
    moves the extractor count is the thing to watch in its tests.
 4. **The engine hand-off**:
-   * a numpy forward of the actor and encoder for the bot;
+   * the bot's inference in C++ with the nets in onnxruntime, nothing to install (the user, 2026-11-12; 02-policy.md,
+     "Deployment"): first a C++ featurizer and map bundle, which training then uses too, as the only ones;
    * decoded orders sent as commands;
    * the opening and the economy script in the engine;
    * the checks listed in 02-policy.md, "Not yet checked live".

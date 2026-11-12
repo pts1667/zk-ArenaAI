@@ -21,7 +21,7 @@ import torch.nn.functional as F
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT / "bots"))
-from policy_model import ID_DIM, NAME_DIM, Block  # noqa: E402
+from policy_model import ID_DIM, NAME_DIM, Block, attention  # noqa: E402
 from zkbot.policy import featurize as fz  # noqa: E402
 
 # The first two columns of each token group's features are its place on the map, -1 to 1.
@@ -107,7 +107,7 @@ class CrossBlock(nn.Module):
         b, q_count, d = queries.shape
         split = lambda t: t.view(b, t.shape[1], self.heads, d // self.heads).transpose(1, 2)  # noqa: E731
         k, v = self.kv(self.ln_t(tokens)).chunk(2, -1)
-        o = F.scaled_dot_product_attention(split(self.q(self.ln_q(queries))), split(k), split(v), attn_mask=key_mask[:, None, None, :])
+        o = attention(split(self.q(self.ln_q(queries))), split(k), split(v), key_mask[:, None, None, :])
         queries = queries + self.out(o.transpose(1, 2).reshape(b, q_count, d))
         return queries + self.ff2(F.gelu(self.ff1(self.ln2(queries)), approximate="tanh"))
 

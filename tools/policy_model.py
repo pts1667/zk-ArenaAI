@@ -10,6 +10,7 @@ the layout and saved weights hold.  The actor is tools/policy_latent.py.
 """
 from __future__ import annotations
 
+import math
 import pathlib
 import sys
 from dataclasses import dataclass, replace
@@ -273,6 +274,17 @@ def join(batches: list[Batch], device: str | None = None) -> Batch:
     return Batch(**out)
 
 
+def attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
+    """F.scaled_dot_product_attention, a head size that isn't a multiple of 8 padded with zeros on the GPU: PyTorch's efficient
+    kernels need one, and the frame encoder's (144 wide in 4 heads: 36) took the math kernel, 5 times slower at a cloning pass's
+    sizes (2026-11-11).  The zeros change no score, the scale is the head size's, and the result's padding is dropped."""
+    size = q.shape[-1]
+    if size % 8 == 0 or not q.is_cuda:
+        return F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+    pad = lambda t: F.pad(t, (0, -size % 8))  # noqa: E731
+    return F.scaled_dot_product_attention(pad(q), pad(k), pad(v), attn_mask=mask, scale=1.0 / math.sqrt(size))[..., :size]
+
+
 class Block(nn.Module):
     def __init__(self, d: int, heads: int):
         super().__init__()
@@ -292,24 +304,20 @@ class Block(nn.Module):
             mask = key_mask[:, None, None, :]
         else:
             mask = bias.masked_fill(~key_mask[:, None, None, :], float("-inf"))
-        o = F.scaled_dot_product_attention(shape(q), shape(k), shape(v), attn_mask=mask)
+        o = attention(shape(q), shape(k), shape(v), mask)
         h = h + self.out(o.transpose(1, 2).reshape(b, n, d))
         return h + self.ff2(F.gelu(self.ff1(self.ln2(h)), approximate="tanh"))
 
 
-_KIND_SETS: dict[tuple, torch.Tensor] = {}
+assert rf.KIND_COUNT <= 31, "kind_in's mask is an int32's bits"
 
 
 def kind_in(kind: torch.Tensor, kinds: tuple[int, ...]) -> torch.Tensor:
-    """Whether each kind is one of these: a lookup in a table kept on the device, as `torch.isin` against a tensor made each call
-    copied it there each time, and every such copy made the host wait for the GPU."""
-    key = (tuple(kinds), str(kind.device))
-    table = _KIND_SETS.get(key)
-    if table is None:
-        table = torch.zeros(rf.KIND_COUNT, dtype=torch.bool)
-        table[list(kinds)] = True
-        table = _KIND_SETS[key] = table.to(kind.device)
-    return table[kind.clamp(0, rf.KIND_COUNT - 1)] & (kind >= 0)
+    """Whether each kind is one of these: a bit of a mask, nothing copied to the device.  `torch.isin` against a tensor made each
+    call copied it there each time, and each copy made the host wait for the GPU; a table kept on the device was built on the host
+    inside a compiled graph (`--compile dynamic`, 2026-11-11)."""
+    mask = sum(1 << k for k in set(kinds))
+    return ((mask >> kind.clamp(0, rf.KIND_COUNT - 1).to(torch.int32)) & 1).bool() & (kind >= 0)
 
 
 def region_legal(b: Batch, scores: torch.Tensor, kind: torch.Tensor) -> torch.Tensor:
@@ -562,8 +570,9 @@ def _choices(actor: nn.Module, v: Batch, me: torch.Tensor, ctx, given: Actions |
 
 
 def _taken_before(anchor: torch.Tensor, units: int) -> torch.Tensor:
-    """B x K x C: the units actions before each have picked."""
-    hot = F.one_hot(anchor.clamp_min(0), units).bool() & (anchor >= 0)[..., None]
+    """B x K x C: the units actions before each have picked.  Compared with each unit's index, not `F.one_hot`, whose count of
+    classes is a number on the host: compiled, it made each count of units a graph of its own (2026-11-11)."""
+    hot = (anchor[..., None] == torch.arange(units, device=anchor.device)) & (anchor >= 0)[..., None]
     return (torch.cumsum(hot.long(), 1) - hot.long()) > 0
 
 

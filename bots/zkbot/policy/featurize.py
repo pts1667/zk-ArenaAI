@@ -32,7 +32,9 @@ FEATURE_VERSION = 9          # what a saved encoder or actor was trained to read
 ENCODER_FEATURE_VERSIONS = (9,)     # those an encoder reads alike
 
 # The user's, for long and many-sided games (2026-11-10): an 80-minute 1v1 had 656 records in sight on a side and 609 of its own.
-CAP_CONTROLLABLE, CAP_UNITS, CAP_HIDDEN = 512, 1280, 64
+# CAP_HIDDEN: the critic's enemies the seat can't see, nearest its army first.  256 since 2026-11-11 (the user): at 64 a late team
+# game, free-for-all or chicken game left most of them out.  Only the critic reads them, and no stored data holds them.
+CAP_CONTROLLABLE, CAP_UNITS, CAP_HIDDEN = 512, 1280, 256
 CAP_SITES = 24
 CAP_FEATURES = 512          # wrecks and the like in sight.  Past that, a region's metal says what's left out.
 CAP_SUMMARIES = 12
@@ -269,7 +271,9 @@ def _summaries(units: np.ndarray, left: np.ndarray, rows: np.ndarray, bundle: Bu
             row = np.zeros(UNIT_DIM, np.float32)
             row[_I + 0] = x[members].mean() / bundle.map_w * 2.0 - 1.0
             row[_I + 1] = z[members].mean() / bundle.map_h * 2.0 - 1.0
-            hp = np.nan_to_num(units["hp_frac"][members], nan=1.0)
+            # A unit's health can be below zero in the frame it dies: summed into one below -1, it made log1p NaN, and with it every
+            # number a cloning pass made from the frame (full-2's clone, 2026-11-11).  At 0 at least, as the unit tokens' is.
+            hp = np.maximum(np.nan_to_num(units["hp_frac"][members], nan=1.0), 0.0)
             row[_S + 0] = np.log1p(len(members)) / 5.0
             row[_S + 1] = np.log1p((hp * table.cost[rows[members]]).sum()) / 10.0
             row[_S + 2] = np.log1p(table.dps_ground[rows[members]].sum()) / 8.0

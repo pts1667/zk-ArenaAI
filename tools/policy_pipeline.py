@@ -66,9 +66,11 @@ FRAMES_FLAGS = ["--script-frames", "1000000", "--scenario-frames", "1000000", "-
 RECORD_FLAGS = ["--games", "64", "--workers", "12", "--threads", "12", "--seed", "6", "--variants"]
 # clone-8's (03-training.md, "Cloning"), at the actor's decision every 3 s; but 4 samples a pass and 16 passes a step, where clone-8
 # had 8 and 8: the same 64 samples a step.  A sample from late in an 80-minute game takes 1.3 to 2 GB of the card, so 8 ran out of
-# 85% of it (measured 2026-11-10), and 4 fit even with every cap full.
+# 85% of it (measured 2026-11-10).  4 didn't always fit either: on army-7 a pass of 4 padded to the caps took up to 8.6 GB, and one
+# ran out (2026-11-11).  So the trainer puts a step's 64 into passes by size (--pass-gb), and splits one that runs out anyway
+# (03-training.md, "Cloning").  Compiled with symbolic shapes: 13% faster on army-7, after about 5 minutes of compiling (2026-11-11).
 CLONE_FLAGS = ["--decide-every", "6", "--samples", "4", "--accumulate", "16", "--workers", "15", "--z", "--z-dropout", "0.2",
-               "--economy-weight", "2.5"]
+               "--economy-weight", "2.5", "--compile", "dynamic"]
 # The PPO smoke run's (03-training.md, "From a clone"): a learning rate of 1e-4 drifted from the clone too far; a token budget of 165,000
 # didn't fit in 85% of the card.  The new critic learns at 3e-4, as every earlier critic did: at the actor's 1e-5 it learned nothing.
 # A win sooner is worth up to 0.1 more (the user, 2026-11-10); the lead rule fades by policy_train's default --lead-fade.

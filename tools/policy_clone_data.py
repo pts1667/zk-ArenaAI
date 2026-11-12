@@ -86,6 +86,12 @@ class Recorder:
     def close(self) -> None:
         self.closing = True
 
+    def close_when(self, want: int) -> None:
+        """Closes once the games written and those running come to `want`: every game started till then is kept, however long it
+        runs, and none started after.  So it writes `want`, or a few more where games end together, or the games running if more."""
+        if not self.closing and self.games + len(self.kept) >= want:
+            self.close()
+
     closing = False
 
     @property
@@ -194,12 +200,13 @@ def read_game(path: pathlib.Path) -> list[Side]:
     return [(frames, orders, side_info(meta, s)) for s, (frames, orders) in enumerate(sides)]
 
 
-def read_side(path: pathlib.Path, side: int, until: int | None = None) -> Side:
-    """One side of a game, decoding only it and only as far as frame `until` (all of a .npz): what a cloning sample needs."""
+def read_side(path: pathlib.Path, side: int, until: int | None = None, keep: np.ndarray | None = None) -> Side:
+    """One side of a game, decoding only it and only as far as frame `until` (all of a .npz): what a cloning sample needs.  keep:
+    only these frames of a .zkr are made, the others None (zkrecord.read)."""
     path = pathlib.Path(path)
     if path.suffix == ".npz":
         return read_game(path)[0]
-    meta, sides = zkrecord.read(path, side=side, until=until)
+    meta, sides = zkrecord.read(path, side=side, until=until, keep=keep)
     frames, orders = sides[side]
     return frames, orders, side_info(meta, side)
 

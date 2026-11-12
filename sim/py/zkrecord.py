@@ -19,6 +19,11 @@ import numpy as np
 import zksim
 from zkbot.policy import rawframe
 
+try:        # undoing the deltas in one pass (`_undelta`); in numpy alone without it
+    import numba
+except ImportError:     # pragma: no cover
+    numba = None
+
 ABI_VERSION = 2
 MAGIC = b"ZKREC002"
 MAGIC_TWO_SIDES = b"ZKREC001"       # ABI 1's: both sides of a game, teams 0 and 1, and no count of them
@@ -183,6 +188,19 @@ class _Cursor:
         return out
 
 
+class _FileCursor(_Cursor):
+    """A cursor reading a file as it goes, so that a read stopping early (`read`'s until) reads no further."""
+
+    def __init__(self, f):
+        self.f = f
+
+    def take(self, n: int) -> bytes:
+        out = self.f.read(n)
+        if len(out) != n:
+            raise ValueError("zkrecord: the file ends early")
+        return out
+
+
 def _unzstd(blob: bytes) -> bytes:
     L = lib()
     size = L.zkr_frame_size(blob, len(blob))
@@ -212,8 +230,32 @@ def _chains(back: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     return order, first, np.cumsum(start) - 1
 
 
-def _undelta(res: np.ndarray, chains: tuple[np.ndarray, np.ndarray, np.ndarray]) -> np.ndarray:
-    """Each field the wrapping sum of the residuals along its chain."""
+if numba is not None:
+    @numba.njit(cache=True, nogil=True)
+    def _undelta_column(res, back, out):     # pragma: no cover (compiled)
+        for i in range(len(res)):
+            b = back[i]
+            if b > 0:
+                out[i] = out[i - b] + res[i]
+            else:
+                out[i] = res[i]
+
+
+def _undelta(res: np.ndarray, back: np.ndarray) -> np.ndarray:
+    """Each field the wrapping sum of the residuals along its chain: a record's value is that of the one `back` before it plus its
+    residual.  With numba, one pass over the records: the chains' sort and the passes over every field (`_undelta_chains`) were a
+    third of decoding a long game's side (2026-11-11), which cloning's workers spend most of their time on."""
+    if numba is None:
+        return _undelta_chains(res, _chains(back))
+    out = np.empty_like(res)
+    for name in res.dtype.names:
+        unsigned = np.dtype(f"u{res.dtype[name].itemsize}")
+        _undelta_column(res[name].view(unsigned), back, out[name].view(unsigned))
+    return out
+
+
+def _undelta_chains(res: np.ndarray, chains: tuple[np.ndarray, np.ndarray, np.ndarray]) -> np.ndarray:
+    """`_undelta` in numpy: each field the wrapping sum of the residuals along its chain."""
     order, first, segment = chains
     out = np.empty_like(res)
     for name in res.dtype.names:
@@ -258,6 +300,13 @@ def _split(a: np.ndarray, counts: np.ndarray) -> list[np.ndarray]:
     return np.split(a, np.cumsum(counts)[:-1]) if len(counts) else []
 
 
+def _rows(counts: np.ndarray, frames: np.ndarray) -> np.ndarray:
+    """The records of these frames (sorted), given each frame's count of them."""
+    at = np.concatenate(([0], np.cumsum(counts)))
+    n = counts[frames]
+    return np.repeat(at[frames] - np.concatenate(([0], np.cumsum(n)[:-1])), n) + np.arange(int(n.sum()))
+
+
 def _packed(dtype) -> int:
     """Bytes a record of `dtype` takes in a file's planes, which have no padding."""
     dtype = np.dtype(dtype)
@@ -273,11 +322,19 @@ def _teams(c: _Cursor, magic: bytes, path) -> tuple[int, ...]:
     return tuple(int(t) for t in c.array("<i4", int(c.array("<i4", 1)[0])))
 
 
-def read(path: str | os.PathLike, side: int | None = None, until: int | None = None) -> tuple[dict, list[tuple[list[rawframe.Frame], list[np.ndarray]]]]:
+def read(path: str | os.PathLike, side: int | None = None, until: int | None = None,
+         keep: np.ndarray | None = None) -> tuple[dict, list[tuple[list[rawframe.Frame | None], list[np.ndarray]]]]:
     """A file's meta, and for each side it holds, in order, its frames and the orders given at each.  side: only that one's (the
     others' are empty); until: only the frames before it, at least (records are deltas along the game, so a frame needs all before
-    it, and reading stops after the chunk that holds frame until - 1)."""
-    c = _Cursor(pathlib.Path(path).read_bytes())
+    it, and reading stops after the chunk that holds frame until - 1).  The file is read only as far as that, not whole as it was
+    (2026-11-11).  keep: only these frames are made, the others None: every record is still undone, but widening them and making
+    frames of them was a quarter of decoding a side, of which cloning reads one frame in 6."""
+    with open(path, "rb", buffering=1 << 20) as f:
+        return _read(_FileCursor(f), path, side, until, keep)
+
+
+def _read(c: _Cursor, path, side: int | None, until: int | None,
+          keep: np.ndarray | None = None) -> tuple[dict, list[tuple[list[rawframe.Frame | None], list[np.ndarray]]]]:
     magic = c.take(8)
     if magic not in (MAGIC, MAGIC_TWO_SIDES):
         raise ValueError(f"{path}: not a zkrecord file")
@@ -317,11 +374,21 @@ def read(path: str | os.PathLike, side: int | None = None, until: int | None = N
             out.append(([], []))
             continue
         globs = (np.cumsum(cat["globs"].astype(np.uint64), axis=0).astype(np.uint32)).view(np.float32)
-        units = _wide_units(_undelta(cat["units"], _chains(cat["unit_back"])), map_w, map_h, y_lo, y_hi)
-        feats = _wide_features(_undelta(cat["features"], _chains(cat["feature_back"])), map_w, map_h)
-        assert len(cat["unit_counts"]) == (frames if until is None else min(frames, read_frames))
-        fr = [rawframe.Frame(u, sites, g, f)
-              for u, g, f in zip(_split(units, cat["unit_counts"]), globs, _split(feats, cat["feature_counts"]))]
+        units, feats = _undelta(cat["units"], cat["unit_back"]), _undelta(cat["features"], cat["feature_back"])
+        unit_counts, feature_counts = cat["unit_counts"], cat["feature_counts"]
+        assert len(unit_counts) == (frames if until is None else min(frames, read_frames))
+        if keep is None:
+            made = np.arange(len(unit_counts))
+        else:
+            made = np.unique(np.asarray(keep, np.int64))
+            made = made[(made >= 0) & (made < len(unit_counts))]
+            units, feats = units[_rows(unit_counts, made)], feats[_rows(feature_counts, made)]
+            unit_counts, feature_counts = unit_counts[made], feature_counts[made]
+        units = _wide_units(units, map_w, map_h, y_lo, y_hi)
+        feats = _wide_features(feats, map_w, map_h)
+        fr: list[rawframe.Frame | None] = [None] * len(cat["unit_counts"])
+        for j, u, f in zip(made, _split(units, unit_counts), _split(feats, feature_counts)):
+            fr[j] = rawframe.Frame(u, sites, globs[j], f)
         out.append((fr, _split(cat["orders"], cat["order_counts"])))
     return meta, out
 

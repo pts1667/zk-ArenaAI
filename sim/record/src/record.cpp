@@ -21,6 +21,10 @@
 #include <type_traits>
 #include <vector>
 
+#ifdef __GLIBC__
+#include <malloc.h>
+#endif
+
 #include "zksim/rawframe.hpp"
 
 namespace {
@@ -244,8 +248,10 @@ struct Slot {
     std::vector<int32_t> teams;             // each side's team
     int frames = 0, chunks = 0;
     int open = 0;                           // frames in the open chunk
-    std::vector<uint8_t> body;              // the compressed chunks so far, each with its length in front
-    std::vector<uint8_t> raw;               // a chunk before compressing
+    // The compressed chunks so far, each with its length in front, each its own size: one growing buffer held up to twice the
+    // game's bytes, and room for a whole uncompressed chunk past them, in each of 64 slots (2026-11-11: 12 recorders of 8-team,
+    // 80-minute games outgrew 40 GB).
+    std::vector<std::vector<uint8_t>> body;
     int64_t clamps[ZKR_CLAMPS] = {};
 };
 
@@ -284,16 +290,18 @@ void put_value(std::vector<uint8_t>& out, T v) {
 // A file to write: its front, then the compressed chunks.
 struct Pending {
     std::string path;
-    std::vector<uint8_t> head, body;
+    std::vector<uint8_t> head;
+    std::vector<std::vector<uint8_t>> body;
 };
 
 int write_file(const Pending& p) {
     const std::string part = p.path + ".part";
     int err = 0;
     if (FILE* f = std::fopen(part.c_str(), "wb")) {
-        if (std::fwrite(p.head.data(), 1, p.head.size(), f) != p.head.size() ||
-            (!p.body.empty() && std::fwrite(p.body.data(), 1, p.body.size(), f) != p.body.size()))
-            err = errno ? errno : EIO;
+        bool ok = std::fwrite(p.head.data(), 1, p.head.size(), f) == p.head.size();
+        for (const auto& chunk : p.body)
+            ok = ok && std::fwrite(chunk.data(), 1, chunk.size(), f) == chunk.size();
+        if (!ok) err = errno ? errno : EIO;
         if (std::fclose(f) != 0 && !err) err = errno ? errno : EIO;
         if (!err && std::rename(part.c_str(), p.path.c_str()) != 0) err = errno ? errno : EIO;
         if (err) std::remove(part.c_str());
@@ -345,8 +353,9 @@ public:
         slot.y_hi = y_hi > y_lo ? y_hi : y_lo + 1.0f;
         const auto* p = static_cast<const SiteRecord*>(sites);
         slot.sites.assign(p, p + std::max(0, n_sites));
-        slot.sides.resize(slot.teams.size());       // kept, and their buffers with them, from the slot's last run
-        for (Side& side : slot.sides) side.clear();
+        // Fresh sides: kept from the slot's last run, each slot's buffers stayed as big as the biggest game it had held.
+        slot.sides.clear();
+        slot.sides.resize(slot.teams.size());
         slot.frames = slot.chunks = slot.open = 0;
         slot.body.clear();
     }
@@ -399,7 +408,8 @@ public:
         put_raw(head, slot.teams);
         std::vector<uint8_t> sites;
         put_raw(sites, slot.sites);
-        compress_into(head, sites);
+        const std::vector<uint8_t> packed = compressed(sites);
+        head.insert(head.end(), packed.begin(), packed.end());
         {
             std::lock_guard<std::mutex> lock(write_mutex_);
             queue_.push_back(Pending{path, std::move(head), std::move(slot.body)});
@@ -408,8 +418,8 @@ public:
         for (int c = 0; c < ZKR_CLAMPS; c++) clamps_[c] += slot.clamps[c];
         std::fill(slot.clamps, slot.clamps + ZKR_CLAMPS, 0);
         slot.on = false;
-        for (Side& side : slot.sides) side.clear();
-        slot.body = std::vector<uint8_t>();
+        slot.sides.clear();         // their buffers freed, not kept for the slot's next game
+        slot.body = std::vector<std::vector<uint8_t>>();
         slot.frames = slot.chunks = slot.open = 0;
         return 0;
     }
@@ -499,7 +509,8 @@ private:
     }
 
     void close_chunk(Slot& slot) {
-        std::vector<uint8_t>& raw = slot.raw;
+        // A chunk before compressing: one buffer a thread, not one a slot.
+        thread_local std::vector<uint8_t> raw;
         raw.clear();
         const int frames = slot.open;
         slot.open = 0;
@@ -525,22 +536,25 @@ private:
             ZKR_ORDER_FIELDS(ZKR_PLANES_ORDER)
             sd.clear_chunk();
         }
-        compress_into(slot.body, raw);
+        slot.body.push_back(compressed(raw));
         slot.chunks++;
     }
 
-    void compress_into(std::vector<uint8_t>& out, const std::vector<uint8_t>& raw) const {
+    // `raw` compressed, with its length in front, in a buffer of just that size.
+    std::vector<uint8_t> compressed(const std::vector<uint8_t>& raw) const {
+        thread_local std::vector<uint8_t> scratch;
         const size_t bound = ZSTD_compressBound(raw.size());
-        const size_t at = out.size();
-        out.resize(at + 4 + bound);
-        const size_t n = ZSTD_compressCCtx(thread_cctx(), out.data() + at + 4, bound, raw.data(), raw.size(), level_);
+        if (scratch.size() < bound) scratch.resize(bound);
+        const size_t n = ZSTD_compressCCtx(thread_cctx(), scratch.data(), bound, raw.data(), raw.size(), level_);
         if (ZSTD_isError(n)) {
             std::fprintf(stderr, "zkrecord: %s\n", ZSTD_getErrorName(n));
             std::abort();
         }
+        std::vector<uint8_t> out(4 + n);
         const uint32_t len = uint32_t(n);
-        std::memcpy(out.data() + at, &len, 4);
-        out.resize(at + 4 + n);
+        std::memcpy(out.data(), &len, 4);
+        std::memcpy(out.data() + 4, scratch.data(), n);
+        return out;
     }
 
     // The writer thread: files are written in the order finished, off the caller's thread (the disk can be slow: WSL's /mnt).
@@ -556,6 +570,12 @@ private:
                 writing_ = true;
             }
             const int err = write_file(p);
+            p = Pending();
+#ifdef __GLIBC__
+            // A game's chunks, freed, are holes in the heap that glibc keeps: given back, so that a recorder's size follows the
+            // games it holds (2026-11-11: about a quarter of its growth).
+            malloc_trim(0);
+#endif
             {
                 std::lock_guard<std::mutex> lock(write_mutex_);
                 writing_ = false;

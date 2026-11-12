@@ -41,6 +41,8 @@ import zksim  # noqa: E402
 from zkbot.policy import actions as act, rawframe as rf, tables  # noqa: E402
 
 MINUTES = (3, 6, 10)
+PROGRESS_EVERY = 300.0      # seconds between progress lines
+WRITE_THREADS = 4           # the recorder's, packing and compressing games' frames side by side
 
 
 def make_env(games: int, seed: int, maps: str | None, decide_every: int, policy_economy: float, advise: bool,
@@ -126,7 +128,9 @@ def main() -> None:
     ap.add_argument("--z", choices=("none", "variant"), default="none",
                     help="what the actor is told of its strategy: nothing, or its side's knobs (the counts unknown)")
     ap.add_argument("--record", help="keep the games here for DAgger: the actor's frames with the scripts' advice as orders")
-    ap.add_argument("--record-games", type=int, default=0, help="with --record, play on until this many games are kept (default --games)")
+    ap.add_argument("--record-games", type=int, default=0,
+                    help="with --record, keep this many games (default --games), or the games running if more: once those written and "
+                         "running come to it, games that start aren't kept, and those running are played out")
     ap.add_argument("--record-prefix", default="game-dagger",
                     help="the kept games' file names start with this (it must start with game-), so that rounds can share a directory")
     ap.add_argument("--workers", type=int, default=12)
@@ -139,6 +143,8 @@ def main() -> None:
                     help="how likely each chicken difficulty is, as very-easy:1 easy:1 normal:1 (default se.CHICKEN_DIFFICULTY_WEIGHTS)")
     ap.add_argument("--encoder", default=policy_latent.ENCODER)
     ap.add_argument("--gpu-memory", type=float, default=0.85)
+    ap.add_argument("--graphs", action=argparse.BooleanOptionalAction, default=True,
+                    help="play each forward pass as a CUDA graph (policy_graphs.py), as PPO does")
     ap.add_argument("--replays", help="keep the first --replay-games games here, for the dashboard (policy_replay.py)")
     ap.add_argument("--replay-games", type=int, default=4)
     ap.add_argument("--replay-label", help="what the dashboard calls them (default: the actor's directory against the script)")
@@ -158,9 +164,9 @@ def main() -> None:
     vocabulary = len(table.names) + 1
     actor = ct.load_actor(args.actor, vocabulary, args.encoder, decide_every, device).eval()
     pm.TEMPERATURE = args.temperature
-    player = pt.Player(actor, None, workers, device)
+    player = pt.Player(actor, None, workers, device, graphs=args.graphs)
     env.begin()
-    rec = cd.Recorder(env, pathlib.Path(args.record), args.record_prefix) if args.record else None
+    rec = cd.Recorder(env, pathlib.Path(args.record), args.record_prefix, threads=WRITE_THREADS) if args.record else None
     if args.replays:
         import policy_replay
         replays = pathlib.Path(args.replays)
@@ -170,10 +176,17 @@ def main() -> None:
     names = np.arange(vocabulary, dtype=np.int32)
     notes = Notes(env)
     want_kept = args.record_games or args.games
-    decisions = 0
+    decisions = noted_decisions = 0
+    noted = time.perf_counter()
     while len(notes.results) < args.games or (rec is not None and not rec.closed):
-        if rec is not None and not rec.closing and len(notes.results) >= args.games and rec.games >= want_kept:
-            rec.close()
+        if rec is not None:
+            rec.close_when(want_kept)
+        if time.perf_counter() - noted >= PROGRESS_EVERY:
+            now = time.perf_counter()
+            print(json.dumps({"seconds": round(now - began), "results": len(notes.results), "kept_games": rec.games if rec else 0,
+                              "running_kept": len(rec.kept) if rec else 0, "decisions": decisions,
+                              "decisions_a_second": round((decisions - noted_decisions) / (now - noted), 1)}), flush=True)
+            noted, noted_decisions = now, decisions
         acting = [s for s in env.policy_seats_to_act() if env.decisions[env.game_of(s)] % decide_every == 0]
         frames = [(env.frame(seat), env.bundle_of(seat), names) for seat in acting]
         index = torch.as_tensor(acting, device=device)

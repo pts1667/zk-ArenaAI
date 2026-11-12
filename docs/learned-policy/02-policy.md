@@ -66,7 +66,8 @@ numba, giving the same tensors to the bit as the numpy it replaced.  Without num
   for health and DPS.  Stats come from the catalog, not the live game.
 * **The economy is on** (`economy=True`) everywhere the actor's or the encoder's frames are made: metal, energy, income,
   storage, unfinished structures, idle builders and site status.
-* **For the critic only**: up to 64 enemy units the seat can't see (`hidden_*`).
+* **For the critic only**: up to 256 enemy units the seat can't see (`hidden_*`), nearest the seat's army first.  It was 64
+  until 2026-11-11 (the user): a late team game, free-for-all or chicken game has hundreds or thousands hidden.
 * **`FEATURE_VERSION`** (8) is what a saved encoder or actor was trained to read.  Raise it with any change to the tensors'
   meaning.  Loading checks it, and `ENCODER_FEATURE_VERSIONS` lists what an encoder reads alike.  Frame shards store featurized
   tensors, ids included, so a change means collecting frames again.  Version 7 (2026-11-10) resized the id tables for
@@ -161,6 +162,28 @@ target was lost, or it's idle.  This keeps orders steady.
 * `actions.encode` is the inverse.  It turns the scripts' orders into the policy's choices (the cloning labels), taking the
   nearest legal region, fine option or place, and counting what can't be said: 0.35% of orders in `army-6`'s check.  A group
   order is recorded as its anchor's order followed by a `GROUP_MARK` record holding the radius and roles.
+
+## Deployment: C++ inference (planned)
+
+The bot is to run with nothing to install (the user, 2026-11-12): its inference path in C++, the nets in onnxruntime, and no
+Python, numpy or numba.  onnxruntime builds exist for Windows (x64, ARM64), Linux (x64, ARM64, glibc 2.28 or newer) and macOS
+on Apple Silicon only (1.31.1).  Not started.
+
+* **One featurizer and one map bundle**: the C++ featurizer (now `featurize.py`, `featurize_kernels.py`) and bundle builder
+  (now `terrain.py`, `bundle.py`) are to be the only ones.  Training calls them through ctypes, as it calls libzksim, so what
+  the bot sees can't drift from what the policy learnt on.  Each is checked bit for bit against the Python, on recorded
+  frames and on every pool map, before the Python goes.
+* **The nets in ONNX**: the encoder, the time transformer and one action step, each exported on its own.  The decision loop
+  (sampling, masks, up to 16 actions until done, as `policy_model.sample_actions`) is C++, checked against torch on recorded
+  decisions.  Attention exports by the `scaled_dot_product_attention` path with a mask, not flex attention: ONNX's
+  FlexAttention is an experimental op (`ai.onnx.preview`), and a decision's window is at most 4 frames of 44 tokens.
+* **The engine side**: first a C++ client of ControllerAI in place of `main.py`, `client.py` and `host.py`.  In the end, a
+  native Skirmish AI the engine loads, as it loads CircuitAI, so the bot is one folder in Zero-K's AI directory: its
+  library, onnxruntime's and the model files.  The opening and the economy script go with it.
+* **Size**: about 4,900 lines of Python are on the bot's path now: `terrain.py` 1,400, the featurizer 1,100, the raw frame
+  schema 300 (already generated as `sim/include/zksim/rawframe.hpp`), actions and groups 350, the engine glue 650, the unit
+  tables 550.
+* **Order**: the featurizer (which pays in training too), the bundle, the nets and the decision loop, then the engine side.
 
 ## Not yet checked live
 

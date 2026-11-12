@@ -113,6 +113,13 @@ def _frame_mask(frames: Frames, queries: int, keys: int, device: str) -> BlockMa
     return create_block_mask(seen, None, None, queries, keys, device=device)
 
 
+@functools.lru_cache(maxsize=64)
+def layout_of(per: int, tokens: int, last: int, offset: int = 0) -> Frames:
+    """The one `Frames` of these numbers.  A compiled block checks that its block mask was made from the very layout it's given:
+    a new but equal one each call (the mask cached from the first) recompiled it every call, until it fell back to eager."""
+    return Frames(per, tokens, last, offset)
+
+
 @torch.compiler.disable
 def frame_mask(frames: Frames, queries: int, keys: int, device: torch.device) -> BlockMask:
     """`TimeBlock.bias`'s -inf as a block mask: flex attention skips the blocks nothing in is seen, ~93% of a cloning sample's.
@@ -387,13 +394,13 @@ class LatentActor(nn.Module):
             if newest_only and i == len(self.blocks) - 1:
                 q = slice(h.shape[1] - per, h.shape[1] - acts)
                 if self.flex:
-                    layout = Frames(per, tokens, last, q.start)
+                    layout = layout_of(per, tokens, last, q.start)
                     bias = layout, frame_mask(layout, tokens, h.shape[1], h.device)
                 else:
                     bias = block.frame_bias(frame[-1:], frame, is_act[:tokens], is_act)
                 h = block(h[:, q], h, bias)
             elif self.flex:
-                layout = Frames(per, tokens, last)
+                layout = layout_of(per, tokens, last)
                 h = block(h, h, (layout, frame_mask(layout, h.shape[1], h.shape[1], h.device)))
             else:
                 h = block(h, h, block.frame_bias(frame, frame, is_act, is_act))
@@ -610,7 +617,20 @@ def compile_for_cloning(actor: LatentActor, mode: str, flex: bool = True) -> Non
     blocks of keys out of the window instead of scoring every pair.  Not for play or PPO, whose shapes change with every batch:
     compiling there gained nothing and once hung (03-training.md, "Dead ends")."""
     actor.flex = flex
-    if mode != "none":
+    if mode == "dynamic":
+        # Every part of a cloning pass, with shapes symbolic, as they change from pass to pass (passes by size, 2026-11-11): the
+        # host launching each part's many small kernels one by one was what held cloning up.  The trainer compiles the heads.
+        # The time transformer's blocks one by one: its loop makes each block's mask outside any graph (`frame_mask`).
+        # A graph has a few versions, each compiled once: with and without gradients (the held-out check), a pass of one stretch,
+        # a size past Inductor's thresholds.  A block had 7 within 6 steps, and past 8 (PyTorch's limit) it would run eager.
+        torch._dynamo.config.recompile_limit = 64
+        # A version that fails to compile runs eager: a clone can't resume, and one failing hours in would be lost.
+        torch._dynamo.config.suppress_errors = True
+        actor.encoder.compile(dynamic=True)
+        actor.action_tokens = torch.compile(actor.action_tokens, dynamic=True)
+        for block in actor.blocks:
+            block.compile(dynamic=True)
+    elif mode != "none":
         actor.sequence = torch.compile(actor.sequence, mode=mode, dynamic=False)
 
 

@@ -90,7 +90,8 @@ featurizer").  Tokens come in a fixed order:
   * which regions each unit may move, jump or wait to;
   * what each factory may produce and each constructor build;
   * a route cost to every region.
-* **For the critic only**: enemy units the seat can't see (`hidden_*`, up to 64).
+* **For the critic only**: enemy units the seat can't see (`hidden_*`, up to 256, nearest the seat's army first; 64 before
+  2026-11-11).
 
 Names are dropped per game for the actor (`NAME_DROPOUT`: 30% of the vocabulary becomes "unknown"), so it learns to go by stats
 too.  The frozen encoder always sees the true names.

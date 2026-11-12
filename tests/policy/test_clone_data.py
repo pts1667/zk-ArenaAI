@@ -365,6 +365,23 @@ def test_a_free_for_all_records_every_team_and_lists_a_side_only_as_far_as_its_a
     assert again == cd.sides(tmp_path) and (str(files[out]), 2, 8) in again
 
 
+def test_recording_stops_starting_kept_games_once_those_written_and_running_come_to_the_target(tmp_path):
+    """Two games of 10 steps and a target of 3: the first two end at step 10, and with the two then starting that's 4, so those
+    are the last kept, played out to their end; none is cut short."""
+    env = se.SimEnv(2, 5, ["scripts"], threads=2, variants=True)
+    env.time_limit = 10
+    env.begin()
+    rec = cd.Recorder(env, tmp_path)
+    steps = 0
+    while not rec.closed:
+        rec.close_when(3)
+        rec.step()
+        steps += 1
+    files = sorted(tmp_path.glob("game-*.zkr"))
+    assert steps == 20 and len(files) == rec.games == 4
+    assert all(zkrecord.header(p)[0] == 10 for p in files)
+
+
 def test_a_chicken_game_records_its_players_sides_alone_with_its_kind_and_difficulty(tmp_path):
     env = se.SimEnv(2, 5, ["scripts"], threads=2, kinds={"chicken": 1.0}, difficulties={"Normal": 1.0}, variants=True)
     env.time_limit = 10
