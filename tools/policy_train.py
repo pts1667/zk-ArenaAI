@@ -60,10 +60,10 @@ class Config:
     # themselves); it plays better than the weights it follows (Generals.io, 2606.23348).
     ema: float = 0.99
     segment: int = 32
-    # Decisions x (padded tokens + DECISION_TOKENS) in a minibatch, which is what its memory follows: about 14 KiB each, so
-    # 260,000 is about 3.5 GB, in the learner's 4.6 beside 4 collectors.  A step took about 0.5 s whether of 32 decisions or 384,
-    # so the bigger the faster.  A minibatch that doesn't fit is split, and the budget shrinks for the rest of the run.
-    token_budget: int = 260_000
+    # Decisions x (padded tokens + DECISION_TOKENS) in a minibatch, which is what its memory follows: 241 decisions of 480 fit the
+    # learner's 4.6 GB beside 4 collectors (full-2, 2026-11-12).  A step took about 0.5 s whether of 32 decisions or 384, so the
+    # bigger the faster.  The most it may be: SPLIT_SHRINK and BUDGET_GROW keep it to what fits.
+    token_budget: int = 130_000
     gpu_share: float = 0.85         # of the card all runs on it may hold.  Past the card it spills into shared memory, at a fifth of the speed.
     gpu_runs: int = 1               # trainings sharing the card, each with its part of gpu_share.  The limit is per process, so it must be told.
     empty_cache: bool = True        # hand back what the allocator holds after each iteration
@@ -152,11 +152,11 @@ class Config:
 
 
 MUON_DECAY = 0.01           # the critic's Muon's weight decay (--critic-muon-lr), as cloning's
-# A decision's memory in training, in tokens of the critic's.  The critic's grows with its frame's tokens, about 14 KiB each
-# whatever the frame's size (measured 2026-11-12: it pairs no tokens); the actor's mostly doesn't, as it reads 4 frames of 40
-# latents a decision.  On full-2's first segments (2026-11-12), a decision of 165-237 tokens took 14.1-16.7 MiB whether 32 or
-# 384 were trained together, so the actor's part is about 800 tokens' worth.
-DECISION_TOKENS = 800
+# What a decision costs in training's memory beside its tokens, in tokens.  On full-2's first segments (2026-11-12), a decision
+# of 165-237 tokens took 14.1-16.7 MiB whether 32 or 384 were trained together, the critic about 14 KiB a token of it; but in
+# its PPO, 241 decisions of about 280 tokens fit where 151 of about 590 and 103 of about 860 didn't, so the rest grows with
+# the tokens too (the actor's reading of the units).  Each minibatch's memory is logged (minibatches.jsonl) to fit it.
+DECISION_TOKENS = 200
 # The token budget follows the learner's memory: a tenth less after an iteration where a minibatch didn't fit (once, as the
 # iteration's minibatches were all planned before it), and a twentieth more, up to --token-budget, after one whose training
 # peaked under GROW_BELOW of the learner's limit.
@@ -183,6 +183,13 @@ def gpu_fraction(share: float, runs: int, card_bytes: int, others: float = 0.0) 
 def collector_bytes(cfg: "Config") -> float:
     """What a run's collector processes hold of the card in all."""
     return cfg.collectors * (cfg.collector_gb * 2**30 + PROCESS_OVERHEAD)
+
+
+def padded_tokens(batch: list["Segment"]) -> int:
+    """A minibatch's padded tokens a decision, as `Learner._minibatches` counts them (DECISION_TOKENS aside)."""
+    units = max(min(len(s.frame.units), UNIT_TOKENS) + min(len(s.frame.sites), fz.CAP_SITES) + min(len(s.frame.features), fz.CAP_FEATURES)
+                for seg in batch for s in seg.steps)
+    return units + max(seg.bundle.regions for seg in batch) + 2
 
 
 def spo_objective(ratio: torch.Tensor, adv: torch.Tensor, eps: float) -> torch.Tensor:
@@ -686,8 +693,6 @@ class Learner:
         eps = cfg.epsilon_start + (cfg.epsilon_end - cfg.epsilon_start) * p
         self.set_rates()
         self.shrunk = False
-        if self.memory_limit:
-            torch.cuda.reset_peak_memory_stats()
         totals: dict[str, float] = {}
         counts: dict[str, float] = {}
 
@@ -695,8 +700,13 @@ class Learner:
             totals[name] = totals.get(name, 0.0) + value * weight
             counts[name] = counts.get(name, 0.0) + weight
 
+        peaks = [0, 0]
+        log = (self.run / "minibatches.jsonl").open("a") if self.memory_limit else None
         for _ in range(cfg.passes):
             for batch in self._minibatches(segments, rng):
+                if log is not None:
+                    torch.cuda.reset_peak_memory_stats()
+                splits = self.splits
                 self._backward(batch, eps, note)
                 grad = torch.nn.utils.clip_grad_norm_(self.trained, cfg.grad_clip)
                 self.optimizer.step()
@@ -704,12 +714,21 @@ class Learner:
                     self.muon.step()
                 self.ema_step()
                 note("grad_norm", float(grad))
+                if log is not None:
+                    allocated, reserved = torch.cuda.max_memory_allocated(), torch.cuda.max_memory_reserved()
+                    peaks = [max(peaks[0], allocated), max(peaks[1], reserved)]
+                    log.write(json.dumps({"iteration": self.iteration, "decisions": sum(len(seg.steps) for seg in batch),
+                                          "tokens": padded_tokens(batch), "allocated_gb": round(allocated / 2**30, 3),
+                                          "reserved_gb": round(reserved / 2**30, 3), "split": self.splits > splits}) + "\n")
                 if between is not None:
                     between()
         out = {k: totals[k] / max(counts[k], 1e-9) for k in totals}
         out.update(token_budget=self.token_budget, splits=self.splits)
-        if self.memory_limit and not self.shrunk and torch.cuda.max_memory_reserved() < GROW_BELOW * self.memory_limit:
-            self.token_budget = min(cfg.token_budget, int(self.token_budget * BUDGET_GROW))
+        if log is not None:
+            log.close()
+            out.update(learner_allocated_gb=peaks[0] / 2**30, learner_reserved_gb=peaks[1] / 2**30)     # training's peaks
+            if not self.shrunk and peaks[1] < GROW_BELOW * self.memory_limit:
+                self.token_budget = min(cfg.token_budget, int(self.token_budget * BUDGET_GROW))
         if self.reference is not None:
             out["kl_weight"] = self.kl_weight
         if self.cfg.clone_weight:
@@ -1217,10 +1236,9 @@ def train(cfg: Config, run: pathlib.Path, make_env, device: str = "cuda") -> Non
                        collect_rate=metrics["decisions"] / max(collect_s, 1e-9), train_rate=metrics["decisions"] * cfg.passes / train_s,
                        overall_rate=metrics["decisions"] / (t2 - t0), game_minutes=learner.decisions * cfg.decide_every / 120.0,
                        beta=beta(learner.progress), entropy_coef=dict(learner.entropy_coef), lead_share=lead_share)
-        if device == "cuda":        # the most this process's allocator has held this iteration, for sizing gpu_share's parts
-            metrics["learner_reserved_gb"] = torch.cuda.max_memory_reserved() / 2**30
-            metrics["learner_allocated_gb"] = torch.cuda.max_memory_allocated() / 2**30
-            torch.cuda.reset_peak_memory_stats()
+        if device == "cuda":        # the most this process's allocator held while training, for sizing gpu_share's parts
+            metrics.setdefault("learner_reserved_gb", torch.cuda.max_memory_reserved() / 2**30)
+            metrics.setdefault("learner_allocated_gb", torch.cuda.max_memory_allocated() / 2**30)
         if metrics["masked_out"]:
             raise RuntimeError(f"{metrics['masked_out']} chosen actions were outside their mask")
         test = remote.evaluate if remote is not None else functools.partial(evaluate, make_env=make_env)

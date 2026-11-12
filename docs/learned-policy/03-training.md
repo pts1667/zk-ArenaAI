@@ -349,19 +349,23 @@ In a 1v1, for side A against side B at decision t:
   nothing here, as the encoder did where Muon beat AdamW.  The actor, fine-tuned from the clone at small rates, keeps Adam
   unless `--actor-muon-lr` puts its hidden matrices on Muon too (all its linear layers' weights but the heads' answers),
   at that rate's share of Adam's schedule and nothing during the critic's warm-up: an A/B of 50 iterations each decides.
-* **Minibatches** are filled to a token budget (`--token-budget`, 260,000): a decision counts its padded tokens and 800 more
-  (`DECISION_TOKENS`), what the actor's part of its memory is worth in the critic's tokens.  Measured on `full-2`'s first
-  segments (2026-11-12), a decision took 14.1-16.7 MiB, linear in the decisions from 32 to 384, and a step about 0.5 s whatever
-  its size: 32 decisions took 0.25 s, 384 took 0.50.  So the budget is about 3.5 GB of the learner's 4.6.  It used to weigh a
-  token by `1 + tokens / 1200`, fitted when attention paired every token: frames grew to about 730 tokens by `full-2`'s 18th
-  iteration, minibatches fell from 141 decisions to 34, and training from 252 decisions a second to 70, with most of its
-  memory unused.  A minibatch that doesn't fit is done again in 2, then 4... runs of its segments, each weighed by its
-  decisions.  The budget then shrinks by a tenth, once in the iteration, as its minibatches were all planned before: shrunk at
-  each split, the first restart's went from 260,000 to 112,000 in one iteration, and its minibatches to 80 decisions.  After an
-  iteration without a split whose training peaked under 85% of the learner's limit, it grows by a twentieth, up to
-  `--token-budget`.  In that restart, 260,000 peaked at 4.38 GB at iteration 1 and ran out at iteration 2, and 112,000 peaked
-  at 2.4-2.7 GB: about 1.2 GB of nets, optimizers and copies, and 12.7 KiB a token.  `splits` and `token_budget` are in
-  `metrics.jsonl`, and `learner_reserved_gb` and `learner_allocated_gb` are each iteration's training peaks.
+* **Minibatches** are filled to a token budget (`--token-budget`, 130,000 at most): a decision counts its padded tokens and
+  200 more (`DECISION_TOKENS`).  A step takes about 0.5 s whatever its size (on `full-2`'s first segments, 2026-11-12, 32
+  decisions took 0.25 s and 384 took 0.50, at 14.1-16.7 MiB a decision), so minibatches are as big as the learner's memory
+  allows.  It used to weigh a token by `1 + tokens / 1200`, fitted when attention paired every token: frames grew to about
+  730 tokens by `full-2`'s 18th iteration, minibatches fell from 141 decisions to 34, and training from 252 decisions a
+  second to 70, with most of its memory unused.
+  * A minibatch that doesn't fit is done again in 2, then 4... runs of its segments, each weighed by its decisions.  The
+    budget then shrinks by a tenth, once in the iteration, as its minibatches were all planned before.  After an iteration
+    without a split whose training peaked under 85% of the learner's limit, it grows by a twentieth, up to `--token-budget`.
+  * The 200: with 800, from the critic's 14 KiB a token and the first segments' 14 MiB a decision, 241 decisions of about 280
+    tokens fit the learner's 4.6 GB, but 151 of about 590 and 103 of about 860 didn't, and the budget shrank to fit them, from
+    260,000 to 154,000 by iteration 7.  The actor's reading of the units grows with the tokens too.  Shrunk at every split,
+    before the once-an-iteration rule, it had gone from 260,000 to 112,000 in one iteration.
+  * Even so, those 7 iterations played 145-222 decisions a second overall, against 124-131 at the same point before.
+  * Each minibatch's decisions, padded tokens, peak memory and whether it split are in the run's `minibatches.jsonl`, to fit
+    the weight to.  `metrics.jsonl` has `splits`, `token_budget`, and `learner_reserved_gb` and `learner_allocated_gb`, the
+    iteration's training peaks.
 
 ### From a clone
 

@@ -95,10 +95,11 @@ The first whole run on the variety work, started by me while the user slept:
   about 730 tokens, minibatches went from 141 decisions to 34, under a token weighting fitted when attention paired every
   token, while the learner used little of its memory (the user saw 8 of the card's 12 GB in use).  I stopped it at
   iteration 18 (set aside as `ppo-pairs-18`).  Now a graph shape narrower than the widest goes before the next capture, and
-  the budget counts tokens linearly, with 800 more a decision for the actor, as measured, so a big frame's minibatch is about
-  4x what it was; a minibatch that doesn't fit is split, and the budget shrinks by a tenth once in an iteration and grows back
-  when there's room (03-training.md, "PPO" and "Playing").  The first restart shrank it at every split, to 112,000 in one
-  iteration; restarted again at 04:01 with the rule above.
+  the budget counts tokens linearly, with 200 more a decision; a minibatch that doesn't fit is split, and the budget shrinks
+  by a tenth once in an iteration and grows back when there's room (03-training.md, "PPO" and "Playing").  Restarted three
+  times for it: shrinking at every split (`ppo-shrink-4`), then 800 a decision, which planned big frames' minibatches too
+  big (`ppo-k800-7`, 145-222 decisions a second overall all the same), then at 04:07 as it is now.  Each minibatch's
+  memory is logged in `ppo/minibatches.jsonl`, to fit the 200 to.
 * Next (the user, 2026-11-12): 50 iterations of the pipeline's PPO (Adam on the actor), then 50 with Muon on the actor's
   hidden matrices (`--actor-muon-lr 1.3e-4`, `runs/full-2-actor-muon`), then the real PPO stage with the better of the two.
 
