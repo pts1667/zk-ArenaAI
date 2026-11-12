@@ -340,8 +340,24 @@ In a 1v1, for side A against side B at decision t:
   With `--critic-bins` its value is a distribution over bins from -span to span, trained by HL-Gauss.  `--critic-lr` gives it a
   rate of its own, falling in step with the actor's: at the actor's 1e-5 a new critic learned nothing (explained variance
   0.0000 for 19 iterations in `full-1`).  The pipeline gives it 3e-4.
-* **Minibatches** are filled to a token budget (`--token-budget`): 40,000 fits the 10M actor in 85% of the card, where 165,000
-  didn't.
+* **The critic's shape** (the user, 2026-11-12): 32 learnt queries and the global token read every token, as the frame encoder
+  reads, in 4 rounds, each a reading and then the queries attending to each other.  So its cost grows with the tokens, not their
+  square, as it did when it was self-attention over every token.  At the caps (16 frames of 2,193 tokens), a forward and
+  backward pass takes 36 ms and 0.54 GB against 95 ms and 1.42 GB, with 6.67M parameters against 3.24M.
+* **Muon on the critic** (`--critic-muon-lr`, the user, 2026-11-12): its hidden matrices, all its linear layers' weights but the
+  value's, at 0.004 falling as its Adam rate does, with weight decay 0.01; Adam for the rest of it.  The critic learns from
+  nothing here, as the encoder did where Muon beat AdamW.  The actor, fine-tuned from the clone at small rates, keeps Adam
+  unless `--actor-muon-lr` puts its hidden matrices on Muon too (all its linear layers' weights but the heads' answers),
+  at that rate's share of Adam's schedule and nothing during the critic's warm-up: an A/B of 50 iterations each decides.
+* **Minibatches** are filled to a token budget (`--token-budget`, 260,000): a decision counts its padded tokens and 800 more
+  (`DECISION_TOKENS`), what the actor's part of its memory is worth in the critic's tokens.  Measured on `full-2`'s first
+  segments (2026-11-12), a decision took 14.1-16.7 MiB, linear in the decisions from 32 to 384, and a step about 0.5 s whatever
+  its size: 32 decisions took 0.25 s, 384 took 0.50.  So the budget is about 3.5 GB of the learner's 4.6.  It used to weigh a
+  token by `1 + tokens / 1200`, fitted when attention paired every token: frames grew to about 730 tokens by `full-2`'s 18th
+  iteration, minibatches fell from 141 decisions to 34, and training from 252 decisions a second to 70, with most of its
+  memory unused.  A minibatch that doesn't fit is done again in 2, then 4... runs of its segments, each weighed by its
+  decisions, and the budget shrinks by a tenth (`splits` and `token_budget` in `metrics.jsonl`; `learner_reserved_gb` and
+  `learner_allocated_gb` are each iteration's peaks).
 
 ### From a clone
 
@@ -364,7 +380,7 @@ In a 1v1, for side A against side B at decision t:
 **The smoke run** (16 games, 3 iterations of 512 decisions, from `clone-7`): at a learning rate of 1e-4 the actor drifted too far
 from the clone.  At 1e-5 the KL to the clone went from 0.003 to 0.023, PPO's own KL per iteration stayed at 0.005-0.008, and 10%
 of ratios clipped.  The pipeline's PPO flags are this run's: lr 1e-5 to 3e-6, KL 0.5, cloning loss 0.5, 51 bins over ±1.5,
-economy share 0.25 to 1, income 0.5, token budget 40,000, not concurrent; since `full-1`, the critic at 3e-4 alone for 10
+economy share 0.25 to 1, income 0.5, token budget 40,000 (as it was counted then), not concurrent; since `full-1`, the critic at 3e-4 alone for 10
 iterations; and since 2026-11-10 the KL and the cloning loss fading by iteration, and SPO's loss in place of the clip and
 dual clip 3, as above.
 
@@ -420,8 +436,11 @@ every seat that decides.
 * **Collector processes** (`tools/policy_collectors.py`, `--collectors N`): each plays its share of the games and of the
   tests, with its own copy of the nets and its own graphs.  They fork before the GPU is touched, after the map pool is
   loaded, and share its maps.  Weights reach them through shared memory before each collection, checked by a checksum.
-  Each may hold `--collector-gb` (0.75) of the card, which the learner's own limit leaves room for.  With `--concurrent` they
-  collect the next iteration while this one trains.
+  Each may hold `--collector-gb` (1.0) of the card, which the learner's own limit leaves room for.  At 0.75, a collector ran
+  out in `full-2`'s 8th iteration (2026-11-12): mixed games' frames grow past 1v1s', and a graph's shape only grows.  At the
+  caps, a collector's 16 games reserve 0.65 GB with one shape and 0.83 with two; at 1.0 one reached 0.96 by iteration 16,
+  holding the shape before while capturing the next.  So a shape narrower than the widest now goes before the next capture.
+  With 4 at 1.0 the learner keeps about 4.6.  With `--concurrent` they collect the next iteration while this one trains.
 
 ## Speed
 

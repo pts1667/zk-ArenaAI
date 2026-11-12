@@ -21,7 +21,7 @@ import torch.nn.functional as F
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT / "bots"))
-from policy_model import ID_DIM, NAME_DIM, Block, attention  # noqa: E402
+from policy_model import ID_DIM, NAME_DIM, Block, CrossBlock  # noqa: E402  (CrossBlock is read from here too)
 from zkbot.policy import featurize as fz  # noqa: E402
 
 # The first two columns of each token group's features are its place on the map, -1 to 1.
@@ -86,30 +86,6 @@ def collate_frames(items: list[dict[str, np.ndarray]]) -> FrameBatch:
         arrays[name] = torch.from_numpy(out)
     arrays["glob_x"] = torch.from_numpy(np.stack([t["glob_x"] for t in items]).astype(np.float32))
     return FrameBatch(**arrays)
-
-
-class CrossBlock(nn.Module):
-    """Queries reading tokens."""
-
-    def __init__(self, d: int, heads: int):
-        super().__init__()
-        self.heads = heads
-        self.ln_q = nn.LayerNorm(d)
-        self.ln_t = nn.LayerNorm(d)
-        self.q = nn.Linear(d, d)
-        self.kv = nn.Linear(d, 2 * d)
-        self.out = nn.Linear(d, d)
-        self.ln2 = nn.LayerNorm(d)
-        self.ff1 = nn.Linear(d, 4 * d)
-        self.ff2 = nn.Linear(4 * d, d)
-
-    def forward(self, queries: torch.Tensor, tokens: torch.Tensor, key_mask: torch.Tensor) -> torch.Tensor:
-        b, q_count, d = queries.shape
-        split = lambda t: t.view(b, t.shape[1], self.heads, d // self.heads).transpose(1, 2)  # noqa: E731
-        k, v = self.kv(self.ln_t(tokens)).chunk(2, -1)
-        o = attention(split(self.q(self.ln_q(queries))), split(k), split(v), key_mask[:, None, None, :])
-        queries = queries + self.out(o.transpose(1, 2).reshape(b, q_count, d))
-        return queries + self.ff2(F.gelu(self.ff1(self.ln2(queries)), approximate="tanh"))
 
 
 @torch.no_grad()

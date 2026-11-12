@@ -309,6 +309,30 @@ class Block(nn.Module):
         return h + self.ff2(F.gelu(self.ff1(self.ln2(h)), approximate="tanh"))
 
 
+class CrossBlock(nn.Module):
+    """Queries reading tokens."""
+
+    def __init__(self, d: int, heads: int):
+        super().__init__()
+        self.heads = heads
+        self.ln_q = nn.LayerNorm(d)
+        self.ln_t = nn.LayerNorm(d)
+        self.q = nn.Linear(d, d)
+        self.kv = nn.Linear(d, 2 * d)
+        self.out = nn.Linear(d, d)
+        self.ln2 = nn.LayerNorm(d)
+        self.ff1 = nn.Linear(d, 4 * d)
+        self.ff2 = nn.Linear(4 * d, d)
+
+    def forward(self, queries: torch.Tensor, tokens: torch.Tensor, key_mask: torch.Tensor) -> torch.Tensor:
+        b, q_count, d = queries.shape
+        split = lambda t: t.view(b, t.shape[1], self.heads, d // self.heads).transpose(1, 2)  # noqa: E731
+        k, v = self.kv(self.ln_t(tokens)).chunk(2, -1)
+        o = attention(split(self.q(self.ln_q(queries))), split(k), split(v), key_mask[:, None, None, :])
+        queries = queries + self.out(o.transpose(1, 2).reshape(b, q_count, d))
+        return queries + self.ff2(F.gelu(self.ff1(self.ln2(queries)), approximate="tanh"))
+
+
 assert rf.KIND_COUNT <= 31, "kind_in's mask is an int32's bits"
 
 
@@ -348,17 +372,23 @@ def _sample(logits: torch.Tensor) -> torch.Tensor:
 
 
 class Critic(nn.Module):
-    """A separate encoder over the privileged frame.  Never in the bot.  Its size grew with the actor's (the user, 2026-11-09): it was
-    width 128, 2 layers of 4 heads."""
+    """A separate encoder over the privileged frame.  Never in the bot.  Learnt queries read every token, as the frame encoder's do
+    (frame_model.FrameEncoder), each round a reading and then the queries attending to each other, and the value is read from the
+    global token, which is one of the queries.  So its cost grows with the tokens, not their square: to 2026-11-12 it was
+    self-attention over every token, about 5M pairs a layer at the caps (the user).  Before the queries read them, each token has a
+    feed-forward of its own.  Its size grew with the actor's (the user, 2026-11-09): it was width 128, 2 layers of 4 heads."""
     D = 256
     LAYERS = 4
     HEADS = 8
+    QUERIES = 32
 
-    def __init__(self, vocabulary: int, d: int = D, layers: int = LAYERS, heads: int = HEADS, bins: int = 0, span: float = 3.0):
+    def __init__(self, vocabulary: int, d: int = D, layers: int = LAYERS, heads: int = HEADS, bins: int = 0, span: float = 3.0,
+                 queries: int = QUERIES):
         """bins: above 0, the value is a distribution over that many values evenly from -span to span, trained by HL-Gauss
-        (`hl_gauss`; 04-literature.md P7), and the value is its mean; else one number."""
+        (`hl_gauss`; 04-literature.md P7), and the value is its mean; else one number.  layers: rounds of reading; queries: besides
+        the global token's."""
         super().__init__()
-        self.size = {"d": d, "layers": layers, "heads": heads, **({"bins": bins, "span": span} if bins else {})}
+        self.size = {"d": d, "layers": layers, "heads": heads, "queries": queries, **({"bins": bins, "span": span} if bins else {})}
         self.bins = bins
         self.name_embed = nn.Embedding(vocabulary, 8)
         self.kind_embed = nn.Embedding(fz.TOKEN_KINDS, d)
@@ -369,6 +399,11 @@ class Critic(nn.Module):
         self.site_in = nn.Linear(fz.SITE_DIM, d)
         self.feat_in = nn.Linear(fz.FEATURE_DIM, d)
         self.glob_in = nn.Linear(fz.GLOBAL_DIM, d)
+        self.token_ln = nn.LayerNorm(d)
+        self.token_ff1 = nn.Linear(d, 2 * d)
+        self.token_ff2 = nn.Linear(2 * d, d)
+        self.queries = nn.Parameter(torch.randn(queries, d) / math.sqrt(d))
+        self.reads = nn.ModuleList(CrossBlock(d, heads) for _ in range(layers))
         self.blocks = nn.ModuleList(Block(d, heads) for _ in range(layers))
         self.lnf = nn.LayerNorm(d)
         self.value = nn.Linear(d, bins or 1)
@@ -397,10 +432,13 @@ class Critic(nn.Module):
         hf = self.feat_in(b.feat_x) + self.kind_embed.weight[fz.TK_FEATURE]
         hg = self.glob_in(b.glob_x)[:, None]
         hu = hu + self.kind_embed(b.tok_kind[:, :hu.shape[1]])
-        h = torch.cat((hg, hu, hh, hr, hs, hf), 1)
+        tokens = torch.cat((hg, hu, hh, hr, hs, hf), 1)
+        tokens = tokens + self.token_ff2(F.gelu(self.token_ff1(self.token_ln(tokens)), approximate="tanh"))
         mask = torch.cat((torch.ones_like(b.unit_mask[:, :1]), b.unit_mask, b.hidden_mask, b.reg_mask, b.site_mask, b.feat_mask), 1)
-        for block in self.blocks:
-            h = block(h, None, mask)
+        h = torch.cat((tokens[:, :1], self.queries.to(tokens.dtype).expand(len(tokens), -1, -1)), 1)
+        everyone = torch.ones(h.shape[:2], dtype=torch.bool, device=h.device)
+        for read, block in zip(self.reads, self.blocks):
+            h = block(read(h, tokens, mask), None, everyone)
         out = self.value(self.lnf(h[:, 0])).float()
         if not self.bins:
             return out[:, 0]

@@ -28,8 +28,9 @@ replay launches the lot at once.
 * **Random numbers** are new at each replay: PyTorch's generator is graph-safe.
 * **Memory**: every graph of a `Graphs` shares one pool, and a replay's outputs are copied out before the next.  What one graph
   leaves for the next (the decision's context, the steps' state, the tail's outputs) is held, so that no later capture puts
-  anything there; the rest of a graph's memory is its own only while it plays, and a round plays one shape's graphs.  The
-  oldest shape goes past `keep` of them.  A collector of 16 games held 460 MB with 6 graphs kept: 185 MB of pool, and the
+  anything there; the rest of a graph's memory is its own only while it plays, and a round plays one shape's graphs.  A shape
+  narrower than the widest goes before the next capture, and the oldest past `keep` of them.  At the caps one shape held
+  648 MB of the pool, and two 830, so a collector's 0.75 GB ran out while it kept the one before.  A collector of 16 games held 460 MB with 6 graphs kept: 185 MB of pool, and the
   rest its nets, the kept graphs' inputs and outputs, and its seats' state.
 """
 from __future__ import annotations
@@ -114,8 +115,8 @@ class Graphs:
     """`policy_train.Player._forward` as CUDA graphs, for a CUDA actor and critic (or no critic)."""
 
     def __init__(self, actor, critic, slots: int = act.SLOTS, keep: int = 2, cuts: tuple[int, ...] = CUTS):
-        """keep: the shapes held.  As the widths only grow, a shape narrower than the widest is never played again: what's
-        kept is the widest with z and without (a bootstrap or a test without it)."""
+        """keep: the most shapes held.  As the widths only grow, a shape narrower than the widest is never played again and
+        goes as soon as a wider one is needed: what's kept is the widest with z and without (a bootstrap or a test without it)."""
         self.actor, self.critic, self.slots, self.keep = actor, critic, slots, keep
         self.cuts = tuple(c for c in cuts if 0 < c < slots) + (slots,)
         self.device = next(actor.parameters()).device
@@ -196,6 +197,15 @@ class Graphs:
         key = (z is None, *(None if v is None else v.shape for v in vars(nb).values()))
         shape = self.shapes.get(key)
         if shape is None:
+            # Every call pads to the widest yet, so a shape of other widths never plays again: it goes before the capture, which
+            # can then reuse its memory.
+            stale = [k for k in self.shapes if k[1:] != key[1:]]
+            for old in stale:
+                del self.shapes[old]
+            if stale and not self.shapes:
+                # A pool no graph holds can't be captured into again (PyTorch asserts): its memory goes back, and a new one starts.
+                torch.cuda.empty_cache()
+                self.pool = torch.cuda.graph_pool_handle()
             shape = self.shapes[key] = self._new_shape(nb, history, seen, z)
         else:
             self.shapes.move_to_end(key)

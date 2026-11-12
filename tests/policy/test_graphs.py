@@ -126,7 +126,7 @@ def short(games, seed, modes=None, threads=2, **kw):
     env.time_limit = 6
     return env
 
-cfg = pt.Config(decisions=24, iteration=8, games=2, passes=1, segment=4, token_budget=4000, data_workers=0, eval_every=1, eval_games=2,
+cfg = pt.Config(decisions=24, iteration=8, games=2, passes=1, segment=4, token_budget=25_000, data_workers=0, eval_every=1, eval_games=2,
                 checkpoint_every=10**6, latent_encoder={str(encoder_path)!r}, collectors=2, **{config!r})
 pt.train(cfg, pathlib.Path({str(run)!r}), functools.partial(short, speed_weight=cfg.speed_weight), device={device!r})
 """

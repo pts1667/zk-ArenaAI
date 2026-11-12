@@ -60,8 +60,10 @@ class Config:
     # themselves); it plays better than the weights it follows (Generals.io, 2606.23348).
     ema: float = 0.99
     segment: int = 32
-    # Decisions x padded tokens in a minibatch, which is what its memory follows.
-    token_budget: int = 165_000
+    # Decisions x (padded tokens + DECISION_TOKENS) in a minibatch, which is what its memory follows: about 14 KiB each, so
+    # 260,000 is about 3.5 GB, in the learner's 4.6 beside 4 collectors.  A step took about 0.5 s whether of 32 decisions or 384,
+    # so the bigger the faster.  A minibatch that doesn't fit is split, and the budget shrinks for the rest of the run.
+    token_budget: int = 260_000
     gpu_share: float = 0.85         # of the card all runs on it may hold.  Past the card it spills into shared memory, at a fifth of the speed.
     gpu_runs: int = 1               # trainings sharing the card, each with its part of gpu_share.  The limit is per process, so it must be told.
     empty_cache: bool = True        # hand back what the allocator holds after each iteration
@@ -70,6 +72,12 @@ class Config:
     # The critic's rate at the start, falling as the actor's does; 0: the actor's.  A clone's actor wants a small rate, and a new
     # critic at it learns nothing: at 1e-5 its explained variance stayed at 0.0000 for 19 iterations (full-1, 2026-11-10).
     critic_lr: float = 0.0
+    # Above 0, Muon trains the critic's hidden matrices at this rate, falling as the critic's other rate does, and Adam the rest of
+    # it (the user, 2026-11-12).  The critic learns from nothing here, as the frame encoder did, where Muon beat AdamW (S4).
+    critic_muon_lr: float = 0.0
+    # The same for the actor's hidden matrices (policy_latent.answers keeps its heads' layers on Adam), as cloning and DAgger trained
+    # them, falling as its Adam rate does and 0 while the critic warms up; 0: Adam for all of it (2026-11-12, against Adam in full-2).
+    actor_muon_lr: float = 0.0
     # SPO's eps, the ratio's trust region 1 +- eps (Learner._update_loss), at the start and at the end, linear between.  PPO's
     # clip had these until 2026-11-10.
     epsilon_start: float = 0.15
@@ -137,15 +145,19 @@ class Config:
                                     # this process, where a second thread would use the GPU during a capture
     collectors: int = 0             # processes that play the games, each its share of them, and the tests (policy_collectors.py);
                                     # 0: this process plays
-    collector_gb: float = 0.75      # the GPU memory each collector may hold, out of gpu_share.  The learner's training needs about
+    collector_gb: float = 1.0       # the GPU memory each collector may hold, out of gpu_share.  The learner's training needs about
                                     # 4.5 GB of the rest (at 4 x 1.5 it had 2.6 GB, and ran out); a collector of 16 games ran out at
-                                    # 0.5 (2026-11-10)
+                                    # 0.5 (2026-11-10), and at 0.75 in full-2's first iterations of mixed games, as its frames grew
+                                    # (2026-11-12).  At the caps, 16 games' two kept shapes (policy_graphs) reserve 0.83 GB.
 
 
-# A big frame costs more memory per token than a small one.  Fitted on the first actor, whose attention was over every pair of
-# tokens, at 40, 128 and 256 units a side: this many tokens is where a token's pairs cost what the token itself does.  Kept as a
-# cautious bound until it's measured on this actor.
-PAIR_TOKENS = 1200
+MUON_DECAY = 0.01           # the critic's Muon's weight decay (--critic-muon-lr), as cloning's
+# A decision's memory in training, in tokens of the critic's.  The critic's grows with its frame's tokens, about 14 KiB each
+# whatever the frame's size (measured 2026-11-12: it pairs no tokens); the actor's mostly doesn't, as it reads 4 frames of 40
+# latents a decision.  On full-2's first segments (2026-11-12), a decision of 165-237 tokens took 14.1-16.7 MiB whether 32 or
+# 384 were trained together, so the actor's part is about 800 tokens' worth.
+DECISION_TOKENS = 800
+SPLIT_SHRINK = 0.9          # the token budget after a minibatch didn't fit
 ACT_PAIRS = 24_000_000      # batch x tokens^2 of one forward pass while playing: its pair table is about 20 bytes a pair
 FLAT_CHUNK = 64             # decisions a data worker featurizes at a time
 # Records past the caps become no tokens.
@@ -166,11 +178,6 @@ def gpu_fraction(share: float, runs: int, card_bytes: int, others: float = 0.0) 
 def collector_bytes(cfg: "Config") -> float:
     """What a run's collector processes hold of the card in all."""
     return cfg.collectors * (cfg.collector_gb * 2**30 + PROCESS_OVERHEAD)
-
-
-def memory_tokens(tokens: int) -> float:
-    """What a padded frame of this many tokens costs in training's memory, in tokens of a small one."""
-    return tokens * (1.0 + tokens / PAIR_TOKENS)
 
 
 def spo_objective(ratio: torch.Tensor, adv: torch.Tensor, eps: float) -> torch.Tensor:
@@ -427,13 +434,28 @@ class Learner:
         actor_params = [p for p in self.actor.parameters() if p.requires_grad]
         critic_params = [p for p in self.critic.parameters() if p.requires_grad]
         self.trained = actor_params + critic_params
-        # Two groups, so that the critic can learn alone at first (critic_warmup).
-        self.optimizer = torch.optim.Adam([{"params": actor_params}, {"params": critic_params, "lr": cfg.critic_lr or cfg.lr_start}],
+        # Muon's, as frame_vae.Optimisers chooses: the weights of the actor's linear layers but those giving answers
+        # (policy_latent.answers), as cloning has them, and of the critic's but the one giving the value.
+        actor_hidden = ({id(m.weight) for name, m in self.actor.named_modules()
+                         if isinstance(m, torch.nn.Linear) and m.weight.requires_grad and not policy_latent.answers(name, m)}
+                        if cfg.actor_muon_lr > 0.0 else set())
+        critic_hidden = ({id(m.weight) for name, m in self.critic.named_modules() if isinstance(m, torch.nn.Linear) and name != "value"}
+                         if cfg.critic_muon_lr > 0.0 else set())
+        hidden = actor_hidden | critic_hidden
+        # Two groups each, so that the critic can learn alone at first (critic_warmup).
+        self.optimizer = torch.optim.Adam([{"params": [p for p in actor_params if id(p) not in hidden]},
+                                           {"params": [p for p in critic_params if id(p) not in hidden], "lr": cfg.critic_lr or cfg.lr_start}],
                                           lr=cfg.lr_start, eps=cfg.adam_eps)
+        groups = [{"params": [p for p in params if id(p) in chosen], "role": role, "lr": rate}
+                  for role, params, chosen, rate in (("actor", actor_params, actor_hidden, cfg.actor_muon_lr),
+                                                     ("critic", critic_params, critic_hidden, cfg.critic_muon_lr)) if chosen]
+        self.muon = torch.optim.Muon(groups, weight_decay=MUON_DECAY) if groups else None
         self.economy_share = cfg.economy_start
         self.decisions = 0
         self.iteration = 0
         self.entropy_coef = {h: ENTROPY_BASE for h in HEADS}
+        self.token_budget = cfg.token_budget        # shrinks by SPLIT_SHRINK each time a minibatch doesn't fit
+        self.splits = 0
         self.self_play = SelfPlay(cfg.self_play_at, cfg.self_play_holds_below, cfg.self_play_per_iteration)
         self.autocast = torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda")
         self.graphs = cfg.graphs and not cfg.concurrent
@@ -477,9 +499,9 @@ class Learner:
 
     def _minibatches(self, segments: list[Segment], rng: np.random.Generator) -> list[list[Segment]]:
         """Whole segments up to the token budget, near-equal sizes together so padding stays small.  Sizes are jittered, so a
-        minibatch isn't all from one stage of the game, and the minibatches then go in random order.  The budget counts padded
-        tokens, weighed by `memory_tokens`: a small frame batched with a big map's costs as much as the big map's.  Token groups
-        pad separately, so each is tracked on its own."""
+        minibatch isn't all from one stage of the game, and the minibatches then go in random order.  The budget counts a
+        decision's padded tokens and `DECISION_TOKENS`: a small frame batched with a big map's costs as much as the big map's.
+        Token groups pad separately, so each is tracked on its own."""
         units = np.array([max(min(len(s.frame.units), UNIT_TOKENS) + min(len(s.frame.sites), fz.CAP_SITES) + min(len(s.frame.features), fz.CAP_FEATURES) for s in seg.steps) for seg in segments])
         regions = np.array([seg.bundle.regions for seg in segments])
         lengths = np.array([len(seg.steps) for seg in segments])
@@ -487,8 +509,8 @@ class Learner:
         batches, current = [], []
         decisions = most_units = most_regions = 0
         for i in order:
-            grown = (decisions + lengths[i]) * memory_tokens(max(most_units, units[i]) + max(most_regions, regions[i]) + 2)
-            if current and grown > self.cfg.token_budget:
+            grown = (decisions + lengths[i]) * (max(most_units, units[i]) + max(most_regions, regions[i]) + 2 + DECISION_TOKENS)
+            if current and grown > self.token_budget:
                 batches.append(current)
                 current = []
                 decisions = most_units = most_regions = 0
@@ -583,7 +605,6 @@ class Learner:
                 note(f"entropy_{h}", float(total.detach()) / n, n)
         note("loss_pg", float(pg.detach()))
         note("loss_value", float(value_loss.detach()))
-        note("minibatch_decisions", decisions)
         return pg + cfg.value_weight * value_loss - entropy_loss
 
     @property
@@ -611,8 +632,40 @@ class Learner:
         """The actor's rate on its schedule, or 0 while the critic warms up; the critic's scaled as the actor's falls."""
         cfg = self.cfg
         lr = cfg.lr_start + (cfg.lr_end - cfg.lr_start) * self.progress
-        self.optimizer.param_groups[0]["lr"] = 0.0 if self.iteration < cfg.critic_warmup else lr
+        actor = 0.0 if self.iteration < cfg.critic_warmup else lr
+        self.optimizer.param_groups[0]["lr"] = actor
         self.optimizer.param_groups[1]["lr"] = cfg.critic_lr * lr / cfg.lr_start if cfg.critic_lr else lr
+        for group in self.muon.param_groups if self.muon is not None else ():
+            group["lr"] = (cfg.actor_muon_lr * actor if group["role"] == "actor" else cfg.critic_muon_lr * lr) / cfg.lr_start
+
+    def _backward(self, batch: list[Segment], eps: float, note) -> None:
+        """The minibatch's gradient.  One that doesn't fit the card is done again in 2, then 4... runs of its segments, each loss
+        weighed by its share of the decisions, and the budget shrinks for the rest of the run."""
+        decisions = sum(len(seg.steps) for seg in batch)
+        parts = 1
+        while True:
+            self.optimizer.zero_grad(set_to_none=True)
+            if self.muon is not None:
+                self.muon.zero_grad(set_to_none=True)
+            notes = []
+            try:
+                for piece in np.array_split(np.arange(len(batch)), parts):
+                    run = [batch[int(k)] for k in piece]
+                    share = sum(len(seg.steps) for seg in run) / decisions
+                    (self._loss(run, eps, lambda *a: notes.append(a)) * share).backward()
+                break
+            except torch.OutOfMemoryError:
+                if parts >= len(batch):
+                    raise
+            # Out of the handler, so the failed attempt's tensors are freed.
+            torch.cuda.empty_cache()
+            parts = min(2 * parts, len(batch))
+            self.splits += 1
+            self.token_budget = int(self.token_budget * SPLIT_SHRINK)
+            print(json.dumps({"split": parts, "decisions": decisions, "token_budget": self.token_budget}), flush=True)
+        for a in notes:
+            note(*a)
+        note("minibatch_decisions", decisions)
 
     def train(self, segments: list[Segment], rng: np.random.Generator, between=None) -> dict[str, float]:
         """between: called after each optimizer step, the moments when the weights are whole."""
@@ -629,15 +682,17 @@ class Learner:
 
         for _ in range(cfg.passes):
             for batch in self._minibatches(segments, rng):
-                self.optimizer.zero_grad(set_to_none=True)
-                self._loss(batch, eps, note).backward()
+                self._backward(batch, eps, note)
                 grad = torch.nn.utils.clip_grad_norm_(self.trained, cfg.grad_clip)
                 self.optimizer.step()
+                if self.muon is not None:
+                    self.muon.step()
                 self.ema_step()
                 note("grad_norm", float(grad))
                 if between is not None:
                     between()
         out = {k: totals[k] / max(counts[k], 1e-9) for k in totals}
+        out.update(token_budget=self.token_budget, splits=self.splits)
         if self.reference is not None:
             out["kl_weight"] = self.kl_weight
         if self.cfg.clone_weight:
@@ -666,7 +721,8 @@ class Learner:
         name = f"it-{self.iteration:06d}.pt"
         temp = directory / (name + ".tmp")
         ema = {"ema_actor": self.ema.actor.state_dict(), "ema_critic": self.ema.critic.state_dict()} if self.ema is not None else {}
-        torch.save({"actor": self.actor.state_dict(), "critic": self.critic.state_dict(), "optimizer": self.optimizer.state_dict(), **ema,
+        muon = {"muon": self.muon.state_dict()} if self.muon is not None else {}
+        torch.save({"actor": self.actor.state_dict(), "critic": self.critic.state_dict(), "optimizer": self.optimizer.state_dict(), **ema, **muon,
                     "size": asdict(self.actor.size), "critic_size": self.critic.size,
                     "iteration": self.iteration, "decisions": self.decisions, "entropy_coef": self.entropy_coef, "self_play": asdict(self.self_play)}, temp)
         os.replace(temp, directory / name)
@@ -682,6 +738,8 @@ class Learner:
         self.actor.load_state_dict(state["actor"])
         self.critic.load_state_dict(state["critic"])
         self.optimizer.load_state_dict(state["optimizer"])
+        if self.muon is not None:
+            self.muon.load_state_dict(state["muon"])
         if self.ema is not None:
             self.ema.actor.load_state_dict(state.get("ema_actor", state["actor"]))
             self.ema.critic.load_state_dict(state.get("ema_critic", state["critic"]))
@@ -1142,8 +1200,10 @@ def train(cfg: Config, run: pathlib.Path, make_env, device: str = "cuda") -> Non
                        collect_rate=metrics["decisions"] / max(collect_s, 1e-9), train_rate=metrics["decisions"] * cfg.passes / train_s,
                        overall_rate=metrics["decisions"] / (t2 - t0), game_minutes=learner.decisions * cfg.decide_every / 120.0,
                        beta=beta(learner.progress), entropy_coef=dict(learner.entropy_coef), lead_share=lead_share)
-        if device == "cuda":        # the most this process's allocator has held, for sizing gpu_share's parts
+        if device == "cuda":        # the most this process's allocator has held this iteration, for sizing gpu_share's parts
             metrics["learner_reserved_gb"] = torch.cuda.max_memory_reserved() / 2**30
+            metrics["learner_allocated_gb"] = torch.cuda.max_memory_allocated() / 2**30
+            torch.cuda.reset_peak_memory_stats()
         if metrics["masked_out"]:
             raise RuntimeError(f"{metrics['masked_out']} chosen actions were outside their mask")
         test = remote.evaluate if remote is not None else functools.partial(evaluate, make_env=make_env)
@@ -1280,6 +1340,10 @@ def main() -> None:
     ap.add_argument("--lr-start", type=float, default=Config.lr_start)
     ap.add_argument("--lr-end", type=float, default=Config.lr_end)
     ap.add_argument("--critic-lr", type=float, default=Config.critic_lr, help="the critic's rate at the start, scaled as the actor's falls; 0: the actor's")
+    ap.add_argument("--critic-muon-lr", type=float, default=Config.critic_muon_lr,
+                    help="above 0, Muon trains the critic's hidden matrices at this rate at the start, scaled as the actor's falls")
+    ap.add_argument("--actor-muon-lr", type=float, default=Config.actor_muon_lr,
+                    help="above 0, Muon trains the actor's hidden matrices at this rate at the start, on the actor's schedule")
     ap.add_argument("--critic-bins", type=int, default=0, help="HL-Gauss bins for the critic (C6); 0 for one number")
     ap.add_argument("--critic-span", type=float, default=Config.critic_span)
     ap.add_argument("--entropy-floor", type=float, default=Config.entropy_floor, help="0 from a clone: no head's bonus rises")
@@ -1333,7 +1397,7 @@ def main() -> None:
                  segment=args.segment, token_budget=args.token_budget, data_workers=args.workers, concurrent=args.concurrent,
                  decide_every=args.decide_every, hours=args.hours, eval_every=args.eval_every, gpu_runs=args.gpu_runs, empty_cache=args.empty_cache,
                  latent_encoder=args.latent_encoder, enabled_kinds=policy_sim_env.KINDS,     # what the sim obeys
-                 init=args.init, maps=args.maps, variants=args.variants, lr_start=args.lr_start, lr_end=args.lr_end, critic_lr=args.critic_lr,
+                 init=args.init, maps=args.maps, variants=args.variants, lr_start=args.lr_start, lr_end=args.lr_end, critic_lr=args.critic_lr, critic_muon_lr=args.critic_muon_lr, actor_muon_lr=args.actor_muon_lr,
                  critic_bins=args.critic_bins, critic_span=args.critic_span, entropy_floor=args.entropy_floor, critic_warmup=args.critic_warmup, kl_start=args.kl_start, **fades,
                  clone_weight=args.clone_weight, economy_start=args.economy_start, economy_end=args.economy_end,
                  income_weight=args.income_weight, speed_weight=args.speed_weight, diversity=args.diversity, fine_sim=args.fine_sim, z=args.z,

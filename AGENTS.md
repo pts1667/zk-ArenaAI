@@ -87,7 +87,18 @@ The first whole run on the variety work, started by me while the user slept:
   | after DAgger round 1 | 17% / 2% / 81% | 11% | 5.2 (8.6) |
 
   The stall in expansion stays.  `record-1` and `record-2` took 97 and 128 minutes; recording is faster since (03-training.md,
-  "DAgger").  `dagger-2` was done at 02:03 on 2026-11-12; then the final eval, then PPO.
+  "DAgger").  After round 2, the final eval (64 1v1s): 8% / 5% / 88%, extractors at 6 minutes 4.6 (10.5).
+* PPO started at 02:52 on 2026-11-12, after the critic was made to read the frame with learnt queries and Muon trains it (the
+  user; 03-training.md, "PPO").  Neither had been tried at scale before it.  Explained variance reached 0.41 by iteration 7.
+* A collector ran out of its 0.75 GB at iteration 8 (`ppo-oom-0.75`); at 1.0 one reached 0.96 by iteration 16, holding its
+  previous graph shape while capturing the next.  Training had fallen from 252 decisions a second to 70: as frames grew to
+  about 730 tokens, minibatches went from 141 decisions to 34, under a token weighting fitted when attention paired every
+  token, while the learner used little of its memory (the user saw 8 of the card's 12 GB in use).  I stopped it at
+  iteration 18 (set aside as `ppo-pairs-18`).  Now a graph shape narrower than the widest goes before the next capture, and
+  the budget counts tokens linearly, with 800 more a decision for the actor, as measured, so a big frame's minibatch is about
+  4x what it was; a minibatch that doesn't fit is split (03-training.md, "PPO" and "Playing").
+* Next (the user, 2026-11-12): 50 iterations of the pipeline's PPO (Adam on the actor), then 50 with Muon on the actor's
+  hidden matrices (`--actor-muon-lr 1.3e-4`, `runs/full-2-actor-muon`), then the real PPO stage with the better of the two.
 
 ## Variety (2026-11-10 and 11): built, tested, not yet trained on
 
@@ -251,8 +262,10 @@ README.md has the rules for engine games: headless at max speed, windowed only w
    whole pipeline hasn't been done since the variety work (only `--dry-run`, the suite, and each stage's own tests), and
    the unconfirmed choices under "Variety" are the user's to settle.  Check `wsl free -g` first: the pool is 10.8 GB now
    (it was 7.5), and a sample from late in an 80-minute game takes 1.3 to 2 GB of the card.
-2. **PPO's speed**: with concurrent collectors, training (about 22 s an iteration) is now longer than collecting (12 s).
-   In a round's replay the decision itself (encoder, time transformer, critic: 41 ms at 64 decisions) is the bigger part; a
+2. **PPO's speed**: with concurrent collectors, training was longer than collecting, and in `full-2` fell to 70 decisions a
+   second as frames grew.  A step takes about 0.5 s whatever its size, so with minibatches as big as memory allows
+   (2026-11-12) collecting (about 150 a second in `full-2`) should be the limit; check it in `metrics.jsonl`'s `train_rate`
+   and `collect_rate`.  In a round's replay the decision itself (encoder, time transformer, critic: 41 ms at 64 decisions) is the bigger part; a
    step is about 1 ms of small kernels, which fusing (`torch.compile` of a step, now the shapes are fixed) could shrink.
 3. **The stall in expansion** survived DAgger.  Whether PPO's economy share (the policy running its own economy in more games)
    moves the extractor count is the thing to watch in its tests.

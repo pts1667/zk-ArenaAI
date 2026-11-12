@@ -59,7 +59,7 @@ flowchart LR
 | Reach | 12 frames: each of the 4 layers reaches 3 further back, so a decision depends on the 12 before it (36 s) |
 | Actions a decision | up to 16 (`actions.SLOTS`), then done |
 | Who owns a unit | an allyteam and a player numbered from the viewer, in tables of 8 and 64 (`featurize.MAX_ALLY_TEAMS`, `MAX_PLAYERS`), 8 numbers each |
-| Critic (PPO) | width 256, 4 layers of 8 heads: 3,221,865 parameters (3,234,715 with 51 bins); with `--critic-bins`, its value is a distribution trained by HL-Gauss |
+| Critic (PPO) | width 256, 8 heads, 32 learnt queries and the global token reading every token in 4 rounds: 6,655,081 parameters (6,667,931 with 51 bins); with `--critic-bins`, its value is a distribution trained by HL-Gauss |
 | Strategy z | 32 numbers a side, optional (`--z` in cloning; `Z_DIM`): see "Frames in time" |
 
 ## What it reads: the featurizer
@@ -437,8 +437,9 @@ frame, so every decision in the stretch sees exactly what it would have seen in 
     what play did.
   * The policy loss is Simple Policy Optimization's (SPO), not PPO's clip.  Each action gets its own ratio, averaged within a
     decision (done included), with one advantage per decision.
-  * The **critic** is a separate network, never in the bot: a self-attention encoder over the privileged frame, including the
-    enemy units the seat can't see.  It reads the value off its global token.
+  * The **critic** is a separate network, never in the bot: learnt queries reading the privileged frame, including the enemy
+    units the seat can't see, as the frame encoder reads (so its cost grows with the tokens, not their square).  The global
+    token is one of the queries, and it reads the value off that.  Muon trains its hidden matrices.
 
 ```mermaid
 flowchart LR

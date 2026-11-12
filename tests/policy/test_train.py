@@ -37,31 +37,38 @@ def test_a_minibatch_budgets_its_padded_size(learner):
         frame = rf.Frame(np.zeros(n_units, rf.UNIT_DTYPE), np.zeros(0, rf.SITE_DTYPE), np.zeros(len(rf.GLOBAL_FIELDS), np.float32))
         return pt.Segment([pt.Step(frame, *(np.zeros(0) for _ in range(11)))] * length, np.zeros(1), np.zeros((regions, 1)), SimpleNamespace(regions=regions), np.zeros(1))
     segments = [segment(40, 24, 32) for _ in range(40)] + [segment(20, 76, 32) for _ in range(40)]
-    budget = learner.cfg.token_budget
-    learner.cfg.token_budget = 100_000
+    budget = learner.token_budget
+    learner.token_budget = 200_000
     try:
         batches = learner._minibatches(segments, np.random.default_rng(1))
     finally:
-        learner.cfg.token_budget = budget
+        learner.token_budget = budget
     assert sorted(id(s) for b in batches for s in b) == sorted(id(s) for s in segments)
     for b in batches:
         decisions = sum(len(s.steps) for s in b)
         padded = max(len(s.steps[0].frame.units) for s in b) + max(s.bundle.regions for s in b) + 2
-        assert decisions * padded <= 100_000 or len(b) == 1
+        assert decisions * (padded + pt.DECISION_TOKENS) <= 200_000 or len(b) == 1
 
 
-def test_big_frames_get_fewer_tokens_in_a_minibatch(learner):
-    """A frame of many tokens costs more memory per token."""
-    def segment(n_units):
-        frame = rf.Frame(np.zeros(n_units, rf.UNIT_DTYPE), np.zeros(0, rf.SITE_DTYPE), np.zeros(len(rf.GLOBAL_FIELDS), np.float32))
-        return pt.Segment([pt.Step(frame, *(np.zeros(0) for _ in range(11)))] * 32, np.zeros(1), np.zeros((76, 1)), SimpleNamespace(regions=76), np.zeros(1))
-    budget = learner.cfg.token_budget
-    learner.cfg.token_budget = 165_000
+def test_a_minibatch_that_does_not_fit_is_done_in_runs_of_its_segments(learner, monkeypatch):
+    """Each run's loss weighed by its share of the decisions, the gradient is the whole minibatch's; and the budget shrinks."""
+    weight = learner.trained[0]
+    segments = [pt.Segment([None] * n, None, None, None, np.full(1, v)) for n, v in ((3, 1.0), (5, 2.0), (8, -1.0))]
+
+    def loss(run, eps, note):
+        if len(run) > 1:
+            raise torch.OutOfMemoryError("too big")
+        note("tried", 1.0)
+        return weight.sum() * sum(len(s.steps) * float(s.names[0]) for s in run) / sum(len(s.steps) for s in run)
+    monkeypatch.setattr(learner, "_loss", loss)
+    budget, notes = learner.token_budget, []
     try:
-        size = {n: 32 * max(len(b) for b in learner._minibatches([segment(n) for _ in range(40)], np.random.default_rng(1))) for n in (80, 512)}
+        learner._backward(segments, 0.2, lambda *a: notes.append(a))
+        assert learner.token_budget < budget
     finally:
-        learner.cfg.token_budget = budget
-    assert size[512] * (512 + 78) < 0.8 * size[80] * (80 + 78)
+        learner.token_budget = budget
+    assert torch.allclose(weight.grad, torch.full_like(weight, (3 * 1.0 + 5 * 2.0 - 8 * 1.0) / 16))
+    assert notes == [("tried", 1.0)] * 3 + [("minibatch_decisions", 16)]
 
 
 def test_playing_in_pieces_decides_the_same_as_in_one(learner, monkeypatch):
@@ -178,12 +185,13 @@ def test_a_lead_can_end_nine_in_ten_training_games_at_first_and_none_from_iterat
 
 
 def _config(encoder_path, **kw) -> pt.Config:
-    base = dict(decisions=120, iteration=60, games=2, passes=1, segment=4, token_budget=4000, data_workers=0, eval_every=10**6, checkpoint_every=10**6, latent_encoder=str(encoder_path))
+    base = dict(decisions=120, iteration=60, games=2, passes=1, segment=4, token_budget=25_000, data_workers=0, eval_every=10**6, checkpoint_every=10**6, latent_encoder=str(encoder_path))
     return pt.Config(**{**base, **kw})
 
 
 def test_a_short_run_trains_leaves_the_encoder_alone_and_goes_on(tmp_path, encoder_path):
-    cfg = _config(encoder_path, concurrent=False, decisions=60, iteration=30)       # not concurrent: as policy_pipeline runs it
+    # Not concurrent, and Muon on the critic: as policy_pipeline runs it.  (Muon on the actor's matrices takes minutes on the CPU.)
+    cfg = _config(encoder_path, concurrent=False, decisions=60, iteration=30, critic_muon_lr=0.004)
     pt.train(cfg, tmp_path, pt.make_sim, device="cpu")
     rows = [json.loads(line) for line in (tmp_path / "metrics.jsonl").read_text().splitlines()]
     assert len(rows) >= 2 and all(r["masked_out"] == 0 for r in rows)
@@ -196,24 +204,30 @@ def test_a_short_run_trains_leaves_the_encoder_alone_and_goes_on(tmp_path, encod
     assert len((tmp_path / "metrics.jsonl").read_text().splitlines()) > len(rows)
 
 
-def test_the_optimiser_holds_only_what_trains(tmp_path, encoder_path):
-    cfg = _config(encoder_path)
+def test_the_optimisers_hold_only_what_trains_each_once_with_the_hidden_matrices_in_muon(tmp_path, encoder_path):
+    cfg = _config(encoder_path, critic_muon_lr=0.004, actor_muon_lr=1.3e-4)
     learner = pt.Learner(cfg, tmp_path, pt.DataWorkers(0, [sim_frames(1)[1]], cfg.enabled_kinds), "cpu")
-    held = {id(p) for group in learner.optimizer.param_groups for p in group["params"]}
-    assert not held & {id(p) for p in learner.actor.encoder.parameters()}
-    assert id(learner.actor.latent_in.weight) in held and id(learner.critic.value.weight) in held
+    adam = [id(p) for group in learner.optimizer.param_groups for p in group["params"]]
+    muon = [id(p) for group in learner.muon.param_groups for p in group["params"]]
+    assert sorted(adam + muon) == sorted(id(p) for p in learner.trained)
+    assert not set(adam + muon) & {id(p) for p in learner.actor.encoder.parameters()}
+    assert id(learner.critic.value.weight) in adam and id(learner.critic.queries) in adam and id(learner.actor.head_kind.weight) in adam
+    assert id(learner.critic.reads[0].kv.weight) in muon and id(learner.critic.unit_in.weight) in muon and id(learner.actor.latent_in.weight) in muon
 
 
 def test_the_critic_learns_at_its_own_rate_falling_as_the_actors_does(tmp_path, encoder_path):
-    cfg = replace(_config(encoder_path), lr_start=1e-5, lr_end=3e-6, critic_lr=3e-4, critic_warmup=2, decisions=1000)
+    cfg = replace(_config(encoder_path), lr_start=1e-5, lr_end=3e-6, critic_lr=3e-4, critic_muon_lr=0.004, actor_muon_lr=1.3e-4,
+                  critic_warmup=2, decisions=1000)
     learner = pt.Learner(cfg, tmp_path, pt.DataWorkers(0, [sim_frames(1)[1]], cfg.enabled_kinds), "cpu")
     actor, critic = learner.optimizer.param_groups
-    learner.set_rates()
-    assert actor["lr"] == 0.0 and critic["lr"] == pytest.approx(3e-4)       # warming up: the critic alone
+    muon = {g["role"]: g for g in learner.muon.param_groups}
+    learner.set_rates()      # warming up: the critic alone
+    assert actor["lr"] == 0.0 == muon["actor"]["lr"] and critic["lr"] == pytest.approx(3e-4) and muon["critic"]["lr"] == pytest.approx(0.004)
     learner.iteration, learner.decisions = 2, 500
     learner.set_rates()
     assert actor["lr"] == pytest.approx(6.5e-6) and critic["lr"] == pytest.approx(3e-4 * 0.65)
-    plain = pt.Learner(replace(cfg, critic_lr=0.0, critic_warmup=0), tmp_path, learner.workers, "cpu")
+    assert muon["actor"]["lr"] == pytest.approx(1.3e-4 * 0.65) and muon["critic"]["lr"] == pytest.approx(0.004 * 0.65)
+    plain = pt.Learner(replace(cfg, critic_lr=0.0, critic_muon_lr=0.0, actor_muon_lr=0.0, critic_warmup=0), tmp_path, learner.workers, "cpu")
     plain.set_rates()
     assert [g["lr"] for g in plain.optimizer.param_groups] == pytest.approx([1e-5, 1e-5])
 
