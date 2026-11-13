@@ -19,6 +19,7 @@ Passing `variants=True` gives each side's army script its own knobs at the start
 from __future__ import annotations
 
 import json
+import math
 import pathlib
 import sys
 from dataclasses import dataclass, field
@@ -79,6 +80,15 @@ CHICKEN_DIFFICULTY_WEIGHTS = {"Very Easy": 1.0, "Easy": 1.0, "Normal": 1.0}
 # Which of zksim's stats says a team is still in the game: from ABI 20 the live units that keep it in (not the Flea, the bombs,
 # terraunit: Zero-K's game_over.lua), before it every live unit.
 KEEP_STAT = 3 if zksim.STATS > 3 else 1
+# The reward's terms, by name (03-training.md, "Reward"): PPO's critic has a value head for each one it's given
+# (policy_train.Config.terms).  "blend" is the reward as one number (`reward`), the shaping fading by beta into the result; the
+# rest are its parts and more, apart and unfaded (`reward_terms`).
+TERMS = ("blend", "result", "score", "economy", "combat")
+# The terms that are discounted averages, and their horizons in seconds of game: the rest aren't discounted (`term_gamma`).
+TERM_HORIZONS = {"economy": 600.0}
+COMBAT_CONSTANT = 1000.0            # metal: the damage balance's (`_combat`), as VALUE_CONSTANT is the value balance's
+# Which of zksim's stats is the metal a team's damage has cost the others: from ABI 24.  -1 before it, with no combat term.
+DEALT_STAT = 4 if zksim.STATS > 4 else -1
 
 _POOL: list[tuple[zksim.Map, bd.Bundle, "MapFacts"]] = []
 _CATALOG: zksim.Catalog | None = None
@@ -481,6 +491,9 @@ class SimEnv:
         self.income_weight = 0.0
         self.last_income = np.zeros((games, self.slots))       # by alliance, as `last_raw`
         self.income_delta = np.zeros((games, self.slots))
+        self.income_now = np.zeros((games, self.slots))         # `_income` at the step just taken, before anyone went out at it
+        self.last_combat = np.zeros((games, self.slots))       # the damage balance (`_combat`), as `last_raw`
+        self.combat_delta = np.zeros((games, self.slots))
         # A small reward for short games (the user, 2026-11-10): an alliance that goes out pays this x the share of the time limit
         # left / (alliances - 1) (`_time_left`), and the survivors at the game's end share what was paid, as the result.  Not faded by
         # beta, so that a sooner win is worth more all through a run.
@@ -594,8 +607,7 @@ class SimEnv:
             self._new_teams(g)
             self._reset(g)
         self.batch.step(ticks=0)
-        self.last_raw[:] = self._raw()
-        self.last_income[:] = self._income()
+        self._rebase()
 
     def _new_teams(self, g: int, kind: str = "1v1", ally_of=(0, 1)) -> None:
         """Game g's teams, each one's alliance: a 1v1 unless told otherwise (as a subclass's own `_reset` leaves them).  In a chicken
@@ -972,6 +984,19 @@ class SimEnv:
         """Each live alliance's metal income against the others', -1 to 1, as `_raw` is for value."""
         return self._balance(self.batch.globs[:, :, rf.G["metal_income"]], INCOME_CONSTANT)
 
+    def _combat(self) -> np.ndarray:
+        """Each live alliance's damage so far, in the metal it cost the others, against theirs, -1 to 1, as `_raw` is for value:
+        at two, (dealt - taken) / (dealt + taken + COMBAT_CONSTANT), a side's trades as Zero-K's experience counts a unit's."""
+        return self._balance(self.batch.stats[:, :, DEALT_STAT], COMBAT_CONSTANT)
+
+    def _rebase(self, g: int | slice = slice(None)) -> None:
+        """The balances whose changes are rewards, as they are now: at a game's start, and in a game that goes on when an
+        alliance goes out, as they're over the alliances still in from then on."""
+        self.last_raw[g] = self._raw()[g]
+        self.last_income[g] = self._income()[g]
+        if DEALT_STAT >= 0:
+            self.last_combat[g] = self._combat()[g]
+
     def script_production(self, seat: int) -> list[tuple[int, str]]:
         """This decision's production choices by a script-controlled seat: (factory uid, unit name) for each PRODUCE it gave."""
         names = catalog().units
@@ -1118,10 +1143,14 @@ class SimEnv:
         raw = self._raw()
         self.delta = raw - self.last_raw
         self.last_raw = raw
-        if self.income_weight:
-            income = self._income()
-            self.income_delta = income - self.last_income
-            self.last_income = income
+        income = self._income()
+        self.income_delta = income - self.last_income
+        self.last_income = income
+        self.income_now = income
+        if DEALT_STAT >= 0:
+            combat = self._combat()
+            self.combat_delta = combat - self.last_combat
+            self.last_combat = combat
         self._diversity()
         self.done, self._replace = [], []
         self.result[:] = 0.0
@@ -1170,9 +1199,7 @@ class SimEnv:
                 self.speed_paid[g, a] = self.speed_pot[g] / len(survivors)
                 decided.append((a, share))
         elif len(out):
-            # The rest's balances are over the alliances still in from now on.
-            self.last_raw[g] = self._raw()[g]
-            self.last_income[g] = self._income()[g]
+            self._rebase(g)
         result_of = dict(decided)
         teams = [t for t in range(int(self.n_teams[g])) if int(self.ally[g, t]) in result_of]
         for t in teams:
@@ -1242,26 +1269,67 @@ class SimEnv:
         diversity bonus less the mean of the other live alliances', fading by beta into the result paid at this step (`_after_step`),
         and the speed term (`_time_left`), which doesn't fade.  In a game of two alliances, alliance 1's is alliance 0's turned round,
         as side 1's was side 0's in a 1v1."""
-        g, team = divmod(seat, self.slots)
-        a = int(self.ally[g, team])
-        if a < 0:
+        view = self._view(seat)
+        if view is None:
             return 0.0
-        bonus = self._bonuses(g)
-        if self.n_allies[g] == 2:
-            sign, a = (1.0 if a == 0 else -1.0), 0
-            shaped = self.delta[g, 0] + bonus[0] - bonus[1] + self.income_weight * self.income_delta[g, 0]
-        else:
-            if not self.paying[g, a]:
-                return 0.0
-            them = [b for b in np.flatnonzero(self.paying[g]) if b != a]
-            div = bonus[a] - sum(bonus[b] for b in them) / max(len(them), 1)
-            sign = 1.0
-            shaped = self.delta[g, a] + div + self.income_weight * self.income_delta[g, a]
-        result = self.paid[g, a]
-        out = (1.0 - beta) * shaped + beta * result
+        g, a, sign = view
+        out = (1.0 - beta) * self._shaped(g, a) + beta * self.paid[g, a]
         if self.speed_weight and self.speed_paid[g, a]:
             out += self.speed_weight * self.speed_paid[g, a]
         return float(sign * out)
+
+    def reward_terms(self, seat: int, names: tuple[str, ...], beta: float) -> np.ndarray:
+        """The reward's terms (TERMS) at the step just taken, by name, each zero-sum over the alliances as `reward` is:
+        "blend", `reward` itself; "result", the result and the speed term; "score", the value balance's change and the diversity
+        bonus, as `reward` shapes but for income; "economy", the income balance (`_income`) x (1 - its gamma) each step, a discounted average
+        of it, and at the alliance's end the whole level, as if it lasted; "combat", the damage balance's change (`_combat`)."""
+        out = np.zeros(len(names))
+        view = self._view(seat)
+        if view is None:
+            return out
+        g, a, sign = view
+        for i, name in enumerate(names):
+            if name == "blend":
+                out[i] = self.reward(seat, beta)
+                continue
+            if name == "result":
+                v = self.paid[g, a] + self.speed_weight * self.speed_paid[g, a]
+            elif name == "score":
+                v = self._shaped(g, a, income=False)
+            elif name == "economy":
+                ended = g in self._replace or not self.alive[g, a]
+                v = self.income_now[g, a] * (1.0 if ended else 1.0 - self.term_gamma(name))
+            elif name == "combat":
+                v = self.combat_delta[g, a]
+            else:
+                raise ValueError(f"no reward term {name!r}: {TERMS}")
+            out[i] = sign * v
+        return out
+
+    def term_gamma(self, name: str) -> float:
+        """A term's discount a step of this env (TERM_HORIZONS), 1 for those not discounted."""
+        horizon = TERM_HORIZONS.get(name)
+        return 1.0 if horizon is None else math.exp(-self.ticks * zksim.TICK_FRAMES / zksim.FRAMES_PER_SECOND / horizon)
+
+    def _view(self, seat: int) -> tuple[int, int, float] | None:
+        """A seat's game, the alliance whose balances its reward reads, and the sign it reads them with: at two alliances
+        alliance 0's, turned round for alliance 1.  None for a seat with no reward: no alliance, or one out of a bigger game
+        before this step."""
+        g, team = divmod(seat, self.slots)
+        a = int(self.ally[g, team])
+        if a < 0:
+            return None
+        if self.n_allies[g] == 2:
+            return g, 0, (1.0 if a == 0 else -1.0)
+        return (g, a, 1.0) if self.paying[g, a] else None
+
+    def _shaped(self, g: int, a: int, income: bool = True) -> float:
+        """Alliance a's value balance's change and diversity bonus less the mean of the other live alliances', and with income,
+        its income balance's change by income_weight."""
+        bonus = self._bonuses(g)
+        them = [b for b in np.flatnonzero(self.paying[g]) if b != a] if self.n_allies[g] != 2 else [1 - a]
+        div = bonus[a] - sum(bonus[b] for b in them) / max(len(them), 1)
+        return float(self.delta[g, a] + div + (self.income_weight * self.income_delta[g, a] if income else 0.0))
 
     def finished_seats(self) -> list[tuple[int, str, float]]:
         """Seats whose game just ended, or whose alliance went out of it.  The call also starts the ended games afresh, so read the
@@ -1275,8 +1343,7 @@ class SimEnv:
                 self._new_teams(g)
                 self._reset(g)
                 self.batch.refresh(g)
-                self.last_raw[g] = self._raw()[g]
-                self.last_income[g] = self._income()[g]
+                self._rebase(g)
             self.waiting[:] = False
         self._replace, self.done = [], []
         return out

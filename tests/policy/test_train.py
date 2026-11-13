@@ -174,6 +174,18 @@ def test_the_kl_to_the_clone_and_the_cloning_loss_fade_to_a_fifth_by_iteration_1
         assert [pt.fade_share(i, fade) for i in (0, 50, 100, 300, 500, 2000)] == pytest.approx([1.0, 0.6, 0.2, 0.1, 0.0, 0.0])
 
 
+def test_each_term_has_its_own_gamma_and_the_advantage_weighs_the_terms_over_their_returns_spread():
+    """finish: GAE term by term, at lambda 1 the discounted return less the value.  weigh: a term whose returns spread over 1
+    counts for its weight over that spread, one that spreads less for its weight."""
+    steps = [pt.Step(*([None] * 12), value=np.zeros(2), reward=np.array(r)) for r in ((4.0, 1.0), (0.0, 1.0), (0.0, 1.0))]
+    values, returns = pt.finish([pt.Trajectory(None, None, steps, done=True)], 1.0, np.array([1.0, 0.5]))
+    assert values.shape == returns.shape == (3, 2)
+    assert [s.ret.tolist() for s in steps] == [s.advantages.tolist() for s in steps] == [[4.0, 1.75], [0.0, 1.5], [0.0, 1.0]]
+    scales = pt.Learner.weigh(SimpleNamespace(term_weights=np.array([1.0, 0.5])), steps)
+    assert scales.tolist() == pytest.approx([3.6, 1.0])
+    assert [s.advantage for s in steps] == pytest.approx([4.0 / 3.6 + 0.875, 0.75, 0.5])
+
+
 def test_a_lead_can_end_nine_in_ten_training_games_at_first_and_none_from_iteration_100(learner):
     assert [pt.fade_share(i, pt.Config.lead_fade) for i in (0, 50, 100, 400)] == pytest.approx([0.9, 0.45, 0.0, 0.0])
     held = learner.iteration
@@ -205,8 +217,16 @@ def test_a_short_run_trains_leaves_the_encoder_alone_and_goes_on(tmp_path, encod
     original = torch.load(encoder_path, weights_only=True)["model"]
     assert torch.equal(saved["actor"]["encoder.encoder.queries"], original["encoder.queries"])
     assert not torch.equal(saved["actor"]["latent_in.weight"], pl.make(VOCABULARY, encoder_path).state_dict()["latent_in.weight"])
-    pt.train(replace(cfg, decisions=90), tmp_path, pt.make_sim, device="cpu")
-    assert len((tmp_path / "metrics.jsonl").read_text().splitlines()) > len(rows)
+    # Going on with the reward's terms apart: the critic's heads start afresh and learn alone, the actor waiting for them.
+    terms = (("result", 1.0), ("score", 0.5), ("economy", 0.3))
+    pt.train(replace(cfg, decisions=90, terms=terms), tmp_path, pt.make_sim, device="cpu")
+    more = [json.loads(line) for line in (tmp_path / "metrics.jsonl").read_text().splitlines()][len(rows):]
+    assert more and all("explained_variance_economy" in r and "return_scale_score" in r for r in more)
+    marker = json.loads((tmp_path / "latest.json").read_text())
+    later = torch.load(tmp_path / marker["checkpoint"], weights_only=True)
+    assert later["terms"] == ["result", "score", "economy"] and later["warm_until"] == saved["iteration"] + cfg.critic_rewarm
+    assert later["critic"]["value.weight"].shape[0] == 3 * max(cfg.critic_bins, 1)
+    assert torch.equal(later["actor"]["latent_in.weight"], saved["actor"]["latent_in.weight"])
 
 
 def test_the_optimisers_hold_only_what_trains_each_once_with_the_hidden_matrices_in_muon(tmp_path, encoder_path):
@@ -273,7 +293,7 @@ def test_segments_score_in_training_as_their_decisions_did_in_play(tmp_path, enc
     for t, frame in enumerate(frames):
         items, acts, value, seats.history, seats.seen = learner.act([(frame, bundle, names)], seats.history, seats.seen)
         c = items[0].controllable
-        tr.steps.append(pt.Step(frame, *(acts[h][0] for h in pt.act.SLOT_FIELDS + ("logp",)), float(value[0]), latents=acts["latents"][0]))
+        tr.steps.append(pt.Step(frame, *(acts[h][0] for h in pt.act.SLOT_FIELDS + ("logp",)), value[0].copy(), latents=acts["latents"][0]))
         if t in (6, learner.actor.reach + 4):
             pt._cut(tr, segments, seats.history[0], seats.seen[0])
     pt._close(tr, segments)

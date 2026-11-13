@@ -111,6 +111,10 @@ class Config:
     variants: bool = False          # each side's army script draws its knobs (policy_variants.py)
     critic_bins: int = 0            # above 0, the critic's value is a distribution over this many, trained by HL-Gauss
     critic_span: float = 1.5        # from -span to span: the result is 1 at most, and the shaping a little on top
+    # The reward's terms (policy_sim_env.TERMS), each with a head of the critic and the weight of its advantage (`weigh`;
+    # 03-training.md, "Reward"): ("blend", 1.0) alone is the one reward, the shaping fading into the result by beta.
+    terms: tuple[tuple[str, float], ...] = (("blend", 1.0),)
+    critic_rewarm: int = 10         # after a resume that changed the terms, iterations where only the critic learns: its heads start afresh
     entropy_floor: float = 0.3      # ENTROPY_FLOOR: a head below this share of its maximum entropy gets more bonus.  A clone's heads
                                     # all are, so from a clone it's 0, and the KL to the clone keeps its spread instead
     critic_warmup: int = 0          # iterations at the start where only the critic learns: the actor stays as it was
@@ -260,10 +264,11 @@ class Step:
     place: np.ndarray
     offset: np.ndarray
     logp: np.ndarray
-    value: float = 0.0
-    reward: float = 0.0
-    advantage: float = 0.0
-    ret: float = 0.0
+    value: np.ndarray | float = 0.0     # by term (Config.terms), as are reward, advantages and ret
+    reward: np.ndarray | float = 0.0
+    advantages: np.ndarray | float = 0.0
+    ret: np.ndarray | float = 0.0
+    advantage: float = 0.0              # the terms' advantages weighed together (Learner.weigh)
     latents: np.ndarray | None = None   # tokens x latent: this frame's, as the actor read it
     label: dict | None = None           # what the scripts advised here, as slots (actions.SLOT_FIELDS), when they advise
     labelled: np.ndarray | None = None  # which controllable units the advice told something
@@ -288,7 +293,7 @@ class Trajectory:
     seen: np.ndarray | None = None
     segment_start: int = 0
     done: bool = False
-    bootstrap: float = 0.0
+    bootstrap: np.ndarray | float = 0.0     # by term
 
 
 def name_map(rng: np.random.Generator, vocabulary: int) -> np.ndarray:
@@ -415,7 +420,7 @@ class Player:
             ctx, new_history, new_seen, keep = self.actor.decide(b, history, seen, z)
             a = pm.sample_actions(self.actor, b, ctx)
             new_history = self.actor.acted(b, a, new_history)       # what it did, for the decisions after
-            value = self.critic(b) if self.critic is not None else torch.zeros(len(items), device=self.device)
+            value = self.critic(b) if self.critic is not None else torch.zeros(len(items), 1, device=self.device)
         out = {k: getattr(a, k).cpu().numpy() for k in act.SLOT_FIELDS + ("logp",)}
         out.update({k: v.cpu().numpy() for k, v in keep.items()})
         return out, value.float().cpu().numpy(), new_history.float(), new_seen.float()
@@ -450,7 +455,10 @@ class Learner:
                 self.reference = copy.deepcopy(self.actor).eval()
                 for p in self.reference.parameters():
                     p.requires_grad_(False)
-        self.critic = pm.Critic(self.vocabulary, bins=cfg.critic_bins, span=cfg.critic_span).to(device)
+        self.critic = pm.Critic(self.vocabulary, bins=cfg.critic_bins, span=cfg.critic_span, terms=len(cfg.terms)).to(device)
+        self.term_names = tuple(name for name, _ in cfg.terms)
+        self.term_weights = np.array([w for _, w in cfg.terms])
+        self.warm_until = cfg.critic_warmup        # the iteration from which the actor learns too (Config.critic_rewarm)
         actor_params = [p for p in self.actor.parameters() if p.requires_grad]
         critic_params = [p for p in self.critic.parameters() if p.requires_grad]
         self.trained = actor_params + critic_params
@@ -602,7 +610,7 @@ class Learner:
         decisions = len(steps)
         advantages = np.array([s.advantage for s in steps], np.float32)
         adv = torch.as_tensor((advantages - advantages.mean()) / (float(advantages.std()) + 1e-6), device=device)
-        ret = torch.as_tensor([s.ret for s in steps], device=device, dtype=torch.float32)
+        ret = torch.as_tensor(np.stack([np.broadcast_to(s.ret, (self.critic.terms,)) for s in steps]), device=device, dtype=torch.float32)
         old = a.logp
         weights = pm.chosen(a).float()
         ratio = (logp - old).clamp(-20.0, 20.0).exp()
@@ -618,10 +626,12 @@ class Learner:
                 note("kl", float(((old - logp) * weights).sum()) / total, total)
                 note("clip_fraction", float(((deviation > eps).float() * weights).sum()) / total, total)     # outside 1 +- eps
                 note("ratio_deviation", float((deviation * weights).sum()) / total, total)
-        if self.critic.bins:
-            value_loss = self.critic.hl_gauss(value, ret).sum() / decisions
-        else:
-            value_loss = (value - ret).pow(2).sum() / decisions
+        # Each term's head as if it were the only one: their losses add up.
+        per_term = (self.critic.hl_gauss(value, ret) if self.critic.bins else (value - ret).pow(2)).sum(0) / decisions
+        value_loss = per_term.sum()
+        if len(per_term) > 1:
+            for name, x in zip(self.term_names, per_term.detach().tolist()):
+                note(f"loss_value_{name}", x)
         entropy_loss = torch.zeros((), device=device)
         for h in HEADS:
             e, mask = entropy[h]
@@ -658,7 +668,7 @@ class Learner:
         """The actor's rate on its schedule, or 0 while the critic warms up; the critic's scaled as the actor's falls."""
         cfg = self.cfg
         lr = cfg.lr_start + (cfg.lr_end - cfg.lr_start) * self.progress
-        actor = 0.0 if self.iteration < cfg.critic_warmup else lr * self.lr_scale
+        actor = 0.0 if self.iteration < self.warm_until else lr * self.lr_scale
         self.optimizer.param_groups[0]["lr"] = actor
         self.optimizer.param_groups[1]["lr"] = cfg.critic_lr * lr / cfg.lr_start if cfg.critic_lr else lr
         for group in self.muon.param_groups if self.muon is not None else ():
@@ -704,6 +714,7 @@ class Learner:
         self.shrunk = False
         totals: dict[str, float] = {}
         counts: dict[str, float] = {}
+        scales = self.weigh([s for seg in segments for s in seg.steps])
 
         def note(name: str, value: float, weight: float = 1.0) -> None:
             totals[name] = totals.get(name, 0.0) + value * weight
@@ -733,6 +744,8 @@ class Learner:
                     between()
         out = {k: totals[k] / max(counts[k], 1e-9) for k in totals}
         out.update(token_budget=self.token_budget, splits=self.splits, lr_scale=self.lr_scale)
+        if len(scales) > 1:
+            out.update({f"return_scale_{name}": float(x) for name, x in zip(self.term_names, scales)})
         self.follow_kl(out.get("kl"))
         if log is not None:
             log.close()
@@ -745,10 +758,23 @@ class Learner:
             out["clone_weight"] = self.clone_weight
         return out
 
+    def weigh(self, steps: list[Step]) -> np.ndarray:
+        """Each step's advantage, its terms' weighed (Config.terms), each first over its returns' spread this iteration, from the
+        5th percentile to the 95th, when that's over 1, as DreamerV3 scales its returns (Hafner et al. 2023): so a term whose
+        returns spread wide doesn't drown the rest, and one that's nearly constant isn't blown up.  Returns the scales."""
+        if not steps:
+            return np.ones(len(self.term_weights))
+        returns = np.stack([np.broadcast_to(s.ret, self.term_weights.shape) for s in steps])
+        scales = np.maximum(1.0, np.percentile(returns, 95, 0) - np.percentile(returns, 5, 0))
+        weights = self.term_weights / scales
+        for s in steps:
+            s.advantage = float(np.dot(np.broadcast_to(s.advantages, weights.shape), weights))
+        return scales
+
     def follow_kl(self, kl: float | None) -> None:
         """The actor's rate for the next iteration, from this one's KL (Config.kl_target)."""
         target = self.cfg.kl_target
-        if not target or kl is None or self.iteration < self.cfg.critic_warmup:
+        if not target or kl is None or self.iteration < self.warm_until:
             return
         if kl > 2.0 * target:
             self.lr_scale /= KL_SLOW
@@ -780,7 +806,8 @@ class Learner:
         muon = {"muon": self.muon.state_dict()} if self.muon is not None else {}
         torch.save({"actor": self.actor.state_dict(), "critic": self.critic.state_dict(), "optimizer": self.optimizer.state_dict(), **ema, **muon,
                     "size": asdict(self.actor.size), "critic_size": self.critic.size,
-                    "iteration": self.iteration, "decisions": self.decisions, "entropy_coef": self.entropy_coef, "self_play": asdict(self.self_play), "lr_scale": self.lr_scale}, temp)
+                    "iteration": self.iteration, "decisions": self.decisions, "entropy_coef": self.entropy_coef, "self_play": asdict(self.self_play), "lr_scale": self.lr_scale,
+                    "terms": list(self.term_names), "warm_until": self.warm_until}, temp)
         os.replace(temp, directory / name)
         marker = self.run / "latest.json.tmp"
         marker.write_text(json.dumps({"checkpoint": f"ckpt/{name}", "iteration": self.iteration, "decisions": self.decisions}))
@@ -791,20 +818,51 @@ class Learner:
         if not marker.exists():
             return False
         state = torch.load(self.run / json.loads(marker.read_text())["checkpoint"], map_location=self.device, weights_only=True)
+        # Other terms than the checkpoint's: the critic keeps what it reads, and its value heads start afresh, Adam's moments of
+        # them too, while it learns them alone for a while (Config.critic_rewarm).
+        fresh = list(state.get("terms", ["blend"])) != list(self.term_names)
         self.actor.load_state_dict(state["actor"])
-        self.critic.load_state_dict(state["critic"])
+        _load_critic(self.critic, state["critic"], fresh)
         self.optimizer.load_state_dict(state["optimizer"])
+        if fresh:
+            for p in self.critic.value.parameters():
+                self.optimizer.state.pop(p, None)
         if self.muon is not None:
             self.muon.load_state_dict(state["muon"])
         if self.ema is not None:
             self.ema.actor.load_state_dict(state.get("ema_actor", state["actor"]))
-            self.ema.critic.load_state_dict(state.get("ema_critic", state["critic"]))
+            _load_critic(self.ema.critic, state.get("ema_critic", state["critic"]), fresh)
         self.iteration, self.decisions = state["iteration"], state["decisions"]
+        self.warm_until = self.iteration + self.cfg.critic_rewarm if fresh else state.get("warm_until", self.cfg.critic_warmup)
         self.entropy_coef = state["entropy_coef"]
         self.lr_scale = state.get("lr_scale", 1.0)
         if "self_play" in state:
             self.self_play = SelfPlay(**state["self_play"])
         return True
+
+
+def parse_terms(given: list[str]) -> tuple[tuple[str, float], ...]:
+    """--terms' TERM:WEIGHT pairs, each a term of policy_sim_env.TERMS once."""
+    import policy_sim_env
+    out = tuple((name, float(w)) for name, w in (t.split(":") for t in given))
+    names = [name for name, _ in out]
+    if not out or len(set(names)) < len(names) or not set(names) <= set(policy_sim_env.TERMS):
+        raise ValueError(f"--terms: each of {policy_sim_env.TERMS} once at most, as TERM:WEIGHT")
+    if "combat" in names and policy_sim_env.DEALT_STAT < 0:
+        raise ValueError("--terms: combat needs the sim's damage statistics, libzksim ABI 24")
+    return out
+
+
+def _load_critic(critic: pm.Critic, state: dict, fresh: bool) -> None:
+    """A critic's weights; with fresh, all but its value heads', which stay as a new critic's (zero)."""
+    if not fresh:
+        critic.load_state_dict(state)
+        return
+    with torch.no_grad():
+        for p in critic.value.parameters():
+            p.zero_()
+    missing, unexpected = critic.load_state_dict({k: v for k, v in state.items() if not k.startswith("value.")}, strict=False)
+    assert not unexpected and all(k.startswith("value.") for k in missing), (missing, unexpected)
 
 
 def _pad(arrays: list[np.ndarray], shape: tuple, fill: float, device: str, dtype: torch.dtype) -> torch.Tensor:
@@ -862,23 +920,24 @@ def _stored_actions(steps: list[Step], device: str) -> pm.Actions:
     return pm.actions_from({f: np.stack([getattr(s, f) for s in steps]) for f in act.SLOT_FIELDS + ("logp",)}, device)
 
 
-def finish(trajectories: list[Trajectory], gae: float) -> tuple[list[Segment], list[float], list[float]]:
-    """Advantages over each seat's own decisions; gamma is 1."""
-    segments: list[Segment] = []
+def finish(trajectories: list[Trajectory], gae: float, gammas: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
+    """Each term's advantages over each seat's own decisions, by GAE at lambda `gae`, with the term's gamma a decision (1 but for
+    the discounted averages: policy_sim_env.term_gamma).  Returns the values and returns, decisions x terms."""
+    gammas = np.ones(1) if gammas is None else np.asarray(gammas, np.float64)
     values, returns = [], []
     for tr in trajectories:
-        steps = tr.steps
-        running = 0.0
-        next_value = 0.0 if tr.done else tr.bootstrap
-        for s in reversed(steps):
-            delta = s.reward + next_value - s.value
-            running = delta + gae * running
-            s.advantage = running
+        running = np.zeros(len(gammas))
+        next_value = running if tr.done else tr.bootstrap
+        for s in reversed(tr.steps):
+            delta = s.reward + gammas * next_value - s.value
+            running = delta + gae * gammas * running
+            s.advantages = running
             s.ret = running + s.value
             next_value = s.value
             values.append(s.value)
             returns.append(s.ret)
-    return segments, values, returns
+    shape = (-1, len(gammas))
+    return np.array(values, np.float64).reshape(shape), np.array(returns, np.float64).reshape(shape)
 
 
 class Seats:
@@ -954,7 +1013,7 @@ class Collector:
                     t = items[k]
                     raw = frames[k][0]
                     step = Step(rf.Frame(raw.units.copy(), raw.sites.copy(), raw.glob.copy(), raw.features.copy()),
-                                *(out[h][k].copy() for h in act.SLOT_FIELDS + ("logp",)), float(value[k]))
+                                *(out[h][k].copy() for h in act.SLOT_FIELDS + ("logp",)), value[k].copy())
                     step.z = None if told is None else told[k]
                     picked = step.anchor >= 0
                     masked_out += int((~t.kind_mask[step.anchor[picked], step.kind[picked]]).sum())
@@ -979,7 +1038,7 @@ class Collector:
                     step.label, step.labelled = advice_label(env, seat, items[k], current[seat].bundle, self.rng)
             for seat, tr in current.items():
                 if tr.steps:
-                    tr.steps[-1].reward += env.reward(seat, beta(progress))
+                    tr.steps[-1].reward = tr.steps[-1].reward + env.reward_terms(seat, learner.term_names, beta(progress))
             for seat in acting:
                 bonus += float(env.bonus[env.game_of(seat), env.team_of(seat)])
             for seat, mode, won in env.finished_seats():
@@ -1005,14 +1064,15 @@ class Collector:
             _, _, value, _, _ = self.player.act(frames, seats.history[index], seats.seen[index], _z_tensor(seat_z(env, acting, cfg.z), learner.device))
             for k, seat in enumerate(acting):
                 tr = current[seat]
-                tr.bootstrap = float(value[k])
+                tr.bootstrap = value[k].copy()
                 _close(tr, segments)
                 finished.append(tr)
                 self._carry_on(seat)
         # The same horizon in game time whatever the decision rate.
-        _, values, returns = finish(finished, cfg.gae ** cfg.decide_every)
+        gammas = np.array([env.term_gamma(name) ** env.act_every for name in learner.term_names])
+        values, returns = finish(finished, cfg.gae ** cfg.decide_every, gammas)
         graphs = self.player.graphs.stats() if self.player.graphs is not None else {}
-        return segments, Tally(stored, masked_out, actions, bonus, kind_counts, wins, np.array(values), np.array(returns), graphs, lead_rule)
+        return segments, Tally(stored, masked_out, actions, bonus, kind_counts, wins, values, returns, graphs, lead_rule, learner.term_names)
 
 
 @dataclass
@@ -1024,10 +1084,11 @@ class Tally:
     bonus: float
     kind_counts: np.ndarray
     wins: dict[str, list[float]]
-    values: np.ndarray
+    values: np.ndarray              # decisions x terms
     returns: np.ndarray
     graphs: dict[str, float]        # policy_graphs.Graphs.stats, so far
     lead_rule: list[float] = field(default_factory=list)    # 1 for each game ended that a lead could have ended, else 0
+    terms: tuple[str, ...] = ("blend",)
 
     @staticmethod
     def merge(tallies: list["Tally"]) -> "Tally":
@@ -1041,13 +1102,18 @@ class Tally:
         return Tally(sum(t.stored for t in tallies), sum(t.masked_out for t in tallies), sum(t.actions for t in tallies),
                      sum(t.bonus for t in tallies), np.sum([t.kind_counts for t in tallies], 0), wins,
                      np.concatenate([t.values for t in tallies]), np.concatenate([t.returns for t in tallies]), graphs,
-                     [x for t in tallies for x in t.lead_rule])
+                     [x for t in tallies for x in t.lead_rule], tallies[0].terms)
 
     def metrics(self) -> dict[str, float]:
-        v, r, stored = self.values, self.returns, self.stored
-        explained = 1.0 - float(np.var(r - v)) / max(float(np.var(r)), 1e-8)
-        metrics = {"explained_variance": explained, "masked_out": self.masked_out, "decisions": stored, "actions_a_decision": self.actions / max(stored, 1),
-                   "diversity_a_decision": self.bonus / max(stored, 1), "return_min": float(r.min()), "return_max": float(r.max())}
+        """The first term's explained variance and returns' range without a suffix, as with one term; with more, each term's too."""
+        stored = self.stored
+        metrics = {"masked_out": self.masked_out, "decisions": stored, "actions_a_decision": self.actions / max(stored, 1),
+                   "diversity_a_decision": self.bonus / max(stored, 1)}
+        for i, name in enumerate(self.terms):
+            v, r = self.values[:, i], self.returns[:, i]
+            suffix = f"_{name}" if i else ""
+            metrics.update({f"explained_variance{suffix}": 1.0 - float(np.var(r - v)) / max(float(np.var(r)), 1e-8),
+                            f"return_min{suffix}": float(r.min()), f"return_max{suffix}": float(r.max())})
         total = max(int(self.kind_counts.sum()), 1)
         metrics.update({f"share_kind{k}": float(self.kind_counts[k]) / total for k in range(rf.KIND_COUNT) if self.kind_counts[k]})
         for mode, results in self.wins.items():
@@ -1405,6 +1471,11 @@ def main() -> None:
     ap.add_argument("--critic-span", type=float, default=Config.critic_span)
     ap.add_argument("--entropy-floor", type=float, default=Config.entropy_floor, help="0 from a clone: no head's bonus rises")
     ap.add_argument("--critic-warmup", type=int, default=0, help="iterations where only the critic learns")
+    ap.add_argument("--terms", nargs="+", default=[f"{k}:{w:g}" for k, w in Config.terms], metavar="TERM:WEIGHT",
+                    help="the reward's terms, each a head of the critic, and their advantages' weights, among blend (the one reward, "
+                         "faded by beta), result, score, economy and combat, as result:1 score:0.5 economy:0.3 combat:0.3 (default: %(default)s)")
+    ap.add_argument("--critic-rewarm", type=int, default=Config.critic_rewarm,
+                    help="after resuming with other --terms than the checkpoint's, iterations where only the critic learns")
     ap.add_argument("--kl-start", type=float, default=0.0, help="the KL to the frozen clone's weight at iteration 0")
     ap.add_argument("--kl-fade", nargs="+", default=[f"{i}:{s:g}" for i, s in Config.kl_fade], metavar="ITERATION:SHARE",
                     help="its share of that by iteration, linear between, the last after (default: %(default)s)")
@@ -1447,10 +1518,11 @@ def main() -> None:
         policy_sim_env.parse_kinds(args.test_kinds)
         difficulties = {policy_sim_env.zksim.CHICKEN_DIFFICULTIES[d]: w for d, w in
                         policy_sim_env.difficulty_weights(args.chicken_difficulties).items()} if args.chicken_difficulties else {}
+        terms = parse_terms(args.terms)
     except ValueError as e:
         ap.error(str(e))
 
-    cfg = Config(seed=args.seed, decisions=args.decisions, games=args.games, iteration=args.iteration, passes=args.passes, ema=args.ema,
+    cfg = Config(terms=terms, critic_rewarm=args.critic_rewarm, seed=args.seed, decisions=args.decisions, games=args.games, iteration=args.iteration, passes=args.passes, ema=args.ema,
                  segment=args.segment, token_budget=args.token_budget, data_workers=args.workers, concurrent=args.concurrent,
                  decide_every=args.decide_every, hours=args.hours, eval_every=args.eval_every, gpu_runs=args.gpu_runs, empty_cache=args.empty_cache,
                  latent_encoder=args.latent_encoder, enabled_kinds=policy_sim_env.KINDS,     # what the sim obeys

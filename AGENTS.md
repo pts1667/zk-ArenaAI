@@ -1,6 +1,6 @@
 # zk-ArenaAI, the learned policy: where it stands
 
-Updated 2026-11-12.  Branch `learned-policy-plan`.  Repo: `C:/Users/Thoma/Documents/sources/zk-ArenaAI`.  This file was
+Updated 2026-11-13.  Branch `learned-policy-plan`.  Repo: `C:/Users/Thoma/Documents/sources/zk-ArenaAI`.  This file was
 `HANDOFF.md`.
 
 The current state only.  How things got here is in git history.  How everything works, with its numbers, is in
@@ -19,6 +19,31 @@ simulator (`sim/`): first by cloning scripted players, then DAgger, then PPO.
 * **The sim plays four kinds of game** (the user, 2026-11-10): 1v1s, team games of 2 to 4 a side, free-for-alls of 3 to 8,
   and chicken defense, each on the pool maps that hold it, for up to 80 minutes.  See "Variety" below: it's built and
   tested, and **nothing has been trained on it yet**.
+* **Shots fly in the sim** (2026-11-12, the user): a shot that takes time is a projectile, aimed ahead of its target as the
+  engine aims it, that hits whoever is where it comes down, and raiders on a fight order jink up to slow shooters as Zero-K's
+  tactical AI has them do.  Before, 13 Ronins beat 18 Glaives every time; now the Glaives win, as in a game.  The sim's
+  movement is also 1.1 to 1.7 times faster, with no game changed by that.  01-simulator.md, "Weapons and damage", "Unit AI"
+  and "Validation".  Everything recorded or trained before it played the old sim.
+* **The rest of Zero-K's tactical AI is in the sim** (2026-11-12, the user), data-driven from the gadget's tables: ward fire
+  at personal shields (38 types), the tables for the sea and for fight-only targets, the parameters single units have, the
+  AI's turn every 20 frames, and the AI being off for nine types until an order turns it on.  A game's Ronin, Glaive and
+  Mace wear a Thug's shield down as the sim's do.  01-simulator.md, "Unit AI", "Validation", and "Known gaps" for what
+  isn't modelled.
+* **No side goes first in the sim** (2026-11-12, the user).  The policy plays team 0, whose units are made first, and in
+  mirror fights that decided who won: of 4 Maces a side, side 1 every time, of 8 Ronins side 0 every time.  The tactical
+  AI's turn went by the handle, a unit moved before the ones made after it had said what they'd do, and a stun stopped a
+  unit made later from firing back that tick.  Now the turn and a unit's first side are drawn by the seed, and a tick's
+  moves, shots and deaths are settled before any takes effect: of 1,600 mirror fights with the starts shaken, the side made
+  first won 642 and the other 689, side 0 672 and side 1 659.  A game's own 96 went 51 to 40 for the side made first.
+  01-simulator.md, "Unit AI" ("No one goes first") and "Validation" ("Mirror fights"); "Known gaps" for Glaives against
+  Glaives, which take twice a game's time.
+* **Zero-K's end of a game, whole** (2026-11-13, the user): an alliance of AIs with no finished builder or factory left is
+  destroyed (`game_over.lua`'s `vitalAlive`; libzksim ABI 25, `rules.json`'s `vital`), so a game of two ends.  Every team
+  in the sim stands for an AI, so it's always on but for the chickens.  The 25x reveal was already in.  The lead rule and
+  the time limit stay, on top, to hurry games.  01-simulator.md, "Teams and alliances" ("No builder left").
+* **Two damage stats a team** (2026-11-12, the user; libzksim ABI 24, `ZK_STATS` 6): `[4]` the damage its units have done
+  to enemies' units, in metal, and `[5]` what enemies' have done to its own, for a combat-efficiency head.  01-simulator.md,
+  "Teams and alliances".
 * **The actor** (`tools/policy_latent.py`, 10.5M parameters) reads a frozen frame encoder's 40 latent tokens a frame, over a
   window of 4 frames in each of 4 layers.  It decides every 3 s, as actions one after another: a unit, then its order.
 * **One command runs everything** (`tools/policy_pipeline.py`): recording the scripts' games, frames, encoder, 10,000 steps
@@ -109,13 +134,27 @@ The first whole run on the variety work, started by me while the user slept:
   0.052 by iteration 126, with 36% of ratios past 1 ± eps; tests at 100 and 120 won 8% and 9%, against 11-16% before.  I
   stopped it at 127 (kept as `ppo-kl-127`).  The user chose: the actor's rate slows 1.5x after an iteration past twice
   `--kl-target` 0.01 and comes back after one under half of it, and a rollback to iteration 80 (best test, 15.6%).
-  Resumed from 80 at 15:11 (`results/rollback_ppo.sh` cut the logs there).
+  Resumed from 80 at 15:11 (`results/rollback_ppo.sh` cut the logs there).  The test at 100 won 11% (KL 0.012, the rate
+  unslowed).  From iteration 101 (15:30) it tests every 100 iterations, not 20 (the user): a test of 64 games took 220-460 s
+  with the learner waiting, 30-60% on top of 20 iterations.  `results/resume-full2.sh` passes `--eval-every 100`.
+* The sim changed under it twice (the user): projectiles and lead from iteration 296 (17:58), the rest of the tactical AI
+  from 562 (20:52).  Tests (64 1v1s): 11% at 100, 8% at 200, 6% at 300, 11% at 400, 3% at 500 and 600.  183 decisions a
+  second overall at 600.  Explained variance was 0.99-1.0 from about iteration 550: beta at
+  0.85 made the reward mostly the result, and the policy lost about 95% of its games.
+* So the critic now has the reward's terms apart, a head each (the user, 2026-11-12; 03-training.md, "Reward"):
+  `--terms result:1 score:0.5 economy:0.3 combat:0.3` in the pipeline, with `--critic-span 2`.  Built and tested, never
+  trained with: a resume onto other terms keeps the critic but its heads, which start afresh while the actor waits 10
+  iterations.
+* PPO kept getting worse: training games' 1v1 wins fell from 16% (iterations 100-199) to 5% (600-699), team games' from
+  39% to 20%; tests won 0% at 700 and 5% at 800 and 900.  It steepened as the KL to the clone and the cloning loss faded to
+  nothing by 500.  It finished its 4M decisions at iteration 971 (2026-11-13 00:06) on the old critic.  The user
+  judged that PPO isn't working, and asked first for Zero-K's whole end of a game in the sim (above).
 
 ## Variety (2026-11-10 and 11): built, tested, not yet trained on
 
 The user asked for it before the next whole run.  All of it is in the tree and described in `docs/learned-policy/`:
 
-* **Teams**: the sim, the scripts and the recorder take up to 8 teams in alliances (libzksim ABI 21, libzkscripts ABI 12,
+* **Teams**: the sim, the scripts and the recorder take up to 8 teams in alliances (libzksim ABI 25, libzkscripts ABI 12,
   libzkrecord ABI 2, clone data version 7).  A 1v1 plays bit for bit as it did.  Allies share income, overdrive and overflow.
 * **Kinds of game**: `SimEnv`, the recorder, the clone eval, the trainer and the pipeline all take `--kinds` (default
   `1v1:0.5 teams:0.2 ffa:0.2 chicken:0.1`), `--slots`, `--test-kinds` and `--chicken-difficulties`.  The policy plays team 0
@@ -255,7 +294,7 @@ report, and the same command resumes it.
 `--encoder` is needed by every tool that loads an actor until `policy_latent.ENCODER` names a new encoder: its default is
 `encoder-big`, which no longer loads.
 
-**The tests** (791 pass, 3 more need CUDA and are skipped without it): `pytest.ini` runs them on 8 processes, a file's tests in
+**The tests** (801 pass, 3 more need CUDA and are skipped without it): `pytest.ini` runs them on 8 processes, a file's tests in
 one process so that what they share is made once, and `tests/policy/conftest.py` keeps each process's maths to one thread.
 That took the suite from 211 s to about 60 (2026-11-11), with the slowest learning runs cut down and those of paths the
 pipeline doesn't use removed: the variational encoder's fits, checkpoints from before feature version 7, the trainer's
@@ -268,29 +307,44 @@ README.md has the rules for engine games: headless at max speed, windowed only w
 
 ## Next
 
-1. **Run the pipeline again whole** (the user starts it): record the scripts' games with the new economy and the new kinds
+1. **GRPO from branched games** (the user, 2026-11-13, after `full-2`'s PPO got worse), in place of PPO's critic:
+   * A. copy a game in the sim and the scripts (`zk_batch_copy_game`, the scripts' seats), with identity tests: a copy and
+     its original, given the same orders, stay the same;
+   * B. copy a game in `SimEnv` from a registry of its per-game state, with a test that nothing per game is left out of it,
+     and the seat's actor memory with it;
+   * C. GRPO: a trunk game is copied at a random decision every 1-3 minutes into a group of 8 that plays 2 minutes, then
+     the copies go and the trunk plays on.  Each branch is scored by the terms at the end (value balance, income over the 2
+     minutes, damage balance, the result if it ended), weighed as `--terms`; its advantage is (score - mean) / std of its
+     group, with no critic.  Copies keep the world's random state, so only the policy differs.  First from `full-2`'s DAgger
+     actor; record and clone anew only if that trial says the old clone doesn't fit the new sim.  Checked against PPO from
+     the same actor on 64 1v1s.
+2. **The bot's inference in C++** (02-policy.md, "Deployment"), by an agent in parallel: the type table, the featurizer and
+   the actions in a C++ library that training calls through ctypes, bit for bit with the Python before the Python goes;
+   then the map bundle.  The nets in ONNX not for now (the user, 2026-11-13).
+3. **Run the pipeline again whole** (the user starts it): record the scripts' games with the new economy and the new kinds
    of game into a new `--data`, collect frames, train an encoder, clone, DAgger, PPO.  Before it: a small smoke run of the
    whole pipeline hasn't been done since the variety work (only `--dry-run`, the suite, and each stage's own tests), and
    the unconfirmed choices under "Variety" are the user's to settle.  Check `wsl free -g` first: the pool is 10.8 GB now
    (it was 7.5), and a sample from late in an 80-minute game takes 1.3 to 2 GB of the card.
-2. **PPO's speed**: with concurrent collectors, training was longer than collecting, and in `full-2` fell to 70 decisions a
+4. **PPO's speed**: with concurrent collectors, training was longer than collecting, and in `full-2` fell to 70 decisions a
    second as frames grew.  A step takes about 0.5 s whatever its size, so with minibatches as big as memory allows
    (2026-11-12) collecting (about 150 a second in `full-2`) should be the limit; check it in `metrics.jsonl`'s `train_rate`
    and `collect_rate`.  In a round's replay the decision itself (encoder, time transformer, critic: 41 ms at 64 decisions) is the bigger part; a
    step is about 1 ms of small kernels, which fusing (`torch.compile` of a step, now the shapes are fixed) could shrink.
-3. **The stall in expansion** survived DAgger.  Whether PPO's economy share (the policy running its own economy in more games)
+5. **The stall in expansion** survived DAgger.  Whether PPO's economy share (the policy running its own economy in more games)
    moves the extractor count is the thing to watch in its tests.
-4. **The engine hand-off**:
-   * the bot's inference in C++ with the nets in onnxruntime, nothing to install (the user, 2026-11-12; 02-policy.md,
-     "Deployment"): first a C++ featurizer and map bundle, which training then uses too, as the only ones;
+6. **The engine hand-off**:
+   * the rest of the bot's inference in C++ (item 2), with the nets in onnxruntime, nothing to install (the user, 2026-11-12);
    * decoded orders sent as commands;
    * the opening and the economy script in the engine;
    * the checks listed in 02-policy.md, "Not yet checked live".
-5. **The user's open questions** (`docs/model.md`, "Open questions").
+7. **The user's open questions** (`docs/model.md`, "Open questions").
 
 ## Traps
 
-* **Leftover build directories**: `~/zksim/build` is the one in use (libzksim ABI 21, libzkscripts ABI 12, libzkrecord ABI 2,
+* **Leftover build directories**: `~/zksim/build` is the one in use (libzksim ABI 25 since the builder rule, 2026-11-13, so one built
+  before that needs rebuilding, and libzkscripts with it: it reads the stats by their width, and its own number didn't
+  change; libzkscripts ABI 12, libzkrecord ABI 2,
   rebuilt 2026-11-11).  The `build-*` and `agent*` directories beside it are leftovers of comparisons and of agents' tree
   copies, safe to delete, except `agent-maps-lupa` (above).
 * **Memory**: check `wsl free -g` before a launch.  Never run two jobs that load the map pool at once.  Every GPU trainer caps

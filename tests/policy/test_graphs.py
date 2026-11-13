@@ -153,7 +153,7 @@ def test_collector_processes_play_train_and_test(tmp_path, encoder_path):
 def test_a_graph_decides_as_the_plain_forward_pass_and_follows_the_weights(encoder_path):
     torch.manual_seed(2)
     actor = pl.make(VOCABULARY, encoder_path, size=pl.SMALL).cuda()
-    critic = pm.Critic(VOCABULARY, d=32, layers=1, heads=2).cuda()      # one number, so that its bias moves it
+    critic = pm.Critic(VOCABULARY, d=32, layers=1, heads=2, terms=2).cuda()     # numbers, so that its bias moves them; two terms' worth
     torch.nn.init.normal_(critic.value.weight, std=0.1)
     with torch.no_grad():
         actor.head_done.bias[0] = -3.0

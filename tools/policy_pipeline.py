@@ -75,12 +75,14 @@ CLONE_FLAGS = ["--decide-every", "6", "--samples", "4", "--accumulate", "16", "-
 # is policy_train's, which counts tokens as the critic now costs (2026-11-12).  The new critic learns at 3e-4, as every earlier
 # critic did: at the actor's 1e-5 it learned nothing.
 # A win sooner is worth up to 0.1 more (the user, 2026-11-10); the lead rule fades by policy_train's default --lead-fade.  Muon
-# trains the critic's hidden matrices (the user, 2026-11-12) at about 13x its Adam rate, as cloning's 0.008 is to its 6e-4.
+# trains the critic's hidden matrices (the user, 2026-11-12) at about 13x its Adam rate, as cloning's 0.008 is to its 6e-4.  The
+# reward's terms apart, a head of the critic each (the user, 2026-11-12; 03-training.md, "Reward"), whose economy term is income's,
+# so --income-weight weighs only the one reward they replace, "blend".
 PPO_FLAGS = ["--variants", "--z", "variant", "--fine-sim", "--decide-every", "6", "--segment", "16",
-             "--no-concurrent", "--critic-bins", "51", "--critic-span", "1.5", "--kl-start", "0.5",
+             "--no-concurrent", "--critic-bins", "51", "--critic-span", "2", "--kl-start", "0.5",
              "--clone-weight", "0.5", "--economy-start", "0.25", "--economy-end", "1", "--income-weight", "0.5",
              "--speed-weight", "0.1", "--lr-start", "1e-5", "--lr-end", "3e-6", "--critic-lr", "3e-4", "--critic-muon-lr", "0.004",
-             "--entropy-floor", "0"]
+             "--entropy-floor", "0", "--terms", "result:1", "score:0.5", "economy:0.3", "combat:0.3"]
 
 
 @dataclass

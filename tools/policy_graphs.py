@@ -151,7 +151,7 @@ class Graphs:
         ctx, new_history, new_seen, keep = self.actor.decide(b, shape.history, shape.seen, shape.z)
         s = pm.start_sampling(b, ctx, self.slots)
         pm.sample_steps(self.actor, b, ctx, s, range(self.cuts[0]))
-        value = self.critic(b) if self.critic is not None else torch.zeros(len(shape.history), device=self.device)
+        value = self.critic(b) if self.critic is not None else torch.zeros(len(shape.history), 1, device=self.device)
         return ctx, s, (new_history, new_seen, keep["latents"], value)
 
     def _tail(self, shape: _Shape) -> tuple[torch.Tensor, ...]:
@@ -159,7 +159,7 @@ class Graphs:
         a = shape.sampling.actions()
         new_history = self.actor.acted(shape.batch, a, new_history)
         ints = torch.stack([getattr(a, f) for f in act.SLOT_FIELDS], 1)
-        floats = torch.cat((a.logp.float(), value.float()[:, None], latents.float().flatten(1)), 1)
+        floats = torch.cat((a.logp.float(), value.float(), latents.float().flatten(1)), 1)
         return ints, floats, new_history.float(), new_seen.float()
 
     def _new_shape(self, nb: pm.Batch, history: torch.Tensor, seen: torch.Tensor, z: torch.Tensor | None) -> _Shape:
@@ -229,8 +229,9 @@ class Graphs:
         ints, floats = ints[:n].cpu().numpy(), floats[:n].cpu().numpy()
         out = {f: ints[:, i] for i, f in enumerate(act.SLOT_FIELDS)}
         out["logp"] = floats[:, :self.slots]
-        value = floats[:, self.slots]
-        out["latents"] = floats[:, self.slots + 1:].reshape(n, self.actor.encoder.tokens, self.actor.encoder.latent)
+        terms = self.critic.terms if self.critic is not None else 1
+        value = floats[:, self.slots:self.slots + terms]
+        out["latents"] = floats[:, self.slots + terms:].reshape(n, self.actor.encoder.tokens, self.actor.encoder.latent)
         # Copies: the next replay of this graph writes over its outputs.
         return out, value, new_history[:n].clone(), new_seen[:n].clone()
 

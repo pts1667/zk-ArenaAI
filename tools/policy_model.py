@@ -383,13 +383,14 @@ class Critic(nn.Module):
     QUERIES = 32
 
     def __init__(self, vocabulary: int, d: int = D, layers: int = LAYERS, heads: int = HEADS, bins: int = 0, span: float = 3.0,
-                 queries: int = QUERIES):
+                 queries: int = QUERIES, terms: int = 1):
         """bins: above 0, the value is a distribution over that many values evenly from -span to span, trained by HL-Gauss
         (`hl_gauss`; 04-literature.md P7), and the value is its mean; else one number.  layers: rounds of reading; queries: besides
-        the global token's."""
+        the global token's.  terms: values of that many of the reward's terms (policy_train.Config.terms), each its own head on
+        the same reading."""
         super().__init__()
-        self.size = {"d": d, "layers": layers, "heads": heads, "queries": queries, **({"bins": bins, "span": span} if bins else {})}
-        self.bins = bins
+        self.size = {"d": d, "layers": layers, "heads": heads, "queries": queries, "terms": terms, **({"bins": bins, "span": span} if bins else {})}
+        self.bins, self.terms = bins, terms
         self.name_embed = nn.Embedding(vocabulary, 8)
         self.kind_embed = nn.Embedding(fz.TOKEN_KINDS, d)
         self.ally_embed = nn.Embedding(fz.MAX_ALLY_TEAMS + 1, 4)
@@ -406,25 +407,25 @@ class Critic(nn.Module):
         self.reads = nn.ModuleList(CrossBlock(d, heads) for _ in range(layers))
         self.blocks = nn.ModuleList(Block(d, heads) for _ in range(layers))
         self.lnf = nn.LayerNorm(d)
-        self.value = nn.Linear(d, bins or 1)
+        self.value = nn.Linear(d, terms * (bins or 1))
         nn.init.zeros_(self.value.weight)
         nn.init.zeros_(self.value.bias)
         if bins:
             self.register_buffer("centres", torch.linspace(-span, span, bins), persistent=False)
 
     def hl_gauss(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        """B: the cross-entropy of the value's distribution (B x bins logits) against a Gaussian about each target, its standard
-        deviation 0.75 of a bin, as each bin holds it (Farebrother et al. 2024)."""
+        """The cross-entropy of the value's distribution (... x bins logits) against a Gaussian about each target (...), its
+        standard deviation 0.75 of a bin, as each bin holds it (Farebrother et al. 2024)."""
         width = float(self.centres[1] - self.centres[0])
         edges = torch.cat((self.centres - width / 2, self.centres[-1:] + width / 2))
-        t = target.float().clamp(float(edges[0]), float(edges[-1]))[:, None]
-        cdf = torch.special.ndtr((edges[None] - t) / (0.75 * width))
-        p = cdf[:, 1:] - cdf[:, :-1]
+        t = target.float().clamp(float(edges[0]), float(edges[-1]))[..., None]
+        cdf = torch.special.ndtr((edges - t) / (0.75 * width))
+        p = cdf[..., 1:] - cdf[..., :-1]
         p = p / p.sum(-1, keepdim=True).clamp_min(1e-9)
         return -(p * F.log_softmax(logits.float(), -1)).sum(-1)
 
     def forward(self, b: Batch, logits: bool = False) -> torch.Tensor:
-        """B values; with logits (and bins), B x bins logits of the value's distribution."""
+        """B x terms values; with logits (and bins), B x terms x bins logits of their distributions."""
         hu = self.unit_in(torch.cat((b.unit_x, self.name_embed(b.unit_name), self.ally_embed(b.unit_ally), self.player_embed(b.unit_player)), -1))
         hh = self.unit_in(torch.cat((b.hidden_x, self.name_embed(b.hidden_name), self.ally_embed(b.hidden_ally), self.player_embed(b.hidden_player)), -1)) + self.kind_embed.weight[fz.TK_HIDDEN]
         hr = self.reg_in(b.reg_x) + self.kind_embed.weight[fz.TK_REGION]
@@ -441,7 +442,8 @@ class Critic(nn.Module):
             h = block(read(h, tokens, mask), None, everyone)
         out = self.value(self.lnf(h[:, 0])).float()
         if not self.bins:
-            return out[:, 0]
+            return out
+        out = out.view(len(out), self.terms, self.bins)
         return out if logits else (out.softmax(-1) * self.centres).sum(-1)
 
 

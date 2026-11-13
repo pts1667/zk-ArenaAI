@@ -321,6 +321,27 @@ In a 1v1, for side A against side B at decision t:
   `lead_share` and `lead_rule_games`.
 * **Discounting**: gamma is 1 and GAE lambda 0.95.  With gamma below 1 the sum of potential changes would stop meaning "who's
   ahead".  Returns are bounded, so there's no reward or value normalisation; advantages are normalised per minibatch.
+* **The terms apart** (`--terms`; the user, 2026-11-12, after Pluto's and AlphaStar's several value heads): by default the
+  reward is the one number above (`blend`).  Given terms, each has its own reward, its own head on the critic, its own
+  GAE, and a weight; nothing fades by beta.  The pipeline gives `result:1 score:0.5 economy:0.3 combat:0.3`:
+  * `result`: z and the speed term;
+  * `score`: the value balance's change and the diversity bonus, the shaping above without income;
+  * `economy`: the income balance `inc` x (1 - gamma) each step, gamma a step being exp(-seconds / 600), so its return is a
+    discounted average of the income balance over about 10 minutes.  At the alliance's end it pays the whole level, as if
+    it lasted, so a game won early isn't worth less of it than one that drags on;
+  * `combat`: the change in the balance of damage dealt, in the metal it cost (libzksim's stat 4, ABI 24): at two,
+    (dealt - taken) / (dealt + taken + 1000).  That's a side's trades, as Zero-K's experience counts a unit's.
+  
+  A decision's advantage is each term's weighed over its returns' spread that iteration (5th to 95th percentile) where
+  that's over 1, as DreamerV3 scales returns: a wide-spread term doesn't drown the rest, and a near-constant one isn't
+  blown up (`return_scale_TERM` in `metrics.jsonl`).  Then it's normalised per minibatch as before.  The heads' losses add
+  up.  `metrics.jsonl` has the first term's `explained_variance` and returns' range as before, and each other's with its
+  name after (`explained_variance_economy`).  Why: in `full-2` explained variance reached 0.99-1.0 by iteration 550.  The
+  reward was mostly the result, beta at 0.85, and the policy lost about 95% of its games, so the critic knew the
+  outcome and the advantages were mostly noise.  Income and trades say more about a decision's worth than a game it was
+  always going to lose.
+  * **Resuming with other terms** than the checkpoint's keeps all of the critic but its value heads, which start at zero
+    with Adam's moments of them, and the actor stays as it is for `--critic-rewarm` iterations (10) while they learn.
 
 ### The update
 
@@ -339,7 +360,9 @@ In a 1v1, for side A against side B at decision t:
 * **The critic** is a separate network over the privileged frame, with the enemies the seat can't see.  It's never in the bot.
   With `--critic-bins` its value is a distribution over bins from -span to span, trained by HL-Gauss.  `--critic-lr` gives it a
   rate of its own, falling in step with the actor's: at the actor's 1e-5 a new critic learned nothing (explained variance
-  0.0000 for 19 iterations in `full-1`).  The pipeline gives it 3e-4.
+  0.0000 for 19 iterations in `full-1`).  The pipeline gives it 3e-4, and a span of 2, since `score` and `combat` returns
+  are differences of balances (it was 1.5 with the reward as one number).  With `--terms` it has a value head for each,
+  reading the same global token.
 * **The critic's shape** (the user, 2026-11-12): 32 learnt queries and the global token read every token, as the frame encoder
   reads, in 4 rounds, each a reading and then the queries attending to each other.  So its cost grows with the tokens, not their
   square, as it did when it was self-attention over every token.  At the caps (16 frames of 2,193 tokens), a forward and

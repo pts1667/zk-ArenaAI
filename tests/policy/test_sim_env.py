@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import pathlib
 import sys
 
@@ -125,6 +126,31 @@ def test_a_win_pays_a_share_of_the_time_left_on_top_unfaded_and_the_loser_pays_i
     paid = draw.reward(0, beta)
     draw.speed_weight = 0.0
     assert draw.done and draw.result[0] == 0.0 and draw.reward(0, beta) == paid
+
+
+def test_the_rewards_terms_are_zero_sum_and_the_economy_a_discounted_average_whose_last_level_lasts():
+    """reward_terms: "blend" is `reward`; each term is alliance 0's turned round for alliance 1; the economy pays (1 - gamma) x
+    the income balance a step and its whole level at the end; the result pays the win and the speed term."""
+    env = _env_with_values(16000.0, 6000.0)
+    env.speed_weight = 0.1
+    held = env.batch.step
+
+    def step(*args, **kwargs):
+        held(*args, **kwargs)
+        env.batch.globs[0, :2, rf.G["metal_income"]] = (15.0, 5.0)
+    env.batch.step = step
+    names = se.TERMS if se.DEALT_STAT >= 0 else se.TERMS[:-1]
+    level, gamma = 10.0 / (20.0 + se.INCOME_CONSTANT), env.term_gamma("economy")
+    assert gamma == pytest.approx(math.exp(-0.5 / se.TERM_HORIZONS["economy"]))     # a decision is 15 frames
+    for _ in range(se.EARLY_END_DECISIONS):
+        env.step(0.0)
+        mine, theirs = env.reward_terms(0, names, 0.3), env.reward_terms(1, names, 0.3)
+        assert mine == pytest.approx(-theirs) and mine[0] == pytest.approx(env.reward(0, 0.3))
+        if env.done:
+            break
+        assert mine[names.index("economy")] == pytest.approx((1.0 - gamma) * level) and mine[names.index("result")] == 0.0
+    assert env.done and mine[names.index("economy")] == pytest.approx(level)
+    assert mine[names.index("result")] == pytest.approx(1.0 + 0.1 * (1.0 - se.EARLY_END_DECISIONS / se.TIME_LIMIT_DECISIONS))
 
 
 def test_two_minutes_stay_two_minutes_at_a_slower_decision_rate():
