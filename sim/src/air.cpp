@@ -38,7 +38,8 @@ float wrap(float a) {
 bool World::airborne(int u) const { return (type_of(u).flags & ZK_U_AIR) && air[size_t(u)].height > LANDED_HEIGHT; }
 
 // Where an aircraft wants to go, if anywhere.  A plane flies at what it attacks, or at anything its weapons have, rather than
-// stopping in range; one with no ammo makes for its pad.
+// stopping in range, unless the tactical AI has given it a move to make first (a fighter told to loop back, unit_ai.cpp); one
+// with no ammo makes for its pad.
 bool World::air_goal(int u, float& gx, float& gz) {
     const auto& d = type_of(u);
     const AirState& a = air[size_t(u)];
@@ -56,7 +57,7 @@ bool World::air_goal(int u, float& gx, float& gz) {
         gz = z[size_t(a.pad)];
         return true;
     }
-    if (d.flags & ZK_U_PLANE) {
+    if ((d.flags & ZK_U_PLANE) && !ai[size_t(u)].dodging) {
         int t = order[size_t(u)] == ZK_ORDER_ATTACK ? order_target[size_t(u)] : ai[size_t(u)].chasing;
         for (int m = 0; m < d.n_mounts && (t < 0 || !alive[size_t(t)]); ++m) t = weapon_target[size_t(u) * ZK_MAX_MOUNTS + size_t(m)];
         if (t >= 0 && alive[size_t(t)]) {

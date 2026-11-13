@@ -16,7 +16,7 @@ This builds three libraries in `~/zksim/build` (`ZKSIM_LIB` overrides where they
 
 | Library | What | Python side |
 |---|---|---|
-| `libzksim.so` | the sim (`sim/src`, `sim/include/zksim`, C ABI in `capi.h`, ABI 21) | `sim/py/zksim.py` (`Batch`), `sim/py/zknav.py` (routes) |
+| `libzksim.so` | the sim (`sim/src`, `sim/include/zksim`, C ABI in `capi.h`, ABI 25) | `sim/py/zksim.py` (`Batch`), `sim/py/zknav.py` (routes) |
 | `libzkscripts.so` | the army and economy scripts (`sim/scripts`, `zkscripts.h`, ABI 12) | `tools/policy_scripts_cpp.py` |
 | `libzkrecord.so` | the game recorder (`sim/record`, `zkrecord.h`, ABI 2), needs `libzstd-dev` | `sim/py/zkrecord.py` |
 
@@ -40,6 +40,16 @@ compares the two.  The game around the sim (starts, scripts, rewards, the policy
 Speed, `tools/sim_step_bench.py`, 128 games on 8 threads, measured before the sim had teams (16-minute games have run about
 12% faster since): 142,943 game-steps a second at 1 minute into games, 57,889 at 8 and 33,213 at 16.  With both sides scripted,
 `SimEnv.step` runs 92,443 seat decisions a second at 8 minutes (2.8 ms a step).  Movement is the largest phase.
+
+On one thread, 16 games of the four kinds on 8 maps (`tools/sim_step_bench.py --threads 1 --kinds 1v1:0.5 teams:0.2 ffa:0.2
+chicken:0.1 --check`), before and after movement was made faster on 2026-11-12, as means of two runs each on a machine that was
+training: 12,800 and 15,100 game-steps a second at 1 minute, 3,970 and 4,270 at 8, 1,700 and 2,670 at 16, 1,280 and 1,870 at
+30, 1,100 and 1,220 at 45, 1,120 and 1,950 at 60.
+No game changed: `--check` hashes every step's records, features and stats, and each phase's hash was the same before and after.
+What changed: units are pushed apart over packed arrays with SSE2, a unit at rest skips most of its tick, a waypoint's line is
+tested in long hops where the ground around is clear, and an ally's view is copied where it was built twice.  Projectiles came
+after that and change games; flying them is 0.9% of a step at 30 minutes.  The tactical AI's turns and ward fire are 2.6% of
+one there, and the unit AI as a whole 8.3%, beside movement's 56%.
 
 ## Data
 
@@ -120,10 +130,40 @@ Tags in this section: what's left out is listed under "Known gaps", and what was
 
 ### Weapons and damage
 
-* Reload, burst and projectiles per shot, including script bursts.  A target is chosen by category, then distance.  Shots lead
-  their target as the engine does (no target velocity).  Spray scatters sideways only.
-* No projectiles.  Beams hit at once.  Other shots' damage lands after their flight time, if the target is still within the
-  blast.  Blast falloff is the engine's formula, measured from the centre less the unit's radius.
+* Reload, burst and projectiles per shot, including script bursts.  A target is chosen by category, then distance.  Spray
+  scatters sideways only.
+* **Aim** (2026-11-12).  A shot that takes time is aimed ahead of its target as the engine aims it (`Weapon.cpp`,
+  `GetLeadVec`), by the target's velocity times the flight time the weapon reckons with:
+  * that time is distance over speed.  For the 46 weapons whose mount has `accurateLeading`, it's the engine's few Newton steps
+    on a shell's flight time under gravity to where the target will be, for rockets as for shells, which is the engine's quirk
+    and makes a Ronin lead too far inside 333 elmos;
+  * `leadLimit` caps the lead.  `predictBoost` under 1 (Rogue, Recluse: 0.75) makes it anything from 0.75 to 1.25 of itself,
+    and `targetMoveError` (Rogue: 0.3) throws it off by up to that many seconds of the target's speed;
+  * five raiders' guns get their lead from `weapon_projectile_retarget.lua` once they've fired, by distance over speed (Glaive,
+    Scorcher, Dagger, Bandit, Pyro).
+* **A weapon's range is tested at its aim point** (`TryTarget`, `can_reach`), not at the target.  A unit that has taken on an
+  enemy (attack-move finds them at its range plus 100) fires as soon as where it would aim is in range, and stops walking: with
+  455 of range, Ronins open on charging Glaives from 470 to 510 elmos, and from up to 555 as their updates fall (a game's from
+  465 to 561).  It doesn't fire at what's leaving near the end of its range.  What a weapon picks for itself has to be in
+  range itself too (`GenerateWeaponTargets`).
+* **Projectiles** (`World::launch` and `fly` in `combat.cpp`).  Every shot that takes time flies, bar the three kinds below:
+  120 weapons of real units.  60 of them take a second or more to the end of their range, in frames: Tremor 266, Cerberus 196,
+  Merlin 174, Emissary 128, Sling 119, Firewalker 94, Rogue 84, Scalpel 73, Crab 71, Mistral 70, Ronin 68, Buoy 51, Minotaur
+  44, Recluse 43, Thug 43, Ravager 42; a Glaive's takes 11.
+  * It leaves for its aim point at its own speed, and goes off in the first enemy its path passes through, or where it comes
+    down, on whoever is in the blast by then: nobody, if they've moved.
+  * Over the ground the path is a straight line.  Its height is a shell's arc at the engine's elevation for the distance, which
+    makes its flight longer than distance over speed (a Crab's 71 frames at 600 elmos, not 62), or a rocket's
+    `trajectoryHeight`.  So a lobbed shot goes over what stands in between, and lands a little behind a target it just misses.
+  * A rocket with no rise flies level, on past its aim point as far as its fuel goes (`flightTime`, or its range), and through
+    any enemy in the line.  One that homes (`tracks`) turns after its target by its `turnRate`, with the engine's 0.7 lead, and
+    is outrun by what's faster.  A bolt is gone at the end of its range.
+  * A path is tested a tick at a time, against each enemy as it moved over that tick.  The ground stops no shot, as it stops no
+    weapon from aiming, and nor do friends or wrecks.
+* **Still landing at their aim point when their flight time is up**: starburst missiles, bombs, and shots that go through.
+  Beams hit at once.
+* Blast falloff is the engine's formula, measured from the centre less the unit's radius.  The unit a projectile goes off in
+  takes all of it.
 * Burning ground and burn damage; heat rays whose damage falls with range; starburst missiles that climb, then fly; fake guns
   that never fire.
 * Slow, EMP and disarm.  Each level is measured against current health, with overstun.  Disarm stops firing and reloading but
@@ -195,7 +235,66 @@ told, for tests that measure one mechanic.
 * **Fire states**: hold fire, return fire, and fire at will (the default).  Move states: hold position, maneuver (the default),
   roam.  The policy can't set either yet.
 * **Tactical AI**, ported from `unit_tactical_ai.lua`: raiders run from riots, and skirmishers kite and step out of range while
-  reloading.
+  reloading.  It acts on a unit with a fight order, an attack or no order, as the gadget does: not on one told to move, or
+  holding its position.
+  * A unit has its turn every 20 frames, as the gadget gives it (2026-11-12: it was every 15, with the rest of the unit
+    AI).  Which of the four ticks is its own is drawn by its handle and the game's seed, and the side it jinks or strafes to
+    first is drawn at random, as the gadget draws it ("No one goes first", below).  When a turn drops an attack the unit gave itself, for a nearer enemy, the
+    unit picks its next target at once, as the engine's does (`CommandAI.cpp`, `FinishCommand`).  Left until its next look,
+    a Crab walked on unarmoured and lost to the Glaives it beats.
+  * Its numbers and tables are the gadget's (`tactical_ai_defs.lua`, through `tools/simgame`'s dump and `tools/sim_data.py`
+    into `catalog.json`'s `tactics`): a row for each unit type, then the rows that some types go by instead.
+  * Under water a Duck, a Scallop and a Claymore go by their `sea` tables: where the ground under them is below their
+    waterline of -5.  The sim's weapons don't know water ("Known gaps"), so this changes the distances they keep and no more.
+  * Against what a type deals with only on a fight order, it goes by its `fightOnlyOverride` (Mace, Ogre, Ripper, Dart),
+    unless that enemy is stunned.  A Mace sent to fight onto a fusion reactor stays 339 elmos off, of its range of 345;
+    without the table it went in to 149.
+  * `selfVelocityPrediction` (Harpy): its own velocity counts in where it reckons an enemy will be, for kiting and fleeing.
+  * `skirmBlockApproachHeadingBlock` (Mace, Scalpel, Mistral, Dominatrix): with a shot loaded these don't back off from what
+    comes at them, as others with `skirmBlockedApproachFrames` don't, except from an enemy they're facing.
+  * `skirmJinkLength` (Swift): its step back from an enemy goes 1,000 elmos to one side, then the other.
+    `alwaysJinkFight` (Imp, Snitch, Limpet): on a fight order they jink all the way, towards the order's place while they
+    know of no enemy.  Both only once the unit's AI is on.
+  * For nine types the AI is off until it's turned on (`defaultAIState` 0: the three bombs, Swift, Raptor, Magpie, Paladin,
+    Emissary, Fencer), which `ZK_ORDER_UNIT_AI` does.  Off, a unit only gives up an attack of its own for a nearer enemy.
+    For planes the game's button is "loopback attack": `alternateStateToggle` says which button it is, and nothing else.
+    A plane with a target used to fly at it whatever the tactical AI wanted; now it flies the AI's move first.
+* **Ward fire** (2026-11-12), `unit_ward_fire.lua`: a unit with nothing in reach fires at the ground short of an enemy whose
+  shield reaches nearer than the enemy does, for the shield to take.
+  * On the unit's turn, every 20 frames: the nearest enemy it sees within 800 elmos is a Thug, a Convict or a Felon
+    (`wardFireTargets`), with its shield up and at least `wardFireShield` in it.  Where that enemy is predicted to be is past
+    the weapon's reach by more than `wardFireLeeway` and `wardFireEnableLeeway`, and by less than the shield's radius as
+    the table has it (68, a Felon's 118).
+  * Then for 20 frames each of the unit's weapons that has no target, and could pick that enemy, fires at a place on the line
+    to it: the weapon's range less `wardFireLeeway` away, and less again for a unit that's moving
+    (`set_target_speed_buffer`).  The shot flies as any other and goes off in the first shield in its way.  A bolt at the
+    end of its range does that too now, where it used to be gone.
+  * Not for a unit told to attack something, nor one that isn't on fire at will.
+  * 38 types have it.  A Ronin's waits for 200 in the shield, a Glaive's for 50, a Mace's for none.
+* **Swarming** (2026-11-12), the gadget's `DoSwarmEnemy`: in reach of an enemy its table says to swarm, which is that enemy's
+  range plus the unit's `swarmLeeway`, a unit jinks.  Further off than its `maxSwarmRange` it goes at the enemy, `jinkTangentLength`
+  to one side and then the other; nearer, it strafes across the line to it by `strafeOrderLength`; inside `minSwarmRange` it
+  backs off.  It changes side at each of the gadget's updates, 20 frames apart, or every `jinkPeriod` of them.  The numbers
+  and the table are the gadget's, for the 46 unit types that have them (`tactical_ai_defs.lua`, by way of `tools/sim_data.py`).
+  A Glaive closing on Ronins walks 1.10 elmos for each one it closes, 1.09 in a game.
+* **No one goes first** (2026-11-12).  Units are gone through in the order they were made, and a game's first team is made
+  first.  Where one unit's turn changed what a later one's read, the side made first had a fixed part in every fight, and
+  for units whose weapons draw nothing at random a mirror fight came out the same whatever the seed ("Validation", the
+  mirror fights).  Now:
+  * the tactical AI's turn is by a hash of the handle and the seed.  It was `(handle + tick) % 4`, so the unit made just
+    after another always had its turn the tick before it, and of two armies the same one always moved first: the first to
+    have its turn after contact backs off, and the other follows;
+  * the sides units jink and strafe to are drawn at random, where they went by the handle's low bits;
+  * every unit says what it means to do this tick (walk where, stand, or turn to its target) before any moves.  Asked as
+    each came to move, a unit made before its target walked on, the target still being out of reach, while the target,
+    asked after, found it in reach and stood;
+  * who can fire this tick, and how slowed, is as the tick's shooting begins: a stun, disarm or slow landed by a unit made
+    earlier used to stop a later one firing back that tick;
+  * who has died is settled before any death's blast goes off, so what a blast kills dies next tick, whichever was made
+    first.
+
+  Planes and the pushing apart of units still go in the order units were made ("Known gaps").
+* **Hold position**: a unit doesn't walk after a target it took on itself (`MobileCAI.cpp`, `ExecuteAttack`).
 * **Overkill prevention** from each script's `BlockShot`, and **bait prevention** at each unit's default level.
 * **Radar**: an unidentified blip is aimed at with an error.  A weapon that hits only by touching can't hit a radar dot, unless
   the dot is a structure already seen (the user's rule, stricter than the game).
@@ -252,11 +351,32 @@ order: never an ally's.  Roles are the bot catalog's (`zkbot.policy.groups`).  G
   A raw frame's `player` is the team and its `ally_team` the allyteam.  A frame lists the viewer's own units first, then its
   allies' (seen whole), then what it sees, radar blips, memories, and what's hidden (the critic's).
 * **What keeps a team in the game** is any finished unit not on Zero-K's don't-count list (`game_over.lua`: the Flea, the
-  bombs, terraform units and the like; 42 in `rules.json`).  The batch's four stats a team are its tracked value, its live
-  units, its reclaim income, and its finished units that keep it in.
+  bombs, terraform units and the like; 42 in `rules.json`).  The batch's six stats a team (`ZK_STATS`) are its tracked
+  value, its live units, its reclaim income, its finished units that keep it in, and two for the trainer's combat
+  efficiency (ABI 24, 2026-11-12):
+  * `[4]` the damage its units have done to enemies' units since the game began, in metal, and `[5]` the damage enemies'
+    units have done to its own.  Each hit counts the health it takes off, no more than the victim had, times the victim's
+    cost over its full health (a chicken's build time for its cost, as the value stat has it).  What one team deals another
+    takes, so over a game's teams the two sum to the same.
+  * Health only: not what a shield takes, nor stun, slow or disarm, nor reclaim.  Buildings count as units.  A fire counts
+    for the team that lit it (a burning unit's, for whoever set it alight last), a death's blast for the team of what died.
+    A fall counts for no one, and nothing does between allies or to oneself.
 * **The reveal rule** (`game_over.lua`): with two allyteams left and one worth over 25 times the other, the weaker one's
   units are always visible, and any off the map are destroyed.  It's checked every 45 frames, never in chicken games, and
-  doesn't end the game (`zk_world_set_reveal`, `zk_batch_set_reveal`; on by default).
+  doesn't end the game (`zk_world_set_reveal`, `zk_batch_set_reveal`; on by default).  "Always visible" is to everyone,
+  cloaked or not, and units it makes afterwards too: Zero-K gives the winner no radar of its own, it shows it the loser.
+* **No builder left** (`game_over.lua`'s `vitalAlive`, the user, 2026-11-13; ABI 25): an alliance whose teams are all AIs is
+  destroyed once it has no finished builder or factory left that counts.  Every team in the sim stands for an AI, as the
+  bot and CircuitAI are in the engine, so it's always on, in every kind of game, but for the chickens.  `rules.json`'s
+  `vital` lists the 367 types, by the dump's isBuilder (a factory is a builder too): commanders, constructors, factories
+  and plates, caretakers, the strider hub, airpads and the missile silo.  An alliance's units die at the next tick (the
+  gadget blows them up over 50 frames), so it's out, and a game of two alliances ends.  Two differences:
+  * the gadget looks as each unit that counts goes; the sim looks every tick, which comes to the same;
+  * an alliance that has never had such a unit isn't looked at.  That's only an army set down in a test or a scenario:
+    in a game every team starts with its commander.
+  
+  The gadget's automatic don't-count list, `(not ud.canAttack) and (not ud.speed) and (not ud.isFactory)`, adds no units:
+  in Lua 0 is true, so `not ud.speed` is false for every unit.  An extractor or a solar keeps a team in, as in Zero-K.
 
 ### Chicken defense (`sim/src/chickens.cpp`)
 
@@ -299,6 +419,8 @@ free-for-alls (the padding costs about 90 MB at 64 games, and no speed).  A seat
   burrows come up away from them.  On a chicken map that box is the first: it's the players' ("Robot Defenders", with the
   map's metal; the other is the hive's), and Zero-K, which doesn't shuffle a game of one player alliance, gives it to them.
 * **Out**: an alliance with no team that has a unit keeping it in ("Teams and alliances") is out, and its seats finish at once.
+  One with no builder or factory left is destroyed by the sim, so it's out too ("No builder left").  These are Zero-K's
+  own rules and always on; the lead rule and the time limit are the sim's, to hurry games.
   A dead team in a live alliance stops acting, and its seat finishes with its alliance.
 * **End**: one alliance left; or the lead rule; or the time limit at 80 minutes (the user, 2026-11-10; it was 20).  A chicken
   game ends when the queen dies (the players win), when the players are out, or at the limit (a draw).
@@ -466,13 +588,12 @@ Tools: `python tools/sim_engine.py facts|mechanics|overdrive|abilities|air` play
 `tools/sim_battery.py` (`engine` on Windows, then `compare` in WSL) runs the scripted battery.  The engine side is the gadgets
 in `tools/simgame/`.  Mechanics are pinned by `sim/tests/test_*.py` with the engine's numbers in their docstrings.
 
-* **Battery: 119 of 138.**  It covers straight lines, turning, duels, blasts, slope speed, re-order cost by class and rate,
-  paths around walls, and status effects.  The misses:
-  * routes: 9, mostly tank and hover detours and walk times;
-  * the first Racketeer missile lands 35 frames late in the engine;
-  * a unit held at the stun threshold flips over and under;
-  * Bantha's manual salvo;
-  * Scorcher at 90 elmos;
+* **Battery: 123 of 138** on 2026-11-12, against the game's run of 2026-11-05.  It covers straight lines, turning, duels,
+  blasts, slope speed, re-order cost by class and rate, paths around walls, and status effects.  It was 121 before shots flew:
+  the Dagger against Kodachi and Scorcher against Glaive duels came inside with them.  The misses:
+  * routes: 7, tank, spider and hover detours and walk times;
+  * status: 5, walks under disarm and EMP, the manual stun and the disarmed shooter, each 35 to 60 frames off;
+  * the Knight against Ravager duel, 12% short;
   * a kbot re-ordered every 0.5 s.
 * **Mechanics checked in a game** were all within a tick or a few percent, except where noted:
   * overdrive, exact on full storage;
@@ -484,6 +605,123 @@ in `tools/simgame/`.  Mechanics are pinned by `sim/tests/test_*.py` with the eng
   * piercing shots: Pyro 0.9-1.1, Dagger 0.83;
   * push, throw, silos and teleporting;
   * aircraft: plane turns within 10%, rearm times within 3 frames, strafing circles within 8 elmos.
+* **Raiders against slow shooters** (`tools/sim_fights.py`: `engine` on Windows, `sim --tag T` and `compare` in WSL;
+  2026-11-12).  Equal metal, two lines 950 elmos apart, each on a fight order onto the other's place, 5 fights of each in the
+  sim as it was before projectiles, in the sim now, and in a game (two runs of 5):
+
+  | Fight | In | Raiders win | Metal left: shooters, raiders | Seconds | Hits: shooters, raiders | Raiders walk |
+  |---|---|---|---|---|---|---|
+  | 13 Ronins, 18 Glaives | a game | 4 of 5, 5 of 5 | 144 and 234, 0 and 338 | 40, 36 | 0.55 and 0.95, 0.53 and 0.94 | 1.09, 1.09 |
+  | | the sim before | 0 of 5 | 468 and 0 | 29 | 0.68 and 0.70 | 1.01 |
+  | | the sim | 5 of 5 | 0 and 494 | 23 | 0.52 and 0.85 | 1.09 |
+  | 1 Crab, 25 Glaives | a game | 0 of 5, twice | 1600 and 0 | 29, 18 | 3.1 and 0.31, 4.3 and 0.31 | 1.10, 1.10 |
+  | | the sim before | 0 of 5 | 1600 and 0 | 11 | 6.9 and 0.50 | 1.00 |
+  | | the sim | 0 of 5 | 1600 and 0 | 19 | 4.5 and 0.32 | 1.10 |
+  | 26 Rogues, 25 Scorchers | a game | 0 of 5, twice | 3075 and 0, 2975 and 26 | 25, 37 | 0.78 and 0.28, 0.49 and 0.34 | 1.03, 1.03 |
+  | | the sim before | 0 of 5 | 2925 and 0 | 16 | 1.26 and 0.16 | 1.06 |
+  | | the sim | 0 of 5 | 2225 and 0 | 44 | 0.57 and 0.30 | 1.03 |
+
+  Hits are damage done over shots fired times a full hit, so a blast on several counts more than 1.  Raiders walk: their path
+  over the distance they closed, between 450 and 200 elmos from the nearest enemy, where 1 is a straight line.
+  * The game's runs here are on a lane the gadget levels again before each fight.  The fights before leave craters up to 10
+    elmos deep, which earlier runs fought on: they varied about as much as these two do (Glaives 3 to 5 of 5, a Crab's fight
+    19 to 25 s).
+  * The sim's five fights differ by the seed since units' turns and sides are drawn by it (2026-11-12, "No one goes first"),
+    as a game's five differ: Glaives beat Ronins in 18 to 31 s (a game's last run: 23 to 55), the Crab its Glaives in 7 to
+    31 s (12 to 26), Rogues the Scorchers in 25 to 90 s (18 to 90).  Before that the sim's five were one fight.
+  * Before, Ronins beat Glaives every time: the Glaives walked straight (1.01) into rockets aimed where a straight walker
+    would be.  Now Glaives win as they do in a game, sooner and with more left (494 of 1,170 after 23 s, against 234 and 338
+    after 36 to 40).  With every Glaive's side by its handle and their turns in step it was 169 after 39 s, and with the
+    tactical AI at 15 frames 130 after 49 s.
+  * The Crab kills its Glaives in a game's time: 19 s where a game's takes 18 to 29, with 4.5 Glaives hurt a shell against
+    3.1 to 4.3.  It was 11 s and 5.9 while the Glaives' turns and sides went by their handles, and 7 s and 9.1 before the
+    turns were the gadget's and a dropped target was replaced at once.  Measured then: the sim's first shell is fired a
+    half-second later than the game's, at the middle Glaive of the front row, and its 100-elmo blast covers all 25; the
+    game's is fired on first sight at one further along the row, when the pack is 60 elmos wider, and hurts 13 to 16.
+  * Jinking Glaives go 3.80 elmos a frame along their paths in both fights, a game's 3.75 and 3.78 (of a top speed of 3.85).
+  * Rogues leave fewer of themselves than a game's do (2,225 of 3,250 in metal against 2,975 to 3,075), and take longer over
+    the last Scorchers.  A game's do too at times: one of its ten fights reached the 90-second limit with a Scorcher alive.
+  * One shooter holding its position against a Glaive that can't die and doesn't shoot, by what the Glaive does: the share of
+    a full hit each shot did, in a game, in the sim before, and in the sim.  A Rogue fires 9 times in a run and a Sling 10.
+
+    | Shooter | Standing | Crossing at 0.75 of its range | To and fro along its line of fire |
+    |---|---|---|---|
+    | Ronin | 1.00, 0.94, 0.94 | 0.06, 0.33, 0.25 | 0.71, 0.31, 0.71 |
+    | Crab | 1.00, 1.00, 1.00 | 0.42 to 0.47, 0.54, 0.48 | 0.73 to 0.84, 0.78, 0.81 |
+    | Rogue | 1.00, 1.00, 1.00 | 0.00 to 0.44, 0.27, 0.24 | 0.30 to 0.47, 0.18, 0.14 |
+    | Scalpel, which homes | 1.00, 1.00, 1.00 | 1.00, 1.00, 1.00 | 1.00, 1.00, 1.00 |
+    | Sling | 0.10 to 0.60, 1.00, 1.00 | 0.00 to 0.20, 0.11, 0.14 | 0.00 to 0.22, 0.30, 0.71 |
+
+    A game's are over three runs where they differed.  The Ronin's 0.94 is its last rocket still in the air.  The Sling is
+    the one that's off: a game's hits a standing Glaive with 1 to 6 shots of 10, and why isn't known (its scatter as the def
+    has it would hit: see "Known gaps").
+* **Ward fire** (`tools/sim_fights.py`, 2026-11-12): one unit holding its position and a Thug that holds its fire 45 elmos
+  past the unit's range, with 1,200 in its shield, for 30 s.  What the unit fired, what was left in the shield, and what
+  the Thug itself took, in a game and in the sim:
+
+  | Unit | Shots | In the shield at 5 s | at 10 s | at 20 s | at 29 s | Damage to the Thug |
+  |---|---|---|---|---|---|---|
+  | Ronin | 8, 8 | 1051, 1055 | 756, 760 | 526, 350 | 112, 115 | 0, 0 |
+  | Glaive | 159, 155 | 847, 767 | 418, 307 | 2, 28 | 34, 38 | 42, 0 |
+  | Mace | 791, 300 | 9, 2 | 9, 2 | 8, 2 | 3, 2 | 0, 0 |
+
+  The Ronin's sixth rocket lands a moment before 20 s in the sim and after it in a game.  A game counts the Mace's beam three
+  times a shot, once a frame.  Once the shield is down a game's Glaive gets a little through it (10 to 42 of damage in two
+  runs), and the sim's none.
+  * On the craters earlier fights had left, a game's Mace fired nothing and its Ronin fired or not by the run: the engine's
+    weapon refuses a place on the ground it has no clear line to.  The sim doesn't test that ("Known gaps").
+* **The fight-only table** (the same tool): a Mace sent to fight onto a fusion reactor 700 elmos away comes no nearer than
+  315 elmos while it stands and has killed it at 13.0 s in a game, 339 and 13.3 s in the sim.
+* **Mirror fights** (2026-11-12): the same units on both sides, in lines 1,000 elmos apart on level ground, each sent to
+  fight onto the other's place.  The policy plays team 0, so an edge for it here would be in all its training.
+  * In the sim, side 0 in the west and made first, 30 seeds: wins for side 0, for side 1, and fights neither won, before
+    ("No one goes first") and now.
+
+    | A side | Before | Now |
+    |---|---|---|
+    | 12 Glaives | 19, 10, 1 | 13, 17, 0 |
+    | 8 Ronins | 30, 0, 0 (4 left against 1, every time) | 10, 16, 4 |
+    | 6 Thugs | 16, 11, 3 | 16, 13, 1 |
+    | 8 Scorchers | 20, 10, 0 | 19, 10, 1 |
+    | 4 Maces | 0, 30, 0 | 11, 19, 0 (27 and 33 over 60 seeds) |
+    | 8 Rogues | 9, 19, 2 | 12, 14, 4 |
+
+  * Before, the seed changed nothing in the Ronins' fight or the Maces', so their 30 were one fight.  To count a lean, each
+    unit's place is shaken by up to 15 elmos and the gap between the lines by up to 80, the same for both sides, with the
+    side made first and the side in the west taking turns.  Wins for the side made first and for the one made second: Glaives 58 to 39 and Scorchers 63 to 33 of
+    100 before (4 Scorchers a side: 130 to 69 of 200), Ronins 36 to 50, Rogues 38 to 49, Thugs and Maces even.  Now, of 200:
+
+    | A side | Made first, made second, neither | Side 0, side 1 | West, east |
+    |---|---|---|---|
+    | 12 Glaives | 94, 103, 3 | 103, 94 | 97, 100 |
+    | 8 Ronins | 87, 82, 31 | 87, 82 | 76, 93 |
+    | 6 Thugs | 98, 87, 15 | 90, 95 | 83, 102 |
+    | 8 Scorchers | 90, 108, 2 | 107, 91 | 98, 100 |
+    | 4 Maces | 97, 97, 6 | 103, 91 | 101, 93 |
+    | 8 Rogues | 78, 101, 21 | 82, 97 | 90, 89 |
+    | 1 Scorcher | 59, 69, 72 | 59, 69 | 65, 63 |
+    | 1 Glaive | 39, 42, 119 | 41, 40 | 44, 37 |
+    | All | 642, 689, 269 | 672, 659 | 654, 677 |
+
+  * In a game (`tools/sim_fights.py`, the `mirror` kind: 12 fights of each on the levelled lane, 3 for each of team 0 in the
+    west or the east, made first or second), and the sim on the same lane:
+
+    | A side | A game: team 0, team 1, neither | made first, second | seconds | The sim: team 0, team 1, neither | made first, second | seconds |
+    |---|---|---|---|---|---|---|
+    | 12 Glaives | 3, 9, 0 | 5, 7 | 18.9 | 4, 7, 1 | 4, 7 | 37.0 |
+    | 8 Ronins | 8, 2, 2 | 4, 6 | 69.7 | 4, 6, 2 | 4, 6 | 74.8 |
+    | 6 Thugs | 5, 7, 0 | 9, 3 | 77.4 | 6, 5, 1 | 4, 7 | 79.9 |
+    | 8 Scorchers | 7, 5, 0 | 5, 7 | 40.4 | 3, 9, 0 | 5, 7 | 38.5 |
+    | 4 Maces | 3, 9, 0 | 7, 5 | 14.9 | 6, 6, 0 | 2, 10 | 17.7 |
+    | 8 Rogues | 2, 7, 3 | 4, 5 | 86.8 | 5, 6, 1 | 9, 2 | 90.0 |
+    | 1 Scorcher | 3, 9, 0 | 9, 3 | 14.4 | 3, 4, 5 | 1, 6 | 13.5 |
+    | 1 Glaive | 4, 8, 0 | 8, 4 | 8.8 | 2, 2, 8 | 2, 2 | 61.9 |
+    | All | 35, 56, 5 | 51, 40 | | 33, 45, 18 | 31, 47 | |
+
+    A game's own go 51 to 40 for the side made first and 48 to 43 for the west, which is even at 96 fights.  Its 35 to 56
+    for team 1 is 1 chance in 30 if the teams are even: a lean of the engine's or of the rig's, or luck, not looked into.
+    The sim's 12 on the lane lean nowhere that its 200 above don't settle.  Its Glaives take twice a game's time, and one
+    against one mostly don't finish ("Known gaps").
 * **A live frame recreated in the sim** (`tools/policy_golden.py sim`) gives the same unit features.  Its fog is a little
   tighter: it saw 18 of the 23 enemies the live game saw, and none it didn't.
 * **The replay gate failed.**  44,733 logged fights from the rules bot's games were replayed in the sim, and scored on who
@@ -497,18 +735,47 @@ in `tools/simgame/`.  Mechanics are pinned by `sim/tests/test_*.py` with the eng
 
 What's left out on purpose, so it isn't mistaken for modelled:
 
-* **Movement:** terrain-type speed multipliers, crush, collision damage, and units spreading out on landing.  Raiders don't
-  jink sideways as the game's swarm logic has them do.
+* **Movement:** terrain-type speed multipliers, crush, collision damage, and units spreading out on landing.
 * **Weapons:**
-  * accuracy scatter up and down (sideways only);
+  * accuracy scatter up and down (sideways only), which for a shell is landing short or long.  Tried on 2026-11-12 and taken
+    out: against the sim's round targets it sent flat shots over their heads (a Glaive's hits on Ronins went from 0.88 to 0.83,
+    with 0.95 in a game), and it didn't bring a Sling's down to a game's;
+  * a rocket's `wobble` and `dance`, and anything but an enemy in a shot's way: friends, wrecks, the ground;
+  * a rocket out of fuel in the air goes off there, where a game's falls to the ground unless it's `selfExplode`;
+  * shots in flight aren't in the policy's frame, which is as it was;
   * Gauss rifles hitting everything along their line;
   * friends on a piercing shot's line (the game holds fire);
   * the first-shot timing of some heavy guns;
   * shots at a jumper in the air use its map position only.
 * **Shields:** they all start full (several start empty in the game), a stun doesn't drain them, and there are no charge
   priorities when energy is short.
-* **Unit AI:** ward fire, `fightOnlyOverride`, jammers, and the amphibians' sea table.  Builders on attack-move don't reclaim on
-  the way.
+* **Unit AI:**
+  * ward fire for the three types whose ward fire is off until the player turns it on, and is then at anything in the way,
+    shield or not (Badger, Firewalker, Kodachi: `wardFireEverything`).  The sim has no order for that button;
+  * the same gadget's shots at extractors in passing (`mex_shoot_defs.lua`: Ripper, Claymore, Archer, Pyro, Kodachi, Ogre);
+  * a clear line to where ward fire aims: the engine's weapon won't fire at a place on the ground with a rise in the way, and
+    the sim's does;
+  * what the sea tables are mostly for: a weapon's limits in water aren't modelled (a Duck's rockets fire from the sea bed),
+    so a unit under water keeps its sea table's distances with its land weapons;
+  * not checked against a game: the sea tables, `selfVelocityPrediction`, `skirmBlockApproachHeadingBlock`, and what the AI
+    order turns on (`alwaysJinkFight`, the Swift's `skirmJinkLength`, the planes' loopback);
+  * a unit made since sight was last brought up to date, at most 15 frames before, isn't seen by the tactical AI yet;
+  * a unit picks the nearest enemy it sees at its update, where a game's Crab took one a few places along the row;
+  * jammers.  Builders on attack-move don't reclaim on the way.
+* **Glaive against Glaive:** raiders keep their distance from their own kind, and the sim's do it too well.  12 a side
+  are done in 19 s in a game and 37 in the sim.  One against one, a game's 16 duels all ended, in 7 to 9 s where their
+  turns were apart; in the sim 8 of 12 were still going at 90 s, one running and the other following as fast just out of
+  reach, or both backing off and coming on again.
+  * A game's Glaive running from another loses 1.5 to 3.3 elmos in most of its 20-frame turns, a frame's braking just before
+    its next order, which lets the other back into reach.  Its jinking Glaives and kiting Ronins lose nothing.  Why the one
+    brakes wasn't found (`cmd_raw_move.lua` hands a move to the pathfinder inside the unit's turning circle; the goals here
+    are some 90 elmos off and the unit goes 77 a turn).
+  * Tried and not kept: a frame's braking at each of the tactical AI's moves ended the duels (12 a side in 20 s), but slowed
+    jinking Glaives to 3.63 elmos a frame against a game's 3.75 to 3.78 and lost the Crab one fight in five; a frame's
+    braking as a goal comes inside the turning circle ended half the duels and slowed the Scorchers.
+* **Who goes first, what's left** ("Unit AI", "No one goes first"): planes fly, and units are pushed apart, in the order
+  they were made.  The order within a tick of building, reclaim and the economy wasn't looked at.  Two units that kill each
+  other in one tick both die, which is neither side's win.
 * **Economy:** repair, Duck's faster healing under water, nanoframe rate limits, commander morph, capture, resurrect.  Reclaim is
   costed in metal alone.
 * **Air:** no crashing, fighter pull-up or vertical swarm, and no drones are made.

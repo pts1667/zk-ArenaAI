@@ -6,11 +6,16 @@ Both sides play the scripts (opening, economy and army) from commanders, as SimE
 no time limit, so a game ends only when one side is gone and is then started afresh.  At each phase (minutes of game time) it times
 only the batch step, for --measure decisions per thread count, the scripts still giving orders in between.  The run is deterministic,
 so two libraries (ZKSIM_LIB) that agree bit for bit time the same states; each phase prints a hash of what the last step wrote.
+
+The check that a change to the sim plays the same games: the same command with --check under each library, which adds to each
+phase's line a hash of every frame every step has written since the start (units, features, stats and resources of every team).
+--kinds and --maps play the kinds of game a run plays, on a directory of pool maps (a handful linked into one will do).
 """
 from __future__ import annotations
 
 import argparse
 import ctypes as ct
+import hashlib
 import json
 import pathlib
 import sys
@@ -62,13 +67,18 @@ def main() -> None:
     ap.add_argument("--measure", type=int, default=20, help="decisions timed per thread count, twice over")
     ap.add_argument("--warm-threads", type=int, default=8)
     ap.add_argument("--seed", type=int, default=7)
+    ap.add_argument("--kinds", nargs="*", default=None, help="kinds of game by weight, as policy_sim_env.parse_kinds: 1v1s if not given")
+    ap.add_argument("--maps", default="", help="a directory of pool maps (policy_sim_env.load_pool): the training maps if not given")
+    ap.add_argument("--check", action="store_true", help="hash every step's frames, to compare two libraries' games")
     ap.add_argument("--json", default="")
     args = ap.parse_args()
     threads = [int(t) for t in args.threads.split(",")]
     phases = [float(p) for p in args.phases.split(",")]
     take = profile_counters()
 
-    env = env_module.SimEnv(args.games, args.seed, ["scripts"], threads=args.warm_threads)
+    kinds = env_module.parse_kinds(args.kinds) if args.kinds else None
+    maps = env_module.load_pool(args.maps) if args.maps else None
+    env = env_module.SimEnv(args.games, args.seed, ["scripts"], threads=args.warm_threads, kinds=kinds, maps=maps)
     env.early_end = env.time_limit = 1 << 30
     batch = env.batch
     plain_step = batch.step
@@ -86,9 +96,18 @@ def main() -> None:
     rows = []
     started = time.perf_counter()
 
+    every_step = hashlib.blake2b(digest_size=8) if args.check else None
+
     def advance():
         nonlocal decision
         env.step(0.0)
+        if every_step is not None:
+            for position in range(batch.games):
+                for team in range(batch.teams):
+                    every_step.update(batch.records[position, team, :int(batch.counts[position, team])].tobytes())
+                    every_step.update(batch.features[position, team, :int(batch.feature_counts[position, team])].tobytes())
+            every_step.update(batch.stats.tobytes())
+            every_step.update(batch.globs.tobytes())
         env.finished_seats()
         decision += 1
 
@@ -116,7 +135,10 @@ def main() -> None:
         if profile:
             line["profile"] = profile
         rows.append(line)
-        print(f"{args.games} games at {minutes:g} min: {alive:.0f} units alive a game ({handles:.0f} handles), hash {line['hash']:016x}; "
+        if every_step is not None:
+            line["every_step"] = every_step.hexdigest()
+        print(f"{args.games} games at {minutes:g} min: {alive:.0f} units alive a game ({handles:.0f} handles), hash {line['hash']:016x}"
+              + (f", every step's {line['every_step']}" if every_step is not None else "") + "; "
               + ", ".join(f"{t} thr {steps / per[t]:,.0f} game-steps/s" for t in threads)
               + f"  [{time.perf_counter() - started:.0f} s]", flush=True)
         if profile:

@@ -255,9 +255,15 @@ private:
             }
             const int s = w.ally_of[t];
             w.update_view(s);
+            // An allyteam's features, and what its frames have after its own units, are the same for each of its teams: the
+            // first's are copied.
+            int first = 0;
+            while (w.ally_of[first] != s) ++first;
+            const size_t from = size_t(i) * size_t(slots) + size_t(first);
             {
                 ZK_PROF(EMIT);
-                a.counts[slot] = w.emit_view(t, a.records + slot * size_t(a.cap), a.cap, a.globs + slot * G_COUNT, game.commander[t], game.base + 2 * t);
+                a.counts[slot] = w.emit_view(t, a.records + slot * size_t(a.cap), a.cap, a.globs + slot * G_COUNT, game.commander[t], game.base + 2 * t,
+                                             first == t ? nullptr : a.records + from * size_t(a.cap), first == t ? 0 : a.counts[from]);
             }
             {
                 ZK_PROF(STATS);
@@ -265,14 +271,10 @@ private:
             }
             {
                 ZK_PROF(FEATURES);
-                // An allyteam's features are the same for each of its teams: the first's are copied.
-                int first = 0;
-                while (w.ally_of[first] != s) ++first;
                 FeatureRecord* out = a.features + slot * size_t(a.feature_cap);
                 if (first == t) {
                     a.feature_counts[slot] = w.emit_features(s, out, a.feature_cap);
                 } else {
-                    const size_t from = size_t(i) * size_t(slots) + size_t(first);
                     a.feature_counts[slot] = a.feature_counts[from];
                     std::copy_n(a.features + from * size_t(a.feature_cap), a.feature_counts[from], out);
                 }
@@ -314,13 +316,13 @@ int zk_sizeof_type(void) { return int(sizeof(zk_type_rec)); }
 int zk_sizeof_state(void) { return int(sizeof(zk_unit_state)); }
 
 void* zk_catalog_new(const zk_type_rec* types, int n_types, const zk_weapon_rec* weapons, int n_weapons,
-                     const float* priority, const zk_tactics_rec* tactics, const uint8_t* relations) {
+                     const float* priority, const zk_tactics_rec* tactics, int n_tactics, const uint8_t* relations) {
     auto* c = new Catalog;
     c->types.assign(types, types + n_types);
     c->weapons.assign(weapons, weapons + n_weapons);
     c->priority.assign(priority, priority + size_t(n_weapons) * size_t(n_types));
-    c->tactics.assign(tactics, tactics + n_types);
-    c->relations.assign(relations, relations + size_t(n_types) * size_t(n_types));
+    c->tactics.assign(tactics, tactics + n_tactics);
+    c->relations.assign(relations, relations + size_t(n_tactics) * size_t(n_types));
     return c;
 }
 
@@ -357,10 +359,9 @@ void* zk_map_new(int cols, int rows, float cell, const float* height, const floa
     const size_t n = size_t(cols) * size_t(rows);
     m->height.assign(height, height + n);
     m->speed.assign(speed, speed + n * size_t(classes));
-    m->slope.assign(slope, slope + n);
-    m->normal_x.assign(normal_x, normal_x + n);
-    m->normal_z.assign(normal_z, normal_z + n);
+    m->set_slopes(slope, normal_x, normal_z);
     m->slope_mod.assign(slope_mod, slope_mod + classes);
+    m->set_standing();
     m->set_segments(segments);
     return m;
 }

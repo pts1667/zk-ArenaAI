@@ -15,6 +15,8 @@ constexpr float MAX_SLOW = 0.5f;
 constexpr int BURROW_FRAMES = 12;       // Sleep(400) in the scripts: what has idle_cloak digs in this long after stopping
 constexpr float GRAVITY = 120.0f / 900.0f;   // elmos a frame squared: Game.gravity, which every map has here
 constexpr float SEARCH_PAD = 1.0f;      // elmos added to a grid search's radius, so rounding can't leave out what the exact test takes
+constexpr float WALK_LINE_STEP = 16.0f; // cmd_raw_move.lua's test spacing along a line a unit would walk (movement.cpp line_free)
+constexpr int CLEAR_BLOCK = 4;          // cells a side of a block of Map::clearance
 
 struct Catalog {
     std::vector<zk_type_rec> types;
@@ -68,12 +70,35 @@ struct Routes {
     std::vector<int> next_edge;         // nodes x nodes: the gate to take from a segment towards a goal's, or -1
 };
 
+// What CMoveMath's directional speed reads of a cell, together so that it's one place in memory.  slope: 0 under water, where
+// that speed doesn't use it, as on the level.
+struct CellSlope {
+    float slope, normal_x, normal_z;
+};
+
 struct Map {
     int cols = 0, rows = 0, classes = 0;
     float cell = 16.0f;
     std::vector<float> height;
     std::vector<float> speed;
-    std::vector<float> slope, normal_x, normal_z, slope_mod;
+    std::vector<float> slope_mod;
+    std::vector<CellSlope> slopes;
+    void set_slopes(const float* slope, const float* normal_x, const float* normal_z);
+    // Per class and block of CLEAR_BLOCK x CLEAR_BLOCK cells: how many cells it is, at least, from any cell of the block to the
+    // nearest the class can't stand on, going by the larger of the two axes (255 for that or more).  And from that, how many of
+    // a walked line's tests can be passed over after one in the block: those so near are sure to be on ground it can stand on.
+    int clear_cols = 0, clear_rows = 0;
+    std::vector<uint8_t> clearance;
+    int clear_skip[256];
+    const uint8_t* clearance_grid(int cls) const { return &clearance[size_t(cls) * size_t(clear_rows) * size_t(clear_cols)]; }
+    // Per class, a bit a cell: whether the class can stand there, which is its speed there being above 0.  A thirty-second of
+    // the speeds' size, so that tests of many cells stay in the processor's cache.
+    size_t stand_words = 0;
+    std::vector<uint64_t> stand;
+    const uint64_t* stand_bits(int cls) const { return &stand[size_t(cls) * stand_words]; }
+    static bool bit(const uint64_t* bits, size_t i) { return (bits[i >> 6] >> (i & 63)) & 1u; }
+    // Both, from the speeds.
+    void set_standing();
     std::vector<short> nearest_segment;           // per class and cell: the segment there, or the nearest
     std::vector<Routes> routes;                   // per class
     void set_segments(const short* labels);
@@ -89,8 +114,7 @@ struct Map {
         cell_pow2 = std::frexp(c, &e) == 0.5f;
         inv_cell = 1.0f / c;
     }
-    int cell_index(float x, float z) const {
-        int cx, cz;
+    void cell_of(float x, float z, int& cx, int& cz) const {
         if (cell_pow2) {
             cx = int(x * inv_cell);
             cz = int(z * inv_cell);
@@ -100,6 +124,10 @@ struct Map {
         }
         cx = cx < 0 ? 0 : (cx >= cols ? cols - 1 : cx);
         cz = cz < 0 ? 0 : (cz >= rows ? rows - 1 : cz);
+    }
+    int cell_index(float x, float z) const {
+        int cx, cz;
+        cell_of(x, z, cx, cz);
         return cz * cols + cx;
     }
     float height_at(float x, float z) const { return height[size_t(cell_index(x, z))]; }
@@ -108,9 +136,10 @@ struct Map {
     // CMoveMath's speed for a move in this direction: climbing slows a unit, descending doesn't.
     float speed_along(int cls, float x, float z, float dir_x, float dir_z) const { return speed_along_at(cls, size_t(cell_index(x, z)), dir_x, dir_z); }
     float speed_along_at(int cls, size_t i, float dir_x, float dir_z) const {
-        const float base = speed_grid(cls)[i], mod = slope_mod[size_t(cls)], s = slope[i];
-        if (base <= 0.0f || mod <= 0.0f || s <= 0.0f || height[i] < 0.0f) return base;
-        const float climb = -(dir_x * normal_x[i] + dir_z * normal_z[i]);
+        const CellSlope& g = slopes[i];
+        const float base = speed_grid(cls)[i], mod = slope_mod[size_t(cls)], s = g.slope;
+        if (base <= 0.0f || mod <= 0.0f || s <= 0.0f) return base;
+        const float climb = -(dir_x * g.normal_x + dir_z * g.normal_z);
         const float directed = climb > 0.0f ? s * climb : 0.0f;
         return base * (1.0f + s * mod) / (1.0f + directed * mod);
     }
@@ -159,7 +188,8 @@ struct ChickenGame {
     std::vector<int> pick;                   // ChooseTarget's working: a team's units
 };
 
-// A shot in flight: damage is scheduled, there is no projectile.
+// A shot and what it does where it comes down.  One that flies there is a Projectile's; one that climbs first, is dropped or
+// goes through what it hits is scheduled to land at its aim point when its flight is over.
 struct Shot {
     int weapon, source, source_side, target;
     float x, z;
@@ -167,6 +197,30 @@ struct Shot {
     float power;   // of its damage, after falling with distance
     float origin_x, origin_z;
     bool aimed_at_blip;   // a guided one goes for where radar shows it
+};
+
+// A shot on its way: a shell, a bolt or a rocket (combat.cpp, "Projectiles").  Each tick it goes on along its path, and the first
+// enemy in its way stops it.
+struct Projectile {
+    Shot shot;                // x, z: where it's aimed, which for one that homes is where its target is
+    float x, z;               // where it is
+    float dir_x, dir_z;       // the way it's going over the ground, a unit vector
+    float speed;              // along its path, elmos a frame
+    float flat;               // the share of that it makes over the ground: less for a shell's arc and for a rocket's rise
+    float flown;              // over the ground, so far
+    float aimed;              // over the ground, from where it left to where it's aimed
+    float reach;              // how far it goes at most: to where it comes down, or to the end of its range
+    float slope;              // of its path over the straight one, at each end: a shell's elevation, a rocket's rise
+    float from_height;        // of where it left, over what it's aimed at
+    float base;               // how high what it's aimed at is: a flier or a jumper, else 0
+    float muzzle;             // the shooter's hit radius, which isn't part of how far its damage has faded
+    int fuel;                 // frames a rocket has left
+    int wait;                 // frames of the tick it was fired in that had gone by then
+    bool homing;              // turns towards its target, as long as that lives
+    bool fades;               // nothing happens at the end of its reach: a bolt out of range
+
+    // Over what it's aimed at.  Past its aim point it's on its way down to the ground.
+    float height() const { return (1.0f - flown / aimed) * (from_height + slope * flown); }
 };
 
 // Where along a piercing shot's line it meets a unit, and how many times over.
@@ -189,6 +243,12 @@ struct UnitAI {
     bool tactics_off = false;
     bool dodging = false;
     float dodge_x = 0.0f, dodge_z = 0.0f;
+    // Swarming, the same AI's: jinking up to what's slow to hit it, then strafing (DoSwarmEnemy).
+    float jink_side = 1.0f, strafe_side = 1.0f;       // the side it's going to: 1 or -1
+    float jink_count = 0.0f;                  // updates since it changed sides, for what waits longer than one
+    // Ward fire (unit_ward_fire.lua): where its weapons shoot while they've nothing to shoot at, until a frame, and whose shield it's for.
+    float ward_x = 0.0f, ward_z = 0.0f;
+    int ward_until = 0, ward_enemy = -1;
     int ready_frame = 0;                      // of the weapon its table goes by
     int aggressive_until = -1;                // as a target: someone's fighting it, so others may
     // An idle unit's place, which it goes back to.
@@ -285,6 +345,7 @@ struct FireArea {
     const zk_weapon_rec* weapon;
     float x, z, damage_per_frame;
     int frames_left;
+    int team;                 // whose shot lit it, or -1
 };
 
 // A blip's speed record, as blips.py keeps it: its top speed is the highest speed it has held for a whole window.
@@ -316,6 +377,7 @@ struct World {
     float cat_max_footprint = 0.0f;       // the widest footprint radius of any type
     int frame = 0;
     int tick_count = 0;
+    uint32_t turn_salt = 0;                // from the seed: which ticks the tactical AI's turns fall on (unit_ai.cpp update_tactics)
 
     // Teams, who own units and pay for them, and the allyteams they're in, who share sight and don't fight each other.  Until
     // set_teams: two teams, each its own allyteam.
@@ -395,16 +457,22 @@ struct World {
     std::vector<Wreck> wrecks;
     std::vector<int> live_wrecks;
     std::vector<std::vector<int>> wreck_cells;   // ids per grid cell: wrecks don't move
+    std::vector<int> sep_hits;             // ... and the places of the neighbours a unit overlaps
     // The live wrecks again, by grid cell (wreck_start, as cell_start), with their places alongside; remade when one comes or goes.
     std::vector<int> wreck_start, wreck_ids;
     std::vector<float> wreck_px, wreck_pz;
     bool wreck_index_stale = true;
     std::vector<float> burn_rate, burn_frames;
+    std::vector<int8_t> burn_team;         // whose shot set it alight, or -1
     std::vector<FireArea> areas;
+    // The damage each team's units have done to enemies' units and had done to them, in metal (team_stats, capi.h ZK_STATS).
+    double metal_dealt[ZK_MAX_TEAMS] = {}, metal_taken[ZK_MAX_TEAMS] = {};
     std::vector<float> damage_mult;        // of what it's dealt: 1, but for a chicken queen, whose health the gadget stretches
     // The reveal rule (game_over.lua): on unless turned off, never in a chicken game.  revealed: the allyteams always in sight, by bit.
     bool reveal_on = true;
     uint32_t revealed = 0;
+    // The alliances that have had a finished ZK_U_VITAL unit (check_vital), by bit.
+    uint32_t had_vital = 0;
     ChickenGame chickens;
     void start_chickens(int team, int difficulty);
     void chicken_state(float* out) const;
@@ -416,8 +484,22 @@ struct World {
     // cell c are cell_units[cell_start[k] .. cell_start[k + 1]] for k = s * grid_cells() + c, so a row of cells is one run of them.
     int grid_cols = 0, grid_rows = 0;
     std::vector<int> cell_start, cell_units, unit_key;
+    // Each unit's place in cell_units, or -1 for what isn't in the grid; and separate()'s working, by that place: where each
+    // unit is, its footprint, and how much of an overlap with it a neighbour takes.
+    std::vector<int> grid_slot;
+    std::vector<float> sep_x, sep_z, sep_radius, sep_share;
     size_t grid_cells() const { return size_t(grid_cols) * size_t(grid_rows); }
     std::vector<uint8_t> scratch_seen;     // per unit or wreck, for a sweep that marks what's in sight
+    // What a tick settles for every unit before it lets any of them act, so that it's nothing to a unit which were made before it:
+    // where each means to walk, as (kind, x, z) by its place in `live`; who can fire, and how slowed; and who has died.
+    struct MovePlan {
+        int8_t kind;
+        float x, z;
+    };
+    std::vector<MovePlan> move_plans;
+    std::vector<uint8_t> fire_ok;
+    std::vector<float> fire_rate;
+    std::vector<int> dying;
     std::vector<int> scratch_eyes;         // an allyteam's finished units, for the same
     std::vector<int> scratch_found;        // the wrecks a sweep found in sight
     struct EmitLists {
@@ -426,6 +508,7 @@ struct World {
 
     // Shots by the tick they land.
     std::vector<std::vector<Shot>> ring;
+    std::vector<Projectile> projectiles;
     std::vector<PierceHit> pierce_hits;
 
     World(const Catalog* c, const Map* m, uint64_t seed, int behaviour_);
@@ -443,7 +526,10 @@ struct World {
     int count() const { return int(type.size()); }
     void ensure_views();
     void update_view(int ally);
-    int emit_view(int team, UnitRecord* out, int cap, float* glob, int commander, const float* base);
+    // ally_frame, ally_count: a frame this call's world has just written for another team of the same allyteam, or none.  What
+    // comes after an allyteam's own units is the same for each of its teams, and is copied from it.
+    int emit_view(int team, UnitRecord* out, int cap, float* glob, int commander, const float* base, const UnitRecord* ally_frame = nullptr,
+                  int ally_count = 0);
     void team_stats(int team, float* out) const;
     void rebuild_index() { rebuild_grid(); }
     const zk_type_rec& type_of(int u) const { return cat->types[size_t(type[size_t(u)])]; }
@@ -478,6 +564,9 @@ struct World {
     // Every live unit in the cells round a point, cell by cell (row by row), each cell's in handle order.
     template <class F>
     void for_near(float cx, float cz, float radius, F&& f) const;
+    // The same, by place in cell_units.
+    template <class F>
+    void for_near_slots(float cx, float cz, float radius, F&& f) const;
     // The same, of one allyteam only: for_near with the others' left out, in the same order.
     template <class F>
     void for_side(int ally, float cx, float cz, float radius, F&& f) const;
@@ -493,6 +582,7 @@ private:
     void drop_the_dead();
     void died(int u);
     void check_reveal();
+    void check_vital();
     // chickens.cpp
     void run_chickens();
     void chicken_deaths();
@@ -524,14 +614,23 @@ private:
     void pick_targets();
     void fire_weapons();
     void fire_one(int u, int slot, int frame_offset);
+    void fire_at_point(int u, int slot, int frame_offset);
+    bool can_ward(int u, int slot) const;
+    void lead_target(int u, const zk_weapon_rec& w, int t, float tx, float tz, float mult, float& lead_x, float& lead_z) const;
+    void launch(const Shot& s, int u, const zk_weapon_rec& w, int frame_offset);
+    void fly_projectiles();
+    bool fly(Projectile& p);
+    void land_shot(const Shot& s, float px, float pz, int struck, float height, bool fades = false);
     bool pay_for_shot(int u, const zk_weapon_rec& w);
     int manual_mount(int u) const;
     void resolve_shots();
     void apply_shot(const Shot& s);
     void note_attacker(int u, int source, int source_side);
-    void explode(int weapon, float px, float pz, int source, int source_side, bool air, float power = 1.0f, float height = 0.0f);
+    void explode(int weapon, float px, float pz, int source, int source_side, bool air, float power = 1.0f, float height = 0.0f, int struck = -1,
+                 int source_team = -1);
     void pierce(const Shot& s, float px, float pz, float power);
-    void damage_unit(int u, const zk_weapon_rec& w, float mult);
+    void damage_unit(int u, const zk_weapon_rec& w, float mult, int dealer);
+    void count_damage(int victim, float amount, int dealer);
     float shield_takes(const zk_weapon_rec& w, const Shot& s, float px, float pz, float left, float& hit_x, float& hit_z);
     void update_shields();
     void recharge_shields();
@@ -539,7 +638,8 @@ private:
     void share_shield_charge();
     void move_units();
     void track_progress(int u, bool walking);
-    void move_one(int u);
+    MovePlan plan_move(int u);
+    void move_one(int u, const MovePlan& plan);
     bool wants_to_walk(int u, float& gx, float& gz);
     void separate();
     void finish_deaths();
@@ -575,13 +675,22 @@ private:
     void fight_step(int u);
     void idle_step(int u);
     void run_commands(int u);
+    void drop_chase(int u);
     void set_dodge(int u, float tx, float tz);
     void unit_went_idle(int u);
     bool update_idle_aggression(int u, const zk_tactics_rec& b, int enemy, bool known, float default_range, float enemy_dist);
     bool skirm_enemy(int u, const zk_tactics_rec& b, int enemy, bool known, bool idle, bool fight_and_hold, bool hug);
     bool flee_enemy(int u, const zk_tactics_rec& b, int enemy, bool known, bool idle);
-    bool tactics_against(int u, const zk_tactics_rec& b, int enemy, bool known, bool manual_attack, bool have_fight, bool hold, bool idle, bool particular);
+    bool tactics_against(int u, const zk_tactics_rec& own, int enemy, bool known, bool manual_attack, bool have_fight, bool hold, bool idle, bool particular,
+                         bool always_jink);
+    bool swarm_enemy(int u, const zk_tactics_rec& b, int enemy, bool idle);
+    bool swarm_point(int u, const zk_tactics_rec& b, float px, float pz);
+    void jink_towards(int u, const zk_tactics_rec& b, float px, float pz, float apart);
+    void change_side(int u, const zk_tactics_rec& b, float& side_now, bool start_over);
+    int tactics_row(int u) const;
     void run_tactics(int u);
+    void run_ward_fire(int u);
+    void update_tactics();
     void update_unit_ai();
     void update_kamikaze();
     void update_droppers();
@@ -646,7 +755,9 @@ private:
     void update_status();
     void burn_areas();
     float target_score(int u, int slot, int target);
-    bool in_range(int u, const zk_weapon_rec& w, int target) const;
+    bool in_range(int u, const zk_weapon_rec& w, int target) const { return in_range_at(u, w, target, x[size_t(target)], z[size_t(target)]); }
+    bool in_range_at(int u, const zk_weapon_rec& w, int target, float tx, float tz) const;
+    bool can_reach(int u, const zk_weapon_rec& w, int target) const;
     bool faces(int u, const zk_weapon_rec& w, int target) const;
     void waypoint(int u, float gx, float gz, float& wx, float& wz) const;
     bool clear_sight(int from, int to) const;
@@ -687,6 +798,11 @@ void World::for_enemies(int s, float cx, float cz, float radius, F&& f) const {
 
 template <class F>
 void World::for_near(float cx, float cz, float radius, F&& f) const {
+    for_near_slots(cx, cz, radius, [&](int i) { f(cell_units[size_t(i)]); });
+}
+
+template <class F>
+void World::for_near_slots(float cx, float cz, float radius, F&& f) const {
     const CellBox b = cell_box(cx, cz, radius);
     const size_t cells = grid_cells();
     for (int gz = b.z0; gz <= b.z1; ++gz) {
@@ -700,7 +816,7 @@ void World::for_near(float cx, float cz, float radius, F&& f) const {
             if (cell_start[size_t(s) * cells + first] != cell_start[size_t(s) * cells + last]) with[k++] = size_t(s) * cells;
         if (k == 0) continue;
         if (k == 1) {
-            for (int i = cell_start[with[0] + first]; i < cell_start[with[0] + last]; ++i) f(cell_units[size_t(i)]);
+            for (int i = cell_start[with[0] + first], end = cell_start[with[0] + last]; i < end; ++i) f(i);
             continue;
         }
         if (k == 2) {
@@ -708,9 +824,9 @@ void World::for_near(float cx, float cz, float radius, F&& f) const {
             for (size_t c = first; c < last; ++c) {
                 int i = cell_start[one + c], j = cell_start[other + c];
                 const int i_end = cell_start[one + c + 1], j_end = cell_start[other + c + 1];
-                while (i < i_end && j < j_end) f(cell_units[size_t(cell_units[size_t(i)] < cell_units[size_t(j)] ? i++ : j++)]);
-                while (i < i_end) f(cell_units[size_t(i++)]);
-                while (j < j_end) f(cell_units[size_t(j++)]);
+                while (i < i_end && j < j_end) f(cell_units[size_t(i)] < cell_units[size_t(j)] ? i++ : j++);
+                while (i < i_end) f(i++);
+                while (j < j_end) f(j++);
             }
             continue;
         }
@@ -725,7 +841,7 @@ void World::for_near(float cx, float cz, float radius, F&& f) const {
                 for (int r = 0; r < k; ++r)
                     if (at[r] < end[r] && (pick < 0 || cell_units[size_t(at[r])] < cell_units[size_t(at[pick])])) pick = r;
                 if (pick < 0) break;
-                f(cell_units[size_t(at[pick]++)]);
+                f(at[pick]++);
             }
         }
     }

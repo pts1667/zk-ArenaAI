@@ -2,9 +2,12 @@
 prevention, shooting at radar, and overheating.  Measured against a game (01-simulator.md, "Validation")."""
 from __future__ import annotations
 
+import math
 import pathlib
 import pytest
 import sys
+
+import numpy as np
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "py"))
 import zksim  # noqa: E402
@@ -234,6 +237,99 @@ def test_turning_the_tactical_ai_off_stops_the_stepping():
     for _ in range(6 * 6):
         w.step(1)
         assert not w.get(k).dodging
+
+
+def test_a_unit_fires_at_a_shield_that_reaches_nearer_than_the_unit_under_it():
+    """unit_ward_fire.lua.  A Thug 45 elmos past a Ronin's range is out of its reach, and its shield, 90 across, isn't: the Ronin
+    fires at the ground short of it and the shield takes the rockets.  Not at a shield with less in it than its table asks (200)."""
+    def after(charge: float, secs: float):
+        w = world()
+        k = w.add(SKIRMISHER, 0, X, Z)
+        w.set_move_state(k, 0)
+        t = dummy(w, "shieldassault", CAT.units[CAT.index[SKIRMISHER]]["max_range"] + 45.0, 0.0)
+        w.set_shield(t, charge)
+        w.ready_weapons()
+        seconds(w, secs)
+        return w.get(k).shots_fired, w.get(t)
+
+    fired, thug = after(1200.0, 20)
+    assert fired >= 4 and thug.shield < 700.0 and thug.damage_taken == 0.0, (fired, thug.shield)
+    assert after(1200.0, 2)[0] == 1 and after(150.0, 2)[0] == 0
+
+
+def test_against_what_it_fights_only_when_told_to_a_unit_goes_by_another_table():
+    """fightOnlyOverride.  By its own table a Mace told to fight its way to a fusion comes in to 150 elmos of it; by the one it
+    has for what blows up, it shoots it from the end of its reach."""
+    w = world()
+    m = w.add("hoverriot", 0, X, Z)
+    f = dummy(w, "energyfusion", 900, 0)
+    w.ready_weapons()
+    w.fight(m, X + 900, Z)
+    nearest = 900.0
+    for _ in range(6 * 30):
+        w.step(1)
+        if not w.get(f).alive:
+            break
+        nearest = min(nearest, X + 900 - w.get(m).x)
+    assert not w.get(f).alive and nearest > 300.0, nearest
+
+
+def test_under_water_a_unit_goes_by_its_table_for_the_sea():
+    """GetUnitBehavior.  A Duck jinking round a Ronin keeps half its missile's 232 elmos off; where the ground is under its
+    waterline its table is for its torpedo's 160, and it comes in nearer."""
+    def nearest(depth: float) -> float:
+        rows = cols = 256
+        ground = zksim.Map(np.full((rows, cols), -depth, np.float32), np.ones((len(zksim.MOVE_CLASSES), rows, cols), np.float32), 16.0, "pool")
+        w = zksim.World(CAT, ground, seed=1)
+        d = w.add("amphraid", 0, X, Z)
+        dummy(w, SKIRMISHER, 500, 0, TOUGH)
+        w.ready_weapons()
+        w.fight(d, X + 500, Z)
+        best = 500.0
+        for _ in range(6 * 30):
+            w.step(1)
+            s = w.get(d)
+            best = min(best, math.hypot(X + 500 - s.x, s.z - Z))
+        return best
+
+    assert nearest(0.0) > 105.0
+    assert nearest(30.0) < 95.0
+
+
+def test_a_mace_with_a_shot_ready_still_backs_off_from_what_it_faces():
+    """skirmBlockApproachHeadingBlock.  With a shot ready a unit stands against what's coming at it, and a Mace only when it's
+    turned away from it: facing it, it backs off as if it had just fired."""
+    w = world()
+    m = w.add("hoverriot", 0, X, Z, math.pi / 2)
+    w.set_fire_state(m, 0)      # so that its shot stays ready
+    g = dummy(w, RAIDER, 900, 0, TOUGH)
+    w.set_move_state(g, 1)
+    w.ready_weapons()
+    w.move(g, X - 2000, Z)
+    w.fight(m, X + 2000, Z)
+    backed = False
+    for _ in range(6 * 6):
+        w.step(1)
+        backed = backed or bool(w.get(m).dodging)
+    assert backed
+
+
+def test_a_bomb_jinks_all_the_way_on_a_fight_order_once_its_ai_is_on():
+    """alwaysJinkFight, which the three bombs have.  Their AI is off until it's turned on (defaultAIState)."""
+    def strays(on: bool) -> float:
+        w = world()
+        b = w.add("cloakbomb", 0, X, Z, math.pi / 2)
+        if on:
+            w.set_unit_ai(b, True)
+        w.fight(b, X + 1000, Z)
+        off = 0.0
+        for _ in range(6 * 8):
+            w.step(1)
+            off = max(off, abs(w.get(b).z - Z))
+        return off
+
+    assert strays(on=False) < 1.0
+    assert strays(on=True) > 20.0
 
 
 def shots(name: str, n: int, target: str, gap: float, secs: float, spotter: bool = False) -> int:
@@ -476,6 +572,29 @@ def test_on_fire_at_will_a_bomb_on_a_fight_order_goes_off_passing_something_clos
     w.fight(b, X, Z + 800.0)
     seconds(w, 4.0)
     assert not w.get(b).alive
+
+
+def test_a_mirror_fight_goes_either_way_by_the_seed():
+    """Four Maces a side in lines 1000 elmos apart, side 0's made first, each sent to fight where the other stands.  Over 60 seeds
+    each side wins a quarter at least.  While units took their tactical AI's turns, moved and shot in the order they were made,
+    and nothing in this fight was drawn by the seed, the side made second won every one."""
+    wins = [0, 0]
+    for seed in range(60):
+        w = zksim.World(CAT, FLAT, seed=500 + seed, behaviour=zksim.ORDERS)
+        ids = [[w.add("hoverriot", side, x, 2048.0 + (k - 1.5) * 40.0, heading) for k in range(4)]
+               for side, (x, heading) in enumerate(((1500.0, math.pi / 2), (2500.0, -math.pi / 2)))]
+        w.ready_weapons()
+        for side in (0, 1):
+            for u in ids[side]:
+                w.fight(u, 1500.0 if side else 2500.0, 2048.0)
+        for _ in range(60 * 6):
+            w.step(1)
+            left = [sum(1 for u in ids[side] if w.get(u).alive) for side in (0, 1)]
+            if not all(left):
+                break
+        for side in (0, 1):
+            wins[side] += left[side] > left[1 - side]
+    assert min(wins) >= 15, wins
 
 
 def test_an_attack_order_at_what_cant_be_seen_lapses_short_of_a_bomb_reaching_it():

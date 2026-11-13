@@ -5,6 +5,10 @@
 * `dont_count`: units that don't keep a team in the game (LuaRules/Gadgets/game_over.lua: its list of names, and any unit
   whose customParams say `dontcount`, from the engine dump's units.json).
 * `reveal`: game_over.lua's overwhelming-advantage rule: how many times the other's value, and how often it's looked at.
+* `vital`: what keeps an alliance of AIs in the game when finished (game_over.lua's vitalAlive): builders, and factories that
+  aren't `notreallyafactory`, by the engine dump's isBuilder and isFactory.  Every team in the sim stands for an AI.
+* `dont_count` leaves out the gadget's automatic list, `(not ud.canAttack) and (not ud.speed) and (not ud.isFactory)`: in Lua
+  0 is true, so `not ud.speed` is false for every unit, and the list adds none.
 * `chickens`: chicken defense (LuaRules/Gadgets/unit_spawner.lua with LuaRules/Configs/spawn_defs.lua): for each difficulty,
   Beginner to Suicidal, the settings the gadget ends up with (spawn_defs' defaults with the difficulty's own over them), its
   kinds of chicken by role, and the eggs chickens leave (features/chicken_eggs.lua, by the engine dump's feature ids).
@@ -110,7 +114,7 @@ def chickens(zk: pathlib.Path, dump: pathlib.Path) -> dict:
     return out
 
 
-def game_over(zk: pathlib.Path, dump: pathlib.Path) -> tuple[list[str], dict]:
+def game_over(zk: pathlib.Path, dump: pathlib.Path) -> tuple[list[str], dict, list[str]]:
     text = (zk / "LuaRules" / "Gadgets" / "game_over.lua").read_text("utf8")
     # The list for ordinary games is the second (the first is a campaign's).
     blocks = re.findall(r"doesNotCountList = \{(.*?)\}", text, re.S)
@@ -119,7 +123,10 @@ def game_over(zk: pathlib.Path, dump: pathlib.Path) -> tuple[list[str], dict]:
     names |= {n for n, u in units.items() if (u.get("customParams") or {}).get("dontcount") or u.get("isFeature")}
     reveal = {"value_ratio": float(re.search(r"ECON_SUPREMACY_MULT = (\d+)", text).group(1)),
               "every_frames": int(re.search(r"if \(n % (\d+) == 0\) then\s*\n\s*if not gameIsOver", text).group(1))}
-    return sorted(names), reveal
+    assert "if ud.isBuilder or (ud.isFactory and not ud.customParams.notreallyafactory) then" in text, "game_over.lua's vital units changed"
+    vital = {n for n, u in units.items() if n not in names and (u.get("isBuilder") or (
+             u.get("isFactory") and not (u.get("customParams") or {}).get("notreallyafactory")))}
+    return sorted(names), reveal, sorted(vital)
 
 
 def main() -> None:
@@ -128,10 +135,10 @@ def main() -> None:
     ap.add_argument("--dump", type=pathlib.Path, default=ROOT / "results" / "simtools" / "simdump")
     ap.add_argument("--out", type=pathlib.Path, default=OUT)
     args = ap.parse_args()
-    dont_count, reveal = game_over(args.zk, args.dump)
-    rules = {"dont_count": dont_count, "reveal": reveal, "chickens": chickens(args.zk, args.dump)}
+    dont_count, reveal, vital = game_over(args.zk, args.dump)
+    rules = {"dont_count": dont_count, "reveal": reveal, "vital": vital, "chickens": chickens(args.zk, args.dump)}
     args.out.write_text(json.dumps(rules, indent=1) + "\n", "utf8")
-    print(f"{args.out}: {len(dont_count)} that don't count, {len(rules['chickens']['difficulties'])} difficulties, "
+    print(f"{args.out}: {len(dont_count)} that don't count, {len(vital)} vital, {len(rules['chickens']['difficulties'])} difficulties, "
           f"{len(rules['chickens']['eggs'])} eggs")
 
 

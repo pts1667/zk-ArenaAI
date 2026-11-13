@@ -262,6 +262,7 @@ def test_a_plant_makes_the_transport_that_lifts_what_there_is_and_it_brings_it_t
     transports = {cat.index[n]: n for n in ("gunshiptrans", "gunshipheavytrans")}
     made, told, landed, labelled = [[] for _ in cases], [[] for _ in cases], [None] * len(cases), set()
     fusion = [2 + len(extra) for _, extra, _, _ in cases]
+    health = [1.0] * len(cases)         # the load's, as each step begins: a fusion it kills within the step blows up beside it
     for _ in range(400):
         looked = {g: copy.deepcopy(env.frame(g * env.slots)) for g in range(3) if landed[g] is None and env.decisions[g] % env.script_every == 0}
         env.step(0.0)
@@ -277,8 +278,9 @@ def test_a_plant_makes_the_transport_that_lifts_what_there_is_and_it_brings_it_t
                     told[g].append((kind, target))
                     given.append(o)
                 elif unit == 1 and kind == zksim.ORDER_ATTACK and told[g]:      # brought there, it's told what to go for
-                    own = env.batch.records[g, 0, :int(env.batch.counts[g, 0])]
-                    landed[g] = (target, float(own[own["uid"] == 1]["hp_frac"][0]))
+                    landed[g] = (target, health[g])
+            own = env.batch.records[g, 0, :int(env.batch.counts[g, 0])]
+            health[g] = float(own[own["uid"] == 1]["hp_frac"][0])
             if given and g in looked:
                 t = fz.featurize(looked[g], env.bundle_of(g * env.slots), env.table, enabled_kinds=se.KINDS)
                 x, z = actions.world_positions(t, env.bundle_of(g * env.slots))

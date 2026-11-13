@@ -139,7 +139,8 @@ def test_a_weapon_that_ignores_shields_does():
     name = next(u["name"] for u in CAT.units if u["flags"] & zksim.ARMED and u["mount_weapon"] and CAT.weapons[u["mount_weapon"][0]]["intercepted_by"] == 0
                 and CAT.weapons[u["mount_weapon"][0]]["range"] >= 300.0 and CAT.weapons[u["mount_weapon"][0]]["damage"][0] > 0.0)
     w, _, _, play = _duel(name, 1000.0 + CAT.weapons[CAT.units[CAT.index[name]]["mount_weapon"][0]]["range"] * 0.8)
-    sh = w.add(SMALL, 1, 1000.0 + CAT.weapons[CAT.units[CAT.index[name]]["mount_weapon"][0]]["range"] * 0.4, Z)
+    # Beside the shot's path, which goes through its shield and not through it.
+    sh = w.add(SMALL, 1, 1000.0 + CAT.weapons[CAT.units[CAT.index[name]]["mount_weapon"][0]]["range"] * 0.4, Z + 50.0)
     full = w.get(sh).shield
     assert play() > 0.0
     assert w.get(sh).shield == pytest.approx(full)

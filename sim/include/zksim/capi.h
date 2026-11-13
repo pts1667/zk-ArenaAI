@@ -8,7 +8,8 @@
 extern "C" {
 #endif
 
-#define ZK_ABI_VERSION 21
+#define ZK_ABI_VERSION 25
+#define ZK_WARD_TARGETS 4
 #define ZK_MAX_MOUNTS 8
 #define ZK_MAX_TEAMS 8     /* players in a game, and so allyteams too */
 #define ZK_ARMOR_CLASSES 5
@@ -42,7 +43,11 @@ enum {
     ZK_W_THROWS = 2097152,          /* fired by a manual-fire order, it throws what's around the unit (unit_thrower.lua) */
     ZK_W_BOMB = 4194304,            /* dropped from a plane: falls from it, let go where it will land on the target (BombDropper.cpp).
                                        One that does no damage only marks a bomber's target */
-    ZK_W_DROPPED = 8388608          /* fired by the script a shot at a time straight down, when the unit's marking bomb would drop */
+    ZK_W_DROPPED = 8388608,         /* fired by the script a shot at a time straight down, when the unit's marking bomb would drop */
+    ZK_W_ROCKET = 16777216,         /* flies under its own power, a missile or a torpedo: as far as its fuel takes it, and then it goes off */
+    ZK_W_BURNBLOW = 33554432,       /* goes off where it was aimed, whether or not anything's there (selfExplode) */
+    ZK_W_LEAD_ADDED = 67108864      /* its lead is put on once it's fired (weapon_projectile_retarget.lua): the weapon itself aims at the
+                                       target, and that's where it tests its range */
 };
 
 /* Times are in frames and distances in elmos. */
@@ -74,8 +79,16 @@ typedef struct {
     float okp_damage, okp_frames, okp_full_frames, okp_hit_mod, okp_min_range, okp_fast_mult, okp_radar_mult;
     float radar_wobble_penalty, radar_dot_penalty;   /* target_priority_defs.lua: what firing at a radar dot costs a target's rating */
     float impulse;              /* what a hit pushes with, away from the shooter, or towards it if negative (weapon_impulse.lua) */
-    float gravity;              /* a bomb's fall, elmos a frame squared */
+    float gravity;              /* its fall, elmos a frame squared: a bomb's or a shell's, and what a refined lead reckons with */
+    /* How it aims at what moves and how it flies there (combat.cpp, "Projectiles"). */
+    float lead_limit;           /* the furthest its aim goes ahead of a target, elmos; negative for no limit (leadLimit) */
+    float predict_boost;        /* 1 leads by the target's speed; less, by that speed out by up to the rest either way (predictBoost) */
+    float move_error;           /* its aim is off by up to this share of what the target moves in a second (targetMoveError) */
+    float flight_frames;        /* a rocket's fuel; 0 for what its range needs (flightTime) */
+    float turn_rate;            /* how fast a rocket that homes turns, about radians a frame (turnRate) */
+    float rise;                 /* a rocket's path rises over the straight one at this slope, at each end (trajectoryHeight) */
     int32_t kind, flags, shield_intercept, intercepted_by;
+    int32_t accurate_leading;   /* times the estimate of its flight time, which it leads by, is refined; 0 leaves it at distance over speed */
 } zk_weapon_rec;
 
 enum { ZK_U_MOBILE = 1, ZK_U_AIR = 2, ZK_U_ARMED = 4, ZK_U_FIREPROOF = 8, ZK_U_FACTORY = 16, ZK_U_PLOPPABLE = 32, ZK_U_COMMANDER = 64,
@@ -91,6 +104,7 @@ enum { ZK_U_MOBILE = 1, ZK_U_AIR = 2, ZK_U_ARMED = 4, ZK_U_FIREPROOF = 8, ZK_U_F
        ZK_U_LANDS = 131072,            /* lands when it has nothing to do: an aircraft from a plane factory (unit_air_plants.lua) */
        ZK_U_STRAFES = 262144,          /* a gunship that circles what it attacks (airStrafe) */
        ZK_U_DONT_COUNT = 524288,       /* doesn't keep its team in the game (game_over.lua; sim/data/rules.json) */
+       ZK_U_VITAL = 1048576,           /* finished, keeps an alliance of AIs in the game: a builder or factory (game_over.lua; rules.json) */
        ZK_U_LEAVES_GHOST = 2048 };     /* a building: once seen, radar shows just where it is */
 
 typedef struct {
@@ -165,15 +179,42 @@ typedef struct {
 
 /* unit_tactical_ai.lua's table for one unit type, after its defaults.  Distances in elmos, times in frames.  A negative stands for what it leaves out. */
 enum { ZK_T_HANDLED = 1, ZK_T_IDLE_ONLY = 2, ZK_T_SKIRM_RADAR = 4, ZK_T_SKIRM_EVERYTHING = 8, ZK_T_KEEP_ORDER = 16, ZK_T_FLEE_EVERYTHING = 32,
-       ZK_T_FLEE_RADAR = 64, ZK_T_FLEE_COMBAT = 128, ZK_T_IDLE_FLEE_COMBAT = 256 };
-/* How a type regards each type of enemy: types x types of these. */
-enum { ZK_R_SKIRM = 1, ZK_R_FLEE = 2, ZK_R_IDLE_FLEE = 4, ZK_R_HUG = 8, ZK_R_FIGHT_ONLY = 16, ZK_R_BONUS_RANGE = 32, ZK_R_AVOID_HEIGHT = 64 };
+       ZK_T_FLEE_RADAR = 64, ZK_T_FLEE_COMBAT = 128, ZK_T_IDLE_FLEE_COMBAT = 256,
+       ZK_T_LOCAL_JINK = 512,          /* a jink's move is given from where the unit is, not from beside its enemy (localJinkOrder) */
+       ZK_T_CIRCLE_STRAFE = 1024,      /* in reach it runs round its enemy, where the rest step from side to side */
+       ZK_T_SELF_VELOCITY = 2048,      /* its own velocity counts with its enemy's in how far off that will be (selfVelocityPrediction) */
+       ZK_T_WARD = 4096,               /* ward fire at shields (unit_ward_fire.lua), which is on unless a player turns it off */
+       ZK_T_STARTS_OFF = 8192,         /* its AI is off until it's turned on (defaultAIState; ZK_ORDER_UNIT_AI) */
+       ZK_T_ALWAYS_JINK = 16384 };     /* on a fight order it jinks all the way, enemy or none (alwaysJinkFight) */
+/* How a table regards each type of enemy: tables x types of these. */
+enum { ZK_R_SKIRM = 1, ZK_R_FLEE = 2, ZK_R_IDLE_FLEE = 4, ZK_R_HUG = 8, ZK_R_FIGHT_ONLY = 16, ZK_R_BONUS_RANGE = 32, ZK_R_AVOID_HEIGHT = 64,
+       ZK_R_SWARM = 128 };             /* jinks towards it and strafes it, so that its slow shots miss */
 
 typedef struct {
     float search_range, idle_push_dist_sq, idle_chase_leeway, idle_commit_dist, idle_commit_mult, idle_enemy_mult;
     float flee_order_dis, flee_leeway, flee_distance, min_flee_range, flee_vel_prediction;
     float weapon_range, stopping_distance, velocity_prediction, skirm_order_dis, skirm_order_dis_min, hug_range, skirm_leeway;
     float skirm_range_override, reload_skirm_leeway, skirm_blocked_frames, vel_pred_chase, skirm_keep_leeway, skirm_only_near, my_speed;
+    /* Swarming.  Further off than max_swarm_range it jinks towards its enemy, nearer than min_swarm_range away from it, and between
+       the two it strafes.  jink_period: the updates between changes of side, or 0 for every one. */
+    float max_swarm_range, min_swarm_range, swarm_leeway, jink_tangent, jink_parallel, jink_away_parallel, strafe_order_length;
+    float min_circle_strafe, jink_period;
+    float skirm_jink;                 /* keeping its distance, it goes this far to one side and then the other (skirmJinkLength); 0 for none */
+    /* With a shot ready it stands against what's coming only if the cosine between its heading and the way to the enemy is under
+       this (skirmBlockApproachHeadingBlock); 2 for whichever way it faces. */
+    float skirm_heading_block;
+    /* Ward fire.  With nothing to shoot, it fires at the ground towards the nearest enemy, if that is one of ward_target with its
+       shield up and ward_shield in it, and is predicted (ward_predict frames of its velocity on) further off than the weapon's
+       range plus the two leeways and nearer than that range plus its type's ward_range.  It aims ward_leeway short of its range,
+       and that times its own speed shorter (ward_speed_buffer), at a point ward_height over the ground. */
+    float ward_leeway, ward_enable_leeway, ward_predict, ward_shield, ward_height, ward_speed_buffer;
+    float ward_range[ZK_WARD_TARGETS];
+    int32_t ward_target[ZK_WARD_TARGETS];     /* unit types, -1 for none */
+    float waterline;                  /* where the ground under it is lower than this, it goes by the table `sea` names */
+    /* row: this record's place in the table.  The first n_types are the types' own, the rest the other tables some have.
+       sea: the type's table for the sea.  fight_only: the one against what it engages only on a fight order (fightOnlyOverride).
+       -1 for none. */
+    int32_t row, sea, fight_only;
     int32_t flags, weapon_num, blocked_on_fight;
 } zk_tactics_rec;
 
@@ -230,7 +271,7 @@ int zk_sizeof_state(void);
 
 void* zk_catalog_new(const zk_type_rec* types, int n_types, const zk_weapon_rec* weapons, int n_weapons,
                      const float* priority /* n_weapons x n_types */,
-                     const zk_tactics_rec* tactics /* n_types */, const uint8_t* relations /* n_types x n_types */);
+                     const zk_tactics_rec* tactics, int n_tactics /* n_types or more */, const uint8_t* relations /* n_tactics x n_types */);
 void zk_catalog_free(void* catalog);
 
 /* Game rules from Zero-K's gadgets rather than its units (tools/sim_rules.py, sim/data/rules.json), given to a catalog once, before
@@ -384,10 +425,14 @@ void zk_world_set_roles(void* world, const int32_t* role_of_type, int n_types);
 /* Returns how many units it selected. */
 int zk_world_order_group(void* world, const zk_group_rec* group);
 
-/* Per team: tracked value, live units, metal a second from reclaim (part of the frame's income), and the live units that keep a team
-   in the game: finished, and not ZK_U_DONT_COUNT (game_over.lua).  The value is cost x build progress; a chicken, which costs nothing,
-   counts its build time, which for every unit that has a cost is its metal cost. */
-#define ZK_STATS 4
+/* Per team: [0] tracked value, [1] live units, [2] metal a second from reclaim (part of the frame's income), [3] the live units that
+   keep a team in the game: finished, and not ZK_U_DONT_COUNT (game_over.lua).  The value is cost x build progress; a chicken, which
+   costs nothing, counts its build time, which for every unit that has a cost is its metal cost.
+   [4] and [5], since the game began: the damage the team's units have done to enemies' units, and the damage enemies' units have done
+   to its own, in metal.  A hit counts the health it takes off, no more than its victim had, times the victim's cost (a chicken's
+   build time) over its full health.  Health only: not what a shield takes, nor stun, slow or disarm.  A fire counts for whoever lit
+   it, a death's blast for the team of what died; a fall counts for no one.  Nothing between allies or to oneself. */
+#define ZK_STATS 6
 
 int zk_sizeof_unit_record(void);
 int zk_sizeof_site_record(void);

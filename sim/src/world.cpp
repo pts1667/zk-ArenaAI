@@ -43,7 +43,7 @@ uint64_t Rng::next() {
 }
 
 World::World(const Catalog* c, const Map* m, uint64_t seed, int behaviour_)
-    : cat(c), map(m), rng(seed), behaviour(behaviour_), ring(RING_SLOTS) {
+    : cat(c), map(m), rng(seed), behaviour(behaviour_), turn_salt(uint32_t((seed * 0x9E3779B97F4A7C15ull) >> 32)), ring(RING_SLOTS) {
     grid_cols = std::max(1, int(std::ceil(m->width() / GRID_CELL)));
     grid_rows = std::max(1, int(std::ceil(m->depth() / GRID_CELL)));
     cell_start.resize(size_t(n_allies) * grid_cells() + 1);
@@ -78,6 +78,7 @@ int World::add(int t, int owner, float px, float pz, float head, float hp_frac, 
     nearest.push_back(-1);
     alive.push_back(1);
     live.push_back(u);
+    grid_slot.push_back(-1);
     x.push_back(px);
     z.push_back(pz);
     vx.push_back(0.0f);
@@ -105,6 +106,10 @@ int World::add(int t, int owner, float px, float pz, float head, float hp_frac, 
         a.heat = d.heat_initial;
         a.line_x = a.line_end_x = px;
         a.line_z = a.line_end_z = pz;
+        // unit_tactical_ai.lua draws each unit's sides at random.
+        a.jink_side = rng.between(0, 1) ? 1.0f : -1.0f;
+        a.strafe_side = rng.between(0, 1) ? 1.0f : -1.0f;
+        a.tactics_off = (cat->tactics[size_t(t)].flags & ZK_T_STARTS_OFF) != 0;
         ai.push_back(a);
     }
     incoming.emplace_back();
@@ -121,6 +126,7 @@ int World::add(int t, int owner, float px, float pz, float head, float hp_frac, 
     mem_z.push_back(0.0f);
     burn_rate.push_back(0.0f);
     burn_frames.push_back(0.0f);
+    burn_team.push_back(-1);
     damage_mult.push_back(1.0f);
     work_on.push_back(-1);
     produces.push_back(-1);
@@ -334,6 +340,7 @@ void World::tick() {
         if (behaviour == ZK_BEHAVIOUR_ORDERS || behaviour == ZK_BEHAVIOUR_SCRIPTED) { ZK_PROF(KAMIKAZE); update_kamikaze(); }
         { ZK_PROF(TARGETS); pick_targets(); }
     }
+    if (behaviour == ZK_BEHAVIOUR_ORDERS) { ZK_PROF(UNIT_AI); update_tactics(); }
     if (behaviour == ZK_BEHAVIOUR_ORDERS || behaviour == ZK_BEHAVIOUR_SCRIPTED) { ZK_PROF(KAMIKAZE); update_droppers(); }
     { ZK_PROF(FIRE); fire_weapons(); }
     { ZK_PROF(SHOTS); resolve_shots(); }
@@ -350,6 +357,8 @@ void World::tick() {
         }
         move_units();
     }
+    // After the units: each projectile's path this tick is tried against where they went in it.
+    { ZK_PROF(SHOTS); fly_projectiles(); }
     { ZK_PROF(DEATHS); finish_deaths(); }
     // After deaths: a build step adds health, and mustn't bring back what this tick killed.
     if (economy_on) { ZK_PROF(ECONOMY); run_economy(); }
@@ -362,6 +371,7 @@ void World::tick() {
         for (int f = frame + 1; f <= frame + ZK_TICK_FRAMES; ++f)
             if (f % cat->reveal_every == 0) check_reveal();
     }
+    check_vital();
     frame += ZK_TICK_FRAMES;
     ++tick_count;
 }
@@ -388,6 +398,26 @@ void World::check_reveal() {
     if (supreme < 0) return;
     for (int s = 0; s < n_allies; ++s)
         if (s != supreme) revealed |= 1u << s;
+}
+
+// game_over.lua's resignation of AI teams: an alliance whose teams are all AIs, as every team in the sim stands for, is destroyed when
+// it has no finished builder or factory left that counts (ZK_U_VITAL; sim/data/rules.json "vital").  So it's out (stats[3] 0) and
+// the game goes on without it, or ends.  The gadget looks as each unit that counts goes, and blows the alliance's units up over the
+// next 50 frames; here they die at the next tick.  Not the chickens.  An alliance that has never had such a unit, an army set down
+// in a test or a scenario, isn't looked at: in a game every team starts with its commander.
+void World::check_vital() {
+    uint32_t has = 0;
+    for (const int u : live) {
+        const size_t i = size_t(u);
+        const uint32_t f = type_of(u).flags;
+        if (alive[i] && build[i] >= 1.0f && (f & ZK_U_VITAL) && !(f & ZK_U_DONT_COUNT)) has |= 1u << side[i];
+    }
+    had_vital |= has;
+    uint32_t gone = had_vital & ~has;
+    if (chickens.rules && chickens.ally >= 0) gone &= ~(1u << chickens.ally);
+    if (!gone) return;
+    for (const int u : live)
+        if (alive[size_t(u)] && ((gone >> side[size_t(u)]) & 1u)) hp[size_t(u)] = 0.0f;
 }
 
 void World::died(int u) {
@@ -426,6 +456,7 @@ void World::rebuild_grid() {
         // What a transport carries is off the grid: nothing that looks around a place finds it (transport.cpp).
         if (carrier[size_t(u)] >= 0) {
             unit_key[size_t(u)] = -1;
+            grid_slot[size_t(u)] = -1;
             continue;
         }
         ++on_grid;
@@ -444,7 +475,10 @@ void World::rebuild_grid() {
     cell_units.resize(on_grid);
     for (size_t k = kept; k-- > 0;) {
         const int u = live[k];
-        if (unit_key[size_t(u)] >= 0) cell_units[size_t(--cell_start[size_t(unit_key[size_t(u)])])] = u;
+        if (unit_key[size_t(u)] < 0) continue;
+        const int slot = --cell_start[size_t(unit_key[size_t(u)])];
+        cell_units[size_t(slot)] = u;
+        grid_slot[size_t(u)] = slot;
     }
 }
 
@@ -499,6 +533,7 @@ void World::update_status() {
         slow[size_t(u)] = std::max(0.0f, slow[size_t(u)] - frames / SLOW_DECLINE_FRAMES);
         if (burn_frames[size_t(u)] > 0.0f) {
             const float amount = burn_rate[size_t(u)] * std::min(frames, burn_frames[size_t(u)]) * damage_mult[size_t(u)];
+            count_damage(u, amount, burn_team[size_t(u)]);
             hp[size_t(u)] -= amount;
             damage_taken[size_t(u)] += amount;
             recent_damage[size_t(u)] += amount;

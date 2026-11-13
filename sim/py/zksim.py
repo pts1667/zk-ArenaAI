@@ -19,7 +19,8 @@ sys.path.insert(0, str(ROOT / "py"))
 sys.path.insert(0, str(ROOT.parent / "bots"))
 import zknav  # noqa: E402
 from zkbot.policy import rawframe  # noqa: E402
-ABI_VERSION = 21
+ABI_VERSION = 25
+WARD_TARGETS = 4
 MAX_MOUNTS = 8
 MAX_TEAMS = 8                       # players in a game, and so allyteams too
 TICK_FRAMES = 5
@@ -32,7 +33,7 @@ ORDER_BUILD, ORDER_ASSIST, ORDER_RECLAIM, ORDER_PRODUCE, ORDER_MOVE_STATE, ORDER
 ORDER_PLACE_BEACON, ORDER_WAIT_AT_BEACON, ORDER_ON_OFF = 19, 20, 21
 ORDER_LOAD, ORDER_UNLOAD, ORDER_DROP = 22, 23, 24        # an air transport's (sim/src/transport.cpp)
 MOBILE, AIR, ARMED, FIREPROOF, FACTORY, PLOPPABLE, COMMANDER, CAN_CLOAK, STARTS_CLOAKED, FIRES_CLOAKED, AREA_CLOAK_ON, LEAVES_GHOST, KAMIKAZE_BLIND, FLOATS = 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192
-MISSILE, NEUTRAL, PLANE, LANDS, STRAFES, DONT_COUNT = 16384, 32768, 65536, 131072, 262144, 524288
+MISSILE, NEUTRAL, PLANE, LANDS, STRAFES, DONT_COUNT, VITAL = 16384, 32768, 65536, 131072, 262144, 524288, 1048576
 FEATURES_PER_SIDE = 512             # records a frame can hold, as many as featurize keeps; past it, those with the most metal left (sim/src/views.cpp)
 # Chicken defense (sim/src/chickens.cpp): the difficulties, the roles of the gadget's kinds, and what chicken_state gives.
 CHICKEN_DIFFICULTIES = ("Beginner", "Very Easy", "Easy", "Normal", "Hard", "Suicidal")
@@ -55,8 +56,9 @@ class WeaponRec(ct.Structure):
         "area_dps", "area_radius", "area_plateau", "area_range_fall", "area_plateau_fall", "area_time_fall", "area_frames",
         "burn_frames", "burn_random", "burn_chance", "burn_damage",
         "okp_damage", "okp_frames", "okp_full_frames", "okp_hit_mod", "okp_min_range", "okp_fast_mult", "okp_radar_mult",
-        "radar_wobble_penalty", "radar_dot_penalty", "impulse", "gravity")] + [(n, ct.c_int32) for n in (
-            "kind", "flags", "shield_intercept", "intercepted_by")]
+        "radar_wobble_penalty", "radar_dot_penalty", "impulse", "gravity",
+        "lead_limit", "predict_boost", "move_error", "flight_frames", "turn_rate", "rise")] + [(n, ct.c_int32) for n in (
+            "kind", "flags", "shield_intercept", "intercepted_by", "accurate_leading")]
 
 
 class TypeRec(ct.Structure):
@@ -81,8 +83,12 @@ class TacticsRec(ct.Structure):
         "search_range", "idle_push_dist_sq", "idle_chase_leeway", "idle_commit_dist", "idle_commit_mult", "idle_enemy_mult",
         "flee_order_dis", "flee_leeway", "flee_distance", "min_flee_range", "flee_vel_prediction",
         "weapon_range", "stopping_distance", "velocity_prediction", "skirm_order_dis", "skirm_order_dis_min", "hug_range", "skirm_leeway",
-        "skirm_range_override", "reload_skirm_leeway", "skirm_blocked_frames", "vel_pred_chase", "skirm_keep_leeway", "skirm_only_near", "my_speed")] + [
-        (n, ct.c_int32) for n in ("flags", "weapon_num", "blocked_on_fight")]
+        "skirm_range_override", "reload_skirm_leeway", "skirm_blocked_frames", "vel_pred_chase", "skirm_keep_leeway", "skirm_only_near", "my_speed",
+        "max_swarm_range", "min_swarm_range", "swarm_leeway", "jink_tangent", "jink_parallel", "jink_away_parallel", "strafe_order_length",
+        "min_circle_strafe", "jink_period", "skirm_jink", "skirm_heading_block", "ward_leeway", "ward_enable_leeway", "ward_predict",
+        "ward_shield", "ward_height", "ward_speed_buffer")] + [
+        ("ward_range", ct.c_float * WARD_TARGETS), ("ward_target", ct.c_int32 * WARD_TARGETS), ("waterline", ct.c_float)] + [
+        (n, ct.c_int32) for n in ("row", "sea", "fight_only", "flags", "weapon_num", "blocked_on_fight")]
 
 
 class UnitState(ct.Structure):
@@ -125,7 +131,7 @@ def _load_library() -> ct.CDLL:
     fl, it = ct.c_float, ct.c_int
     fp, ip = ct.POINTER(ct.c_float), ct.POINTER(ct.c_int)
     lib.zk_catalog_new.restype = vp
-    lib.zk_catalog_new.argtypes = [ct.POINTER(TypeRec), it, ct.POINTER(WeaponRec), it, fp, ct.POINTER(TacticsRec), ct.POINTER(ct.c_uint8)]
+    lib.zk_catalog_new.argtypes = [ct.POINTER(TypeRec), it, ct.POINTER(WeaponRec), it, fp, ct.POINTER(TacticsRec), it, ct.POINTER(ct.c_uint8)]
     lib.zk_catalog_free.argtypes = [vp]
     lib.zk_catalog_reveal.argtypes = [vp, fl, it]
     lib.zk_catalog_chickens.argtypes = [vp, it, ct.POINTER(ChickenRules)]
@@ -240,6 +246,7 @@ class Catalog:
         self.index = {u["name"]: i for i, u in enumerate(self.units)}
         self.weapon_index = {w["name"]: i for i, w in enumerate(self.weapons)}
         dont_count = set((self.rules or {}).get("dont_count", ()))
+        vital = set((self.rules or {}).get("vital", ()))
         types = (TypeRec * len(self.units))()
         for rec, u in zip(types, self.units):
             rec.move_state, rec.fire_state = 1, 2      # the engine's defaults, for records that don't say
@@ -247,6 +254,8 @@ class Catalog:
             _fill(rec, u)
             if u["name"] in dont_count:
                 rec.flags |= DONT_COUNT
+            if u["name"] in vital:
+                rec.flags |= VITAL
             rec.n_mounts = len(u["mount_weapon"])
             for i in range(rec.n_mounts):
                 rec.mount_weapon[i] = u["mount_weapon"][i]
@@ -254,12 +263,17 @@ class Catalog:
                 rec.mount_bad[i] = u["mount_bad"][i]
         weapons = (WeaponRec * len(self.weapons))()
         for rec, w in zip(weapons, self.weapons):
+            rec.lead_limit, rec.predict_boost = -1.0, 1.0      # the engine's defaults again: no limit to its lead, and no error in it
             _fill(rec, w)
-        tactics = (TacticsRec * len(self.units))()
-        for rec, t in zip(tactics, self.tactics):
+        # A type's own table first, then the other tables some have: for the sea, and against what they fight only when told to.
+        tactics = (TacticsRec * len(self.tactics))()
+        for row, (rec, t) in enumerate(zip(tactics, self.tactics)):
+            rec.row, rec.sea, rec.fight_only, rec.skirm_heading_block, rec.ward_shield = row, -1, -1, 2.0, -1.0
+            rec.ward_target = (ct.c_int32 * WARD_TARGETS)(*[-1] * WARD_TARGETS)
             _fill(rec, t)
         relations = np.require(self.relations, np.uint8, "C")
-        self.handle = _lib.zk_catalog_new(types, len(self.units), weapons, len(self.weapons), _floats(priority), tactics,
+        assert relations.shape == (len(self.tactics), len(self.units)), relations.shape
+        self.handle = _lib.zk_catalog_new(types, len(self.units), weapons, len(self.weapons), _floats(priority), tactics, len(self.tactics),
                                           relations.ctypes.data_as(ct.POINTER(ct.c_uint8)))
         if self.rules:
             self._install_rules(self.rules)
@@ -578,7 +592,9 @@ class World:
 ORDER_DTYPE = np.dtype([("unit", "i4"), ("kind", "i4"), ("x", "f4"), ("z", "f4"), ("target", "i4")], align=True)
 # capi.h zk_group_rec: one order to the anchor and every unit of its team that's mobile and finished, of a role in `roles`, within `radius` of it
 GROUP_DTYPE = np.dtype([("anchor", "i4"), ("roles", "u4"), ("radius", "f4"), ("kind", "i4"), ("x", "f4"), ("z", "f4"), ("target", "i4")], align=True)
-STATS = 4      # per team: tracked value, live units, metal a second from reclaim, live units that keep the team in the game
+# Per team: tracked value, live units, metal a second from reclaim, live units that keep the team in the game, and since the game began
+# the damage its units have done to enemies' and had done to them by enemies', in metal (capi.h ZK_STATS).
+STATS = 6
 
 
 class Batch:

@@ -104,19 +104,29 @@ local function dumpFacts()
 	Spring.SendCommands("quitforce")
 end
 
--- What unit_tactical_ai.lua does by unit type, after its defaults, with its sets of unit defs as names.  Those amphibians that behave
--- differently under water go by their land table, as the sim has no depth to go by.
+-- What unit_tactical_ai.lua does by unit type, after its defaults, with its sets of unit defs as names, and as name:number where a
+-- set gives each a number (wardFireTargets).  A table of parameters inside one (fightOnlyOverride) is a row of its own.
 local function tacticsRow(behaviour)
 	local row = {}
 	for k, v in pairs(behaviour) do
 		if type(v) == "table" then
-			local names = {}
-			for id, on in pairs(v) do
-				if on and type(id) == "number" and UnitDefs[id] then
-					names[#names + 1] = UnitDefs[id].name
+			if type(next(v)) == "string" then
+				row[k] = tacticsRow(v)
+			else
+				local names, values = {}, {}
+				for id, on in pairs(v) do
+					if on and type(id) == "number" and UnitDefs[id] then
+						names[#names + 1] = UnitDefs[id].name
+						if type(on) == "number" then
+							values[#values + 1] = UnitDefs[id].name .. ":" .. on
+						end
+					end
+				end
+				row[k] = table.concat(names, " ")
+				if #values > 0 then
+					row[k .. "Values"] = table.concat(values, " ")
 				end
 			end
-			row[k] = table.concat(names, " ")
 		elseif type(v) ~= "function" then
 			row[k] = v
 		end
@@ -139,12 +149,47 @@ local function overkillLines(ud)
 	return lines[1] and lines or nil
 end
 
+-- How many times each weapon refines the flight time it leads by (accurateLeading).  It's set where a unit's file mounts the weapon,
+-- and neither def table shows it.  Read as text: some of the files don't load outside the game's own def loader.
+local function accurateLeading()
+	local found = {}
+	for _, ud in pairs(UnitDefs) do
+		local text = (VFS.LoadFile("units/" .. ud.name .. ".lua") or ""):gsub("%-%-[^\n]*", "")
+		local mounts = text:match("weapons%s*=%s*(%b{})")
+		for mount in (mounts and mounts:sub(2, -2) or ""):gmatch("%b{}") do
+			local def, times = mount:match("def%s*=%s*%[%[([%w_]+)%]%]"), mount:match("accurateLeading%s*=%s*(%d+)")
+			if def and times then
+				found[ud.name .. "_" .. string.lower(def)] = tonumber(times)
+			end
+		end
+	end
+	return found
+end
+
+-- The weapons whose shots weapon_projectile_retarget.lua turns towards where their target will be: the engine's own lead is
+-- limited to nothing for these, so that the turret points at the target.
+local function gadgetLead()
+	local found = {}
+	local _, projectileLead = VFS.Include("LuaRules/Configs/retargetable_projectiles.lua", nil, VFS.GAME)
+	for id in pairs(projectileLead or {}) do
+		found[WeaponDefs[id].name] = true
+	end
+	return found
+end
+
 function dumpTactics(radarWobblePenalty, radarDotPenalty)
 	local behaviours = VFS.Include("LuaRules/Configs/tactical_ai_defs.lua")
 	local tactics, overkill, radar = {}, {}, {}
 	for id, b in pairs(behaviours) do
-		tactics[UnitDefs[id].name] = tacticsRow(b.land or b)
-		tactics[UnitDefs[id].name].defaultAIState = b.defaultAIState
+		local row = tacticsRow(b.land or b)
+		row.defaultAIState = b.defaultAIState
+		if b.land and b.sea then
+			-- GetUnitBehavior: the other table, for where the unit, or the ground under one that floats, is below the waterline.
+			row.sea = tacticsRow(b.sea)
+			row.waterline = b.waterline or 0
+			row.floatWaterline = b.floatWaterline or false
+		end
+		tactics[UnitDefs[id].name] = row
 	end
 	for _, ud in pairs(UnitDefs) do
 		overkill[ud.name] = overkillLines(ud)
@@ -155,7 +200,7 @@ function dumpTactics(radarWobblePenalty, radarDotPenalty)
 		end
 	end
 	local out = {}
-	encode({tactics = tactics, overkill = overkill, radar = radar}, 0, out)
+	encode({tactics = tactics, overkill = overkill, radar = radar, accurate_leading = accurateLeading(), gadget_lead = gadgetLead()}, 0, out)
 	local f = io.open("simdump/tactics.json", "w")
 	f:write(table.concat(out), "\n")
 	f:close()

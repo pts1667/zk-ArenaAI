@@ -165,7 +165,7 @@ void World::update_view(int s) {
     }
 }
 
-int World::emit_view(int viewer, UnitRecord* out, int cap, float* glob, int commander, const float* base) {
+int World::emit_view(int viewer, UnitRecord* out, int cap, float* glob, int commander, const float* base, const UnitRecord* ally_frame, int ally_count) {
     const int s = ally_of[viewer];
     SideView& v = views[size_t(s)];
     int w = 0;
@@ -212,24 +212,32 @@ int World::emit_view(int viewer, UnitRecord* out, int cap, float* glob, int comm
     blips.clear();
     memory.clear();
     hidden.clear();
-    for (const int u : live) {
-        const size_t i = size_t(u);
-        if (!alive[i]) continue;
-        if (side[i] == s) (team[i] == viewer ? own : allies).push_back(u);
-        else if (v.in_los[i]) seen.push_back(u);
-        else if (v.in_radar[i]) blips.push_back(u);
-        else if (v.remembered[i]) memory.push_back(u);
-        else hidden.push_back(u);
+    if (ally_frame) {
+        // Only its own side's are sorted: the rest come from the other frame.
+        for (const int u : live) {
+            const size_t i = size_t(u);
+            if (alive[i] && side[i] == s) (team[i] == viewer ? own : allies).push_back(u);
+        }
+    } else {
+        for (const int u : live) {
+            const size_t i = size_t(u);
+            if (!alive[i]) continue;
+            if (side[i] == s) (team[i] == viewer ? own : allies).push_back(u);
+            else if (v.in_los[i]) seen.push_back(u);
+            else if (v.in_radar[i]) blips.push_back(u);
+            else if (v.remembered[i]) memory.push_back(u);
+            else hidden.push_back(u);
+        }
+        // The remembered dead, and any that died since the view was last brought up to date, which it still has as they were.
+        const size_t living = memory.size();
+        for (const int u : v.memories)
+            if (!v.in_los[size_t(u)] && v.remembered[size_t(u)]) memory.push_back(u);
+        for (size_t k = v.fallen_seen; k < fallen.size(); ++k) {
+            const size_t i = size_t(fallen[k]);
+            if (side[i] != s && !v.in_los[i] && v.remembered[i]) memory.push_back(int(i));
+        }
+        if (memory.size() > living) std::sort(memory.begin(), memory.end());
     }
-    // The remembered dead, and any that died since the view was last brought up to date, which it still has as they were.
-    const size_t living = memory.size();
-    for (const int u : v.memories)
-        if (!v.in_los[size_t(u)] && v.remembered[size_t(u)]) memory.push_back(u);
-    for (size_t k = v.fallen_seen; k < fallen.size(); ++k) {
-        const size_t i = size_t(fallen[k]);
-        if (side[i] != s && !v.in_los[i] && v.remembered[i]) memory.push_back(int(i));
-    }
-    if (memory.size() > living) std::sort(memory.begin(), memory.end());
     for (int u : own) {
         if (w >= cap) break;
         const size_t i = size_t(u);
@@ -260,6 +268,12 @@ int World::emit_view(int viewer, UnitRecord* out, int cap, float* glob, int comm
     for (int u : allies) {
         if (w >= cap) break;
         common(u, KNOW_LOS, UF_IN_LOS | UF_TYPE_KNOWN);
+    }
+    // The other frame's records from here on: its own side's units, however they're shared out between the two teams, came to
+    // as many as this one's.
+    if (ally_frame && ally_count > w) {
+        std::copy(ally_frame + w, ally_frame + ally_count, out + w);
+        w = ally_count;
     }
     for (int u : seen) {
         if (w >= cap) break;
@@ -418,6 +432,8 @@ void World::team_stats(int t, float* out) const {
     out[1] = float(units);
     out[2] = purses[t].reclaim_income;
     out[3] = float(counting);
+    out[4] = float(metal_dealt[t]);
+    out[5] = float(metal_taken[t]);
 }
 
 }  // namespace zk

@@ -824,6 +824,7 @@ def test_income_comes_from_what_is_finished_alive_and_on_a_spot():
     world.add("staticmex", 0, 1000.0, 1000.0, build=0.5)
     solar = world.add("energysolar", 0, 1100.0, 1000.0)
     commander = world.add(COMMANDER, 0, 1300.0, 1300.0)
+    world.add("cloakcon", 0, 1300.0, 1500.0)        # a builder left when the commander goes: else its team is out (check_vital)
     world.step(1)
     r = world.resources(0)
     assert r["metal_income"] == 2.0 + 2.0 + 4.0 and r["energy_income"] == 2.0 + 2.0 + 6.0, r

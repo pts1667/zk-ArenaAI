@@ -49,6 +49,8 @@ W_DISARM_ONLY, W_MANUAL, W_STOCKPILE, W_UNMODELLED, W_UNLINKED, W_HIGH_ARC, W_BE
 W_IMPACT_ONLY, W_TURRET, W_PARALYZER, W_NO_SELF_DAMAGE, W_NO_AUTO_TARGET, W_NO_FRIENDLY_FIRE, W_SLOW_ONLY, W_AREA_SLOWS = 1, 2, 4, 8, 16, 32, 64, 128
 W_OKP_STATIC_ONLY, W_OKP_FLIGHT, W_OKP_TARGET_SPEED, W_SCRIPT_BURST = 32768, 65536, 131072, 262144
 W_PIERCES, W_ONE_HIT_EACH, W_THROWS, W_BOMB, W_DROPPED = 524288, 1048576, 2097152, 4194304, 8388608
+W_ROCKET, W_BURNBLOW, W_LEAD_ADDED = 16777216, 33554432, 67108864
+ROCKET_TYPES = {"MissileLauncher", "TorpedoLauncher"}       # fly under their own power, as far as their fuel goes
 # Metal and energy per second from the module all new commanders have (dynamic_comm_defs.lua, "econ"); it's not in the unit def.
 # Logged games agree: income less 2 per extractor and solar is 6 and 8, this and the team's innate 2 and 2.
 COMMANDER_ECON = (4.0, 6.0)
@@ -74,8 +76,12 @@ U_CAN_CLOAK, U_STARTS_CLOAKED, U_FIRES_CLOAKED, U_AREA_CLOAK_ON, U_LEAVES_GHOST,
 # bait_prevention_defs.lua: a target whose build time is up to the n-th of these is at bait level n.
 BAIT_COST_BANDS = (10.0, 89.9, 239.9, 419.9)
 # capi.h: how a unit type regards a type of enemy, and how it acts.  From unit_tactical_ai.lua's tables.
-R_SKIRM, R_FLEE, R_IDLE_FLEE, R_HUG, R_FIGHT_ONLY, R_BONUS_RANGE, R_AVOID_HEIGHT = 1, 2, 4, 8, 16, 32, 64
+R_SKIRM, R_FLEE, R_IDLE_FLEE, R_HUG, R_FIGHT_ONLY, R_BONUS_RANGE, R_AVOID_HEIGHT, R_SWARM = 1, 2, 4, 8, 16, 32, 64, 128
 T_HANDLED, T_IDLE_ONLY, T_SKIRM_RADAR, T_SKIRM_EVERYTHING, T_KEEP_ORDER, T_FLEE_EVERYTHING, T_FLEE_RADAR, T_FLEE_COMBAT, T_IDLE_FLEE_COMBAT = 1, 2, 4, 8, 16, 32, 64, 128, 256
+T_LOCAL_JINK, T_CIRCLE_STRAFE = 512, 1024
+T_SELF_VELOCITY, T_WARD, T_STARTS_OFF, T_ALWAYS_JINK = 2048, 4096, 8192, 16384
+WARD_TARGETS = 4                # capi.h
+WARD_MOST_BAIT = 2              # unit_ward_fire.lua: a unit kept from baits above this level doesn't ward
 DEFAULT_BURN_FRAMES = 450.0          # fire_defs.lua
 SLOW_DECLINE_PER_FRAME = 0.04 / FRAMES   # timeslow_defs.lua DEGRADE_FACTOR
 # Weapons that would rather hit something not yet disarmed: the penalty, and the status above which
@@ -202,6 +208,10 @@ def _weapon_record(w: dict, velocity: tuple[float, float, float], alpha: float, 
         flags |= W_THROWS | W_NO_AUTO_TARGET
     if w["type"] == "AircraftBomb":
         flags |= W_BOMB
+    if w["type"] in ROCKET_TYPES:
+        flags |= W_ROCKET
+    if w.get("selfExplode"):
+        flags |= W_BURNBLOW
     # A bomber's fake bomb only marks where it's going: Odin's script blocks it, and Thunderbird's starts its run when it would
     # drop (bomberassault.lua, bomberdisarm.lua).  Thermite falls from the plane, and then burns where it lands.
     if flags & W_BOMB and "fake_weapon" in custom:
@@ -256,6 +266,10 @@ def _weapon_record(w: dict, velocity: tuple[float, float, float], alpha: float, 
         "burn_damage": _custom(w, "burndamage", DEFAULT_BURN_DAMAGE),
         "impulse": _custom(w, "impulse"),
         "gravity": float(w.get("myGravity") or 0.0) or game_gravity,
+        # Weapon.cpp GetLeadVec and MissileProjectile.cpp.  weapondefs_post.lua has set predictBoost where a def didn't.
+        "lead_limit": float(w.get("leadLimit", -1.0)), "predict_boost": float(w.get("predictBoost", 1.0)),
+        "move_error": float(w.get("targetMoveError") or 0.0), "flight_frames": float(w.get("flightTime") or 0.0),
+        "turn_rate": float(w.get("turnRate") or 0.0), "rise": float(w.get("trajectoryHeight") or 0.0), "accurate_leading": 0,
         "kind": _weapon_kind(w), "flags": flags,
         "shield_intercept": int(w["shieldInterceptType"]), "intercepted_by": int(w["interceptedByShieldType"]),
     }
@@ -715,20 +729,43 @@ def _lists(v):
     return [v[k] for k in sorted(v, key=int)] if isinstance(v, dict) else v
 
 
-def _tactics_record(b: dict, unit: dict) -> dict:
-    """One row of unit_tactical_ai.lua's table, after its defaults.  Swarming and ward fire aren't in the sim."""
+def _tactics_record(b: dict, unit: dict, index: dict, speed_buffer: float) -> dict:
+    """One table of unit_tactical_ai.lua's, after its defaults, with what unit_ward_fire.lua reads from it.  The sim has no order
+    for ward fire's button, so it's as the tables start it: on for what fires at shields, and never for the three that fire
+    towards anything once it's turned on (Badger, Firewalker, Kodachi), whose parameters aren't read.  speed_buffer: the unit
+    def's set_target_speed_buffer."""
     # A negative stands for what the table leaves out.
     def num(key: str, default: float = 0.0) -> float:
         return float(b.get(key, default))
     flags = T_HANDLED
-    if b.get("onlyIdleHandling") or not b.get("defaultAIState", 1):
+    if b.get("onlyIdleHandling"):
         flags |= T_IDLE_ONLY
+    if not b.get("defaultAIState", 1):
+        flags |= T_STARTS_OFF
     for key, flag in (("skirmRadar", T_SKIRM_RADAR), ("skirmEverything", T_SKIRM_EVERYTHING), ("skirmKeepOrder", T_KEEP_ORDER),
                       ("fleeEverything", T_FLEE_EVERYTHING), ("fleeRadar", T_FLEE_RADAR), ("fleeCombat", T_FLEE_COMBAT),
-                      ("idleFleeCombat", T_IDLE_FLEE_COMBAT)):
+                      ("idleFleeCombat", T_IDLE_FLEE_COMBAT), ("localJinkOrder", T_LOCAL_JINK), ("circleStrafe", T_CIRCLE_STRAFE),
+                      ("selfVelocityPrediction", T_SELF_VELOCITY), ("alwaysJinkFight", T_ALWAYS_JINK)):
         if b.get(key):
             flags |= flag
+    # With no enemy looked for, such a unit does nothing but jink: the sim's code for it stops there.
+    assert not (flags & T_ALWAYS_JINK) or not (flags & (T_SKIRM_RADAR | T_SKIRM_EVERYTHING | T_FLEE_EVERYTHING | T_FLEE_RADAR)), unit["name"]
+    ward: list[tuple[int, float]] = []
+    if b.get("hasWardFire") and b.get("wardFireDefault"):
+        # Each type it fires towards, with how far past the weapon's range one may be.
+        ward = [(index[n], float(v)) for n, v in (item.split(":") for item in b["wardFireTargetsValues"].split()) if n in index]
+        shield = b.get("wardFireShield")
+        assert isinstance(shield, (int, float)) and not isinstance(shield, bool), unit["name"]
+        assert not any(b.get(k) for k in ("wardFireEverything", "wardFireUnboundedRange", "wardFireRangeOverride", "wardFireTravelVectorAvoid")), unit["name"]
+        assert 0 < len(ward) <= WARD_TARGETS and unit["bait_level"] <= WARD_MOST_BAIT, unit["name"]
+        flags |= T_WARD
     return {
+        "skirm_jink": num("skirmJinkLength"), "skirm_heading_block": num("skirmBlockApproachHeadingBlock", 2.0),
+        "ward_leeway": num("wardFireLeeway", 10.0), "ward_enable_leeway": num("wardFireEnableLeeway", 3.0), "ward_predict": num("wardFirePredict"),
+        "ward_shield": float(b["wardFireShield"]) if ward else -1.0, "ward_height": num("wardFireHeight"), "ward_speed_buffer": speed_buffer,
+        "ward_target": [t for t, _ in ward] + [-1] * (WARD_TARGETS - len(ward)),
+        "ward_range": [r for _, r in ward] + [0.0] * (WARD_TARGETS - len(ward)),
+        "sea": -1, "fight_only": -1, "waterline": 0.0,
         "search_range": num("searchRange", max(unit["max_range"] + 100.0, 800.0)), "idle_push_dist_sq": num("idlePushAggressDistSq"),
         "idle_chase_leeway": num("idleChaseEnemyLeeway"), "idle_commit_dist": num("idleCommitDist"),
         "idle_commit_mult": num("idleCommitDistMult"), "idle_enemy_mult": num("idleEnemyDistMult"),
@@ -741,25 +778,50 @@ def _tactics_record(b: dict, unit: dict) -> dict:
         "skirm_blocked_frames": num("skirmBlockedApproachFrames", -1.0), "vel_pred_chase": num("velPredChaseFactor", -1.0),
         "skirm_keep_leeway": num("skirmKeepOrderLeeway", -1e9), "skirm_only_near": num("skirmOnlyNearEnemyRange", -1.0),
         "my_speed": num("mySpeed", unit["speed"]), "flags": flags, "weapon_num": max(0, int(num("weaponNum", 1.0)) - 1),
+        "max_swarm_range": num("maxSwarmRange"), "min_swarm_range": num("minSwarmRange"), "swarm_leeway": num("swarmLeeway", 50.0),
+        "jink_tangent": num("jinkTangentLength"), "jink_parallel": num("jinkParallelLength"),
+        "jink_away_parallel": num("jinkAwayParallelLength"), "strafe_order_length": num("strafeOrderLength"),
+        "min_circle_strafe": num("minCircleStrafeDistance"), "jink_period": num("jinkPeriod"),
         "blocked_on_fight": 1 if b.get("skirmBlockedApproachOnFight") else 0,
     }
 
 
-def _tactics(units: list[dict], table: dict) -> tuple[list[dict], np.ndarray]:
+def _tactics(units: list[dict], table: dict, raw_units: dict) -> tuple[list[dict], np.ndarray]:
+    """A record for each unit type, and after those the other tables some types have: for the sea (GetUnitBehavior), and against
+    what they engage only on a fight order (fightOnlyOverride).  relations: a row for each record, a column for each type."""
     index = {u["name"]: i for i, u in enumerate(units)}
-    records: list[dict] = []
-    relations = np.zeros((len(units), len(units)), np.uint8)
+    records: list[dict] = [{} for _ in units]
+    behaviours: dict[int, dict] = {}
+
+    def add(row: int, b: dict, u: dict, state) -> None:
+        b = {**b, "defaultAIState": state}
+        # unit_target_on_the_move.lua reads the speed buffer only beside a range buffer.
+        params = raw_units[u["name"]].get("customParams") or {}
+        speed_buffer = float(params.get("set_target_speed_buffer") or 0.0) if params.get("set_target_range_buffer") else 0.0
+        records[row] = _tactics_record(b, u, index, speed_buffer)
+        behaviours[row] = b
+        for key, field in (("sea", "sea"), ("fightOnlyOverride", "fight_only")):
+            other = b.get(key)
+            if isinstance(other, dict) and other:
+                records.append({})
+                records[row][field] = len(records) - 1
+                add(len(records) - 1, other, u, state)
+        if records[row]["sea"] >= 0:
+            # By the unit's height, which for these is the ground's: they walk the sea bed, or go by the ground under them.
+            assert b.get("floatWaterline") or MOVE_CLASS_NAMES[u["move_class"]] == "amph", u["name"]
+            records[row]["waterline"] = float(b.get("waterline", 0.0))
+
     for i, u in enumerate(units):
         b = table.get(u["name"])
-        if not b or b.get("externallyHandled"):
-            records.append({})
-            continue
-        records.append(_tactics_record(b, u))
+        if b and not b.get("externallyHandled"):
+            add(i, b, u, b.get("defaultAIState", 1))
+    relations = np.zeros((len(records), len(units)), np.uint8)
+    for row, b in behaviours.items():
         for key, bit in (("skirms", R_SKIRM), ("flees", R_FLEE), ("idleFlee", R_IDLE_FLEE), ("hugs", R_HUG), ("fightOnlyUnits", R_FIGHT_ONLY),
-                         ("bonusRangeUnits", R_BONUS_RANGE), ("avoidHeightDiff", R_AVOID_HEIGHT)):
+                         ("bonusRangeUnits", R_BONUS_RANGE), ("avoidHeightDiff", R_AVOID_HEIGHT), ("swarms", R_SWARM)):
             for name in (b.get(key) or "").split():
                 if name in index:
-                    relations[i, index[name]] |= bit
+                    relations[row, index[name]] |= bit
     return records, relations
 
 
@@ -793,10 +855,19 @@ def catalog() -> None:
     _air_idle(units, raw_units)
     extras = json.loads((DUMP / "tactics.json").read_text("utf8", "replace"))
     print("scripts read for overkill prevention:", _apply_overkill(units, weapons, raw_units, extras["overkill"]))
+    if "accurate_leading" not in extras:
+        raise SystemExit("the dump has no accurate_leading: run tools/sim_engine.py dump again")
     for w in weapons:
         radar = extras["radar"].get(w["name"]) or {}
         w["radar_wobble_penalty"], w["radar_dot_penalty"] = float(radar.get("wobble", 0.0)), float(radar.get("dot", 0.0))
-    tactics, relations = _tactics(units, extras["tactics"])
+        w["accurate_leading"] = int(extras["accurate_leading"].get(w["name"], 0))
+        # weapon_projectile_retarget.lua's ApplyProjectileLead: by distance over speed, whatever the def's limit.
+        if w["name"] in extras["gadget_lead"]:
+            w["lead_limit"] = -1.0
+            w["flags"] |= W_LEAD_ADDED
+    if not any("wardFireTargetsValues" in b for b in extras["tactics"].values()):
+        raise SystemExit("the dump has no wardFireTargetsValues: run tools/sim_engine.py dump again")
+    tactics, relations = _tactics(units, extras["tactics"], raw_units)
     table = np.full((len(weapons), len(units)), 100.0, np.float32)
     for n, (_, _, row) in priority.items():
         if n in weapon_index:

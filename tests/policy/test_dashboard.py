@@ -153,13 +153,13 @@ class Both:
 def test_a_long_games_units_go_to_pages_of_their_own_and_read_as_one_file_does(tmp_path):
     import policy_sim_env as se
 
-    env = se.SimEnv(1, 5, ["scripts"], units=6, threads=2)      # won by side 0 at 2:16
+    env = se.SimEnv(1, 15, ["scripts"], units=6, threads=2)     # won by side 0 at 4:08
     env.time_limit = 600
     env.begin()
     _play(env, Both(pr.Capture(env, tmp_path / "whole", 1, "eval", "a test"), pr.Capture(env, tmp_path / "paged", 1, "eval", "a test", page_rows=200)))
     whole, paged = _read(tmp_path / "whole" / "game0.json.gz"), _read(tmp_path / "paged" / "game0.json.gz")
     assert "pages" not in whole and len(paged["pages"]) >= 4
-    assert whole["result"] == paged["result"] == {"winner": 0, "how": "eliminated", "seconds": 136.0}
+    assert whole["result"] == paged["result"] == {"winner": 0, "how": "eliminated", "seconds": 248.5}
     assert [t["outcome"] for t in paged["teams"]] == [1.0, -1.0]
     pages = [_read(tmp_path / "paged" / p["file"]) for p in paged["pages"]]
     assert [(p["page"], p["first"], len(p["frames"])) for p in pages] == [(k, p["first"], p["count"]) for k, p in enumerate(paged["pages"])]
@@ -384,19 +384,22 @@ def _rows_by_team(replay: dict, directory: pathlib.Path) -> list[int]:
 def test_the_viewer_reads_format_2_and_format_3_of_two_four_and_eight_teams_paged_or_not(tmp_path, world):
     import policy_sim_env as se
 
-    env = se.SimEnv(1, 5, ["scripts"], units=6, threads=2)      # today's env: two teams, won by team 0 at 2:16
+    env = se.SimEnv(1, 15, ["scripts"], units=6, threads=2)     # today's env: two teams, won by team 0 at 4:08
     env.time_limit = 600
     env.begin()
     _play(env, Both(pr.Capture(env, tmp_path / "two", 1, "eval", "a test"), pr.Capture(env, tmp_path / "paged", 1, "eval", "a test", page_rows=200)))
     for n, ally_of in ((4, [0, 0, 1, 1]), (8, list(range(8)))):
         env = TeamGames(world, _starts(world[1], n), ally_of, seed=3, time_limit=40)
         _play(env, pr.Capture(env, tmp_path / f"teams{n}", 1, "eval", "teams"))
-    old = DATA / "replay_format2.json.gz"         # written by format 2's writer (2026-11-10), from the same game as "two"
+    old = DATA / "replay_format2.json.gz"         # written by format 2's writer (2026-11-10), from such a game as "two" of the sim's then
     files = [old, *(tmp_path / d / "game0.json.gz" for d in ("two", "paged", "teams4", "teams8"))]
     two, paged, old_seen, four, eight = (_viewer_reads(tmp_path, *files)[k] for k in (1, 2, 0, 3, 4))
     assert old_seen["format"] == 2 and two["format"] == 3
     for k in ("kind", "n", "frames", "end", "rows", "deaths", "featureFrames", "alliances", "slot", "marks", "winner", "series", "unitFields"):
-        assert old_seen[k] == two[k] == paged[k], k      # the same game, read the same from either format, paged or not
+        assert two[k] == paged[k], k                     # the same game, read the same paged or not
+    for k in ("kind", "n", "alliances", "slot", "marks", "winner", "unitFields"):
+        assert old_seen[k] == two[k], k                  # the same line-up and winner, read the same from either format
+    assert old_seen["frames"] == 137 and old_seen["series"] == [137, 137] and old_seen["deaths"] > 0 and min(old_seen["rows"]) > 0
     assert two["kind"] == "1v1" and two["alliances"] == [["A", 0, [0]], ["B", 1, [1]]] and two["winner"] == 0 and not two["marks"]
     assert old_seen["teams"] == [["policy", 0, "policy"], ["army script", 1, "script"]]
     assert two["rows"] == _rows_by_team(_read(files[1]), files[1].parent) and two["deaths"] > 0
