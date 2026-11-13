@@ -19,7 +19,7 @@ sys.path.insert(0, str(ROOT / "py"))
 sys.path.insert(0, str(ROOT.parent / "bots"))
 import zknav  # noqa: E402
 from zkbot.policy import rawframe  # noqa: E402
-ABI_VERSION = 25
+ABI_VERSION = 26
 WARD_TARGETS = 4
 MAX_MOUNTS = 8
 MAX_TEAMS = 8                       # players in a game, and so allyteams too
@@ -177,6 +177,7 @@ def _load_library() -> ct.CDLL:
     lib.zk_batch_reset.argtypes = [vp, it, cvp, ct.c_uint64, it, it, ip, it, ip, ip, fp, fp, fp, fp, fp, ip, fp]
     lib.zk_batch_world.restype = vp
     lib.zk_batch_world.argtypes = [vp, it]
+    lib.zk_batch_copy_game.argtypes = [vp, it, it]
     lib.zk_batch_step.argtypes = [vp, ip, it, vp, ip, vp, ip, it, vp, it, ip, fp, fp, vp, it, ip]
     lib.zk_batch_step_begin.argtypes = [vp, ip, it, vp, ip, vp, ip, it, vp, it, ip, fp, fp, vp, it, ip]
     lib.zk_batch_step_wait.argtypes = [vp]
@@ -704,6 +705,14 @@ class Batch:
 
     def set_threads(self, threads: int) -> None:
         _lib.zk_batch_set_threads(self.handle, threads)
+
+    def copy_game(self, src: int, dst: int) -> None:
+        """Game dst becomes a copy of game src as it stands, its random state too (zk_batch_copy_game), and its frames with it."""
+        if self._in_flight is not None:
+            raise RuntimeError("a step is under way: wait for it first")
+        _lib.zk_batch_copy_game(self.handle, src, dst)
+        self.sites[dst] = self.sites[src].copy()
+        self.refresh(dst)
 
     def refresh(self, game: int) -> None:
         """This game's frames, in place, without stepping: after a reset, while the rest of the batch stays as it was."""

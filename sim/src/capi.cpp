@@ -587,6 +587,18 @@ void zk_batch_reset(void* batch, int g, const void* map, uint64_t seed, int beha
 
 void* zk_batch_world(void* batch, int g) { return static_cast<Batch*>(batch)->games[size_t(g)].world.get(); }
 
+// A World holds no pointers but to the catalog's and the map's read-only data, which a copy shares: its own copy is whole.
+void zk_batch_copy_game(void* batch, int src, int dst) {
+    auto* b = static_cast<Batch*>(batch);
+    if (src == dst) return;
+    const Game& from = b->games[size_t(src)];
+    Game& to = b->games[size_t(dst)];
+    to.world = from.world ? std::make_unique<World>(*from.world) : nullptr;
+    std::copy(std::begin(from.commander), std::end(from.commander), std::begin(to.commander));
+    std::copy(std::begin(from.base), std::end(from.base), std::begin(to.base));
+    to.cost = from.cost;
+}
+
 void zk_batch_set_roles(void* batch, const int32_t* role_of_type, int n_types) {
     auto* b = static_cast<Batch*>(batch);
     b->wait();

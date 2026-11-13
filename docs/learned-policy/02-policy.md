@@ -68,13 +68,18 @@ numba, giving the same tensors to the bit as the numpy it replaced.  Without num
   storage, unfinished structures, idle builders and site status.
 * **For the critic only**: up to 256 enemy units the seat can't see (`hidden_*`), nearest the seat's army first.  It was 64
   until 2026-11-11 (the user): a late team game, free-for-all or chicken game has hundreds or thousands hidden.
-* **`FEATURE_VERSION`** (8) is what a saved encoder or actor was trained to read.  Raise it with any change to the tensors'
+* **`FEATURE_VERSION`** (10) is what a saved encoder or actor was trained to read.  Raise it with any change to the tensors'
   meaning.  Loading checks it, and `ENCODER_FEATURE_VERSIONS` lists what an encoder reads alike.  Frame shards store featurized
   tensors, ids included, so a change means collecting frames again.  Version 7 (2026-11-10) resized the id tables for
   free-for-all.  Version 8 (the same day, the user's numbers) raised the caps for long and many-sided games, from 592 unit
   tokens with 256 controllable and 32 features: an 80-minute 1v1 had 656 records in sight on a side and 609 of its own.  So
   every encoder, actor and frame pool from before is invalid, `full-1`'s too.  Version 9 (2026-11-11) is air transports:
   a unit's carried and loaded flags, three kinds, and aircraft among the controllable.  Nothing had been trained at 8.
+  Version 10 (the user, 2026-11-13), found by the C++ port: the DPS sectors are floored, so sector k is the 45 degrees
+  around k pi/4 from +z towards x, as ray k is (truncated, sector 0 had been 90 degrees wide, 4 and 5 22.5, and the -x
+  side's one off from the rays); and the frame is over 80 minutes, the sim's limit (`GAME_FRAMES`), not 20, which ran to 4.
+  On the golden frames only those columns changed, each unit's DPS kept to 6e-7.  `full-2`'s encoder and every actor
+  trained on it read version 9.
 * **Allies** are units like any other in the pool, told apart by their ids: the viewer's allyteam is 0 and its own player 0.
   Only the viewer's own units are controllable.
 * **Golden tests** (`tests/policy/test_golden.py`): 5 live frames and 4 sim frames against reviewed output, at 1e-6.  Rewrite
@@ -163,16 +168,105 @@ target was lost, or it's idle.  This keeps orders steady.
   nearest legal region, fine option or place, and counting what can't be said: 0.35% of orders in `army-6`'s check.  A group
   order is recorded as its anchor's order followed by a `GROUP_MARK` record holding the radius and roles.
 
-## Deployment: C++ inference (planned)
+## Deployment: C++ inference
 
 The bot is to run with nothing to install (the user, 2026-11-12): its inference path in C++, the nets in onnxruntime, and no
 Python, numpy or numba.  onnxruntime builds exist for Windows (x64, ARM64), Linux (x64, ARM64, glibc 2.28 or newer) and macOS
-on Apple Silicon only (1.31.1).  Not started.
+on Apple Silicon only (1.31.1).  The type table, the featurizer and the actions are done (2026-11-13); training doesn't call
+them yet.
 
-* **One featurizer and one map bundle**: the C++ featurizer (now `featurize.py`, `featurize_kernels.py`) and bundle builder
-  (now `terrain.py`, `bundle.py`) are to be the only ones.  Training calls them through ctypes, as it calls libzksim, so what
-  the bot sees can't drift from what the policy learnt on.  Each is checked bit for bit against the Python, on recorded
-  frames and on every pool map, before the Python goes.
+### libzkpolicy
+
+`sim/policy/` (C ABI in `zkpolicy.h`, about 2,300 lines), bit for bit with the Python, which stays the reference:
+
+* **What's in it**:
+  * the type table, read from a flat file (below);
+  * `featurize.py` and `featurize_kernels.py`: a raw frame (`rawframe.hpp`'s records), a map bundle's arrays and the table to
+    every field of `fz.Tensors`, the masks and the critic's hidden units among them;
+  * `actions.py` and `groups.py`: `decode`, `encode`, `fine_point`, `world_positions`, `to_slots`, `to_decision`, and the
+    groups' `bucket` and `expand`.
+
+  Not in it: the bundle builder (a bundle's arrays are handed in), the nets, the decision loop, the engine side.
+* **The type table is a flat file Python writes**, `bots/zkbot/data/policy_table.bin` (444 KB): `tables.TypeTable`'s arrays
+  as the kernels read them (`fz._table_pack`), the roles, the def ids' rows and the names, behind a header with the table's
+  hash.  Not the catalog's JSON with a vendored reader: the table is made by rules (`tables.py`, `catalog.py`, `units.py`:
+  classes, roles, specials, what each plant makes) that C++ would have to repeat and keep in step, where a flat file has one
+  maker and can't drift.  C++ only checks its header and sizes.  `~/zkml/bin/python sim/py/zkpolicy.py table` rewrites it,
+  and `test_zkpolicy.py` fails while it's stale.
+* **How it's the same to the bit**:
+  * numpy's types followed op by op: NEP 50 keeps a Python float with a float32 in float32, and takes a float32 with a
+    float64 or an index to float64.  Its float32 sums are done pairwise as numpy does them (blocks of up to 128, halves split
+    at multiples of 8);
+  * glibc's libm (`log1pf`, `hypotf`, `atan2f`, `log1p`, `hypot`, `sin`, `cos`), which numpy and numba call on this machine
+    (AVX2, so no SVML), built with `-O3 -ffp-contract=off` (no fused multiply-adds);
+  * numpy's orders (NaN last in a sort, lexsorts stable, `argmin` taking the first NaN), x86's float to int (INT_MIN when out
+    of range) and Python's modulo;
+  * two kernels are quicker and give the same: a DPS sector by the sign of a cross product with each boundary, back to
+    `atan2f` within 1e-4 of one (no difference in 10^8 pairs, half of them near boundaries; made for the truncated sectors,
+    which differ from the floored only on the -x side), and a radius test that rules out by squared distance before `hypotf`.
+* **Checked** by `tools/policy_parity.py` on 49,451 frames of `army-7` (corpus and results in `/mnt/d/zk-learned/parity/`):
+  * 311 sides: 80 1v1s, 80 team games, 80 free-for-alls and 71 chicken games;
+  * each side's frames spread over its game, plus its fullest (the caps of 1,280 units, 512 controllable, 512 wrecks and 256
+    hidden all reached) and those with a transport loaded and with plates;
+  * every frame featurized as training does, every 4th with the defaults, and every 4th with all 24 kinds on a copy whose own
+    units are partly made Djinns, beacons and switches, which the scripts never build: 74,254 featurizations, every field
+    to the bit;
+  * the scripts' 157,226 orders encoded and decoded back, and 3.2M orders of random legal decisions decoded and encoded
+    again, of every kind the masks allow (THROW, PUSH, PULL, PLACE_BEACON, WAIT_AT_BEACON, LOAD, UNLOAD and DROP among
+    them), with slots both ways, and 145,074 group expansions.
+
+  No difference, in 76 s on 8 processes; and none again after version 10 and the actions' fixes below (`check-fv10.json`).
+  `tests/policy/test_zkpolicy.py` does the same on the golden frames.
+* **What the port found in the Python, fixed on both sides** (the user, 2026-11-13): the DPS sectors and the frame's scale
+  (version 10, above); a THROW's reach read by `t.unit_name`, which a training game's dropped names
+  (`policy_train._drop_names`) had made unknown, so a Lobster threw at its own feet, now by `true_name` (the binding passes
+  the real names); `fz.fine_point` in float32 (numpy's scalars) where encode's `fine_points` are float64, now float64 both; and
+  encode keeping fields of a unit's earlier order when a later one replaced it, now the last order that can be put, whole.
+  The math library stays as it is: the bits match on glibc's libm on x86-64, so the bot on Windows will need the same.
+* **Speed** (`policy_parity.py speed`: 15,106 frames of 96 sides, featurized as training does, in WSL on the 16-thread CPU
+  while a training job used 5 to 8 of its threads), per frame:
+
+  | Unit tokens (frames) | numba | libzkpolicy |
+  |---|---|---|
+  | 0-127 (5,565) | 0.45 ms | 0.24 ms |
+  | 128-383 (5,194) | 0.90 | 0.51 |
+  | 384-767 (2,871) | 3.0 | 1.7 |
+  | 768-1,280 (1,476) | 11.1 | 5.6 |
+  | all | 2.13 | 1.13 |
+
+  `featurize_many` in batches of 64 frames, a frame: 1.32 ms on 1 thread (1.03 with the buffers kept from batch to
+  batch, which saves the pages' first touch), 0.24 on 8 and 0.19 on 16, which is 11x numba in one process.
+* **Building**: `cmake -S sim -B ~/zksim/build && cmake --build ~/zksim/build -j8` makes `libzkpolicy.so` beside the sim's
+  libraries.  `sim/py/zkpolicy.py` looks for it at `ZKPOLICY_LIB`, else beside `ZKSIM_LIB`, else in `~/zksim/build`.
+* **Calling it** (`import zkpolicy as zp`, from `sim/py`):
+  * `zp.featurize(frame, bundle, table, ...)` is `fz.featurize`'s drop-in: the same `fz.Tensors`, whose arrays are views of
+    one buffer C++ wrote.
+  * `zp.featurize_many([(frame, bundle), ...], table, threads=8, ..., buffers=None)` does many frames on C++ threads with the
+    GIL let go, each into a buffer of its own or the caller's (`zp.bounds` gives their sizes).  The threads are made for
+    the call, so a process can still fork after it.
+  * `zp.decode`, `zp.encode` (of `act.Order`s, or of `zp.ORDER_DTYPE` records), `zp.fine_point`, `zp.world_positions`,
+    `zp.to_slots`, `zp.to_decision`, `zp.bucket` and `zp.expand` are actions.py's and groups.py's.
+  * A table or bundle is copied into the library once and kept on the Python object, remade if its arrays are replaced.
+  * From C or C++: `zkp_table_new` on the file's bytes and `zkp_bundle_new` on a bundle's arrays, then `zkp_bounds` and
+    `zkp_featurize` into the caller's buffers, which hands back each field's offset and shape.  `zkp_decode` and
+    `zkp_encode` take a `zkp_tensors` of those arrays.
+* **Switching training over** (not done):
+  * `policy_train`'s `_worker_chunk` and `_worker_batch`, `policy_clone_train._samples`, `policy_clone_data` and
+    `frame_data` call `zp.featurize_many` or `zp.featurize`, with a worker's buffers kept.  `Player._features` applies
+    `_drop_names` after, as now;
+  * the encoding of the scripts' orders calls `zp.encode`, and rollouts and the clone eval `zp.decode`;
+  * the bundles' handles (`zp._bundle`) are made before workers fork, and `libzkpolicy` is built in `~/zksim/build`;
+  * encoding the scripts' orders from their records, without `se.policy_orders`' Python loop, needs a map from the sim's
+    catalog ids to the table's rows;
+  * C++ threads could take the place of the featurizing processes, with `pm.collate` still in Python.
+* **Still to do**:
+  * the bundle builder (`terrain.py`, `bundle.py`), checked on every pool map;
+  * the nets and the decision loop, and the engine side (below);
+  * a libm of the bot's own: the bits hold against glibc on x86-64 without AVX-512.  Windows' CRT, or numpy with AVX-512's
+    SVML, may differ in the last bit of `log1pf`, `atan2f` and the like, so the bot and training's library should share one.
+
+### The rest
+
 * **The nets in ONNX**: the encoder, the time transformer and one action step, each exported on its own.  The decision loop
   (sampling, masks, up to 16 actions until done, as `policy_model.sample_actions`) is C++, checked against torch on recorded
   decisions.  Attention exports by the `scaled_dot_product_attention` path with a mask, not flex attention: ONNX's
@@ -180,10 +274,10 @@ on Apple Silicon only (1.31.1).  Not started.
 * **The engine side**: first a C++ client of ControllerAI in place of `main.py`, `client.py` and `host.py`.  In the end, a
   native Skirmish AI the engine loads, as it loads CircuitAI, so the bot is one folder in Zero-K's AI directory: its
   library, onnxruntime's and the model files.  The opening and the economy script go with it.
-* **Size**: about 4,900 lines of Python are on the bot's path now: `terrain.py` 1,400, the featurizer 1,100, the raw frame
-  schema 300 (already generated as `sim/include/zksim/rawframe.hpp`), actions and groups 350, the engine glue 650, the unit
-  tables 550.
-* **Order**: the featurizer (which pays in training too), the bundle, the nets and the decision loop, then the engine side.
+* **Size**: of the 4,900 lines of Python that were on the bot's path, the featurizer (1,100) and the actions and groups
+  (350) are ported, and the unit tables (550) are the flat file now.  Left: `terrain.py` 1,400, the raw frame schema 300
+  (already generated as `sim/include/zksim/rawframe.hpp`), the engine glue 650.
+* **Order**: the featurizer and the actions (done), the bundle, the nets and the decision loop, then the engine side.
 
 ## Not yet checked live
 

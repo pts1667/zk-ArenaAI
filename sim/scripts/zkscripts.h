@@ -19,7 +19,7 @@
 extern "C" {
 #endif
 
-#define ZKS_ABI_VERSION 12
+#define ZKS_ABI_VERSION 13
 #define ZKS_MAX_TEAMS 8              /* ZK_MAX_TEAMS: the most teams a game has room for */
 #define ZKS_MOVE_CLASSES 6
 #define ZKS_ROLE_KNOBS 7             /* raid, riot, assault, skirm, arty, aa, snipe: the roles ROLE_ORDER of policy_mix.py has */
@@ -147,6 +147,10 @@ void zks_runner_free(zks_runner* runner);
  *   styles: each team's army script knobs (n_teams zks_style), or NULL for the standard script. */
 void zks_reset(zks_runner* runner, int game, int map, int n_teams, const int32_t* ally_of_team, uint32_t script_teams,
                const double* starts, const double* rally, int economy, int aimer, const uint64_t* seeds, const zks_style* styles);
+
+/* Game dst's seats become copies of game src's as they stand, their random numbers too: zk_batch_copy_game's partner, so that a
+ * copied game's scripts play on as the original's would. */
+void zks_copy_game(zks_runner* runner, int src, int dst);
 
 enum {
     ZKS_SEAT_ARMY = 1,          /* the army script plays this seat */

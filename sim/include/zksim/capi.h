@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define ZK_ABI_VERSION 25
+#define ZK_ABI_VERSION 26
 #define ZK_WARD_TARGETS 4
 #define ZK_MAX_MOUNTS 8
 #define ZK_MAX_TEAMS 8     /* players in a game, and so allyteams too */
@@ -459,6 +459,9 @@ void zk_batch_reset(void* batch, int g, const void* map, uint64_t seed, int beha
                     int n, const int* type, const int* team, const float* x, const float* z, const float* heading,
                     const float* hp_frac, const float* build_frac, const int* commander, const float* base);
 void* zk_batch_world(void* batch, int g);
+/* Game dst becomes a copy of game src as it stands, its random state too: given the same orders the two play the same from
+   here, so that several futures of one moment can be played (a branch).  dst's frame arrays fill at its next step. */
+void zk_batch_copy_game(void* batch, int src, int dst);
 /* zk_world_set_roles for every game, now and after any reset. */
 void zk_batch_set_roles(void* batch, const int32_t* role_of_type, int n_types);
 /* zk_world_set_reveal for every game, now and after any reset. */

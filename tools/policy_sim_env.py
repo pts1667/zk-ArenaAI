@@ -18,6 +18,7 @@ Passing `variants=True` gives each side's army script its own knobs at the start
 """
 from __future__ import annotations
 
+import copy
 import json
 import math
 import pathlib
@@ -82,7 +83,8 @@ CHICKEN_DIFFICULTY_WEIGHTS = {"Very Easy": 1.0, "Easy": 1.0, "Normal": 1.0}
 KEEP_STAT = 3 if zksim.STATS > 3 else 1
 # The reward's terms, by name (03-training.md, "Reward"): PPO's critic has a value head for each one it's given
 # (policy_train.Config.terms).  "blend" is the reward as one number (`reward`), the shaping fading by beta into the result; the
-# rest are its parts and more, apart and unfaded (`reward_terms`).
+# rest are its parts and more, apart and unfaded (`reward_terms`).  GRPO (policy_train.GroupCollector) asks for "income" too,
+# the income balance's level, whose mean over a branch is its economy.
 TERMS = ("blend", "result", "score", "economy", "combat")
 # The terms that are discounted averages, and their horizons in seconds of game: the rest aren't discounted (`term_gamma`).
 TERM_HORIZONS = {"economy": 600.0}
@@ -439,6 +441,17 @@ class SimEnv:
     # the army and economy scripts are C++ (policy_scripts_cpp.py).
     own_scripts = False
 
+    # What a game is, apart from the sim's and the scripts' state: what `copy_game` copies, and what a test checks is all of it.
+    # Arrays whose first axis is the game; lists by game, shared (read-only, or replaced whole) or copied deep; dicts by game and
+    # by seat.  Everything else is the env's own, shared by its games.
+    GAME_ARRAYS = ("waiting", "policy_economy", "last_income", "income_delta", "income_now", "last_combat", "combat_delta",
+                   "lead_rule", "starts", "decisions", "n_teams", "ally", "n_allies", "chickens", "difficulty", "alive", "paying",
+                   "facing", "outcome", "result", "last_raw", "delta", "paid", "speed_paid", "speed_pot", "bonus")
+    GAME_LISTS_SHARED = ("mode", "bundle", "kind", "script_kinds", "styles")
+    GAME_LISTS_OWN = ("seats", "scripts", "known", "game_rng")
+    GAME_DICTS = ("chicken_states", "_units_of")
+    SEAT_DICTS = ("pending", "script_record", "ended")
+
     def __init__(self, games: int, seed: int, modes: list[str], units: int | None = None, threads: int = 16, decide_every: int = 1, maps: list | None = None,
                  weights: np.ndarray | None = None, economy: bool = True, script_threads: int | None = None, variants: bool = False,
                  teams: int | None = None, kinds: dict[str, float] | None = None, difficulties=None):
@@ -480,6 +493,9 @@ class SimEnv:
         self.align = False
         self.slot = 0                       # steps since begin
         self.waiting = np.zeros(games, bool)    # ended, waiting for such a slot to start afresh
+        # Ended games wait, as they are, for the caller to start them afresh (`restart`) or copy another over them (`copy_game`):
+        # GRPO's groups of copies, where one copy's end is no other's (policy_train.GroupCollector).
+        self.hold_ended = False
         # The army script runs for the policy's seats too, only advising: its orders are labels (`army_orders`) and aren't carried out.
         # For learning from what it would have done in the policy's games (DAgger, PPO's cloning loss; 04-literature.md P3, P7).
         self.advise = False
@@ -531,6 +547,9 @@ class SimEnv:
         self.eco_every = max(1, ECO_EVERY // decide_every)
         self.rng = np.random.default_rng(seed)
         self.seed_stream = np.random.SeedSequence(seed)
+        # Each game's own draws while it's played (where a policy's build goes), so that a copy draws as its original does.  New
+        # for each game from `seed_stream`, which leaves `rng`'s draws as they were.
+        self.game_rng = [np.random.default_rng(s) for s in self.seed_stream.spawn(games)]
         self.batch = zksim.Batch(catalog(), games, threads=threads, cap=UNIT_RECORDS, teams=self.slots)
         self.table = tables.table()
         self.script_data = ScriptData(self.table, catalog())
@@ -728,6 +747,7 @@ class SimEnv:
         return starts, known, ally_of, chosen
 
     def _reset(self, g: int) -> None:
+        self.game_rng[g] = np.random.default_rng(self.seed_stream.spawn(1)[0])
         kind = self._draw_kind()
         world_map, bundle, facts = self._draw_map(kind)
         boxes = self._draw_boxes(kind, facts)
@@ -896,12 +916,13 @@ class SimEnv:
         # The point itself if it fits, else the nearest that does, looking further out a ring at a time.
         if fits(x, z):
             return x, z
+        rng = self.game_rng[g]
         for spread in BUILD_SPREADS:
             for _ in range(BUILD_TRIES):
-                px, pz = x + float(self.rng.normal(0.0, spread)), z + float(self.rng.normal(0.0, spread))
+                px, pz = x + float(rng.normal(0.0, spread)), z + float(rng.normal(0.0, spread))
                 if fits(px, pz):
                     return px, pz
-        return ground.site(self.rng, footing, x, z, taken)
+        return ground.site(rng, footing, x, z, taken)
 
     def _placed(self, seat: int, rows: np.ndarray) -> np.ndarray:
         """The policy's BUILD orders put where they fit (`place_build`), and those that fit nowhere dropped.  rows: `sim_orders`'."""
@@ -1110,6 +1131,7 @@ class SimEnv:
         if self.slot % window:
             return
         self.made *= DIVERSITY_DECAY ** window
+        counted = []        # the policy's new units, counted after every game's bonus: a game's mustn't depend on those before it
         for g in range(self.count):
             for side in range(int(self.n_teams[g])):
                 if side == self.chickens[g]:        # nothing they have is made in a factory
@@ -1127,7 +1149,9 @@ class SimEnv:
                     continue
                 self.bonus[g, side] = self.diversity * float(self.rarity(rows).sum())
                 if self._is_policy(g * self.slots + side):
-                    np.add.at(self.made, rows, 1.0)
+                    counted.append(rows)
+        for rows in counted:
+            np.add.at(self.made, rows, 1.0)
 
     def _after_step(self) -> None:
         """Rewards' parts by alliance, and who's out.  An alliance with no team that has a unit keeping it in is out: its teams'
@@ -1282,7 +1306,8 @@ class SimEnv:
         """The reward's terms (TERMS) at the step just taken, by name, each zero-sum over the alliances as `reward` is:
         "blend", `reward` itself; "result", the result and the speed term; "score", the value balance's change and the diversity
         bonus, as `reward` shapes but for income; "economy", the income balance (`_income`) x (1 - its gamma) each step, a discounted average
-        of it, and at the alliance's end the whole level, as if it lasted; "combat", the damage balance's change (`_combat`)."""
+        of it, and at the alliance's end the whole level, as if it lasted; "combat", the damage balance's change (`_combat`);
+        "income", the income balance itself, for GRPO's mean of it over a branch."""
         out = np.zeros(len(names))
         view = self._view(seat)
         if view is None:
@@ -1301,6 +1326,8 @@ class SimEnv:
                 v = self.income_now[g, a] * (1.0 if ended else 1.0 - self.term_gamma(name))
             elif name == "combat":
                 v = self.combat_delta[g, a]
+            elif name == "income":
+                v = self.income_now[g, a]
             else:
                 raise ValueError(f"no reward term {name!r}: {TERMS}")
             out[i] = sign * v
@@ -1309,7 +1336,12 @@ class SimEnv:
     def term_gamma(self, name: str) -> float:
         """A term's discount a step of this env (TERM_HORIZONS), 1 for those not discounted."""
         horizon = TERM_HORIZONS.get(name)
-        return 1.0 if horizon is None else math.exp(-self.ticks * zksim.TICK_FRAMES / zksim.FRAMES_PER_SECOND / horizon)
+        return 1.0 if horizon is None else math.exp(-self.seconds_a_step / horizon)
+
+    @property
+    def seconds_a_step(self) -> float:
+        """The game time a step plays."""
+        return self.ticks * zksim.TICK_FRAMES / zksim.FRAMES_PER_SECOND
 
     def _view(self, seat: int) -> tuple[int, int, float] | None:
         """A seat's game, the alliance whose balances its reward reads, and the sign it reads them with: at two alliances
@@ -1331,19 +1363,51 @@ class SimEnv:
         div = bonus[a] - sum(bonus[b] for b in them) / max(len(them), 1)
         return float(self.delta[g, a] + div + (self.income_weight * self.income_delta[g, a] if income else 0.0))
 
+    def copy_game(self, src: int, dst: int) -> None:
+        """Game dst becomes a copy of game src as it stands, to play on from there as src would given the same orders: a branch,
+        for training from several futures of one moment.  The sim's state and its random numbers (zksim.Batch.copy_game), the
+        scripts' (policy_scripts_cpp.Scripts.copy_game), and this env's (GAME_ARRAYS and the rest).  Between steps, once
+        `finished_seats` has been read.  The policy's own memory of the seats is the caller's."""
+        assert not self.done and not self._replace, "read finished_seats first"
+        if src == dst:
+            return
+        self.batch.copy_game(src, dst)
+        if self.cpp is not None:
+            self.cpp.copy_game(src, dst)
+        for name in self.GAME_ARRAYS:
+            a = getattr(self, name)
+            a[dst] = a[src]
+        for name in self.GAME_LISTS_SHARED:
+            getattr(self, name)[dst] = getattr(self, name)[src]
+        for name in self.GAME_LISTS_OWN:
+            getattr(self, name)[dst] = copy.deepcopy(getattr(self, name)[src])
+        keys = [(src, dst)]
+        for names, pairs in ((self.GAME_DICTS, keys), (self.SEAT_DICTS, [(src * self.slots + t, dst * self.slots + t) for t in range(self.slots)])):
+            for name in names:
+                d = getattr(self, name)
+                for a, b in pairs:
+                    if a in d:
+                        d[b] = copy.deepcopy(d[a])
+                    else:
+                        d.pop(b, None)
+
     def finished_seats(self) -> list[tuple[int, str, float]]:
         """Seats whose game just ended, or whose alliance went out of it.  The call also starts the ended games afresh, so read the
-        reward first; with `align`, they start at the next slot that act_every divides, and wait ended till then."""
+        reward first; with `align`, they start at the next slot that act_every divides, and wait ended till then; with
+        `hold_ended`, they wait for the caller."""
         out = self.done
         if self._replace:
             self.waiting[self._replace] = True
-        if not self.align or self.slot % self.act_every == 0:
+        if not self.hold_ended and (not self.align or self.slot % self.act_every == 0):
             for g in np.flatnonzero(self.waiting):
-                g = int(g)
-                self._new_teams(g)
-                self._reset(g)
-                self.batch.refresh(g)
-                self._rebase(g)
-            self.waiting[:] = False
+                self.restart(int(g))
         self._replace, self.done = [], []
         return out
+
+    def restart(self, g: int) -> None:
+        """Game g afresh, now: a new game drawn as every game is.  With `align`, at a slot that act_every divides."""
+        self._new_teams(g)
+        self._reset(g)
+        self.batch.refresh(g)
+        self._rebase(g)
+        self.waiting[g] = False

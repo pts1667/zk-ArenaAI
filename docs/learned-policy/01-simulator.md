@@ -16,8 +16,8 @@ This builds three libraries in `~/zksim/build` (`ZKSIM_LIB` overrides where they
 
 | Library | What | Python side |
 |---|---|---|
-| `libzksim.so` | the sim (`sim/src`, `sim/include/zksim`, C ABI in `capi.h`, ABI 25) | `sim/py/zksim.py` (`Batch`), `sim/py/zknav.py` (routes) |
-| `libzkscripts.so` | the army and economy scripts (`sim/scripts`, `zkscripts.h`, ABI 12) | `tools/policy_scripts_cpp.py` |
+| `libzksim.so` | the sim (`sim/src`, `sim/include/zksim`, C ABI in `capi.h`, ABI 26) | `sim/py/zksim.py` (`Batch`), `sim/py/zknav.py` (routes) |
+| `libzkscripts.so` | the army and economy scripts (`sim/scripts`, `zkscripts.h`, ABI 13) | `tools/policy_scripts_cpp.py` |
 | `libzkrecord.so` | the game recorder (`sim/record`, `zkrecord.h`, ABI 2), needs `libzstd-dev` | `sim/py/zkrecord.py` |
 
 `sim/include/zksim/rawframe.hpp` is generated from `bots/zkbot/policy/rawframe.py` (`python tools/policy_schema.py`), and a test
@@ -34,6 +34,16 @@ compares the two.  The game around the sim (starts, scripts, rewards, the policy
   (`test_batch_threads.py`).  `zk_batch_step_begin` / `zk_batch_step_wait` let the caller work while the sim steps, and
   `zk_batch_set_threads` changes the pool.
 * Each game has its own random generator, seeded by the seed and the game's index.  Sums run in handle order.
+* **A game can be copied** into another of the batch's slots as it stands, its random state too (`zk_batch_copy_game`,
+  `Batch.copy_game`; ABI 26, 2026-11-13): given the same orders, the copy and its original play on the same, bit for bit,
+  so several futures of one moment can be played (GRPO's branches, 03-training.md).  A `World` holds no pointers but to the
+  catalog's and the map's read-only data, so a plain copy of it is whole.  The scripts' seats copy the same way
+  (`zks_copy_game`, libzkscripts ABI 13), and `SimEnv.copy_game` copies the rest of a game: what it is is declared in its
+  `GAME_ARRAYS`, `GAME_LISTS_*`, `GAME_DICTS` and `SEAT_DICTS`, and a test fails on any per-game field they leave out.  A
+  game's own draws while it's played (where the policy's builds go) come from its own generator, `game_rng`, and the
+  diversity bonus is counted the same whatever order the games come in, so a copy's play doesn't depend on its slot.
+  `test_sim.py` and `test_sim_env.py` play a copy and its original 360 steps on with the same orders, mid-fight, and
+  compare every record, stat and reward; leaving out any one part of the copy fails them.
 * Fog goes out from each allyteam's own units.  The spatial grid is split by allyteam, and a tick allocates nothing.  What a
   tick costs follows the units alive, not every unit there has been: an 80-minute 1v1 steps in 142 µs a game.
 

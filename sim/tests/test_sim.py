@@ -726,6 +726,33 @@ def test_a_refreshed_game_gets_its_frames_where_they_belong():
     assert np.array_equal(batch.records[0, 0], before[0]) and np.array_equal(batch.records[2, 1], before[1])
 
 
+@pytest.mark.parametrize("threads", (1, 4))
+def test_a_copied_game_plays_on_as_its_original_given_the_same_orders(threads):
+    """Batch.copy_game mid-fight, shots in the air and fires burning, into a slot that held another game: given the same orders,
+    the copy's frames and stats are the original's to the bit, step after step."""
+    batch = zksim.Batch(CAT, 3, threads=threads)
+    for g in range(3):
+        batch_game(batch, g, 50 + g, FLAT)
+    fight = np.zeros(3 * 60, zksim.ORDER_DTYPE)
+    for g in range(3):
+        for u in range(60):
+            fight[g * 60 + u] = (u, zksim.ORDER_FIGHT, 2000.0, 2000.0, -1)
+    batch.step(fight, np.arange(4, dtype=np.int32) * 60)
+    for _ in range(40):
+        batch.step()
+    batch.copy_game(0, 2)
+    mover = int(batch.records[0, 0, 0]["uid"])              # one of side 0's own, alive
+    turn = np.zeros(2, zksim.ORDER_DTYPE)
+    turn[:] = (mover, zksim.ORDER_MOVE, 600.0, 3400.0, -1)   # to games 0 and 2 alike
+    for k in range(150):
+        batch.step(turn, np.array([0, 1, 1, 2], np.int32)) if k == 10 else batch.step()
+        for team in (0, 1):
+            n = int(batch.counts[0, team])
+            assert n == batch.counts[2, team] and batch.records[0, team, :n].tobytes() == batch.records[2, team, :n].tobytes(), (k, team)
+        assert np.array_equal(batch.stats[0], batch.stats[2]) and np.array_equal(batch.globs[0], batch.globs[2]), k
+    assert batch.stats[0, :, 5].sum() > 0, "they fought"
+
+
 def test_a_batch_step_fills_frames_for_both_sides():
     batch = zksim.Batch(CAT, 2, threads=2)
     batch_game(batch, 0, 7, FLAT)

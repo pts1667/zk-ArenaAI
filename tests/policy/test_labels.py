@@ -82,15 +82,22 @@ def test_what_decoding_makes_reads_back_as_the_same_choices():
 def test_a_place_anywhere_becomes_the_nearest_the_unit_could_go():
     t, bundle = next(_frames(1, 5))
     x, z = actions.world_positions(t, bundle)
-    i = next(i for i in range(t.controllable) if t.kind_mask[i, rf.FIGHT])
+    i = next(i for i in range(t.controllable) if t.kind_mask[i, rf.FIGHT] and t.kind_mask[i, rf.STOP])
     target = (float(bundle.centre[3, 0]) + 37.0, float(bundle.centre[3, 1]) - 21.0)
-    back, missed = actions.encode([actions.Order(int(t.uids[i]), rf.FIGHT, *target)], t, bundle, x, z)
+    fight = actions.Order(int(t.uids[i]), rf.FIGHT, *target)
+    back, missed = actions.encode([fight], t, bundle, x, z)
     assert missed == 0 and back.kind[i] == rf.FIGHT
     points = actions.fine_points(t, bundle)
     best = np.hypot(points[..., 0] - target[0], points[..., 1] - target[1])
     best[~t.ptr_region[i]] = np.inf
     assert np.isclose(np.hypot(*(points[back.region[i], back.fine[i]] - target)), best.min())
     assert (back.kind[np.arange(t.controllable) != i] == rf.KEEP).all()
+    # A later order to the unit replaces it whole, nothing of it left (until 2026-11-13 its region stayed); one that can't be put
+    # leaves it.
+    later, _ = actions.encode([fight, actions.Order(int(t.uids[i]), rf.STOP)], t, bundle, x, z)
+    assert later.kind[i] == rf.STOP and later.region[i] == later.fine[i] == -1
+    kept, missed = actions.encode([fight, actions.Order(int(t.uids[i]), rf.ATTACK_UNIT, target=10**6)], t, bundle, x, z)
+    assert missed == 1 and (kept.kind[i], kept.region[i], kept.fine[i]) == (rf.FIGHT, back.region[i], back.fine[i])
 
 
 def test_what_the_policy_cannot_say_is_counted_and_kept():

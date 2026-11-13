@@ -34,7 +34,7 @@ def legal(t, i=0):
 def test_order_memory_keeps_its_width_when_the_policy_gains_kinds():
     """Frames on disk and encoders trained on them have 16 slots."""
     assert rf.ORDER_SLOTS == 16 and rf.KIND_COUNT > rf.ORDER_SLOTS
-    assert fz.UNIT_DIM == 129 and fz.FEATURE_VERSION == 9
+    assert fz.UNIT_DIM == 129 and fz.FEATURE_VERSION == 10
 
 
 def test_the_facts_come_from_the_generated_data(table):
@@ -263,6 +263,11 @@ def test_a_throw_past_its_reach_goes_as_far_as_it_can_the_same_way(small_map, ta
     assert np.hypot(order.x - ux[i], order.z - uz[i]) == pytest.approx(620.0 * actions.THROW_SHORT, abs=0.1)
     to = small_map.centre[region] - np.array((ux[i], uz[i]))
     assert abs((order.x - ux[i]) * to[1] - (order.z - uz[i]) * to[0]) < 1.0 * float(np.hypot(*to))     # the same line, to an elmo
+    # A training game's dropped names (policy_train._drop_names) don't change it: the reach is the real one's.  Until 2026-11-13
+    # it went by the dropped name, and the Lobster threw at its own feet.
+    t.true_name, t.unit_name = t.unit_name, np.zeros_like(t.unit_name)
+    dropped = next(o for o in actions.decode(decide(t, kind=kind, region=chosen, fine=fine), t, small_map, ux, uz) if o.uid == 1)
+    assert (dropped.x, dropped.z) == (order.x, order.z)
 
 
 # Torch ---------------------------------------------------------------------------------------------------------------------------------------------------

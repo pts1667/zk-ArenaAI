@@ -481,6 +481,12 @@ zks_runner* zks_runner_new(const zks_data* data, int games, int threads, int tea
 
 void zks_runner_free(zks_runner* runner) { delete runner; }
 
+// A seat's pointers are to the shared data and map, and to the frames of its last step, which the next one fills afresh.
+void zks_copy_game(zks_runner* r, int src, int dst) {
+    if (src == dst) return;
+    for (int t = 0; t < r->teams; ++t) r->seat(dst, t) = r->seat(src, t);
+}
+
 void zks_reset(zks_runner* r, int game, int map, int n_teams, const int32_t* ally_of_team, uint32_t script_teams, const double* starts,
                const double* rally, int economy, int aimer, const uint64_t* seeds, const zks_style* styles) {
     const Ground* g = r->data->maps[map].get();

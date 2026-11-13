@@ -154,7 +154,7 @@ The first whole run on the variety work, started by me while the user slept:
 
 The user asked for it before the next whole run.  All of it is in the tree and described in `docs/learned-policy/`:
 
-* **Teams**: the sim, the scripts and the recorder take up to 8 teams in alliances (libzksim ABI 25, libzkscripts ABI 12,
+* **Teams**: the sim, the scripts and the recorder take up to 8 teams in alliances (libzksim ABI 25, libzkscripts ABI 12 then,
   libzkrecord ABI 2, clone data version 7).  A 1v1 plays bit for bit as it did.  Allies share income, overdrive and overflow.
 * **Kinds of game**: `SimEnv`, the recorder, the clone eval, the trainer and the pipeline all take `--kinds` (default
   `1v1:0.5 teams:0.2 ffa:0.2 chicken:0.1`), `--slots`, `--test-kinds` and `--chicken-difficulties`.  The policy plays team 0
@@ -199,12 +199,15 @@ maps (2026-11-11): aircraft controllable by the policy (one line in `featurize_k
 waiting for the rest of the wing); and Zero-K's "special" mark counting as no kind of game, which makes Requiem Outpost
 a chicken map.
 
-## Invalid since 2026-11-10 (FEATURE_VERSION 7, now 9)
+## Invalid since 2026-11-10 (FEATURE_VERSION 7, now 10)
 
 The id tables were resized for free-for-all (version 7: `featurize.MAX_PLAYERS` 64, `MAX_ALLY_TEAMS` 8), then the caps were
-raised (version 8), then air transports came (version 9, 2026-11-11).  Nothing was trained at 7 or 8.  So:
+raised (version 8), then air transports came (version 9, 2026-11-11), then the DPS sectors were made even and the frame put
+over 80 minutes (version 10, the user, 2026-11-13).  Nothing was trained at 7, 8 or 10.  So:
 
-* **no encoder or actor loads**: `runs/full-1`'s among them, and `runs/encoder-big`, every clone, `spo-1`;
+* **no encoder or actor loads**: `runs/full-2`'s (trained at 9: its encoder, clone, DAgger rounds and PPO) and
+  `runs/grpo-trial`'s, `runs/full-1`'s, `runs/encoder-big`, every clone, `spo-1`.  The GRPO trial's PPO arm runs from a copy
+  of the code at 9 (`grpo-trial/code`);
 * frame pools were stored featurized, so none is left (`frames/pool4` and `pool5` are deleted; `full-1/frames` is rejected).
 
 The recorded games (`clone/army-6`, its `z.npz`) are raw and still read (data version 6).  But they're 1v1s by the scripts as
@@ -221,7 +224,7 @@ tool that loads an actor needs `--encoder`.
 * **WSL (Ubuntu)** runs the sim and training: `~/zkml/bin/python` (PyTorch, RTX 4070, pytest-xdist), with pytest in
   `~/zksim/pt`.  So `PYTHONPATH=$HOME/zksim/pt:bots`.
 * **The sim's libraries**: `cmake -S sim -B ~/zksim/build && cmake --build ~/zksim/build -j8`.  That builds `libzksim.so`,
-  `libzkscripts.so` and `libzkrecord.so` (`ZKSIM_LIB` overrides).  The recorder needs `libzstd-dev`.  Rebuild after any change
+  `libzkscripts.so`, `libzkrecord.so` and `libzkpolicy.so` (`ZKSIM_LIB` and `ZKPOLICY_LIB` override).  The recorder needs `libzstd-dev`.  Rebuild after any change
   under `sim/`.
 * **`sim/data/rules.json`** is made by `tools/sim_rules.py`, which needs `lupa`.  It's only in `~/zksim/agent-maps-lupa`
   (add it to `PYTHONPATH`), not in `~/zkml`.
@@ -294,7 +297,7 @@ report, and the same command resumes it.
 `--encoder` is needed by every tool that loads an actor until `policy_latent.ENCODER` names a new encoder: its default is
 `encoder-big`, which no longer loads.
 
-**The tests** (801 pass, 3 more need CUDA and are skipped without it): `pytest.ini` runs them on 8 processes, a file's tests in
+**The tests** (819 pass, 3 of them need CUDA and are skipped without it): `pytest.ini` runs them on 8 processes, a file's tests in
 one process so that what they share is made once, and `tests/policy/conftest.py` keeps each process's maths to one thread.
 That took the suite from 211 s to about 60 (2026-11-11), with the slowest learning runs cut down and those of paths the
 pipeline doesn't use removed: the variational encoder's fits, checkpoints from before feature version 7, the trainer's
@@ -307,20 +310,26 @@ README.md has the rules for engine games: headless at max speed, windowed only w
 
 ## Next
 
-1. **GRPO from branched games** (the user, 2026-11-13, after `full-2`'s PPO got worse), in place of PPO's critic:
-   * A. copy a game in the sim and the scripts (`zk_batch_copy_game`, the scripts' seats), with identity tests: a copy and
-     its original, given the same orders, stay the same;
-   * B. copy a game in `SimEnv` from a registry of its per-game state, with a test that nothing per game is left out of it,
-     and the seat's actor memory with it;
-   * C. GRPO: a trunk game is copied at a random decision every 1-3 minutes into a group of 8 that plays 2 minutes, then
-     the copies go and the trunk plays on.  Each branch is scored by the terms at the end (value balance, income over the 2
-     minutes, damage balance, the result if it ended), weighed as `--terms`; its advantage is (score - mean) / std of its
-     group, with no critic.  Copies keep the world's random state, so only the policy differs.  First from `full-2`'s DAgger
-     actor; record and clone anew only if that trial says the old clone doesn't fit the new sim.  Checked against PPO from
-     the same actor on 64 1v1s.
-2. **The bot's inference in C++** (02-policy.md, "Deployment"), by an agent in parallel: the type table, the featurizer and
-   the actions in a C++ library that training calls through ctypes, bit for bit with the Python before the Python goes;
-   then the map bundle.  The nets in ONNX not for now (the user, 2026-11-13).
+1. **GRPO from branched games** (the user, 2026-11-13, after `full-2`'s PPO got worse), in place of PPO's critic: a game
+   copies in the sim and the scripts (libzksim ABI 26, libzkscripts ABI 13) and in `SimEnv` (01-simulator.md, "The batch"),
+   and `policy_train.py --group 8` trains by GRPO (03-training.md, "GRPO from branched games").  **The trial**
+   (`/mnt/d/zk-learned/runs/grpo-trial`, at FEATURE_VERSION 9), from `full-2`'s DAgger actor, which won 9.4% of 64 1v1s on
+   the sim as it is now: GRPO won 14.1%, 15.6% and 14.1% at iterations 25, 50 and 75, PPO 6.2%, 7.8% and 20.3%.  The user
+   stopped it at PPO's 75th, its results not needed.  At 64 games a test it says no more than that neither fell; GRPO
+   played 1.5-2.5x as fast (no critic).  The next run (item 3) records and clones anew at FEATURE_VERSION 10 anyway.
+2. **The bot's inference in C++** (02-policy.md, "Deployment"; the nets in ONNX not for now, the user, 2026-11-13).
+   Built and checked, not yet used: `libzkpolicy` (`sim/policy/`, `zkpolicy.h`, binding `sim/py/zkpolicy.py`,
+   table file `bots/zkbot/data/policy_table.bin`, written by `python sim/py/zkpolicy.py table`) has the type table, the
+   featurizer and the actions.
+   * Parity: bit for bit with the Python over 49,451 frames of the four kinds (`tools/policy_parity.py`, results in
+     `/mnt/d/zk-learned/parity/`).  Speed: 1.13 ms a frame against numba's 2.13, and 0.19 ms on 16 threads.
+   * Next: training's featurizing (`_worker_chunk`, `_worker_batch`, cloning's samples, frame data) and the orders'
+     encoding and decoding through it, after the GRPO trial; then the map bundle.
+   * What it found in the Python is fixed on both sides, the user asked (2026-11-13): the DPS sectors even and the frame
+     over 80 minutes (`FEATURE_VERSION` 10), a Lobster's throw by its real name (it threw at its own feet when a training
+     game dropped its name), decode's fine point in float64 as encode's, and encode's last order whole.  Parity held after
+     (`/mnt/d/zk-learned/parity/check-fv10.json`).  Left: the bits match on glibc's libm only, so the bot on Windows will
+     need the same.
 3. **Run the pipeline again whole** (the user starts it): record the scripts' games with the new economy and the new kinds
    of game into a new `--data`, collect frames, train an encoder, clone, DAgger, PPO.  Before it: a small smoke run of the
    whole pipeline hasn't been done since the variety work (only `--dry-run`, the suite, and each stage's own tests), and
@@ -342,10 +351,8 @@ README.md has the rules for engine games: headless at max speed, windowed only w
 
 ## Traps
 
-* **Leftover build directories**: `~/zksim/build` is the one in use (libzksim ABI 25 since the builder rule, 2026-11-13, so one built
-  before that needs rebuilding, and libzkscripts with it: it reads the stats by their width, and its own number didn't
-  change; libzkscripts ABI 12, libzkrecord ABI 2,
-  rebuilt 2026-11-11).  The `build-*` and `agent*` directories beside it are leftovers of comparisons and of agents' tree
+* **Leftover build directories**: `~/zksim/build` is the one in use (libzksim ABI 26 and libzkscripts ABI 13 since a game
+  could be copied, 2026-11-13; libzkrecord ABI 2).  One built before that needs rebuilding.  The `build-*` and `agent*` directories beside it are leftovers of comparisons and of agents' tree
   copies, safe to delete, except `agent-maps-lupa` (above).
 * **Memory**: check `wsl free -g` before a launch.  Never run two jobs that load the map pool at once.  Every GPU trainer caps
   itself at 85% of the card (`--gpu-memory`): past the card, the Windows driver spills into system RAM instead of failing.

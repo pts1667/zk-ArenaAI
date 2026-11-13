@@ -50,8 +50,9 @@ a process of its own.  So no two stages load the map pool at once, and each hand
 * **Times** (`full-1`, 2026-11-10): frames 15 minutes, the encoder 74, cloning 6.2 hours (1,528 decisions a second), each round
   25-32 minutes of recording and 18 of fine-tuning, the eval 7.  PPO: see "Speed".
 
-**Until a new encoder exists, run with `--train-encoder`.**  `FEATURE_VERSION` 9 (air transports; 8 was the raised caps, 7
-64 players and 8 allyteams) made every encoder, clone and frame pool unloadable, `full-1`'s among them, so the pipeline has to collect fresh
+**Until a new encoder exists, run with `--train-encoder`.**  `FEATURE_VERSION` 10 (even DPS sectors and the frame over 80
+minutes, 2026-11-13; 9 was air transports, 8 the raised caps, 7 64 players and 8 allyteams) made every encoder, clone and
+frame pool unloadable, `full-1`'s and `full-2`'s among them, so the pipeline has to collect fresh
 frames (51 GB at the old caps, by the same recipe) and train an encoder on them.  The scripts changed as well, and play new
 kinds of game, so give `--data` a new directory: the `record` stage fills it.
 
@@ -496,6 +497,55 @@ every seat that decides.
   holding the shape before while capturing the next.  So a shape narrower than the widest now goes before the next capture.
   With 4 at 1.0 the learner keeps about 4.6.  With `--concurrent` they collect the next iteration while this one trains.
 
+### GRPO from branched games (`--group`)
+
+The user asked for it on 2026-11-13, after `full-2`'s PPO got worse over its 4M decisions ("What the earlier runs showed").
+A critic of a long, noisy game has to learn the whole game's value before its advantages mean anything.  GRPO (Shao et al.
+2024) has none: it plays several futures of the same moment and compares them, so the moment's value cancels out.  For that
+the sim copies games (01-simulator.md, "The batch").
+
+* **Groups.**  With `--group G` the games go in groups of G (8), each group's games copies of one game, with what the actor
+  kept of each seat (its history and its name map), which the policy then plays on apart.  Copies keep the world's random
+  state, so only the policy's choices differ between them, and the scripts', which follow from those.
+* **Stretches.**  A group plays a stretch of game time drawn evenly from `--horizon` (60 to 180 s: 2 minutes on average, and
+  where in a game the stretches start varies).  Each seat's stretch in each game is a branch.  Then one of the group's games
+  still going for the policy, drawn at random, is copied into the rest for the next stretch; when none is, a new game is
+  started and copied.  So every decision played is learnt from, the games go on as the policy plays them, and no game in a
+  group waits but one that ended (`SimEnv.hold_ended`), until its stretch is over.  This is the plan's "a trunk copied into
+  a group" with the trunk a branch drawn after each stretch, rather than a ninth game that's only played on.
+* **Scores.**  A branch's score is its terms over the stretch (`--terms`, as PPO's): `result` and `score` and `combat` their
+  sums over it (the result only if its game or its alliance ended in it), and `economy` the mean of the income balance over
+  it, what it earned against the other branches.  They're weighed by `--terms`' weights.
+* **Advantages.**  A branch's advantage is its score less its group's mean, over its group's spread (Dr. GRPO, Liu et al.
+  2025, drops the spread: `--no-group-std`), and each of its decisions takes it.  The branches of each seat are compared
+  only with the same seat's in the group's other games.  A seat whose branches all scored the same is dropped
+  (`branches_dropped`).  The update is PPO's (SPO's loss, the KL to the clone, the cloning loss), with no value loss.
+* **A collection** stores decisions only of branches that have been judged: a branch still being played at its end goes to
+  a later one, its decisions played by the weights of their time, as concurrent collection's are.
+* **The learner has no critic**, nor do the collectors, the checkpoints or the moving average.  A run can't go between PPO and
+  GRPO; another can start from its actor (`--init`).
+* **Metrics**: `branches`, `branches_dropped`, `new_games`, `branch_decisions` (a branch's on average), and `group_spread`,
+  a group's spread of weighed scores on average, with each term's (`group_spread_result` and so on).  No explained variance.
+* **Checked** by `test_grpo_judges_each_branch_of_a_copied_game_against_the_other_and_trains_with_no_critic`: in a group of
+  two, each stretch's branches start from the same frame and the same kept history, and every advantage is +1 or -1.
+  Leaving out the copy of the game or of the actor's memory fails it.
+* **An iteration** ends when its decisions are in and its groups' stretches have ended, so it holds more than `--iteration`
+  (4,768 at first against 4,096), and a run reaches `--decisions` in fewer iterations than PPO.
+* **The trial** (2026-11-13, `runs/grpo-trial`, at FEATURE_VERSION 9): from `full-2`'s DAgger actor, which won 9.4% of 64
+  1v1s on the sim as it is now, with the pipeline's PPO flags and `full-2`'s, 8 groups of 8 in 4 collectors, tested every
+  25 iterations on 64 1v1s:
+
+  | Iteration | GRPO | PPO |
+  |---|---|---|
+  | 25 | 14.1% | 6.2% |
+  | 50 | 15.6% | 7.8% |
+  | 75 | 14.1% | 20.3% |
+
+  The user stopped it there.  At 64 games a test (a standard error of about 4.5 points) it says that neither fell, not which
+  learns faster.  GRPO played 150-265 decisions a second overall against PPO's 105, having no critic to run.  In GRPO's
+  first minutes the groups' scores spread most in the damage balance (0.062, against 0.011 for value and 0.006 for
+  income), and its orders moved from FIGHT towards MOVE (MOVE 6% of them at iteration 25, 47% at 75).
+
 ## Speed
 
 * **Cloning** runs at 1,326-1,462 decisions a second with 15 workers.  The GPU alone would take 2,450: 157 ms for 8 stretches
@@ -621,5 +671,4 @@ every seat that decides.
 | `torch.compile` in PPO | No speed-up, and a hang after a recompile | (in cloning, `--compile dynamic` adds 13%: "Speed") |
 | The age bias as flex attention's score_mod | 2.4x slower than dense: its gradient came a pair of tokens at a time | `TimeBlock.bias_dims` instead |
 | Linear attention (DeltaNet and others) for memory | The gain was from dropping memory, not from linear attention | |
-| GRPO (no critic) | It needs branching the sim, costs the group size in collection, and loses the privileged critic | |
 | GaLore | Optimizer state was 0.6% of memory: activations dominate | |

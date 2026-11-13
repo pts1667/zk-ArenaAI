@@ -325,3 +325,34 @@ def test_a_game_that_ends_forgets_its_frames(encoder_path):
     seats.seen += 1.0
     seats.clear(0)
     assert float(seats.history[0].abs().sum()) == 0.0 and float(seats.seen[0].sum()) == 0.0 and float(seats.seen[1].sum()) > 0.0
+
+
+def test_grpo_judges_each_branch_of_a_copied_game_against_the_other_and_trains_with_no_critic(tmp_path, encoder_path, monkeypatch):
+    """A group of two games: each stretch's two branches start from the same frame and what the actor kept, and with two, every
+    decision's advantage is +1 or -1, its branch's score above the other's or below."""
+    cfg = _config(encoder_path, games=2, group=2, horizon=(5.0, 10.0), terms=(("result", 1.0), ("score", 0.5), ("economy", 0.3), ("combat", 0.3)))
+    env = pt.make_sim(cfg.games, cfg.seed)
+    learner = pt.Learner(cfg, tmp_path, pt.DataWorkers(0, env.bundles(), cfg.enabled_kinds), "cpu")
+    assert learner.critic is None
+    opened = {}
+    real_open = pt.GroupCollector._open
+
+    def spy(self, seat):
+        real_open(self, seat)
+        opened.setdefault((self.env.slot, seat % self.env.slots), []).append((self.env.frame(seat).units.copy(), self.current[seat].history.copy()))
+
+    monkeypatch.setattr(pt.GroupCollector, "_open", spy)
+    segments, tally = pt.GroupCollector(learner, env, np.random.default_rng(1)).collect_tally(40)
+    assert tally.stored == sum(len(seg.steps) for seg in segments) >= 40 and tally.groups["branches"] >= 4
+    assert np.allclose(np.abs([s.advantage for seg in segments for s in seg.steps]), 1.0)
+    stretches = sorted(opened)
+    assert len(stretches) >= 2 and all(len(opened[k]) == 2 for k in stretches)
+    for (units_a, kept_a), (units_b, kept_b) in (opened[k] for k in stretches):
+        assert np.array_equal(units_a, units_b) and np.array_equal(kept_a, kept_b)
+    assert np.abs(opened[stretches[-1]][0][1]).sum() > 0.0          # a later stretch goes on from what the actor kept
+    before = learner.actor.latent_in.weight.detach().clone()
+    metrics = learner.train(segments, np.random.default_rng(0))
+    assert "loss_pg" in metrics and "loss_value" not in metrics and not torch.equal(before, learner.actor.latent_in.weight)
+    learner.save()
+    saved = torch.load(tmp_path / json.loads((tmp_path / "latest.json").read_text())["checkpoint"], weights_only=True)
+    assert "critic" not in saved and "ema_critic" not in saved

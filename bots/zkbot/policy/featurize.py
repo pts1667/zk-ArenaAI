@@ -25,11 +25,13 @@ from . import rawframe as rf
 from .bundle import PASS_CELL, Bundle
 from .tables import TYPE_DIM, TypeTable
 
-FEATURE_VERSION = 9          # what a saved encoder or actor was trained to read: raise it with any change to the tensors' meaning
+FEATURE_VERSION = 10         # what a saved encoder or actor was trained to read: raise it with any change to the tensors' meaning
                              # 7: ids sized for free-for-all, 64 players and 8 allyteams, so an unknown id reads 64 and 8 (2026-11-10)
                              # 8: caps raised for long and many-sided games, 1280 units, 512 controllable, 512 features (2026-11-10)
                              # 9: air transports (two instance columns, LOAD, UNLOAD and DROP), and aircraft controllable (2026-11-11)
-ENCODER_FEATURE_VERSIONS = (9,)     # those an encoder reads alike
+                             # 10: the DPS sectors even, by floor, and the frame over 80 minutes, not 20 (the user, 2026-11-13)
+ENCODER_FEATURE_VERSIONS = (10,)    # those an encoder reads alike
+GAME_FRAMES = 144000         # 80 minutes, the sim's time limit: the frame's scale
 
 # The user's, for long and many-sided games (2026-11-10): an 80-minute 1v1 had 656 records in sight on a side and 609 of its own.
 # CAP_HIDDEN: the critic's enemies the seat can't see, nearest its army first.  256 since 2026-11-11 (the user): at 64 a late team
@@ -390,7 +392,7 @@ def _global(frame: rf.Frame, bundle: Bundle, economy: bool) -> np.ndarray:
     g = frame.glob
     out = np.zeros(GLOBAL_DIM, np.float32)
     idx = rf.G
-    out[idx["frame"]] = g[idx["frame"]] / 36000.0
+    out[idx["frame"]] = g[idx["frame"]] / float(GAME_FRAMES)
     if economy:
         for name in ("metal", "metal_income", "metal_storage", "energy", "energy_income", "energy_storage"):
             out[idx[name]] = np.log1p(max(0.0, float(g[idx[name]]))) / 10.0
@@ -426,8 +428,9 @@ def fine_point(t: Tensors, bundle: Bundle, region: int, option: int) -> tuple[fl
     cx, cz = float(bundle.centre[region, 0]), float(bundle.centre[region, 1])
     if option == 0:
         return cx, cz
+    # In float64, as actions.fine_points has the points encode chooses among (float32 until 2026-11-13: numpy's scalars).
     angle = (option - 1) * np.pi / 4.0
-    east = (t.north[1], -t.north[0])
+    c, s = float(np.cos(angle)), float(np.sin(angle))
+    n0, n1 = float(t.north[0]), float(t.north[1])
     r = float(t.region_radius[region])
-    return (cx + r * (float(np.cos(angle)) * t.north[0] + float(np.sin(angle)) * east[0]),
-            cz + r * (float(np.cos(angle)) * t.north[1] + float(np.sin(angle)) * east[1]))
+    return cx + r * (c * n0 + s * n1), cz + r * (c * n1 - s * n0)

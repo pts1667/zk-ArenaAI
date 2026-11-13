@@ -38,6 +38,8 @@ free-for-alls of up to 8 and chicken defense, each on the maps that hold it (01-
   kinds of action for them, and a wing of them in the army script that sets assault units down on the enemy's dearest
   building it can take (01-simulator.md, "Transports"; 02-policy.md, "Kinds").  Aircraft are the policy's to command too.
   The map pool is 404 maps.
+* **`FEATURE_VERSION` 10** (2026-11-13): the DPS sectors even and the frame over 80 minutes, which the C++ port of the
+  featurizer found (02-policy.md, "Deployment").  `full-2`'s encoder and actors read 9, so the next run trains anew.
 * **Not built:** play in the engine.  `bots/zkbot` hosts the policy and sends no commands.  It still needs a CPU forward of the
   encoder and actor, the opening and the economy script on the engine side, and decoded orders sent as commands.
 * **Unvalidated:** the sim's fights.  The replay gate failed and the user waived it (2026-11-05; 01-simulator.md, "Validation").

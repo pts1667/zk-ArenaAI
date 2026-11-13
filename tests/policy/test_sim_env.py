@@ -153,6 +153,52 @@ def test_the_rewards_terms_are_zero_sum_and_the_economy_a_discounted_average_who
     assert mine[names.index("result")] == pytest.approx(1.0 + 0.1 * (1.0 - se.EARLY_END_DECISIONS / se.TIME_LIMIT_DECISIONS))
 
 
+def test_copy_game_knows_every_field_a_game_has():
+    """Every attribute that's by game or by seat (an array whose first axis is them, a list as long as the games, a dict) is in
+    SimEnv's registry or known to be the env's own, so that a field added later can't be left out of a copy."""
+    env = se.SimEnv(7, 1, ["fight"], threads=1)
+    env.begin()
+    env.step(0.0)
+    env.finished_seats()
+    registry = set(env.GAME_ARRAYS + env.GAME_LISTS_SHARED + env.GAME_LISTS_OWN + env.GAME_DICTS + env.SEAT_DICTS)
+    shared = {"_rows", "_map_draws", "chicken_difficulties", "grounds", "kinds"}
+    by_game = [name for name, v in vars(env).items() if name not in registry | shared and (
+               (isinstance(v, np.ndarray) and v.ndim and v.shape[0] in (env.count, env.seat_count))
+               or (isinstance(v, list) and len(v) == env.count) or isinstance(v, dict))]
+    assert not by_game, f"by game or seat, and not in SimEnv's registry: {by_game}"
+
+
+def test_a_copied_game_plays_on_as_its_original_given_the_same_orders():
+    """SimEnv.copy_game two minutes in, the policy's seat building its own economy on the scripts' advice: given the same orders,
+    the copy's frames, stats and rewards are its original's to the bit, step after step."""
+    env = se.SimEnv(2, 5, ["fight"], threads=1)
+    env.policy_economy_share, env.advise, env.diversity = 1.0, True, 0.05
+    env.begin()
+    terms = ("result", "score", "economy", "combat") if se.DEALT_STAT >= 0 else ("result", "score", "economy")
+
+    def play(steps: int, compare: bool) -> None:
+        for _ in range(steps):
+            if env.army_orders is not None:
+                (army, ao), (eco, eo) = env.army_orders, env.eco_orders
+                for seat in env.policy_seats_to_act():
+                    env.give_orders(seat, se.policy_orders(np.concatenate((army[ao[seat]:ao[seat + 1]], eco[eo[seat]:eo[seat + 1]]))))
+            env.step(0.0)
+            if compare:
+                for team in range(int(env.n_teams[0])):
+                    n = int(env.batch.counts[0, team])
+                    assert n == env.batch.counts[1, team] and env.batch.records[0, team, :n].tobytes() == env.batch.records[1, team, :n].tobytes()
+                assert np.array_equal(env.batch.stats[0], env.batch.stats[1]) and np.array_equal(env.batch.globs[0], env.batch.globs[1])
+                assert np.array_equal(env.reward_terms(0, terms, 0.5), env.reward_terms(env.slots, terms, 0.5))
+            assert not env.finished_seats(), "a game ended: too soon for this test"
+
+    play(240, compare=False)
+    env.copy_game(0, 1)
+    # Where a policy's build that doesn't fit goes is drawn, as the original would draw it: the advice's builds all fit.
+    assert env.game_rng[1] is not env.game_rng[0] and env.game_rng[1].bit_generator.state == env.game_rng[0].bit_generator.state
+    play(360, compare=True)
+    assert env.batch.stats[0, 0, 5] > 0 and (env.batch.records[0, 0]["def_id"] >= 0).sum() > 10, "it fought and built"
+
+
 def test_two_minutes_stay_two_minutes_at_a_slower_decision_rate():
     env = _env_with_values(16000.0, 6000.0, decide_every=2)
     assert _steps_to_end(env, se.EARLY_END_DECISIONS)[0] == se.EARLY_END_DECISIONS // 2

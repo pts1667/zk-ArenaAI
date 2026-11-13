@@ -28,7 +28,7 @@ import policy_eco as eco  # noqa: E402
 from policy_mix import menu as factory_menu  # noqa: E402
 from policy_variants import ROLES, Variant  # noqa: E402
 
-ABI_VERSION = 12
+ABI_VERSION = 13
 MAX_TEAMS = 8           # ZKS_MAX_TEAMS
 MOVE_CLASSES = 6
 SEAT_ARMY = 1
@@ -113,6 +113,7 @@ def lib() -> ct.CDLL:
         L.zks_runner_free.argtypes = [vp]
         L.zks_reset.argtypes = [vp, ct.c_int, ct.c_int, ct.c_int, c_i32p, ct.c_uint32, c_f64p, c_f64p, ct.c_int, ct.c_int,
                                 P(ct.c_uint64), P(Style)]
+        L.zks_copy_game.argtypes = [vp, ct.c_int, ct.c_int]
         L.zks_step.restype = ct.c_int
         L.zks_step.argtypes = [vp, P(StepArgs), vp, ct.c_int, c_i32p, vp, ct.c_int, c_i32p, vp, ct.c_int, c_i32p]
         L.zks_collect.restype = ct.c_int
@@ -272,6 +273,12 @@ class Scripts:
         if getattr(self, "handle", None) and _LIB is not None:
             _LIB.zks_runner_free(self.handle)
             self.handle = None
+
+    def copy_game(self, src: int, dst: int) -> None:
+        """Slot dst's seats become copies of slot src's as they stand (zks_copy_game), with what this side keeps of the game."""
+        self.lib.zks_copy_game(self.handle, src, dst)
+        self._chicken_game[dst] = self._chicken_game[src]
+        self._chickens[dst] = self._chickens[src]
 
     def reset(self, game: int, ground, starts, rally, economy: bool, aimer: bool, seeds=None, variants=None, ally_of=None,
               script_teams=None) -> None:

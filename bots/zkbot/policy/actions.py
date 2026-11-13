@@ -110,7 +110,9 @@ def _within_throw(t: fz.Tensors, i: int, x: float, z: float, unit_x: np.ndarray,
     """A region counts as in reach if a point of it could be: what's further than that goes as far as it can, the same way."""
     dx, dz = x - float(unit_x[i]), z - float(unit_z[i])
     away = float(np.hypot(dx, dz))
-    reach = float(table().throw_reach[t.unit_name[i]]) * THROW_SHORT
+    # By the unit's real name: a training game may have dropped the one the actor reads (fz.Tensors.true_name).
+    names = t.unit_name if t.true_name is None else t.true_name
+    reach = float(table().throw_reach[names[i]]) * THROW_SHORT
     if away <= reach:
         return x, z
     return float(unit_x[i]) + dx * reach / away, float(unit_z[i]) + dz * reach / away
@@ -208,7 +210,8 @@ def encode(orders: list[Order], t: fz.Tensors, bundle: Bundle, unit_x: np.ndarra
     place and offset (`place_points`).  Returns the choices, and how
     many orders couldn't be put in the policy's terms at all (a unit it doesn't control, a kind its masks rule out now, a target that
     isn't a token), which stay KEEP.  A group order is its unit's choice with its radius and roles, the roles it can't choose
-    dropped (groups.choosable); the units it gives the order to keep what they have."""
+    dropped (groups.choosable); the units it gives the order to keep what they have.  A unit given several orders takes the last
+    that can be put, whole: nothing of an earlier one's stays."""
     c = t.controllable
     kind, enemy, region, fine, produce, group, roles, place, offset = (np.full(c, v, np.int64) for v in (rf.KEEP, -1, -1, -1, -1, -1, 0, -1, -1))
     places = None
@@ -222,6 +225,9 @@ def encode(orders: list[Order], t: fz.Tensors, bundle: Bundle, unit_x: np.ndarra
             missed += 1
             continue
         k = int(o.kind)
+        # This order's choices, which replace whatever an earlier order to the unit chose.
+        e = r = f = p = g = pl = of = -1
+        ro = 0
         if k in fz.KINDS_WITH_REGION:
             mask = t.ptr_jump if k in fz.REACH_KINDS else t.ptr_wait if k == rf.WAIT_AT_BEACON else t.ptr_region
             x, z = o.x, o.z
@@ -233,8 +239,8 @@ def encode(orders: list[Order], t: fz.Tensors, bundle: Bundle, unit_x: np.ndarra
                 x, z = float(unit_x[beacon]), float(unit_z[beacon])
             options = points if k in fz.KINDS_WITH_FINE else points[:, :1]
             legal = np.repeat(mask[i][:, None], options.shape[1], 1)
-            region[i], option = _nearest(options, legal, x, z)
-            fine[i] = option if k in fz.KINDS_WITH_FINE else -1
+            r, option = _nearest(options, legal, x, z)
+            f = option if k in fz.KINDS_WITH_FINE else -1
         elif k in fz.ENEMY_POINTER_KINDS:
             pointer = fz.ENEMY_POINTER_KINDS.index(k)
             if k == rf.ATTACK_GROUND:
@@ -248,34 +254,32 @@ def encode(orders: list[Order], t: fz.Tensors, bundle: Bundle, unit_x: np.ndarra
                 north = np.asarray(t.north, np.float64)
                 compass = GROUND_FINE_RADIUS * (np.cos(angle)[:, None] * north + np.sin(angle)[:, None] * np.array((north[1], -north[0])))
                 options = np.concatenate((around[:, None, :], around[:, None, :] + compass[None]), 1)
-                enemy[i], fine[i] = _nearest(options, np.repeat(legal[:, None], options.shape[1], 1), o.x, o.z)
+                e, f = _nearest(options, np.repeat(legal[:, None], options.shape[1], 1), o.x, o.z)
             else:
                 e = enemy_of.get(token_of.get(int(o.target), -1), -1)
                 if e < 0 or not t.ptr_enemy[pointer, i, e]:
                     missed += 1
                     continue
-                enemy[i] = e
         elif k == rf.PRODUCE or k == rf.BUILD:
             p = _producible_index(o.target)
             if p < 0 or not t.ptr_produce[i, p]:
                 missed += 1
                 continue
-            produce[i] = p
             if k == rf.BUILD:
                 if places is None:
                     places = place_points(t, unit_x, unit_z)
                 away = np.hypot(places[..., 0] - o.x, places[..., 1] - o.z)
-                place[i], offset[i] = np.unravel_index(int(np.argmin(away)), away.shape)
+                pl, of = (int(v) for v in np.unravel_index(int(np.argmin(away)), away.shape))
         elif k == rf.RECLAIM:
-            f = np.flatnonzero(t.feat_ids == int(o.target))
-            if not len(f):
+            found = np.flatnonzero(t.feat_ids == int(o.target))
+            if not len(found):
                 missed += 1     # not among the feature tokens the cap kept
                 continue
-            place[i] = int(f[0])
-        kind[i] = k
+            pl = int(found[0])
         if o.radius > 0.0 and k in gr.GROUP_KINDS:
-            group[i] = gr.bucket(o.radius)
-            roles[i] = int(o.roles) & gr.choosable() if group[i] >= 0 else 0
+            g = gr.bucket(o.radius)
+            ro = int(o.roles) & gr.choosable() if g >= 0 else 0
+        kind[i], enemy[i], region[i], fine[i], produce[i], group[i], roles[i], place[i], offset[i] = k, e, r, f, p, g, ro, pl, of
     return Decision(kind, enemy, region, fine, produce, group, roles, place, offset), missed
 
 

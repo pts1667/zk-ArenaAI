@@ -182,6 +182,18 @@ def test_rays_see_walls_and_enemies(small_map, table):
     assert not t.unit_x[0, fz._R + 16:fz._R + 24].any()
 
 
+def test_a_gun_counts_in_the_sector_of_its_direction_all_round(small_map, table):
+    """Sector k is the 45 degrees around k pi/4 from +z towards x, as ray k is, on either side.  Until FEATURE_VERSION 10 the
+    sector was truncated, not floored: sector 0 was 90 degrees wide and the -x side's were one off."""
+    for k in range(8):
+        for off in (-0.3, 0.3):         # radians either side of the sector's middle, inside its 22.5 degrees
+            angle = k * np.pi / 4.0 + off
+            foe = make_units({"uid": 1, "x": 1280.0, "z": 1280.0},
+                             {"uid": 2, "side": ENEMY, "x": 1280.0 + 300.0 * np.sin(angle), "z": 1280.0 + 300.0 * np.cos(angle)})
+            row = run(foe, small_map, table).unit_x[0]
+            assert np.flatnonzero(row[fz._R + 8:fz._R + 16]).tolist() == [k], (k, off)
+
+
 # Masks: one hand-made frame for each row of 02-policy.md, "Kinds".
 def kinds_of(units, small_map, table, **kw):
     t = run(units, small_map, table, **kw)

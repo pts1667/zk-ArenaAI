@@ -77,6 +77,11 @@ class Weights:
                 t.copy_(views[(section, name)])
 
 
+def nets(actor, critic) -> dict[str, torch.nn.Module]:
+    """What a collector plays with: the actor, and the critic, which GRPO hasn't."""
+    return {"actor": actor, **({"critic": critic} if critic is not None else {})}
+
+
 @torch.no_grad()
 def fingerprint(modules: dict[str, torch.nn.Module]) -> float:
     """A sum over every number of the modules' state, in float64: the same for the same weights, near enough."""
@@ -90,6 +95,7 @@ class Shell:
     def __init__(self, cfg: pt.Config, actor, critic, device: str, vocabulary: int, bundles: list, graphs: bool):
         self.cfg, self.actor, self.critic, self.device, self.vocabulary = cfg, actor, critic, device, vocabulary
         self.term_names = tuple(name for name, _ in cfg.terms)
+        self.term_weights = np.array([w for _, w in cfg.terms])
         self.player = pt.Player(actor, critic, pt.DataWorkers(0, bundles, cfg.enabled_kinds), device, graphs)
         self.evaluator = self.player        # with the tests' weights loaded
         self.progress = 0.0
@@ -117,10 +123,11 @@ class _Serving:
             torch.cuda.set_per_process_memory_fraction(min(1.0, gb * 2**30 / torch.cuda.mem_get_info()[1]))
         torch.manual_seed(seed)
         actor = policy_latent.make(vocabulary, cfg.latent_encoder, cfg.decide_every, policy_latent.Size(**size)).to(device)
-        critic = pm.Critic(vocabulary, bins=cfg.critic_bins, span=cfg.critic_span, terms=len(cfg.terms)).to(device)
-        for p in list(actor.parameters()) + list(critic.parameters()):
-            p.requires_grad_(False)
-        self.nets = {"actor": actor, "critic": critic}
+        critic = None if cfg.group else pm.Critic(vocabulary, bins=cfg.critic_bins, span=cfg.critic_span, terms=len(cfg.terms)).to(device)
+        self.nets = nets(actor, critic)
+        for m in self.nets.values():
+            for p in m.parameters():
+                p.requires_grad_(False)
         self.play, self.test, self.device = play, test, device
         self.play.read(self.nets)
         self.make_env = functools.partial(self.make_env, threads=threads)
@@ -128,7 +135,7 @@ class _Serving:
         env.policy_economy_share, env.self_play_share, env.lead_share = economy, self_play, lead
         self.index = {id(b): i for i, b in enumerate(env.bundles())}
         self.shell = Shell(cfg, actor, critic, device, vocabulary, env.bundles(), cfg.graphs)
-        self.collector = pt.Collector(self.shell, env, np.random.default_rng((cfg.seed, iteration, self.k)))
+        self.collector = (pt.GroupCollector if cfg.group else pt.Collector)(self.shell, env, np.random.default_rng((cfg.seed, iteration, self.k)))
         self.conn.send(("started", None))
 
     def _memory(self) -> dict[str, float]:
@@ -214,7 +221,7 @@ class Collectors:
             self.stash[k].append((t, payload))
 
     def _nets(self, player) -> dict[str, torch.nn.Module]:
-        return {"actor": player.actor, "critic": player.critic}
+        return nets(player.actor, player.critic)
 
     def start(self, learner: pt.Learner, seed: int, device: str) -> None:
         """Each collector's nets and games: its share of `cfg.games`, from its own seed."""

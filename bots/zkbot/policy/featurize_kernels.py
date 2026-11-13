@@ -436,7 +436,8 @@ def unit_block(units, rows, all_units, stats, tf, tb, move_class, label, height,
             out[i, r_at + d] = np.float32(first / RAY_CELLS)
 
     # Hostile and friendly DPS within RAY_DPS_RADIUS per 45-degree sector, from each token's own point of view; summed in float64
-    # in the order numpy's bincount took them.  Sector 0 is around +z, as the rays are: the angle is measured from z towards x.
+    # in the order numpy's bincount took them.  Sector k is the 45 degrees around k pi/4 from +z towards x, as ray k is: the floor
+    # of (angle + pi/8) / (pi/4).  Until FEATURE_VERSION 10 it was truncated, which made sector 0 90 degrees wide, 4 and 5 22.5.
     enemy_sum = np.zeros((n, 8), np.float64)
     own_sum = np.zeros((n, 8), np.float64)
     pairs = False
@@ -450,7 +451,7 @@ def unit_block(units, rows, all_units, stats, tf, tb, move_class, label, height,
             dz = ub["z"] - ua["z"]
             if dx * dx + dz * dz <= _DPS_RADIUS2:
                 pairs = True
-                sector = np.int64(np.int32((np.arctan2(dx, dz) + _PI8) / _PI4)) % 8
+                sector = np.int64(np.floor((np.arctan2(dx, dz) + _PI8) / _PI4)) % 8
                 dps = np.float64(tf[rows[b], T_DPS_GROUND] + tf[rows[b], T_DPS_AIR])
                 if ua["ally_team"] == ub["ally_team"]:
                     own_sum[a, sector] += dps
