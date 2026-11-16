@@ -81,12 +81,14 @@ def main() -> None:
     path = sys.argv[1] if len(sys.argv) > 1 else zksim.DATA / "maps/titanduel_2_2.npz"
     cat = zksim.Catalog()
     world_map = zksim.Map.load(path)
+    with np.load(path) as d:
+        speeds, segments = d["speed"], d["segments"]
     rng = np.random.default_rng(7)
     print(f"{pathlib.Path(path).stem}: arrived within {TIME_ALLOWANCE:g}x the straight walk, {PAIRS} goals each")
     print(f"  {'class':8s}{'same segment':>14s}{'line blocked':>14s}{'of those arrived':>18s}{'other segment':>15s}")
     for name, unit in UNITS.items():
         c = zksim.MOVE_CLASSES.index(name)
-        speed, seg = world_map.speed[c], world_map.segments[c]
+        speed, seg = speeds[c], segments[c]
         area = walkable_areas(speed)
         big = np.bincount(seg[seg >= 0])
         cells = np.argwhere((seg >= 0) & (speed > 0) & (big[np.maximum(seg, 0)] > 64))

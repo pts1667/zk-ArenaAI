@@ -357,10 +357,13 @@ void* zk_map_new(int cols, int rows, float cell, const float* height, const floa
     m->classes = classes;
     m->set_cell(cell);
     const size_t n = size_t(cols) * size_t(rows);
-    m->height.assign(height, height + n);
-    m->speed.assign(speed, speed + n * size_t(classes));
+    m->own.height.assign(height, height + n);
+    m->height = m->own.height;
+    m->own.speed.assign(speed, speed + n * size_t(classes));
+    m->speed = m->own.speed;
     m->set_slopes(slope, normal_x, normal_z);
-    m->slope_mod.assign(slope_mod, slope_mod + classes);
+    m->own.slope_mod.assign(slope_mod, slope_mod + classes);
+    m->slope_mod = m->own.slope_mod;
     m->set_standing();
     m->set_segments(segments);
     return m;
@@ -368,25 +371,107 @@ void* zk_map_new(int cols, int rows, float cell, const float* height, const floa
 
 void zk_map_set_routes(void* map, int move_class, int nodes, const float* centres, int edges, const int* edge_to,
                        const float* gates, const int* next_edge) {
-    Routes& r = static_cast<Map*>(map)->routes[size_t(move_class)];
+    auto* m = static_cast<Map*>(map);
+    const size_t c = size_t(move_class);
+    Routes& r = m->routes[c];
+    auto& cx = m->own.centre_x[c];
+    auto& cz = m->own.centre_z[c];
+    auto& gx = m->own.gate_x[c];
+    auto& gz = m->own.gate_z[c];
     r.nodes = nodes;
-    r.centre_x.resize(size_t(nodes));
-    r.centre_z.resize(size_t(nodes));
+    cx.resize(size_t(nodes));
+    cz.resize(size_t(nodes));
     for (int i = 0; i < nodes; ++i) {
-        r.centre_x[size_t(i)] = centres[2 * i];
-        r.centre_z[size_t(i)] = centres[2 * i + 1];
+        cx[size_t(i)] = centres[2 * i];
+        cz[size_t(i)] = centres[2 * i + 1];
     }
-    r.edge_to.assign(edge_to, edge_to + edges);
-    r.gate_x.resize(size_t(edges));
-    r.gate_z.resize(size_t(edges));
+    m->own.edge_to[c].assign(edge_to, edge_to + edges);
+    gx.resize(size_t(edges));
+    gz.resize(size_t(edges));
     for (int i = 0; i < edges; ++i) {
-        r.gate_x[size_t(i)] = gates[2 * i];
-        r.gate_z[size_t(i)] = gates[2 * i + 1];
+        gx[size_t(i)] = gates[2 * i];
+        gz[size_t(i)] = gates[2 * i + 1];
     }
-    r.next_edge.assign(next_edge, next_edge + size_t(nodes) * size_t(nodes));
+    m->own.next_edge[c].assign(next_edge, next_edge + size_t(nodes) * size_t(nodes));
+    r.centre_x = cx;
+    r.centre_z = cz;
+    r.edge_to = m->own.edge_to[c];
+    r.gate_x = gx;
+    r.gate_z = gz;
+    r.next_edge = m->own.next_edge[c];
 }
 
 void zk_map_free(void* map) { delete static_cast<Map*>(map); }
+
+static_assert(sizeof(CellSlope) == 3 * sizeof(float) && sizeof(int) == sizeof(int32_t) && sizeof(short) == sizeof(int16_t),
+              "zk_map_arrays reads these as they're kept");
+
+void zk_map_arrays_get(const void* map, zk_map_arrays* out) {
+    const auto* m = static_cast<const Map*>(map);
+    *out = {};
+    out->cols = m->cols;
+    out->rows = m->rows;
+    out->classes = m->classes;
+    out->clear_cols = m->clear_cols;
+    out->clear_rows = m->clear_rows;
+    out->cell = m->cell;
+    out->stand_words = int64_t(m->stand_words);
+    out->height = m->height.data();
+    out->speed = m->speed.data();
+    out->slope_mod = m->slope_mod.data();
+    out->slopes = reinterpret_cast<const float*>(m->slopes.data());
+    out->clearance = m->clearance.data();
+    out->clear_skip = m->clear_skip;
+    out->stand = m->stand.data();
+    out->nearest_segment = m->nearest_segment.data();
+}
+
+void zk_map_routes_get(const void* map, int move_class, zk_routes_arrays* out) {
+    const Routes& r = static_cast<const Map*>(map)->routes[size_t(move_class)];
+    *out = {};
+    out->nodes = r.nodes;
+    out->edges = int32_t(r.edge_to.size());
+    out->centre_x = r.centre_x.data();
+    out->centre_z = r.centre_z.data();
+    out->edge_to = r.edge_to.data();
+    out->gate_x = r.gate_x.data();
+    out->gate_z = r.gate_z.data();
+    out->next_edge = r.next_edge.data();
+}
+
+void* zk_map_view(const zk_map_arrays* a) {
+    auto* m = new Map;
+    m->cols = a->cols;
+    m->rows = a->rows;
+    m->classes = a->classes;
+    m->set_cell(a->cell);
+    const size_t n = size_t(a->cols) * size_t(a->rows), classes = size_t(a->classes);
+    m->height = {a->height, n};
+    m->speed = {a->speed, n * classes};
+    m->slope_mod = {a->slope_mod, classes};
+    m->slopes = {reinterpret_cast<const CellSlope*>(a->slopes), n};
+    m->clear_cols = a->clear_cols;
+    m->clear_rows = a->clear_rows;
+    m->clearance = {a->clearance, size_t(a->clear_cols) * size_t(a->clear_rows) * classes};
+    std::copy(a->clear_skip, a->clear_skip + 256, m->clear_skip);
+    m->stand_words = size_t(a->stand_words);
+    m->stand = {a->stand, m->stand_words * classes};
+    m->nearest_segment = {a->nearest_segment, n * classes};
+    m->routes.assign(classes, Routes{});
+    return m;
+}
+
+void zk_map_view_routes(void* map, int move_class, const zk_routes_arrays* a) {
+    Routes& r = static_cast<Map*>(map)->routes[size_t(move_class)];
+    const size_t nodes = size_t(a->nodes), edges = size_t(a->edges);
+    r.nodes = a->nodes;
+    r.centre_x = {a->centre_x, nodes};
+    r.centre_z = {a->centre_z, nodes};
+    r.edge_to = {a->edge_to, edges};
+    r.gate_x = {a->gate_x, edges};
+    r.gate_z = {a->gate_z, edges};
+    r.next_edge = {a->next_edge, nodes * nodes};
+}
 
 void* zk_world_new(const void* catalog, const void* map, uint64_t seed, int behaviour) {
     return new World(static_cast<const Catalog*>(catalog), static_cast<const Map*>(map), seed, behaviour);

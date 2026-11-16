@@ -9,6 +9,7 @@
 #include "numeric.hpp"
 #include "zkscripts.h"
 #include "zksim/rawframe.hpp"
+#include "zksim/span.hpp"
 
 namespace zks {
 
@@ -24,6 +25,8 @@ enum { S_NEW = 0, S_WAITING = 1, S_SENT = 2, S_RETREATING = 3 };
 enum { R_RAID, R_RIOT, R_ASSAULT, R_SKIRM, R_ARTY, R_AA, R_SNIPE, R_SCOUT, R_BUILDER, R_BOMB, R_COUNT };
 // Special rows; X_FACTORY and X_SECOND are pending slots only
 enum { X_CERBERUS, X_LUCIFER, X_SILO, X_NUKE, X_FUSION, X_PYLON, X_RADAR, X_FACTORY, X_SECOND };
+// The defences, as zks_data_desc.defences lists them: the first four guard against the ground
+enum { D_LLT, D_PICKET, D_STINGER, D_GAUSS, D_RAZOR, D_HACKSAW };
 
 // The standard army script's knobs (army.cpp): what a seat has when it's given none.
 zks_style standard_style();
@@ -33,10 +36,11 @@ struct Ground {
     double cell = 16.0, map_w = 0.0, map_h = 0.0;
     std::vector<float> spots;   // n x 3
     int n_spots = 0;
-    std::vector<std::vector<uint8_t>> masks;
-    std::vector<std::vector<float>> sites;
-    std::vector<std::vector<int16_t>> labels;
-    std::vector<float> height;  // rows x cols
+    // Read where the caller keeps them (zks_map_desc).
+    std::vector<zk::Span<uint8_t>> masks;
+    std::vector<zk::Span<float>> sites;
+    std::vector<zk::Span<int16_t>> labels;
+    zk::Span<float> height;     // rows x cols
     int largest[ZKS_MOVE_CLASSES] = {};
 
     int part_at(int c, double x, double z) const;
@@ -57,6 +61,7 @@ struct Data {
     std::vector<int32_t> plate_of;     // a factory row's plate row, -1 for none
     std::vector<int8_t> kind;           // R_* of a row's role, -1 for any other
     std::vector<int8_t> special_of;     // X_* of a row, -1 for none
+    std::vector<int8_t> defence_of;     // D_* of a row, -1 for none
     std::vector<uint8_t> air_plant;     // a factory whose fighters fly: the army script has its own mix for those
     std::vector<float> lift;            // rows x 3: a transport's speed with a load of each class, 0 for one it can't lift
     std::vector<int8_t> load_class;     // 1 light, 2 medium, 3 heavy, 0 for what can't be carried
@@ -68,6 +73,7 @@ struct Data {
     int special[7] = {};
     int second_factories[3] = {};
     int caretaker = -1;
+    int defences[ZKS_DEFENCES] = {};
     double group_radii[ZKS_GROUP_RADII] = {};
     double cerberus_reach = 0.0, missile_reach = 0.0;
     float spot_half = 24.0f;
@@ -265,6 +271,15 @@ struct Seat {
     struct Avoid { int64_t ix, iz; double until; };
     std::vector<Avoid> avoid;
     int finished[7] = {};
+    // Defences (eco.cpp, "Defences")
+    std::vector<double> spot_raided;    // by metal spot: when an armed enemy last came near it
+    struct Watch { int64_t uid; float x, z; bool heavy, finished; };
+    std::vector<Watch> watched;         // our armed buildings as last seen, begun or finished
+    struct Lost { double t, x, z; };
+    std::deque<Lost> turrets_lost;      // finished ones lost, when and where, over the last DYING_FOR
+    struct Off { double x, z, until; };
+    std::vector<Off> heavy_off;         // where a Stinger or Gauss was lost unfinished: none near there until `until`
+    bool armour_seen = false;           // enemy tanks or slow heavies
     Draws draws;
 
     // This step's inputs, filtered, and outputs.  Enemies are every enemy team's own units, read from its frame, a team after
@@ -338,6 +353,15 @@ struct Seat {
     Job radar_job(const Ctx& c, int i, Pass& pass, int by_class, P2 by_at);
     Job link_job(const Ctx& c, int i, const GridOf& grid, Pass& pass);
     Job spot_job(const Ctx& c, int i, Pass& pass);
+    bool contested(P2 p, double seconds) const;
+    void watch(double seconds);
+    void defences_of(const Ctx& c, Pass& pass, double income) const;
+    bool covered(const Pass& pass, P2 p, double reach, bool heavy) const;
+    bool given_up_near(P2 p) const;
+    bool dying(P2 p) const;
+    int light_kind(const Pass& pass) const;
+    Job defend(int i, int k, P2 near, double spread, Pass& pass);
+    Job defence_job(const Ctx& c, int i, Pass& pass, double income);
     bool unsafe(P2 p, float army_reach) const;
     Job reclaim_job(const Ctx& c, int i, Pass& pass, double reach);
 };

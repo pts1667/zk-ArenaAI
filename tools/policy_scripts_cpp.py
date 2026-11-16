@@ -28,7 +28,7 @@ import policy_eco as eco  # noqa: E402
 from policy_mix import menu as factory_menu  # noqa: E402
 from policy_variants import ROLES, Variant  # noqa: E402
 
-ABI_VERSION = 13
+ABI_VERSION = 16
 MAX_TEAMS = 8           # ZKS_MAX_TEAMS
 MOVE_CLASSES = 6
 SEAT_ARMY = 1
@@ -40,7 +40,7 @@ SECOND_FACTORIES = ("factoryplane", "factorygunship", "striderhub")      # zks_d
 FINISHED = (eco.CERBERUS, eco.LUCIFER, eco.SILO, eco.NUKE, eco.FUSION, "singularity", "missile")   # zks_eco_stats, after checks
 LOG_WHAT = ("start", "missile at", "nuke at")
 (MOBILE, AIR, ARMED, BUILDER, FACTORY, FIGHTS, REGENERATES, EXTRACTOR, DEFENCE, KITABLE, HEAVY_RIOT, SLOW_HEAVY, MISSILE, COMMANDER,
- STATIC_ARMED, VALUABLE, CONSTRUCTOR, SINGULARITY, QUEEN, TRANSPORT) = (1 << k for k in range(20))
+ STATIC_ARMED, VALUABLE, CONSTRUCTOR, SINGULARITY, QUEEN, TRANSPORT, TANK) = (1 << k for k in range(21))
 
 P = ct.POINTER
 c_f32p, c_f64p, c_i32p, c_i8p, c_i16p, c_u8p, c_u32p = (P(ct.c_float), P(ct.c_double), P(ct.c_int32), P(ct.c_int8), P(ct.c_int16),
@@ -54,7 +54,7 @@ class DataDesc(ct.Structure):
                 ("generators", c_i32p), ("option_offsets", c_i32p), ("options", c_i32p), ("n_roles", ct.c_int), ("menu", c_i32p),
                 ("plate_of", c_i32p), ("lift", c_f32p), ("load_class", c_i8p), ("n_transports", ct.c_int), ("fall_loss", c_f32p),
                 ("role_ids", ct.c_int32 * 10), ("special", ct.c_int32 * 7), ("second_factories", ct.c_int32 * 3),
-                ("caretaker", ct.c_int32),
+                ("caretaker", ct.c_int32), ("defences", ct.c_int32 * len(eco.DEFENCES)),
                 ("group_radii", ct.c_double * len(groups.GROUP_RADII)), ("cerberus_reach", ct.c_double),
                 ("missile_reach", ct.c_double), ("spot_half", ct.c_float), ("n_footings", ct.c_int)]
 
@@ -143,6 +143,11 @@ def _ptr(a: np.ndarray, kind):
     return a.ctypes.data_as(kind)
 
 
+def _bytes(mask: np.ndarray) -> np.ndarray:
+    """A mask as bytes: itself if it's already one byte a cell, side by side."""
+    return mask.view(np.uint8) if mask.dtype == np.bool_ and mask.flags.c_contiguous else np.ascontiguousarray(mask, np.uint8)
+
+
 class ScriptsData:
     """The scripts' static data in C++, shared read-only by every `Scripts` made from it.  Maps are added as games first use them."""
 
@@ -165,6 +170,10 @@ class ScriptsData:
         chickens = (getattr(ed.cat, "rules", None) or {}).get("chickens") or {}
         queens = {d[k] for d in chickens.get("difficulties", ()) for k in ("queen", "queen_morph") if d.get(k)}
         bits[[t.names.index(name) for name in sorted(queens) if name in t.names]] |= QUEEN
+        # What a tank plant makes that fights: the "early tanks" that LLTs and Pickets answer (eco.cpp, "Defences").
+        if eco.TANK_PLANT in t.names:
+            tanks = t.producible[t.produces[t.names.index(eco.TANK_PLANT)]]
+            bits[[int(r) for r in tanks if sd.fights[r]]] |= TANK
         # Footings: their (low, high) water depths index each map's masks and site samples.  A row's footprint (its half sizes)
         # and how level it wants the ground are its own.
         self.footings: list[tuple[float, float]] = sorted({(f.low, f.high) for f in ed.footing.values()})
@@ -219,10 +228,12 @@ class ScriptsData:
         desc.special[:] = [ed.row.get(name, -1) for name in SPECIAL]
         desc.second_factories[:] = [t.names.index(name) if name in t.names else -1 for name in SECOND_FACTORIES]
         desc.caretaker = t.names.index(eco.CARETAKER) if eco.CARETAKER in t.names else -1
+        desc.defences[:] = [t.names.index(name) if name in t.names else -1 for name in eco.DEFENCES]
         desc.group_radii[:] = groups.GROUP_RADII
         self.lib = lib()
         self.handle = self.lib.zks_data_new(ct.byref(desc))
         self._maps: dict[int, int] = {}         # id(Ground) -> index
+        self._kept: list = []                   # what each map's C++ reads where it is (zkscripts.h zks_map_desc)
 
     def __del__(self):
         if getattr(self, "handle", None) and _LIB is not None:
@@ -234,7 +245,7 @@ class ScriptsData:
         key = id(ground)
         if key not in self._maps:
             b = ground.bundle
-            masks = [np.ascontiguousarray(ground.mask(low, high), np.uint8) for low, high in self.footings]
+            masks = [_bytes(ground.mask(low, high)) for low, high in self.footings]
             sites = [np.ascontiguousarray(ground._sites(low, high), np.float32).reshape(-1, 2) for low, high in self.footings]
             labels = [np.ascontiguousarray(ground.labels(c), np.int16) for c in range(MOVE_CLASSES)]
             largest = np.array([ground._largest_part(c) for c in range(MOVE_CLASSES)], np.int32)
@@ -249,6 +260,7 @@ class ScriptsData:
                            labels=(c_i16p * MOVE_CLASSES)(*[_ptr(lab, c_i16p) for lab in labels]), largest=_ptr(largest, c_i32p),
                            height=_ptr(height, c_f32p))
             self._maps[key] = self.lib.zks_data_add_map(self.handle, ct.byref(desc))
+            self._kept.append((masks, sites, labels, height))
         return self._maps[key]
 
 

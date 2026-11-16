@@ -22,6 +22,12 @@ from zkbot.policy import bundle as bd, rawframe as rf, tables  # noqa: E402
 from zkbot import terrain, units  # noqa: E402
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _map_cache(tmp_path_factory):
+    """load_pool's cache (zksim.map_cache) in this run's own directory, not the user's."""
+    os.environ["ZKSIM_MAP_CACHE"] = str(tmp_path_factory.mktemp("map-cache"))
+
+
 @pytest.fixture(scope="session")
 def table():
     return tables.table()

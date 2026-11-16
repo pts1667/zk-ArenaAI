@@ -12,6 +12,7 @@ one forward pass, from the latents kept at collection and those of the frames be
 from __future__ import annotations
 
 import argparse
+import collections
 import copy
 import functools
 import json
@@ -93,7 +94,9 @@ class Config:
     adam_eps: float = 1e-5
     checkpoint_every: int = 20
     eval_every: int = 20
-    eval_games: int = 64
+    # Every test plays the same games, from the seed cfg.seed x 1000, a run's first test (iteration 0) among them, so that tests pair
+    # game for game (`score_test`); 128 of them, and scored on more than the result (game_score; the user, 2026-11-14).
+    eval_games: int = 128
     enabled_kinds: tuple[int, ...] = fz.STAGE2_KINDS
     data_workers: int = 6
     concurrent: bool = True         # collect the next iteration during this one's training
@@ -164,12 +167,53 @@ class Config:
     # group's other games, and one game still going is copied into the rest for the next.  0: PPO, with its critic.
     group: int = 0
     horizon: tuple[float, float] = (60.0, 180.0)    # seconds
-    # A branch's advantage is its score less its group's mean, over its group's spread; without, not divided (Dr. GRPO, Liu et
-    # al. 2025), training's normalisation over each minibatch scaling it.
-    group_std: bool = True
+    # A branch's advantages (GroupCollector._judge, Learner.weigh_groups; the user, 2026-11-13, after the trial's swing to MOVE).
+    # group_scale "terms": each term less its group's mean, over that term's mean spread in the iteration's groups where it
+    # varied, then weighed (Multi-GRPO's scaling by reward, at the iteration's level so that a term that seldom varies isn't
+    # blown up); "group": the weighed score less its group's mean, over its group's spread (GRPO's own); "none": neither (Dr.
+    # GRPO's).  reward_to_go: each decision judged on its branch's terms from it on, against its group's from the same moment
+    # (DeepSeekMath's process supervision), not on the whole stretch's.  group_step: decisions an optimizer step, in whole
+    # groups, their minibatches' gradients added up, so that what a group's branches all did alike cancels out; 0 for a step a
+    # minibatch.  1,024 is about 3 groups of 8, and 16 steps an iteration of 16,384, as DAPO takes 16 a rollout batch: the
+    # GRPO trial took about 35 an iteration of 4,768, at 0.001-0.01 of KL an iteration.  Under GRPO the advantages aren't
+    # normalised again over each minibatch, and a decision's actions are summed.
+    group_scale: str = "terms"
+    reward_to_go: bool = True
+    group_step: int = 1024
+    # With reward_to_go, the economy term judges a decision on the income balance's change from it on, (1/span) x the sum over
+    # the steps after it of (income - income when it was taken), not on the level, which a branch ahead when the decision was
+    # taken would otherwise credit it with (the user, 2026-11-14, after a review of arXiv 2508.08221 here).
+    economy_change: bool = True
+    # A decision's weighed advantage is clipped to +- adv_clip (0: not), and SPO's pull back on a ratio grows no more past
+    # spo_bound x eps from 1, as Huber's loss (0: SPO's square throughout), so that no one action moves the policy far (the
+    # same).  Under GRPO only.  full-3's GRPO had a loss_pg of 2.585 at iteration 130, against about 0.06.
+    adv_clip: float = 3.0
+    spo_bound: float = 2.0
+    # The least entropy bonus a head has (ENTROPY_BASE's); below 0, ENTROPY_BASE under PPO and none under GRPO, where it
+    # outweighed the advantages: full-3's offset head went from 1.84 to 3.06 of its most, ln 25 = 3.22 (the same).
+    entropy_base: float = -1.0
+    # Bootstrapped GRPO (the user, 2026-11-14): a decision's return is its branch's terms from it to its stretch's end,
+    # discounted as the critic's are (policy_sim_env.term_gamma), plus the critic's value of where the branch ended (nothing if
+    # its game or its alliance did), and its advantages that less its group's mean from the same moment (Learner.bootstrap).
+    # So a decision is judged past its stretch, which only the shaping terms reached before, and what the critic gets wrong
+    # alike for a group's ends cancels.  The critic learns those returns (n-step ones), in the learner only: it plays nothing,
+    # and the actor waits critic_warmup iterations for it.
+    bootstrap: bool = False
+    # Resignation, as AlphaGo Zero's (the user, 2026-11-14), with bootstrap: at a stretch's end the game a group goes on from is
+    # given up, and a new one started, when the critic's result for the policy's side is under the threshold (Learner.resign_at).
+    # resign_free of games are never given up but played out, each saying the least value it reached and whether it was then
+    # lost; the threshold is the highest of RESIGN_THRESHOLDS under which at least resign_least played-out games fell and at
+    # most resign_false of them weren't lost.  None till then, and nothing measured while the critic warms up.
+    resign: bool = False
+    resign_free: float = 0.1
+    resign_false: float = 0.05
+    resign_least: int = 20
 
 
 MUON_DECAY = 0.01           # the critic's Muon's weight decay (--critic-muon-lr), as cloning's
+RESIGN_THRESHOLDS = (-0.95, -0.9, -0.85, -0.8, -0.75, -0.7, -0.6, -0.5)    # Config.resign's candidates, of the critic's result
+RESIGN_WINDOW = 500         # the played-out games it's chosen from, the latest
+HOPELESS = (-0.8, -0.9)     # the critic's result under which a branch's end is logged as hopeless (Learner.bootstrap)
 # What a decision costs in training's memory beside its tokens, in tokens.  On full-2's first segments (2026-11-12), a decision
 # of 165-237 tokens took 14.1-16.7 MiB whether 32 or 384 were trained together, the critic about 14 KiB a token of it; but in
 # its PPO, 241 decisions of about 280 tokens fit where 151 of about 590 and 103 of about 860 didn't, so the rest grows with
@@ -213,9 +257,17 @@ def padded_tokens(batch: list["Segment"]) -> int:
     return units + max(seg.bundle.regions for seg in batch) + 2
 
 
-def spo_objective(ratio: torch.Tensor, adv: torch.Tensor, eps: float) -> torch.Tensor:
-    """Simple Policy Optimization's, to maximise for each sample: r A - |A| (r - 1)^2 / (2 eps)."""
-    return ratio * adv - adv.abs() / (2.0 * eps) * (ratio - 1.0).square()
+def spo_objective(ratio: torch.Tensor, adv: torch.Tensor, eps: float, bound: float = 0.0) -> torch.Tensor:
+    """Simple Policy Optimization's, to maximise for each sample: r A - |A| (r - 1)^2 / (2 eps).  With a bound above 0, the
+    penalty goes on in a straight line past |r - 1| = bound x eps, as Huber's loss, so that its pull back stays bound x |A|
+    (Config.spo_bound)."""
+    dev = ratio - 1.0
+    if bound > 0.0:
+        edge, far = bound * eps, dev.abs()
+        penalty = torch.where(far <= edge, dev.square() / (2.0 * eps), edge * (far - 0.5 * edge) / eps)
+    else:
+        penalty = dev.square() / (2.0 * eps)
+    return ratio * adv - adv.abs() * penalty
 
 
 def fade_share(iteration: int, fade: tuple[tuple[int, float], ...]) -> float:
@@ -282,6 +334,12 @@ class Step:
     label: dict | None = None           # what the scripts advised here, as slots (actions.SLOT_FIELDS), when they advise
     labelled: np.ndarray | None = None  # which controllable units the advice told something
     z: np.ndarray | None = None         # the side's strategy as the actor was told it (Config.z), the same all game
+    slot: int = -1                      # GRPO: the env's slot it was taken at
+    mark: np.ndarray | None = None      # GRPO: its branch's terms summed up to it, by term (GroupCollector)
+    counted: int = 0                    # GRPO: and the steps they were summed over
+    level: float = 0.0                  # GRPO: the income balance when it was taken (Config.economy_change)
+    rest: np.ndarray | None = None      # bootstrapped GRPO: its branch's terms from it to its stretch's end, discounted to it
+    discount: np.ndarray | None = None  # and each term's discount from it to that end
 
 
 @dataclass
@@ -291,6 +349,11 @@ class Segment:
     seen: np.ndarray | None
     bundle: bd.Bundle
     names: np.ndarray
+    group: int = -1                 # GRPO: the group it was judged in, an id a seat's team in a group's stretch (GroupCollector._judge)
+    spreads: np.ndarray | None = None   # GRPO: that group's spread of each term
+    branch: int = -1                    # bootstrapped GRPO: its branch's id
+    members: int = 0                    # and how many branches its group's seat had
+    end: rf.Frame | None = None         # where its branch ended, on the branch's last segment; None if its game or alliance did
 
 
 @dataclass
@@ -464,15 +527,21 @@ class Learner:
                 self.reference = copy.deepcopy(self.actor).eval()
                 for p in self.reference.parameters():
                     p.requires_grad_(False)
-        # GRPO has none: a branch's group stands in for it (GroupCollector).
-        self.critic = None if cfg.group else pm.Critic(self.vocabulary, bins=cfg.critic_bins, span=cfg.critic_span, terms=len(cfg.terms)).to(device)
+        # GRPO has none, a branch's group standing in for it (GroupCollector), but bootstrapped (Config.bootstrap).
+        self.critic = None if cfg.group and not cfg.bootstrap else pm.Critic(self.vocabulary, bins=cfg.critic_bins, span=cfg.critic_span, terms=len(cfg.terms)).to(device)
         self.term_names = tuple(name for name, _ in cfg.terms)
         self.term_weights = np.array([w for _, w in cfg.terms])
+        if cfg.resign and not (cfg.group and cfg.bootstrap and "result" in self.term_names):
+            raise ValueError("--resign reads the critic's result: it needs --group, --bootstrap and the result term")
+        self.lineages: collections.deque = collections.deque(maxlen=RESIGN_WINDOW)     # played-out games: (least value, not lost)
+        self.resign_at: float | None = None
+        self.end_stats: dict[str, float] = {}       # bootstrapped GRPO's ends, this iteration's
         # The iteration from which the actor learns too (Config.critic_rewarm).
         self.warm_until = cfg.critic_warmup if self.critic is not None else 0
         actor_params = [p for p in self.actor.parameters() if p.requires_grad]
         critic_params = [p for p in self.critic.parameters() if p.requires_grad] if self.critic is not None else []
         self.trained = actor_params + critic_params
+        self.actor_trained, self.critic_trained = actor_params, critic_params
         # Muon's, as frame_vae.Optimisers chooses: the weights of the actor's linear layers but those giving answers
         # (policy_latent.answers), as cloning has them, and of the critic's but the one giving the value.
         actor_hidden = ({id(m.weight) for name, m in self.actor.named_modules()
@@ -492,16 +561,17 @@ class Learner:
         self.economy_share = cfg.economy_start
         self.decisions = 0
         self.iteration = 0
-        self.entropy_coef = {h: ENTROPY_BASE for h in HEADS}
+        self.entropy_coef = {h: self.entropy_base for h in HEADS}
         self.token_budget = cfg.token_budget        # SPLIT_SHRINK, BUDGET_GROW
         self.lr_scale = 1.0                         # the actor's rate's share of its schedule's (Config.kl_target)
+        self.actions_scale = 1.0                    # GRPO: the iteration's mean actions a decision, done included (_update_loss)
         self.splits = 0
         self.shrunk = False                         # this iteration
         self.memory_limit = 0.0                     # what the learner may reserve on the card, if it's on one
         self.self_play = SelfPlay(cfg.self_play_at, cfg.self_play_holds_below, cfg.self_play_per_iteration)
         self.autocast = torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda")
         self.graphs = cfg.graphs and not cfg.concurrent
-        self.player = Player(self.actor, self.critic, workers, device, self.graphs)
+        self.player = Player(self.actor, None if cfg.group else self.critic, workers, device, self.graphs)     # GRPO plays no critic
         self.ema = self.frozen_player(workers, self.graphs) if cfg.ema > 0.0 else None
         if device == "cuda":
             # It empties its cache at this limit, and fails rather than spills.
@@ -514,18 +584,24 @@ class Learner:
     def progress(self) -> float:
         return min(1.0, self.decisions / self.cfg.decisions)
 
+    @property
+    def entropy_base(self) -> float:
+        """A head's least entropy bonus (Config.entropy_base)."""
+        base = self.cfg.entropy_base
+        return base if base >= 0.0 else 0.0 if self.cfg.group else ENTROPY_BASE
+
     def act(self, frames: list[tuple[rf.Frame, bd.Bundle, np.ndarray]], history: torch.Tensor, seen: torch.Tensor):
         return self.player.act(frames, history, seen)
 
     def frozen_player(self, workers: DataWorkers, graphs: bool = False) -> Player:
-        actor, critic = copy.deepcopy(self.actor), copy.deepcopy(self.critic)
+        actor, critic = copy.deepcopy(self.actor), None if self.cfg.group else copy.deepcopy(self.critic)
         for p in list(actor.parameters()) + (list(critic.parameters()) if critic is not None else []):
             p.requires_grad_(False)
         return Player(actor, critic, workers, self.device, graphs)
 
     def _pairs(self, player: Player) -> list[tuple[torch.nn.Module, torch.nn.Module]]:
         """Each of this learner's nets with a player's."""
-        return [(self.actor, player.actor)] + ([(self.critic, player.critic)] if self.critic is not None else [])
+        return [(self.actor, player.actor)] + ([(self.critic, player.critic)] if self.critic is not None and player.critic is not None else [])
 
     @torch.no_grad()
     def copy_weights_to(self, player: Player) -> None:
@@ -623,22 +699,35 @@ class Learner:
         cfg, device = self.cfg, self.device
         decisions = len(steps)
         advantages = np.array([s.advantage for s in steps], np.float32)
-        adv = torch.as_tensor((advantages - advantages.mean()) / (float(advantages.std()) + 1e-6), device=device)
+        if cfg.group:       # GRPO: as judged against their groups (GroupCollector._judge, weigh_groups), not again over the minibatch
+            note("adv_abs_max", float(np.abs(advantages).max()))
+            if cfg.adv_clip > 0.0:
+                note("adv_clipped", float((np.abs(advantages) > cfg.adv_clip).mean()), decisions)
+                advantages = np.clip(advantages, -cfg.adv_clip, cfg.adv_clip)
+            adv = torch.as_tensor(advantages, device=device)
+        else:
+            adv = torch.as_tensor((advantages - advantages.mean()) / (float(advantages.std()) + 1e-6), device=device)
         old = a.logp
         weights = pm.chosen(a).float()
         ratio = (logp - old).clamp(-20.0, 20.0).exp()
-        per_action = -spo_objective(ratio, adv[:, None], eps)
+        per_action = -spo_objective(ratio, adv[:, None], eps, cfg.spo_bound if cfg.group else 0.0)
         count = weights.sum(-1)
         has = count > 0
         pg = torch.zeros((), device=device)
         if has.any():
-            pg = ((per_action * weights).sum(-1)[has] / count[has]).sum() / decisions
+            if cfg.group:
+                # Summed over a decision's actions, over the iteration's mean count of them (Dr. GRPO): each order counts alike
+                # however many its decision has, where an average weighed a losing decision's orders the less, the more it had.
+                pg = (per_action * weights).sum() / (decisions * self.actions_scale)
+            else:
+                pg = ((per_action * weights).sum(-1)[has] / count[has]).sum() / decisions
             with torch.no_grad():
                 total = float(weights.sum())
                 deviation = (ratio - 1.0).abs()
                 note("kl", float(((old - logp) * weights).sum()) / total, total)
                 note("clip_fraction", float(((deviation > eps).float() * weights).sum()) / total, total)     # outside 1 +- eps
                 note("ratio_deviation", float((deviation * weights).sum()) / total, total)
+                note("ratio_deviation_max", float((deviation * weights).max()))
         value_loss = torch.zeros((), device=device)
         if self.critic is not None:
             # Each term's head as if it were the only one: their losses add up.
@@ -646,6 +735,11 @@ class Learner:
             per_term = (self.critic.hl_gauss(value, ret) if self.critic.bins else (value - ret).pow(2)).sum(0) / decisions
             value_loss = per_term.sum()
             note("loss_value", float(value_loss.detach()))
+            if cfg.group:       # for each term's explained variance (`train`), as the collector gives it under PPO
+                with torch.no_grad():
+                    guess = (value.float().softmax(-1) * self.critic.centres).sum(-1) if self.critic.bins else value.float()
+                    for name, x in zip(self.term_names, (guess - ret).square().mean(0).tolist()):
+                        note(f"value_error_{name}", x, decisions)
             if len(per_term) > 1:
                 for name, x in zip(self.term_names, per_term.detach().tolist()):
                     note(f"loss_value_{name}", x)
@@ -690,26 +784,36 @@ class Learner:
         for group in self.muon.param_groups if self.muon is not None else ():
             group["lr"] = (cfg.actor_muon_lr * actor if group["role"] == "actor" else cfg.critic_muon_lr * lr) / cfg.lr_start
 
-    def _backward(self, batch: list[Segment], eps: float, note) -> None:
-        """The minibatch's gradient.  One that doesn't fit the card is done again in 2, then 4... runs of its segments, each loss
-        weighed by its share of the decisions, and the budget shrinks for the rest of the run."""
-        decisions = sum(len(seg.steps) for seg in batch)
-        parts = 1
-        while True:
+    def _restore(self, kept: list | None) -> None:
+        """The parameters' gradients back to `kept` (`_backward`), or to none."""
+        if kept is None:
             self.optimizer.zero_grad(set_to_none=True)
             if self.muon is not None:
                 self.muon.zero_grad(set_to_none=True)
+            return
+        for p, g in zip(self.trained, kept):
+            p.grad = None if g is None else g.clone()
+
+    def _backward(self, batch: list[Segment], eps: float, note, share: float = 1.0) -> None:
+        """The minibatch's gradient, `share` of it, added to what the parameters hold (`train` clears them at each step).  One that
+        doesn't fit the card is done again in 2, then 4... runs of its segments, each loss weighed by its share of the decisions,
+        from the gradient as it was before, and the budget shrinks for the rest of the run."""
+        decisions = sum(len(seg.steps) for seg in batch)
+        kept = [None if p.grad is None else p.grad.clone() for p in self.trained] if any(p.grad is not None for p in self.trained) else None
+        parts = 1
+        while True:
             notes = []
             try:
                 for piece in np.array_split(np.arange(len(batch)), parts):
                     run = [batch[int(k)] for k in piece]
-                    share = sum(len(seg.steps) for seg in run) / decisions
-                    (self._loss(run, eps, lambda *a: notes.append(a)) * share).backward()
+                    weight = share * sum(len(seg.steps) for seg in run) / decisions
+                    (self._loss(run, eps, lambda *a: notes.append(a)) * weight).backward()
                 break
             except torch.OutOfMemoryError:
                 if parts >= len(batch):
                     raise
-            # Out of the handler, so the failed attempt's tensors are freed.
+            # Out of the handler, so the failed attempt's tensors are freed; and the gradient as it was.
+            self._restore(kept)
             torch.cuda.empty_cache()
             parts = min(2 * parts, len(batch))
             self.splits += 1
@@ -730,39 +834,52 @@ class Learner:
         self.shrunk = False
         totals: dict[str, float] = {}
         counts: dict[str, float] = {}
-        # With GRPO the collector gave each step its advantage (GroupCollector._judge).
-        scales = self.weigh([s for seg in segments for s in seg.steps]) if self.critic is not None else np.ones(1)
+        scales = self.prepare(segments)
 
         def note(name: str, value: float, weight: float = 1.0) -> None:
+            if name.endswith("_max"):       # the iteration's most
+                totals[name], counts[name] = max(totals.get(name, value), value), 1.0
+                return
             totals[name] = totals.get(name, 0.0) + value * weight
             counts[name] = counts.get(name, 0.0) + weight
 
         peaks = [0, 0]
         log = (self.run / "minibatches.jsonl").open("a") if self.memory_limit else None
         for _ in range(cfg.passes):
-            for batch in self._minibatches(segments, rng):
-                if log is not None:
-                    torch.cuda.reset_peak_memory_stats()
-                splits = self.splits
-                self._backward(batch, eps, note)
-                grad = torch.nn.utils.clip_grad_norm_(self.trained, cfg.grad_clip)
+            for batches in self._plan(segments, rng):
+                total = sum(len(seg.steps) for batch in batches for seg in batch)
+                self._restore(None)
+                for batch in batches:
+                    if log is not None:
+                        torch.cuda.reset_peak_memory_stats()
+                    splits = self.splits
+                    self._backward(batch, eps, note, sum(len(seg.steps) for seg in batch) / total)
+                    if log is not None:
+                        allocated, reserved = torch.cuda.max_memory_allocated(), torch.cuda.max_memory_reserved()
+                        peaks = [max(peaks[0], allocated), max(peaks[1], reserved)]
+                        log.write(json.dumps({"iteration": self.iteration, "decisions": sum(len(seg.steps) for seg in batch),
+                                              "tokens": padded_tokens(batch), "allocated_gb": round(allocated / 2**30, 3),
+                                              "reserved_gb": round(reserved / 2**30, 3), "split": self.splits > splits}) + "\n")
+                # The actor's and the critic's apart: together, a young critic's gradient shrank the actor's, and under Adam's
+                # eps a small gradient makes a smaller step, not the same one.
+                grad = torch.nn.utils.clip_grad_norm_(self.actor_trained, cfg.grad_clip)
+                if self.critic_trained:
+                    note("grad_norm_critic", float(torch.nn.utils.clip_grad_norm_(self.critic_trained, cfg.grad_clip)))
                 self.optimizer.step()
                 if self.muon is not None:
                     self.muon.step()
                 self.ema_step()
                 note("grad_norm", float(grad))
-                if log is not None:
-                    allocated, reserved = torch.cuda.max_memory_allocated(), torch.cuda.max_memory_reserved()
-                    peaks = [max(peaks[0], allocated), max(peaks[1], reserved)]
-                    log.write(json.dumps({"iteration": self.iteration, "decisions": sum(len(seg.steps) for seg in batch),
-                                          "tokens": padded_tokens(batch), "allocated_gb": round(allocated / 2**30, 3),
-                                          "reserved_gb": round(reserved / 2**30, 3), "split": self.splits > splits}) + "\n")
+                note("step_decisions", total)
                 if between is not None:
                     between()
         out = {k: totals[k] / max(counts[k], 1e-9) for k in totals}
         out.update(token_budget=self.token_budget, splits=self.splits, lr_scale=self.lr_scale)
         if len(scales) > 1:
-            out.update({f"return_scale_{name}": float(x) for name, x in zip(self.term_names, scales)})
+            out.update({f"{'term' if cfg.group else 'return'}_scale_{name}": float(x) for name, x in zip(self.term_names, scales)})
+        out.update(self.end_stats)
+        for i, name in enumerate(self.term_names if f"value_error_{self.term_names[0]}" in out else ()):
+            out[f"explained_variance{'_' + name if i else ''}"] = 1.0 - out[f"value_error_{name}"] / max(float(self.return_var[i]), 1e-8)
         self.follow_kl(out.get("kl"))
         if log is not None:
             log.close()
@@ -774,6 +891,149 @@ class Learner:
         if self.cfg.clone_weight:
             out["clone_weight"] = self.clone_weight
         return out
+
+    def prepare(self, segments: list[Segment]) -> np.ndarray:
+        """Each decision's advantage, its terms weighed, and the mean count of actions a decision (`_update_loss`).  Returns
+        the terms' scales."""
+        steps = [s for seg in segments for s in seg.steps]
+        if self.cfg.group and self.cfg.bootstrap:
+            self.bootstrap(segments)
+        if not self.cfg.group:
+            scales = self.weigh(steps)
+        elif self.cfg.group_scale == "terms":
+            scales = self.weigh_groups(segments)
+        else:           # the collector gave each step its advantage (GroupCollector._judge)
+            scales = np.ones(1)
+        self.actions_scale = float(np.mean([1 + int((s.anchor[:-1] >= 0).sum()) for s in steps])) if steps else 1.0
+        return scales
+
+    def bootstrap(self, segments: list[Segment]) -> None:
+        """Bootstrapped GRPO (Config.bootstrap): each decision's return, the critic's target, is its branch's terms from it to its
+        stretch's end (`Step.rest`, GroupCollector._judge) and the critic's value of where the branch ended, discounted to it.
+        Its advantages are that, the economy less the income balance when it was taken (Config.economy_change), less the
+        group's mean of the same from the same moment, a branch with no decision then counting 0, as the collector judges them
+        unbootstrapped; each group's spreads (weigh_groups) are of the same at its stretch's start."""
+        ends = {seg.branch: (seg.end, seg.bundle, seg.names) for seg in segments if seg.end is not None}
+        values = dict(zip(ends, self.values_of(list(ends.values()))))
+        self.end_stats = {}
+        if values and "result" in self.term_names:
+            # How much play is spent where the critic already calls the game lost: each valued end, by its branch's decisions.
+            at = self.term_names.index("result")
+            counts: dict[int, int] = {}
+            for seg in segments:
+                if seg.branch in values:
+                    counts[seg.branch] = counts.get(seg.branch, 0) + len(seg.steps)
+            result = np.array([values[b][at] for b in counts])
+            weight = np.array(list(counts.values()), np.float64)
+            self.end_stats["end_value_result"] = float(result.mean())
+            for line in HOPELESS:
+                self.end_stats[f"hopeless{round(-100 * line)}"] = float(weight[result < line].sum() / weight.sum())
+        change = np.array([self.cfg.economy_change and name == "economy" for name in self.term_names])
+        means: dict[tuple[int, int], np.ndarray] = {}
+        starts: dict[int, dict[int, tuple[int, np.ndarray]]] = {}       # group: branch: its first decision's slot and its terms
+        for seg in segments:
+            end = values.get(seg.branch, 0.0)
+            first = starts.setdefault(seg.group, {})
+            for step in seg.steps:
+                step.ret = step.rest + step.discount * end
+                own = step.ret - change * step.level
+                means[seg.group, step.slot] = means.get((seg.group, step.slot), 0.0) + own / seg.members
+                if seg.branch not in first or step.slot < first[seg.branch][0]:
+                    first[seg.branch] = (step.slot, own)
+        for seg in segments:
+            seg.spreads = np.stack([own for _, own in starts[seg.group].values()]).std(0)
+            for step in seg.steps:
+                step.advantages = step.ret - change * step.level - means[seg.group, step.slot]
+        returns = np.stack([step.ret for seg in segments for step in seg.steps]) if segments else np.zeros((0, len(self.term_names)))
+        self.return_var = returns.var(0) if len(returns) else np.ones(len(self.term_names))
+
+    @property
+    def resign_state(self) -> tuple[bool, float | None]:
+        """For the collectors (Config.resign): whether to measure the critic's result where groups go on, and the threshold."""
+        measuring = self.cfg.resign and self.iteration >= self.warm_until
+        return measuring, self.resign_at if measuring else None
+
+    def follow_resignation(self, records: list[tuple[float, float]]) -> dict[str, float]:
+        """The played-out games of a collection, each (the least result the critic gave it where it went on, 1 if it then wasn't
+        lost), into the window, and the threshold from it (Config.resign).  Returns its metrics."""
+        cfg = self.cfg
+        self.lineages.extend(records)
+        out = {"played_out": len(records), "played_out_window": len(self.lineages)}
+        self.resign_at = None
+        for line in RESIGN_THRESHOLDS:
+            kept = [k for low, k in self.lineages if low < line]
+            if len(kept) >= cfg.resign_least:
+                out[f"resign_false{round(-100 * line)}"] = float(np.mean(kept))
+                if np.mean(kept) <= cfg.resign_false:
+                    self.resign_at = line
+        out["resign_at"] = self.resign_at if self.resign_at is not None else 0.0
+        out["resigning"] = float(self.resign_at is not None)
+        return out
+
+    @torch.no_grad()
+    def values_of(self, frames: list[tuple[rf.Frame, bd.Bundle, np.ndarray]]) -> list[np.ndarray]:
+        """The critic's value of each (frame, bundle, names), by term."""
+        if not frames:
+            return []
+        out = []
+        regions = max(b.regions for _, b, _ in frames)
+        for batch in self.workers.batches([frames[i:i + FLAT_CHUNK] for i in range(0, len(frames), FLAT_CHUNK)], regions):
+            with self.autocast:
+                out.extend(self.critic(batch.to(self.device)).float().cpu().numpy())
+        return out
+
+    def gradient(self, segments: list[Segment], rng: np.random.Generator) -> torch.Tensor:
+        """The actor's gradient of the loss over these segments as one optimizer step would take it, before its clipping,
+        flattened; their advantages as `prepare` left them.  A critic's (--bootstrap) is left out: it doesn't learn from the
+        advantages, and would make any two halves alike.  The parameters' gradients are cleared after."""
+        cfg = self.cfg
+        eps = cfg.epsilon_start + (cfg.epsilon_end - cfg.epsilon_start) * self.progress
+        total = sum(len(seg.steps) for seg in segments)
+        self._restore(None)
+        for batch in self._minibatches(segments, rng):
+            self._backward(batch, eps, lambda *a: None, sum(len(seg.steps) for seg in batch) / total)
+        out = torch.cat([(torch.zeros_like(p) if p.grad is None else p.grad).flatten().float() for p in self.actor_trained])
+        self._restore(None)
+        return out
+
+    def _plan(self, segments: list[Segment], rng: np.random.Generator) -> list[list[list[Segment]]]:
+        """The iteration's optimizer steps, each as its minibatches (`_minibatches`).  Under GRPO with Config.group_step, whole
+        groups in a random order, each step's up to that many decisions or just past (the last joins the one before when it would
+        be under half of it); else a step a minibatch."""
+        cfg = self.cfg
+        if not (cfg.group and cfg.group_step):
+            return [[batch] for batch in self._minibatches(segments, rng)]
+        by: dict[int, list[Segment]] = {}
+        for seg in segments:
+            by.setdefault(seg.group, []).append(seg)
+        parts: list[list[Segment]] = []
+        current: list[Segment] = []
+        n = 0
+        for g in rng.permutation(sorted(by)):
+            current += by[int(g)]
+            n += sum(len(seg.steps) for seg in by[int(g)])
+            if n >= cfg.group_step:
+                parts.append(current)
+                current, n = [], 0
+        if current:
+            if parts and n < cfg.group_step / 2:
+                parts[-1] += current
+            else:
+                parts.append(current)
+        return [self._minibatches(part, rng) for part in parts]
+
+    def weigh_groups(self, segments: list[Segment]) -> np.ndarray:
+        """GRPO's advantages with Config.group_scale "terms": each decision's terms less its group's (GroupCollector._judge), each
+        over that term's mean spread in this iteration's groups where it varied, weighed (Config.terms).  Returns the scales."""
+        spreads = {seg.group: seg.spreads for seg in segments}
+        s = np.stack(list(spreads.values())) if spreads else np.zeros((0, len(self.term_weights)))
+        varied = s > 1e-9
+        scales = np.where(varied.any(0), (s * varied).sum(0) / np.maximum(varied.sum(0), 1), 1.0)
+        weights = self.term_weights / scales
+        for seg in segments:
+            for step in seg.steps:
+                step.advantage = float(np.dot(step.advantages, weights))
+        return scales
 
     def weigh(self, steps: list[Step]) -> np.ndarray:
         """Each step's advantage, its terms' weighed (Config.terms), each first over its returns' spread this iteration, from the
@@ -809,7 +1069,7 @@ class Learner:
             if e < self.cfg.entropy_floor * maxima[h]:
                 self.entropy_coef[h] = min(ENTROPY_MAX, self.entropy_coef[h] * 1.1)
             else:
-                self.entropy_coef[h] = max(ENTROPY_BASE, self.entropy_coef[h] * 0.97)
+                self.entropy_coef[h] = max(self.entropy_base, self.entropy_coef[h] * 0.97)
 
     def save(self) -> None:
         """A kill at any moment leaves latest.json naming a whole checkpoint."""
@@ -822,12 +1082,13 @@ class Learner:
         critic = {"critic": self.critic.state_dict(), "critic_size": self.critic.size} if self.critic is not None else {}
         ema = {}
         if self.ema is not None:
-            ema = {"ema_actor": self.ema.actor.state_dict(), **({"ema_critic": self.ema.critic.state_dict()} if self.critic is not None else {})}
+            ema = {"ema_actor": self.ema.actor.state_dict(), **({"ema_critic": self.ema.critic.state_dict()} if self.ema.critic is not None else {})}
         muon = {"muon": self.muon.state_dict()} if self.muon is not None else {}
         torch.save({"actor": self.actor.state_dict(), **critic, "optimizer": self.optimizer.state_dict(), **ema, **muon,
                     "size": asdict(self.actor.size),
                     "iteration": self.iteration, "decisions": self.decisions, "entropy_coef": self.entropy_coef, "self_play": asdict(self.self_play), "lr_scale": self.lr_scale,
-                    "terms": list(self.term_names), "warm_until": self.warm_until}, temp)
+                    "terms": list(self.term_names), "warm_until": self.warm_until,
+                    "lineages": [list(r) for r in self.lineages], "resign_at": self.resign_at}, temp)
         os.replace(temp, directory / name)
         marker = self.run / "latest.json.tmp"
         marker.write_text(json.dumps({"checkpoint": f"ckpt/{name}", "iteration": self.iteration, "decisions": self.decisions}))
@@ -840,7 +1101,7 @@ class Learner:
         state = torch.load(self.run / json.loads(marker.read_text())["checkpoint"], map_location=self.device, weights_only=True)
         if (self.critic is None) != ("critic" not in state):
             raise SystemExit(f"{self.run} was trained {'with' if 'critic' in state else 'without'} a critic: a run can't go between PPO "
-                             "and GRPO (--group), but another can start from its actor (--init)")
+                             "or bootstrapped GRPO (--bootstrap) and GRPO without, but another can start from its actor (--init)")
         # Other terms than the checkpoint's: the critic keeps what it reads, and its value heads start afresh, Adam's moments of
         # them too, while it learns them alone for a while (Config.critic_rewarm).
         fresh = self.critic is not None and list(state.get("terms", ["blend"])) != list(self.term_names)
@@ -855,12 +1116,15 @@ class Learner:
             self.muon.load_state_dict(state["muon"])
         if self.ema is not None:
             self.ema.actor.load_state_dict(state.get("ema_actor", state["actor"]))
-            if self.critic is not None:
+            if self.ema.critic is not None:
                 _load_critic(self.ema.critic, state.get("ema_critic", state["critic"]), fresh)
         self.iteration, self.decisions = state["iteration"], state["decisions"]
         self.warm_until = self.iteration + self.cfg.critic_rewarm if fresh else state.get("warm_until", self.cfg.critic_warmup)
-        self.entropy_coef = state["entropy_coef"]
+        # With no floor (Config.entropy_floor 0) no bonus rises above the base, which may have changed since.
+        self.entropy_coef = state["entropy_coef"] if self.cfg.entropy_floor > 0.0 else {h: self.entropy_base for h in HEADS}
         self.lr_scale = state.get("lr_scale", 1.0)
+        self.lineages.extend(tuple(r) for r in state.get("lineages", ()))
+        self.resign_at = state.get("resign_at")
         if "self_play" in state:
             self.self_play = SelfPlay(**state["self_play"])
         return True
@@ -873,8 +1137,6 @@ def parse_terms(given: list[str]) -> tuple[tuple[str, float], ...]:
     names = [name for name, _ in out]
     if not out or len(set(names)) < len(names) or not set(names) <= set(policy_sim_env.TERMS):
         raise ValueError(f"--terms: each of {policy_sim_env.TERMS} once at most, as TERM:WEIGHT")
-    if "combat" in names and policy_sim_env.DEALT_STAT < 0:
-        raise ValueError("--terms: combat needs the sim's damage statistics, libzksim ABI 24")
     return out
 
 
@@ -983,6 +1245,7 @@ class Collector:
     def __init__(self, learner: Learner, env, rng: np.random.Generator):
         self.learner, self.env, self.rng = learner, env, rng
         self.player = learner.player
+        self.won: dict[int, float] = {}     # each seat that ended: 1 won, 0.5 drew, 0 lost
         env.diversity = learner.cfg.diversity
         env.begin()
         self.seats = Seats(env.seat_count, learner.device, learner.actor)
@@ -1070,6 +1333,7 @@ class Collector:
             tally.wins.setdefault(mode if kind == "1v1" else f"{mode}_{kind}", []).append(won)
             if "lead_rule" in facts:
                 tally.lead_rule.append(float(facts["lead_rule"]))
+            self.won[seat] = won
             out.append(seat)
         return out
 
@@ -1122,8 +1386,8 @@ class Collector:
 class GroupCollector(Collector):
     """GRPO's play (Config.group; 03-training.md, "GRPO").  The games go in groups, each group's games copies of one game
     (policy_sim_env.SimEnv.copy_game), with what the actor kept of each seat, played on apart by the policy for a stretch of
-    game time drawn from Config.horizon.  Each seat's stretch in each game, a branch, is then scored by its terms (`_scores`)
-    against the same seat's in the group's other games, and every decision of it takes that advantage (`_judge`).  Then one of
+    game time drawn from Config.horizon.  Each seat's stretch in each game, a branch, is then scored by its terms against the same
+    seat's in the group's other games, and each decision of it judged by that (`_judge`).  Then one of
     the group's games still going, drawn at random, is copied into the rest for the next stretch; when none is, a new game is.
     So every decision played is learnt from, and the games go on as the policy plays them.  A branch still being played when a
     collection ends goes to a later one: its decisions were played by the weights of their time, as concurrent collection's are."""
@@ -1132,6 +1396,8 @@ class GroupCollector(Collector):
         cfg = learner.cfg
         if cfg.group < 2 or env.count % cfg.group:
             raise ValueError(f"{env.count} games don't make groups of {cfg.group}")
+        if cfg.bootstrap and cfg.group_scale != "terms":
+            raise ValueError("--bootstrap weighs the terms as --group-scale terms does")
         self.learner, self.env, self.rng = learner, env, rng
         self.player = learner.player
         env.diversity = cfg.diversity
@@ -1142,13 +1408,28 @@ class GroupCollector(Collector):
         self.current: dict[int, Trajectory] = {}        # each seat's branch, while it's played
         self.pending: dict[int, list[Segment]] = {}     # its segments, cut as they're played, till it's judged
         self.score: dict[int, np.ndarray] = {}          # its terms' sums so far
-        self.lived: dict[int, int] = {}                 # and the steps it was in play
         self.names: list[list[np.ndarray]] = [[] for _ in range(groups)]     # each group's game's name maps, by team
         self.left = np.zeros(groups, np.int64)          # the steps each group's stretch has left: from 0, one starts now
+        self.span = np.ones(groups, np.int64)           # and its steps in all
         self.terms = learner.term_names
-        # A branch's economy is the income balance's mean over it: what it earned, as against the group's others.
-        self.asked = tuple("income" if name == "economy" else name for name in self.terms)
-        self.means = np.array([name == "economy" for name in self.terms])
+        # A branch's economy is the income balance summed over it, over the stretch's length: its mean, if in play throughout.
+        # Bootstrapped (Config.bootstrap), each term is as the critic values it, the economy a discounted average of the
+        # balance, and each is summed discounted (policy_sim_env.term_gamma), so that the critic's value of the end adds on.
+        self.boot = cfg.bootstrap
+        self.asked = self.terms if self.boot else tuple("income" if name == "economy" else name for name in self.terms)
+        self.means = np.array([name == "economy" and not self.boot for name in self.terms])
+        self.gammas = np.array([env.term_gamma(name) if self.boot else 1.0 for name in self.terms])
+        self.change = cfg.economy_change and "economy" in self.terms and (cfg.reward_to_go or self.boot)
+        self.counted: dict[int, int] = {}               # each seat's steps summed in its score
+        self.won: dict[int, float] = {}
+        # Resignation (Config.resign): the critic (the learner's, or the collector's copy of it), whether to measure, the
+        # threshold, and each group's game: played out, and the least the critic gave it.  Its own generator, so that the
+        # games' draws are as they'd be without it.
+        self.critic = getattr(learner, "critic", None) if cfg.resign else None
+        self.measuring, self.resign_at = False, None
+        self.free = np.ones(groups, bool)
+        self.low = np.full(groups, np.inf)
+        self.resign_rng = np.random.default_rng((cfg.seed, 7)) if cfg.resign else None
         self.out = []
         self.tally = Tally.empty(self.terms)
 
@@ -1158,7 +1439,7 @@ class GroupCollector(Collector):
         tr = Trajectory(self.env.bundle_of(seat), self.names[g // self.size][team])
         tr.history, tr.seen = _kept(self.seats.history[seat], self.seats.seen[seat])
         self.current[seat], self.pending[seat] = tr, []
-        self.score[seat], self.lived[seat] = np.zeros(len(self.terms)), 0
+        self.score[seat], self.counted[seat] = np.zeros(len(self.terms)), 0
 
     def _segments_of(self, seat: int) -> list[Segment]:
         return self.pending[seat]
@@ -1176,13 +1457,18 @@ class GroupCollector(Collector):
                     self._branch(int(k))
             acting = env.policy_seats_to_act()
             items = self._act(acting) if acting else []
+            for seat in acting:         # where each decision's branch stood: what comes after judges it (Config.reward_to_go)
+                step = self.current[seat].steps[-1]
+                step.slot, step.mark, step.counted = env.slot, self.score[seat].copy(), self.counted[seat]
+                if self.change:
+                    step.level = float(env.reward_terms(seat, ("income",), b)[0])
             env.step(progress)
             self.left -= 1
             self._advise(acting, items)
             for seat, tr in self.current.items():
                 if not tr.done:
-                    self.score[seat] += env.reward_terms(seat, self.asked, b)
-                    self.lived[seat] += 1
+                    self.score[seat] += self.gammas ** self.counted[seat] * env.reward_terms(seat, self.asked, b)
+                    self.counted[seat] += 1
             for seat in self._finished():
                 if seat in self.current:
                     self.current[seat].done = True
@@ -1194,13 +1480,26 @@ class GroupCollector(Collector):
         drawn at random, copied into the others; or from a new game, when none is."""
         env, size, slots = self.env, self.size, self.env.slots
         games = list(range(k * size, (k + 1) * size))
-        going = sorted({env.game_of(s) for s, tr in self.current.items()
-                        if not tr.done and env.game_of(s) in games and not env.waiting[env.game_of(s)]})
+        alive = [s for s, tr in self.current.items() if not tr.done and env.game_of(s) in games]
+        going = sorted({env.game_of(s) for s in alive if not env.waiting[env.game_of(s)]})
         self._judge(k)
-        if going:
-            src = int(self.rng.choice(going))
-        else:
+        results = [self.won.pop(s) for s in [s for s in self.won if env.game_of(s) in games]]
+        src = int(self.rng.choice(going)) if going else -1
+        if src >= 0 and self.measuring:
+            # Resignation (Config.resign): the critic's result for the policy's side of the game the group would go on from.
+            value = self._value(k, [s for s in alive if env.game_of(s) == src])
+            self.low[k] = min(self.low[k], value)
+            if not self.free[k] and self.resign_at is not None and value < self.resign_at:
+                self.tally.add("resigned", 1)
+                src = -1
+        elif src < 0 and self.free[k] and np.isfinite(self.low[k]) and results:
+            # A game played out to its end: the least it was given, and whether it wasn't lost (of its copies' ends, the share).
+            self.tally.lineages.append((float(self.low[k]), float(np.mean([w >= 0.5 for w in results]))))
+        if src < 0:
             src = games[0]
+            if self.critic is not None:
+                self.free[k] = self.resign_at is None or self.resign_rng.random() < self.learner.cfg.resign_free
+                self.low[k] = np.inf
             env.restart(src)
             for t in range(slots):
                 self.seats.clear(src * slots + t)
@@ -1215,44 +1514,87 @@ class GroupCollector(Collector):
                 self.seats.seen[theirs] = self.seats.seen[mine]
         decision = env.seconds_a_step * env.act_every
         low, high = (max(1, round(s / decision)) for s in self.learner.cfg.horizon)
-        self.left[k] = env.act_every * int(self.rng.integers(low, max(low, high) + 1))
+        self.left[k] = self.span[k] = env.act_every * int(self.rng.integers(low, max(low, high) + 1))
 
-    def _scores(self, seat: int) -> np.ndarray:
-        """A branch's terms: each one's sum over it, but the economy's, which is its mean."""
-        out = self.score.pop(seat)
-        out[self.means] /= max(self.lived.pop(seat), 1)
-        return out
+    @torch.no_grad()
+    def _value(self, k: int, seats: list[int]) -> float:
+        """The critic's result for the least of these seats of group k's game, where it stands now."""
+        env = self.env
+        items = self.player._features([(env.frame(s), env.bundle_of(s), self.names[k][s % env.slots]) for s in seats])
+        with self.player.autocast:
+            values = self.critic(pm.collate(items).to(self.learner.device))
+        return float(values[:, self.terms.index("result")].float().min())
 
     def _judge(self, k: int) -> None:
-        """Group k's branches, each against the same seat's in the group's other games: a branch's score is its terms (`_scores`)
-        weighed as Config.terms, its advantage that less their mean, over their spread with Config.group_std.  Every decision
-        of it takes that advantage.  A seat with one branch, or with branches that all scored the same, teaches nothing: its
-        branches are dropped."""
-        tally, slots = self.tally, self.env.slots
+        """Group k's branches, each seat's against the same seat's in the group's other games.  A branch's terms are each one's
+        sum over it, the economy's over the stretch's length.  With Config.reward_to_go a decision is judged on its branch's terms
+        from it on, less the group's mean of theirs from the same moment (a branch whose game had ended by then has nothing more);
+        else on the whole stretch's, less the group's mean; the economy from it on as the change from the income balance when
+        it was taken (Config.economy_change).  Those are its `advantages`, by term; its `advantage` is them weighed
+        (Config.terms): by the learner over each term's spread in the iteration (Config.group_scale "terms",
+        Learner.weigh_groups), or here, over the group's spread of weighed scores ("group") or not ("none").  A seat with one
+        branch, or whose branches all scored alike, teaches nothing: its branches are dropped.  Bootstrapped (Config.bootstrap),
+        each decision's terms to the stretch's end and their discount to it are kept, and where each branch ended, for the
+        learner to add the critic's value of that and judge them (Learner.bootstrap); only a seat with one branch is dropped."""
+        tally, slots, cfg = self.tally, self.env.slots, self.learner.cfg
+        weights = self.learner.term_weights
+        per = np.where(self.means, 1.0 / max(int(self.span[k]), 1), 1.0)
         teams: dict[int, list[int]] = {}
+        ends: dict[int, rf.Frame] = {}
         for seat in [s for s in self.current if s // slots // self.size == k]:
-            _close(self.current.pop(seat), self.pending[seat])
+            tr = self.current.pop(seat)
+            if self.boot and not tr.done:
+                raw = self.env.frame(seat)
+                ends[seat] = rf.Frame(raw.units.copy(), raw.sites.copy(), raw.glob.copy(), raw.features.copy())
+            _close(tr, self.pending[seat])
             teams.setdefault(seat % slots, []).append(seat)
         for members in teams.values():
-            scores = np.stack([self._scores(s) for s in members])     # branches x terms
-            total = scores @ self.learner.term_weights
-            spread = float(total.std())
+            finals = np.stack([self.score.pop(s) for s in members]) * per       # branches x terms
+            counts = [self.counted.pop(s) for s in members]
             segments = [self.pending.pop(s) for s in members]
-            if len(members) < 2 or spread < 1e-9:
+            spreads, spread = finals.std(0), float((finals @ weights).std())
+            if len(members) < 2 or (not self.boot and (not (spreads > 1e-9).any() or (cfg.group_scale == "group" and spread < 1e-9))):
                 tally.add("dropped", len(members))
                 continue
-            advantage = (total - total.mean()) / (spread if self.learner.cfg.group_std else 1.0)
-            for a, segs in zip(advantage, segments):
+            steps = [[step for seg in segs for step in seg.steps] for segs in segments]
+            if self.boot:
+                for seat, final, count, segs, branch in zip(members, finals, counts, segments, steps):
+                    for step in branch:
+                        step.rest = (final - step.mark) / self.gammas ** step.counted
+                        step.discount = self.gammas ** (count - step.counted)
+                    mark = int(self.rng.integers(1 << 62))
+                    for seg in segs:
+                        seg.branch, seg.members = mark, len(members)
+                    if segs:
+                        segs[-1].end = ends.get(seat)
+            elif cfg.reward_to_go:
+                ahead = [[final - (step.mark + self.means * step.level * (count - step.counted)) * per for step in branch]
+                         for final, count, branch in zip(finals, counts, steps)]
+                mean: dict[int, np.ndarray] = {}
+                for branch, rests in zip(steps, ahead):
+                    for step, rest in zip(branch, rests):
+                        mean[step.slot] = mean.get(step.slot, 0.0) + rest / len(members)
+                for branch, rests in zip(steps, ahead):
+                    for step, rest in zip(branch, rests):
+                        step.advantages = rest - mean[step.slot]
+            else:
+                for final, branch in zip(finals, steps):
+                    for step in branch:
+                        step.advantages = final - finals.mean(0)
+            scale = spread if cfg.group_scale == "group" else 1.0
+            group = int(self.rng.integers(1 << 62))
+            for segs, branch in zip(segments, steps):
+                for step in branch if not self.boot else ():
+                    step.advantage = float(step.advantages @ weights) / scale      # "terms": the learner weighs them again
                 for seg in segs:
-                    for step in seg.steps:
-                        step.advantage = float(a)
+                    seg.group, seg.spreads = group, spreads
                     self.out.append(seg)
                     tally.stored += len(seg.steps)
             tally.add("groups", 1)
             tally.add("branches", len(members))
             tally.add("branch_decisions", sum(len(seg.steps) for segs in segments for seg in segs))
             tally.add("spread", spread)
-            for name, x in zip(self.terms, scores.std(0)):
+            for name, x in zip(self.terms, spreads):
                 tally.add(f"spread_{name}", float(x))
 
 
@@ -1271,6 +1613,7 @@ class Tally:
     lead_rule: list[float] = field(default_factory=list)    # 1 for each game ended that a lead could have ended, else 0
     terms: tuple[str, ...] = ("blend",)
     groups: dict[str, float] = field(default_factory=dict)  # GRPO's sums (GroupCollector._judge)
+    lineages: list = field(default_factory=list)            # games played out (GroupCollector._branch, Config.resign)
 
     @staticmethod
     def empty(terms: tuple[str, ...]) -> "Tally":
@@ -1294,7 +1637,7 @@ class Tally:
         return Tally(sum(t.stored for t in tallies), sum(t.masked_out for t in tallies), sum(t.actions for t in tallies),
                      sum(t.bonus for t in tallies), np.sum([t.kind_counts for t in tallies], 0), wins,
                      np.concatenate([t.values for t in tallies]), np.concatenate([t.returns for t in tallies]), graphs,
-                     [x for t in tallies for x in t.lead_rule], tallies[0].terms, groups)
+                     [x for t in tallies for x in t.lead_rule], tallies[0].terms, groups, [x for t in tallies for x in t.lineages])
 
     def metrics(self) -> dict[str, float]:
         """The first term's explained variance and returns' range without a suffix, as with one term; with more, each term's too.
@@ -1310,7 +1653,8 @@ class Tally:
                             f"return_min{suffix}": float(r.min()), f"return_max{suffix}": float(r.max())})
         g = self.groups
         if g:
-            metrics.update(branches=g.get("branches", 0), branches_dropped=g.get("dropped", 0), new_games=g.get("new_games", 0))
+            metrics.update(branches=g.get("branches", 0), branches_dropped=g.get("dropped", 0), new_games=g.get("new_games", 0),
+                           resigned=g.get("resigned", 0))
             if g.get("groups"):
                 metrics["group_spread"] = g["spread"] / g["groups"]
                 metrics["branch_decisions"] = g["branch_decisions"] / g["branches"]
@@ -1320,6 +1664,8 @@ class Tally:
         for mode, results in self.wins.items():
             metrics[f"wins_{mode}"] = float(np.mean(results))
             metrics[f"games_{mode}"] = len(results)
+        if self.lineages:       # not a number: the learner takes it out (Learner.follow_resignation)
+            metrics["lineages"] = list(self.lineages)
         if self.lead_rule:      # of the training games that ended, the share a lead could have ended: lead_share, as drawn
             metrics["lead_rule_games"] = float(np.mean(self.lead_rule))
         metrics.update(self.graphs)
@@ -1351,7 +1697,10 @@ def evaluate(learner: Learner, make_env, opponent: str, games: int, seed: int, r
     """The current policy (the moving average of its weights, `Config.ema`) against a script, sampled as in training, in games of
     one kind (policy_sim_env.GAME_KINDS), the policy on team 0: a win is its alliance's result 1, as a loss is its alliance out.
     Each game slot counts its first game only: the games that end soonest would otherwise count most, and those are not a fair
-    sample.  replays: policy_replay.Capture's arguments, to keep every game for the dashboard."""
+    sample.  replays: policy_replay.Capture's arguments, to keep every game for the dashboard.  Each game's record says its slot
+    and the seed, so that tests of one seed pair game for game (`score_test`); its alliances' metal income summed over the game,
+    income_own and income_enemy; and the economy at a few minutes (policy_clone_eval.Notes)."""
+    from policy_clone_eval import Notes        # which imports this
     player = learner.evaluator
     # A 1v1 test in a batch of 1v1s, whatever slots the training's games have.
     env = make_env(games, seed, modes=[opponent], kinds={kind: 1.0}, **({"slots": 0} if kind == "1v1" else {}))
@@ -1365,6 +1714,9 @@ def evaluate(learner: Learner, make_env, opponent: str, games: int, seed: int, r
     names = np.arange(learner.vocabulary, dtype=np.int32)
     results: dict[int, float] = {}
     records: dict[int, dict] = {}
+    notes = Notes(env)
+    income = np.zeros((env.count, 2))
+    metal = rf.G["metal_income"]
     while len(results) < games:
         acting = env.policy_seats_to_act()
         if not acting:
@@ -1383,13 +1735,77 @@ def evaluate(learner: Learner, make_env, opponent: str, games: int, seed: int, r
             seats.history[index] = new_history
             seats.seen[index] = new_seen
             env.step(1.0)
+        notes.after_step()
+        for g in range(env.count):
+            if g * env.slots not in results:        # the policy's seat, team 0's
+                n = int(env.n_teams[g])
+                ally, flow = env.ally[g][:n], env.batch.globs[g, :n, metal]
+                income[g] += (float(flow[ally == ally[0]].sum()), float(flow[ally != ally[0]].sum()))
         for seat, _, won in env.finished_seats():
             if seat not in results and seat in getattr(env, "ended", {}):
-                records[seat] = env.ended[seat]
+                g = env.game_of(seat)
+                records[seat] = {**env.ended[seat], "slot": seat, "seed": seed, "income_own": float(income[g, 0]),
+                                 "income_enemy": float(income[g, 1]), "minutes": dict(notes.minutes[g])}
+                notes.finished([(seat, "", won)])
             results.setdefault(seat, won)
             seats.clear(seat)
     r = np.array(list(results.values()), np.float32)
     return {"win_rate": float((r == 1).mean()), "draw_rate": float((r == 0.5).mean()), "loss_rate": float((r == 0).mean()), "games": len(r), "records": list(records.values())}
+
+
+# A test game's score (the user, 2026-11-14): its result, and its alliance's shares of the value at the end, of the metal
+# income over the game and of the damage done, each 0 to 1 and 0.5 when even, weighed as GRPO's terms are (result, score,
+# economy, combat).
+SCORE_PARTS = (("result", 1.0), ("value_share", 0.5), ("income_share", 0.3), ("damage_share", 0.3))
+
+
+def _share(own: float, other: float) -> float:
+    return own / (own + other) if own + other > 0.0 else 0.5
+
+
+def game_score(record: dict) -> dict[str, float]:
+    """A test game's parts (SCORE_PARTS) and their weighed mean, `score`."""
+    parts = {"result": {"won": 1.0, "drew": 0.5}.get(record["result"], 0.0),
+             "value_share": _share(record["own_value"], record["enemy_value"]),
+             "income_share": _share(record.get("income_own", 0.0), record.get("income_enemy", 0.0)),
+             "damage_share": _share(record.get("damage_dealt", 0.0), record.get("damage_taken", 0.0))}
+    parts["score"] = sum(w * parts[k] for k, w in SCORE_PARTS) / sum(w for _, w in SCORE_PARTS)
+    return parts
+
+
+def score_test(name: str, records: list[dict], first: list[dict] | None) -> dict[str, float]:
+    """A test's metrics beside its rates: its games' score and parts on average (`game_score`), the score's standard error,
+    the economy at policy_clone_eval.MINUTES, and, against the run's first test (`first`), the score's change game for game
+    where the two played the same game (seed and slot), with its standard error: what a map or a start makes of a game's
+    score cancels out."""
+    from policy_clone_eval import MINUTES
+    if not records:
+        return {}
+    scores = [game_score(r) for r in records]
+    out = {f"{name}_{k}": float(np.mean([s[k] for s in scores])) for k in scores[0]}
+    out[f"{name}_score_se"] = float(np.std([s["score"] for s in scores], ddof=1) / math.sqrt(len(scores))) if len(scores) > 1 else 0.0
+    for m in MINUTES:
+        for who, tag in (("actor", ""), ("script", "_script")):
+            rows = [r["minutes"][m][who] for r in records if m in r.get("minutes", {})]
+            for key in ("income", "extractors") if rows else ():
+                out[f"{name}{tag}_{key}_at{m}"] = float(np.mean([x[key] for x in rows]))
+    before = {(r["seed"], r["slot"]): game_score(r)["score"] for r in first or () if "seed" in r}
+    change = [s["score"] - before[r["seed"], r["slot"]] for r, s in zip(records, scores) if (r.get("seed"), r.get("slot")) in before]
+    if len(change) > 1:
+        out[f"{name}_score_change"] = float(np.mean(change))
+        out[f"{name}_score_change_se"] = float(np.std(change, ddof=1) / math.sqrt(len(change)))
+        out[f"{name}_paired"] = len(change)
+    return out
+
+
+def first_test(run: pathlib.Path, opponent: str, kind: str | None) -> list[dict] | None:
+    """The games of the run's first test against this opponent, of this kind (None: the headline 1v1's), that says its seeds."""
+    path = run / "tests.jsonl"
+    for line in path.read_text().splitlines() if path.exists() else ():
+        row = json.loads(line)
+        if row["opponent"] == opponent and row.get("kind") == kind and any("seed" in g for g in row["games"]):
+            return row["games"]
+    return None
 
 
 _MAP_POOLS: dict = {}
@@ -1489,11 +1905,40 @@ def train(cfg: Config, run: pathlib.Path, make_env, device: str = "cuda") -> Non
     log = (run / "metrics.jsonl").open("a")
     began = last_replays = time.perf_counter()
     env.self_play_share = learner.self_play.share
+    test = remote.evaluate if remote is not None else functools.partial(evaluate, make_env=make_env)
+
+    def tests() -> dict[str, float]:
+        """The headline 1v1s against each opponent and a test of each of Config.test_kinds, of the same games every time."""
+        out = {}
+        cases = [(f"eval_{o}", o, None) for o in env.eval_opponents] + [(f"eval_fight_{k}", "fight", k) for k in cfg.test_kinds]
+        for name, opponent, kind in cases:
+            first = first_test(run, opponent, kind)
+            tested = time.perf_counter()
+            result = test(learner, opponent=opponent, games=cfg.eval_games, seed=cfg.seed * 1000, **({"kind": kind} if kind else {}))
+            out[name] = result["win_rate"]
+            out[f"{name}_draws"], out[f"{name}_losses"] = result["draw_rate"], result["loss_rate"]
+            out.update(score_test(name, result["records"], first))
+            out[f"{name}_seconds"] = time.perf_counter() - tested
+            with (run / "tests.jsonl").open("a") as file:
+                file.write(json.dumps({"iteration": learner.iteration, "decisions": learner.decisions, "opponent": opponent,
+                                       **({"kind": kind} if kind else {}), "games": result["records"]}) + "\n")
+            if name == "eval_fight":
+                learner.self_play.note_test(result["win_rate"], learner.iteration)
+        return out
+
+    if learner.iteration == 0 and cfg.eval_every * cfg.iteration <= cfg.decisions:
+        # A run that tests at all tests what it starts from too: the games its later tests are paired with.
+        first = {"iteration": 0, "total_decisions": 0, **tests()}
+        log.write(json.dumps(first) + "\n")
+        log.flush()
+        print(f"it 0 {({k: round(v, 3) for k, v in first.items() if k.startswith('eval_') and isinstance(v, float)})}", flush=True)
     while learner.decisions < cfg.decisions:
         learner.economy_share = cfg.economy_start + (cfg.economy_end - cfg.economy_start) * learner.progress
         env.policy_economy_share = learner.economy_share
         # The training games' only: a test makes its own, with the rule in every game.  Collectors are sent it with each collection.
         lead_share = env.lead_share = learner.lead_share
+        if remote is None and cfg.group:
+            collector.measuring, collector.resign_at = learner.resign_state
         t0 = time.perf_counter()
         if remote is not None:
             if not remote.collecting:
@@ -1510,6 +1955,9 @@ def train(cfg: Config, run: pathlib.Path, make_env, device: str = "cuda") -> Non
         if cfg.concurrent and remote is None:
             collector.player = frozen
             ahead = Ahead(collector, frozen, cfg.iteration, max(0.0, train_s - collect_s))
+        lineages = metrics.pop("lineages", [])
+        if cfg.resign:
+            metrics.update(learner.follow_resignation(lineages))
         metrics.update(learner.train(segments, rng, between=ahead.tick if ahead else None))
         if ahead:
             ahead.tick(force=True)
@@ -1529,27 +1977,8 @@ def train(cfg: Config, run: pathlib.Path, make_env, device: str = "cuda") -> Non
             metrics.setdefault("learner_allocated_gb", torch.cuda.max_memory_allocated() / 2**30)
         if metrics["masked_out"]:
             raise RuntimeError(f"{metrics['masked_out']} chosen actions were outside their mask")
-        test = remote.evaluate if remote is not None else functools.partial(evaluate, make_env=make_env)
         if learner.iteration % cfg.eval_every == 0:
-            for opponent in env.eval_opponents:
-                tested = time.perf_counter()
-                result = test(learner, opponent=opponent, games=cfg.eval_games, seed=cfg.seed * 1000 + learner.iteration)
-                metrics[f"eval_{opponent}"] = result["win_rate"]
-                metrics[f"eval_{opponent}_draws"], metrics[f"eval_{opponent}_losses"] = result["draw_rate"], result["loss_rate"]
-                metrics[f"eval_{opponent}_seconds"] = time.perf_counter() - tested
-                with (run / "tests.jsonl").open("a") as tests:
-                    tests.write(json.dumps({"iteration": learner.iteration, "decisions": learner.decisions, "opponent": opponent, "games": result["records"]}) + "\n")
-                if opponent == "fight":
-                    learner.self_play.note_test(result["win_rate"], learner.iteration)
-            for kind in cfg.test_kinds:         # asked for: the headline above stays the 1v1's
-                tested = time.perf_counter()
-                result = test(learner, opponent="fight", games=cfg.eval_games, seed=cfg.seed * 1000 + learner.iteration, kind=kind)
-                metrics[f"eval_fight_{kind}"] = result["win_rate"]
-                metrics[f"eval_fight_{kind}_draws"], metrics[f"eval_fight_{kind}_losses"] = result["draw_rate"], result["loss_rate"]
-                metrics[f"eval_fight_{kind}_seconds"] = time.perf_counter() - tested
-                with (run / "tests.jsonl").open("a") as tests:
-                    tests.write(json.dumps({"iteration": learner.iteration, "decisions": learner.decisions, "opponent": "fight", "kind": kind,
-                                            "games": result["records"]}) + "\n")
+            metrics.update(tests())
         if cfg.replay_hours and time.perf_counter() - last_replays >= cfg.replay_hours * 3600.0:
             tested = time.perf_counter()
             hours = (tested - began) / 3600.0
@@ -1563,7 +1992,7 @@ def train(cfg: Config, run: pathlib.Path, make_env, device: str = "cuda") -> Non
             learner.save()
         log.write(json.dumps(metrics) + "\n")
         log.flush()
-        show = {k: round(v, 3) for k, v in metrics.items() if isinstance(v, float) and (k.startswith(("wins_", "eval_", "entropy_", "share_kind")) or k in ("explained_variance", "group_spread", "kl", "clip_fraction", "collect_rate", "train_rate", "overall_rate", "minibatch_decisions"))}
+        show = {k: round(v, 3) for k, v in metrics.items() if isinstance(v, float) and (k.startswith(("wins_", "eval_", "entropy_", "share_kind")) or k in ("explained_variance", "group_spread", "kl", "clip_fraction", "collect_rate", "train_rate", "overall_rate", "minibatch_decisions", "adv_abs_max", "ratio_deviation_max"))}
         print(f"it {learner.iteration} decisions {learner.decisions} {show}", flush=True)
         if (run / "stop").exists() or (cfg.hours and time.perf_counter() - began >= cfg.hours * 3600.0):
             break
@@ -1598,6 +2027,51 @@ def check_repro(cfg: Config, run: pathlib.Path, make_env) -> None:
     print(f"one iteration twice: worst parameter difference {worst:.2e} in {worst_name}; losses {sums[0][1]['loss_pg']:.6f} {sums[1][1]['loss_pg']:.6f}")
     if worst > 1e-4:
         raise SystemExit("not reproducible within 1e-4")
+
+
+def grad_check(cfg: Config, run: pathlib.Path, make_env, decisions: int, splits: int = 3, device: str = "cuda") -> None:
+    """Whether GRPO's gradient is more signal than noise (03-training.md, "Signal or noise"): `decisions` played by the run's
+    checkpoint, or by Config.init (with --bootstrap, a checkpoint's critic bootstraps the advantages), their groups split in
+    two at random `splits` times, and the halves' gradients (`Learner.gradient`, the actor's) compared by their cosine: with
+    the advantages as trained (all), with each term's alone (its share of them), and with them shuffled among the decisions,
+    a floor for what the halves share whatever the advantages.  No entropy bonus.  To run/grad-check.json."""
+    if not cfg.group:
+        raise SystemExit("--grad-check is GRPO's: --group")
+    make_env = functools.partial(make_env, kinds=dict(cfg.kinds), slots=cfg.slots, difficulties=dict(cfg.chicken_difficulties))
+    env = make_env(cfg.games, cfg.seed)
+    workers = DataWorkers(cfg.data_workers, env.bundles(), cfg.enabled_kinds)
+    learner = Learner(cfg, run, workers, device)
+    learner.resume()
+    learner.entropy_coef = {h: 0.0 for h in HEADS}
+    env.policy_economy_share = learner.economy_share = cfg.economy_start + (cfg.economy_end - cfg.economy_start) * learner.progress
+    env.lead_share = learner.lead_share
+    rng = np.random.default_rng(cfg.seed)
+    segments, metrics = GroupCollector(learner, env, np.random.default_rng((cfg.seed, learner.iteration))).collect(decisions)
+    scales = learner.prepare(segments)
+    steps = [s for seg in segments for s in seg.steps]
+    terms = np.stack([np.broadcast_to(s.advantages, scales.shape) for s in steps]) * (learner.term_weights / scales)
+    cases = {"all": terms.sum(1), **{name: terms[:, i] for i, name in enumerate(learner.term_names)}, "shuffled": rng.permutation(terms.sum(1))}
+    groups = np.array(sorted({seg.group for seg in segments}))
+    rows = []
+    for k in range(splits):
+        picked = set(rng.permutation(groups)[:len(groups) // 2].tolist())
+        halves = [[seg for seg in segments if (seg.group in picked) == side] for side in (True, False)]
+        row = {}
+        for case, advantages in cases.items():
+            for s, a in zip(steps, advantages):
+                s.advantage = float(a)
+            a, b = (learner.gradient(half, rng) for half in halves)
+            row[case] = float(torch.nn.functional.cosine_similarity(a, b, dim=0))
+            row[f"{case}_norms"] = [float(a.norm()), float(b.norm())]
+        rows.append(row)
+        print(json.dumps({"split": k, **{c: round(row[c], 4) for c in cases}}), flush=True)
+    out = {"iteration": learner.iteration, "decisions": len(steps), "groups": len(groups), "scales": dict(zip(learner.term_names, scales.tolist())),
+           "mean": {c: float(np.mean([r[c] for r in rows])) for c in cases}, "splits": rows,
+           "collected": {k: v for k, v in metrics.items() if isinstance(v, (int, float))}}
+    run.mkdir(parents=True, exist_ok=True)
+    (run / "grad-check.json").write_text(json.dumps(out, indent=1))
+    print(json.dumps(out["mean"]), flush=True)
+    workers.close()
 
 
 def _save_forever(cfg: Config, run: pathlib.Path) -> None:
@@ -1681,8 +2155,33 @@ def main() -> None:
                     help="GRPO from branched games in place of the critic, in groups of this many games; 0: PPO with its critic")
     ap.add_argument("--horizon", type=float, nargs=2, default=list(Config.horizon), metavar=("LOW", "HIGH"),
                     help="the seconds of game a branch plays, drawn evenly between (default: %(default)s)")
-    ap.add_argument("--group-std", action=argparse.BooleanOptionalAction, default=Config.group_std,
-                    help="divide a branch's advantage by its group's spread of scores")
+    ap.add_argument("--group-scale", choices=("terms", "group", "none"), default=Config.group_scale,
+                    help="GRPO's advantages: each term over its spread in the iteration's groups, then weighed; the weighed score "
+                         "over its group's spread (GRPO's own); or neither (Dr. GRPO's)")
+    ap.add_argument("--reward-to-go", action=argparse.BooleanOptionalAction, default=Config.reward_to_go,
+                    help="judge each decision on its branch's terms from it on, not on its whole stretch's")
+    ap.add_argument("--group-step", type=int, default=Config.group_step,
+                    help="decisions an optimizer step under GRPO, in whole groups; 0 for a step a minibatch")
+    ap.add_argument("--economy-change", action=argparse.BooleanOptionalAction, default=Config.economy_change,
+                    help="GRPO's economy term from each decision on as the income balance's change from then, not its level")
+    ap.add_argument("--adv-clip", type=float, default=Config.adv_clip, help="GRPO: a decision's weighed advantage clipped to +- this; 0: not")
+    ap.add_argument("--spo-bound", type=float, default=Config.spo_bound,
+                    help="GRPO: SPO's penalty straight past |r - 1| = this x eps, so its pull stays bounded; 0: the square throughout")
+    ap.add_argument("--entropy-base", type=float, default=Config.entropy_base,
+                    help="a head's least entropy bonus; below 0, %g under PPO and 0 under GRPO" % ENTROPY_BASE)
+    ap.add_argument("--eval-games", type=int, default=Config.eval_games, help="games a test, the same ones each time")
+    ap.add_argument("--bootstrap", action=argparse.BooleanOptionalAction, default=Config.bootstrap,
+                    help="GRPO: each branch's return to its stretch's end plus the critic's value of where it ended, which it learns")
+    ap.add_argument("--resign", action=argparse.BooleanOptionalAction, default=Config.resign,
+                    help="bootstrapped GRPO: give up a group's game where the critic calls it lost, as AlphaGo Zero, the threshold "
+                         "kept to --resign-false of the --resign-free share played out")
+    ap.add_argument("--resign-free", type=float, default=Config.resign_free, help="share of games never given up, but played out to measure")
+    ap.add_argument("--resign-false", type=float, default=Config.resign_false, help="most share of games under the threshold not lost")
+    ap.add_argument("--resign-least", type=int, default=Config.resign_least, help="played-out games under a threshold before it's used")
+    ap.add_argument("--grad-check", type=int, default=0, metavar="DECISIONS",
+                    help="GRPO: collect this many decisions from the run's checkpoint (or --init) and write how alike two halves' "
+                         "gradients are (grad_check), then stop")
+    ap.add_argument("--grad-splits", type=int, default=3, help="--grad-check: how many times the groups are split in two at random")
     ap.add_argument("--kl-start", type=float, default=0.0, help="the KL to the frozen clone's weight at iteration 0")
     ap.add_argument("--kl-fade", nargs="+", default=[f"{i}:{s:g}" for i, s in Config.kl_fade], metavar="ITERATION:SHARE",
                     help="its share of that by iteration, linear between, the last after (default: %(default)s)")
@@ -1742,7 +2241,10 @@ def main() -> None:
                  replay_hours=args.replay_hours, replay_games=args.replay_games, replays=args.replays, graphs=args.graphs,
                  collectors=args.collectors, collector_gb=args.collector_gb, kinds=tuple(kinds.items()), slots=args.slots,
                  test_kinds=tuple(args.test_kinds), chicken_difficulties=tuple(difficulties.items()),
-                 group=args.group, horizon=tuple(args.horizon), group_std=args.group_std)
+                 group=args.group, horizon=tuple(args.horizon), group_scale=args.group_scale, reward_to_go=args.reward_to_go,
+                 group_step=args.group_step, economy_change=args.economy_change, adv_clip=args.adv_clip, spo_bound=args.spo_bound,
+                 entropy_base=args.entropy_base, eval_games=args.eval_games, bootstrap=args.bootstrap, resign=args.resign,
+                 resign_free=args.resign_free, resign_false=args.resign_false, resign_least=args.resign_least)
     if args.action_kinds:
         cfg.enabled_kinds = tuple(int(k) for k in args.action_kinds.split(","))
     run = pathlib.Path(args.run)
@@ -1754,6 +2256,8 @@ def main() -> None:
         check_kill(cfg, run)
     elif args.check_repro:
         check_repro(cfg, run, make_env)
+    elif args.grad_check:
+        grad_check(cfg, run, make_env, args.grad_check, args.grad_splits)
     else:
         train(cfg, run, make_env)
 

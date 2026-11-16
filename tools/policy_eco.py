@@ -14,10 +14,15 @@ Each idle constructor, every few seconds, takes the first of these it can do:
   project   start the big project, if one's due and nobody has
   second    the second factory (the user's rule): at SECOND_FROM_M metal a second not counting reclaim, planes, gunships or a
             strider hub, drawn once.  There's no third; more production is plates
+  defence   one a pass (the user, 2026-11-13; eco.cpp, "Defences"): AA by the factory once the enemy has armed aircraft; at 30
+            metal a second a Stinger by an extractor with 700 metal of wrecks near it, a Gauss instead once our turrets are
+            getting destroyed; and from 2:30 an LLT by a contested extractor that no defence covers, a Picket every third once
+            the enemy has tanks or slow heavies (then by every extractor)
   energy    first, while energy made is short of ENERGY_FIRST x metal income: building costs as much energy as metal, and
             overdrive only gets what's left, so short of energy, everything slows and metal piles up unspent
   expand    an extractor on the nearest free spot on our half that no enemy defence or army is near; while metal floats, only
-            while fewer than FLOAT_EXPANDERS are on their way to one
+            while fewer than FLOAT_EXPANDERS are on their way to one.  From 2:30 a contested spot that no defence covers gets its
+            LLT first
   spend     while metal floats (FLOATING of storage, until FLOATING_UNTIL): energy if that's what's short, else help the nearest
             production line (a factory or plate) with fewer than HELPERS_PER_LINE helping, else more production beside our first
             factory, one for each PRODUCTION_PER_INCOME: its plate (a line of its own for a fifth of the metal), and once it has
@@ -80,6 +85,10 @@ VALUABLE = ("energysingu", "staticarty", "turretantiheavy", "staticnuke", "stati
 FUSION = "energyfusion"             # valuable from the second one on
 PYLON = "energypylon"
 CARETAKER = "staticcon"             # a static constructor: in the sim it helps whatever is being built in its reach
+# The defences it builds (zks_data_desc.defences): LLT, Picket, Stinger, Gauss, Razor, Hacksaw.  And the plant whose fighters
+# are the tanks that LLTs and Pickets answer.
+DEFENCES = ("turretlaser", "turretmissile", "turretheavylaser", "turretgauss", "turretaalaser", "turretaaclose")
+TANK_PLANT = "factorytank"
 
 
 class EcoData:

@@ -8,6 +8,7 @@
 
 #include "zksim/capi.h"
 #include "zksim/rawframe.hpp"
+#include "zksim/span.hpp"
 
 namespace zk {
 
@@ -64,10 +65,10 @@ struct MetalSpot {
 // One class's way around a map: tools/sim_data.py works this out, so a run needs no pathfinding.
 struct Routes {
     int nodes = 0;                      // segments
-    std::vector<float> centre_x, centre_z;
-    std::vector<int> edge_to;           // per gate between two segments
-    std::vector<float> gate_x, gate_z;
-    std::vector<int> next_edge;         // nodes x nodes: the gate to take from a segment towards a goal's, or -1
+    Span<float> centre_x, centre_z;
+    Span<int> edge_to;                  // per gate between two segments
+    Span<float> gate_x, gate_z;
+    Span<int> next_edge;                // nodes x nodes: the gate to take from a segment towards a goal's, or -1
 };
 
 // What CMoveMath's directional speed reads of a cell, together so that it's one place in memory.  slope: 0 under water, where
@@ -76,32 +77,47 @@ struct CellSlope {
     float slope, normal_x, normal_z;
 };
 
+// Its arrays are read where they're kept: in `own` for a map made by zk_map_new, or in a file mapped into memory for one made by
+// zk_map_view (capi.h zk_map_arrays), which every process then shares and the system can drop and read again.
 struct Map {
+    Map() = default;
+    Map(const Map&) = delete;               // its arrays may be its own
+    Map& operator=(const Map&) = delete;
     int cols = 0, rows = 0, classes = 0;
     float cell = 16.0f;
-    std::vector<float> height;
-    std::vector<float> speed;
-    std::vector<float> slope_mod;
-    std::vector<CellSlope> slopes;
+    Span<float> height;
+    Span<float> speed;
+    Span<float> slope_mod;
+    Span<CellSlope> slopes;
     void set_slopes(const float* slope, const float* normal_x, const float* normal_z);
     // Per class and block of CLEAR_BLOCK x CLEAR_BLOCK cells: how many cells it is, at least, from any cell of the block to the
     // nearest the class can't stand on, going by the larger of the two axes (255 for that or more).  And from that, how many of
     // a walked line's tests can be passed over after one in the block: those so near are sure to be on ground it can stand on.
     int clear_cols = 0, clear_rows = 0;
-    std::vector<uint8_t> clearance;
+    Span<uint8_t> clearance;
     int clear_skip[256];
     const uint8_t* clearance_grid(int cls) const { return &clearance[size_t(cls) * size_t(clear_rows) * size_t(clear_cols)]; }
     // Per class, a bit a cell: whether the class can stand there, which is its speed there being above 0.  A thirty-second of
     // the speeds' size, so that tests of many cells stay in the processor's cache.
     size_t stand_words = 0;
-    std::vector<uint64_t> stand;
+    Span<uint64_t> stand;
     const uint64_t* stand_bits(int cls) const { return &stand[size_t(cls) * stand_words]; }
     static bool bit(const uint64_t* bits, size_t i) { return (bits[i >> 6] >> (i & 63)) & 1u; }
     // Both, from the speeds.
     void set_standing();
-    std::vector<short> nearest_segment;           // per class and cell: the segment there, or the nearest
+    Span<short> nearest_segment;                  // per class and cell: the segment there, or the nearest
     std::vector<Routes> routes;                   // per class
     void set_segments(const short* labels);
+    // What a map made by zk_map_new keeps itself, from the arrays it was given and the set_ functions.
+    struct Own {
+        std::vector<float> height, speed, slope_mod;
+        std::vector<CellSlope> slopes;
+        std::vector<uint8_t> clearance;
+        std::vector<uint64_t> stand;
+        std::vector<short> nearest_segment;
+        std::vector<std::vector<float>> centre_x, centre_z, gate_x, gate_z;    // per class
+        std::vector<std::vector<int>> edge_to, next_edge;
+    } own;
     int segment_at(int cls, float x, float z) const { return nearest_segment[size_t(cls) * size_t(rows) * size_t(cols) + size_t(cell_index(x, z))]; }
     float width() const { return float(cols) * cell; }
     float depth() const { return float(rows) * cell; }
@@ -467,6 +483,7 @@ struct World {
     std::vector<FireArea> areas;
     // The damage each team's units have done to enemies' units and had done to them, in metal (team_stats, capi.h ZK_STATS).
     double metal_dealt[ZK_MAX_TEAMS] = {}, metal_taken[ZK_MAX_TEAMS] = {};
+    double army_dealt[ZK_MAX_TEAMS] = {};  // the part of metal_dealt its army did (army)
     std::vector<float> damage_mult;        // of what it's dealt: 1, but for a chicken queen, whose health the gadget stretches
     // The reveal rule (game_over.lua): on unless turned off, never in a chicken game.  revealed: the allyteams always in sight, by bit.
     bool reveal_on = true;
@@ -531,6 +548,10 @@ struct World {
     int emit_view(int team, UnitRecord* out, int cap, float* glob, int commander, const float* base, const UnitRecord* ally_frame = nullptr,
                   int ally_count = 0);
     void team_stats(int team, float* out) const;
+    // A mobile, armed unit that isn't a commander, a builder or a missile (capi.h ZK_STATS [9] and [10]).
+    bool army(int u) const;
+    // The share of the map allyteam s has in sight and in radar (capi.h ZK_STATS [7] and [8]).
+    void coverage(int s, float& sight, float& scan) const;
     void rebuild_index() { rebuild_grid(); }
     const zk_type_rec& type_of(int u) const { return cat->types[size_t(type[size_t(u)])]; }
     // What's carried is stunned too, as in the engine (CUnit::SetStunned on loading): it does nothing until it's let go.
@@ -629,8 +650,8 @@ private:
     void explode(int weapon, float px, float pz, int source, int source_side, bool air, float power = 1.0f, float height = 0.0f, int struck = -1,
                  int source_team = -1);
     void pierce(const Shot& s, float px, float pz, float power);
-    void damage_unit(int u, const zk_weapon_rec& w, float mult, int dealer);
-    void count_damage(int victim, float amount, int dealer);
+    void damage_unit(int u, const zk_weapon_rec& w, float mult, int dealer, int source = -1);
+    void count_damage(int victim, float amount, int dealer, int source = -1);
     float shield_takes(const zk_weapon_rec& w, const Shot& s, float px, float pz, float left, float& hit_x, float& hit_z);
     void update_shields();
     void recharge_shields();

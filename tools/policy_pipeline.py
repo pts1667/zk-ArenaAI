@@ -39,7 +39,7 @@ Every stage that plays games plays the kinds of game --kinds says (1v1s, team ga
 policy_sim_env.GAME_KINDS), in batches with --slots teams a game, and chicken games at --chicken-difficulties.  The tests' headline
 stays a 1v1 against the script, so that runs stay comparable; --test-kinds adds a test of each kind it names.
 
---clone-args, --dagger-args and --ppo-args are added at the end of those commands, so they override what's set here.
+--record-args, --clone-args, --dagger-args and --ppo-args are added at the end of those commands, so they override what's set here.
 """
 from __future__ import annotations
 
@@ -176,7 +176,8 @@ def stages(args: argparse.Namespace) -> list[Stage]:
     data = pathlib.Path(args.data)
     if not recorded(data):
         out.append(Stage("record", tool("policy_clone_data.py", "record", "--out", data, "--maps", args.maps, "--decisions",
-                                        args.record_decisions, *RECORD_FLAGS, *kinds_flags(args)), before=[no_games(data)]))
+                                        args.record_decisions, *RECORD_FLAGS, *kinds_flags(args), *shlex.split(args.record_args)),
+                         before=[no_games(data)]))
     if args.train_encoder:
         frames = args.frames or root / "frames"
         if not (frames / "manifest.json").exists():
@@ -184,7 +185,7 @@ def stages(args: argparse.Namespace) -> list[Stage]:
             out.append(Stage("frames", tool("frame_data.py", "collect", "--maps", args.maps, "--out", frames, *FRAMES_FLAGS,
                                             *kinds_flags(args, difficulties=False, slots=False)), before=[fresh(frames)]))
         out.append(Stage("encoder", tool("frame_vae.py", "train", "--data", frames, "--run", root / "encoder", "--steps",
-                                         args.encoder_steps, *ENCODER_FLAGS), own=root / "encoder"))
+                                         args.encoder_steps, *ENCODER_FLAGS, *shlex.split(args.encoder_args)), own=root / "encoder"))
         encoder = str(root / "encoder" / "vae-last.pt")
     else:
         encoder = args.encoder or default_encoder()
@@ -291,7 +292,11 @@ def main() -> None:
     ap.add_argument("--ppo-decisions", type=int, default=2_000_000)
     ap.add_argument("--ppo-hours", type=float, default=0.0, help="stop PPO after this long as well; 0 for no limit")
     ap.add_argument("--ppo-critic-warmup", type=int, default=10, help="iterations where only the new critic learns")
-    ap.add_argument("--clone-args", default="", help="more flags for the clone stage, last so they win")
+    ap.add_argument("--record-args", default="", help="more flags for the record stage, last so they win (--workers 6: half the memory, "
+                    "2026-11-13)")
+    ap.add_argument("--encoder-args", default="", help="more flags for the encoder stage, last so they win (--queries 64 --d 192: "
+                    "more latent tokens, wider)")
+    ap.add_argument("--clone-args", default="", help="more flags for the clone stage, last so they win (--size wide: a new actor's size)")
     ap.add_argument("--dagger-args", default="", help="more flags for each DAgger fine-tuning")
     ap.add_argument("--ppo-args", default="", help="more flags for PPO")
     ap.add_argument("--replay-games", type=int, default=4, help="games kept for the dashboard from each test, and each --replay-hours "

@@ -78,7 +78,7 @@ class Weights:
 
 
 def nets(actor, critic) -> dict[str, torch.nn.Module]:
-    """What a collector plays with: the actor, and the critic, which GRPO hasn't."""
+    """What a collector plays with: the actor, and the critic, which GRPO hasn't but to resign (policy_train.Config.resign)."""
     return {"actor": actor, **({"critic": critic} if critic is not None else {})}
 
 
@@ -96,7 +96,8 @@ class Shell:
         self.cfg, self.actor, self.critic, self.device, self.vocabulary = cfg, actor, critic, device, vocabulary
         self.term_names = tuple(name for name, _ in cfg.terms)
         self.term_weights = np.array([w for _, w in cfg.terms])
-        self.player = pt.Player(actor, critic, pt.DataWorkers(0, bundles, cfg.enabled_kinds), device, graphs)
+        # Under GRPO a critic only judges resignation (GroupCollector._value): the player plays none.
+        self.player = pt.Player(actor, None if cfg.group else critic, pt.DataWorkers(0, bundles, cfg.enabled_kinds), device, graphs)
         self.evaluator = self.player        # with the tests' weights loaded
         self.progress = 0.0
         self.economy_share = 0.0
@@ -123,7 +124,7 @@ class _Serving:
             torch.cuda.set_per_process_memory_fraction(min(1.0, gb * 2**30 / torch.cuda.mem_get_info()[1]))
         torch.manual_seed(seed)
         actor = policy_latent.make(vocabulary, cfg.latent_encoder, cfg.decide_every, policy_latent.Size(**size)).to(device)
-        critic = None if cfg.group else pm.Critic(vocabulary, bins=cfg.critic_bins, span=cfg.critic_span, terms=len(cfg.terms)).to(device)
+        critic = pm.Critic(vocabulary, bins=cfg.critic_bins, span=cfg.critic_span, terms=len(cfg.terms)).to(device) if not cfg.group or cfg.resign else None
         self.nets = nets(actor, critic)
         for m in self.nets.values():
             for p in m.parameters():
@@ -141,13 +142,15 @@ class _Serving:
     def _memory(self) -> dict[str, float]:
         return {"collector_reserved_gb": torch.cuda.max_memory_reserved() / 2**30} if self.device == "cuda" else {}
 
-    def collect(self, want: int, progress: float, economy: float, self_play: float, advising: bool, lead: float) -> None:
+    def collect(self, want: int, progress: float, economy: float, self_play: float, advising: bool, lead: float,
+                resign: tuple = (False, None)) -> None:
         began = time.perf_counter()
         self.play.read(self.nets)
         weights = fingerprint(self.nets)
         self.shell.progress, self.shell.economy_share, self.shell.advising = progress, economy, advising
         env = self.collector.env
         env.policy_economy_share, env.self_play_share, env.lead_share = economy, self_play, lead
+        self.collector.measuring, self.collector.resign_at = resign
         segments, tally = self.collector.collect_tally(want)
         segments = [replace(s, bundle=self.index[id(s.bundle)]) for s in segments]
         self.conn.send(("collected", {"segments": segments, "tally": tally, "seconds": time.perf_counter() - began, "weights": weights,
@@ -220,12 +223,13 @@ class Collectors:
                 return payload
             self.stash[k].append((t, payload))
 
-    def _nets(self, player) -> dict[str, torch.nn.Module]:
-        return nets(player.actor, player.critic)
+    def _nets(self, learner: pt.Learner, player) -> dict[str, torch.nn.Module]:
+        """A player's nets, and under GRPO the learner's critic when the collectors resign by it."""
+        return nets(player.actor, player.critic if not self.cfg.group else learner.critic if self.cfg.resign else None)
 
     def start(self, learner: pt.Learner, seed: int, device: str) -> None:
         """Each collector's nets and games: its share of `cfg.games`, from its own seed."""
-        nets = self._nets(learner.player)
+        nets = self._nets(learner, learner.player)
         self.play, self.test = Weights(nets), Weights(nets)
         self.play.write(nets)
         threads = max(2, (os.cpu_count() or 16) // self.count)
@@ -240,12 +244,12 @@ class Collectors:
     def collect(self, learner: pt.Learner, want: int) -> None:
         """Starts a collection of about `want` decisions, by the learner's weights as they are now."""
         assert not self.collecting
-        nets = self._nets(learner.player)
+        nets = self._nets(learner, learner.player)
         self.play.write(nets)
         self.sent_weights = fingerprint(nets)
         for k, part in enumerate(split(want, self.count)):
             self._send(k, ("collect", {"want": part, "progress": learner.progress, "economy": learner.economy_share, "self_play": learner.self_play.share,
-                                       "advising": learner.advising, "lead": learner.lead_share}))
+                                       "advising": learner.advising, "lead": learner.lead_share, "resign": learner.resign_state}))
         self.collecting, self.sent = True, time.perf_counter()
 
     def result(self) -> tuple[list[pt.Segment], dict[str, float], float]:
@@ -264,14 +268,17 @@ class Collectors:
         return segments, metrics, max(seconds)
 
     def evaluate(self, learner: pt.Learner, opponent: str, games: int, seed: int, replays: dict | None = None, kind: str = "1v1") -> dict:
-        """policy_train.evaluate, its games shared out; with replays, all in the first collector, whose games the replays number."""
-        self.test.write(self._nets(learner.evaluator))
-        shares = [games] if replays is not None else split(games, self.count)
-        asked = [k for k, n in enumerate(shares) if n]
-        for k in asked:
-            self._send(k, ("evaluate", {"opponent": opponent, "games": shares[k], "seed": seed_of(seed, k), "economy": learner.economy_share,
-                                             "replays": replays, "kind": kind}))
-        parts = [self._expect(k, "evaluated") for k in asked]
+        """policy_train.evaluate, its games in chunks of at most a collector's share of the training's games, which its part of
+        the card is sized for: chunk r from seed_of(seed, r), played by collector r mod count, so that every test plays the same
+        games and pairs them game for game.  Replays are the first chunk's.  (2026-11-15: a test of 128 games shared out, 43 a
+        collector, ran the wide actor's out of its 1 GB.)"""
+        self.test.write(self._nets(learner, learner.evaluator))
+        per = max(1, self.cfg.games // self.count)
+        chunks = [min(per, games - at) for at in range(0, games, per)]
+        for r, n in enumerate(chunks):
+            self._send(r % self.count, ("evaluate", {"opponent": opponent, "games": n, "seed": seed_of(seed, r), "economy": learner.economy_share,
+                                                     "replays": replays if r == 0 else None, "kind": kind}))
+        parts = [self._expect(r % self.count, "evaluated") for r in range(len(chunks))]
         total = sum(p["games"] for p in parts)
         out = {name: sum(p[name] * p["games"] for p in parts) / max(total, 1) for name in ("win_rate", "draw_rate", "loss_rate")}
         return {**out, "games": total, "records": [r for p in parts for r in p["records"]]}

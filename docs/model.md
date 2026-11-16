@@ -50,8 +50,8 @@ flowchart LR
 
 | | |
 |---|---|
-| Size | `policy_latent.SIZE`, kept in each checkpoint: width `d` 256, 8 heads, 4 time layers, 4 plan layers.  `SMALL` is 128, 4 heads, 2 and 2 |
-| Parameters | 10,546,864 trained (`SMALL`: 1,929,088), and 1,650,816 frozen in the encoder at `encoder-big`'s recipe |
+| Size | `policy_latent.SIZE`, kept in each checkpoint: width `d` 256, 8 heads, 4 time layers, 4 plan layers, no unit layers.  `SMALL` is 128, 4 heads, 2 and 2.  `WIDE` (the user, 2026-11-14; `full-4`, `policy_clone_train.py --size wide`) is 384, 12 heads, 4 and 4, and 2 unit layers |
+| Parameters | 10,546,864 trained (`SMALL`: 1,929,088; `WIDE`: 27,053,667, 3,548,928 of them in the unit layers), and 1,650,816 frozen in the encoder at `encoder-big`'s recipe (2,893,776 at `full-4`'s, 192 wide with 64 queries) |
 | Latent tokens a frame | 40, of 32 numbers each, LayerNormed without weights |
 | Action tokens a frame | 4 (`ACTION_TOKENS`) |
 | Decisions | every 3 s (`decide_every` 6; `window_frames` and `SimEnv(decide_every=)` take it) |
@@ -243,7 +243,10 @@ The slot's output scores every controllable unit, `q_anchor(slot) · anchor key`
   is over.
 
 **Anchor keys know the frame.**  Once a decision, before any unit is picked, every controllable unit reads the 40 latents with a
-cross-attention block of its own (`unit_read`, its query the unit's raw embedding `hu`).  Its anchor key is `key_anchor` of that
+cross-attention block of its own (`unit_read`, its query the unit's raw embedding `hu`).  With `Size.unit_layers` (2 in `WIDE`),
+the controllable units first read each other in that many self-attention blocks (`LatentActor.among`, padding masked): who's
+beside whom, which the 40 latents blur.  The picked unit's later reading of the frame (`reading`) starts from that row too
+(`Context.mine`); the action tokens of earlier frames still read raw embeddings, having no controllable mask.  Its anchor key is `key_anchor` of that
 reading, with its sine code (`Context.anchor_keys`).  So "my region is threatened" reaches whom to tell.  From the same reading,
 `head_ordered` gives each unit the logit that it's told anything at all this decision (`Context.ordered`).  Cloning learns it as
 a side loss, a label for every unit at every decision.  Nothing samples from it.

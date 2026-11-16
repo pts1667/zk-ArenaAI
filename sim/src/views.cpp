@@ -434,6 +434,60 @@ void World::team_stats(int t, float* out) const {
     out[3] = float(counting);
     out[4] = float(metal_dealt[t]);
     out[5] = float(metal_taken[t]);
+    // Extractors, and the army of every unit there's been: units are never reused.
+    int extractors = 0;
+    double army_value = 0.0;
+    for (int u = 0; u < count(); ++u) {
+        const size_t i = size_t(u);
+        if (team[i] != t) continue;
+        const auto& d = type_of(u);
+        extractors += alive[i] && build[i] >= 1.0f && d.extract_mult > 0.0f;
+        if (army(u)) army_value += double(d.cost > 0.0f ? d.cost : d.build_time) * double(build[i]);
+    }
+    out[6] = float(extractors);
+    float sight = 0.0f, scan = 0.0f;
+    coverage(ally_of[t], sight, scan);
+    const float share = 1.0f / float(std::max(ally_size[ally_of[t]], 1));
+    out[7] = sight * share;
+    out[8] = scan * share;
+    out[9] = float(army_dealt[t]);
+    out[10] = float(army_value);
+}
+
+bool World::army(int u) const {
+    const auto& d = type_of(u);
+    return (d.flags & ZK_U_MOBILE) && (d.flags & ZK_U_ARMED) && !(d.flags & (ZK_U_COMMANDER | ZK_U_MISSILE)) && !(d.build_speed > 0.0f);
+}
+
+void World::coverage(int s, float& sight, float& scan) const {
+    // Circles of each finished unit's ground sight and radar on a grid over the map, a cell counting when its centre is in one.
+    const int cols = std::max(1, int(std::ceil(map->width() / ZK_COVER_CELL))), rows = std::max(1, int(std::ceil(map->depth() / ZK_COVER_CELL)));
+    std::vector<uint8_t> grid(size_t(cols) * size_t(rows), 0);      // 1: in sight, 2: in radar
+    for (const int u : live) {
+        const size_t i = size_t(u);
+        if (side[i] != s || !alive[i] || build[i] < 1.0f) continue;
+        const auto& d = type_of(u);
+        const float los = d.los_radius, radar = unpaid[i] ? 0.0f : d.radar_radius, reach = std::max(los, radar);
+        if (!(reach > 0.0f)) continue;
+        const int c0 = std::max(0, int(std::floor((x[i] - reach) / ZK_COVER_CELL))), c1 = std::min(cols - 1, int(std::floor((x[i] + reach) / ZK_COVER_CELL)));
+        const int r0 = std::max(0, int(std::floor((z[i] - reach) / ZK_COVER_CELL))), r1 = std::min(rows - 1, int(std::floor((z[i] + reach) / ZK_COVER_CELL)));
+        for (int r = r0; r <= r1; ++r) {
+            const float dz = (float(r) + 0.5f) * ZK_COVER_CELL - z[i];
+            for (int c = c0; c <= c1; ++c) {
+                const float dx = (float(c) + 0.5f) * ZK_COVER_CELL - x[i], d2 = dx * dx + dz * dz;
+                uint8_t& cell = grid[size_t(r) * size_t(cols) + size_t(c)];
+                if (d2 <= los * los) cell |= 1u;
+                if (d2 <= radar * radar) cell |= 2u;
+            }
+        }
+    }
+    size_t seen = 0, scanned = 0;
+    for (const uint8_t cell : grid) {
+        seen += cell & 1u;
+        scanned += (cell >> 1) & 1u;
+    }
+    sight = float(seen) / float(grid.size());
+    scan = float(scanned) / float(grid.size());
 }
 
 }  // namespace zk

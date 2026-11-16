@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import shutil
 import sys
@@ -126,6 +127,35 @@ def test_a_written_map_loads_and_plays(pool):
         env.step(0.0)
         env.finished_seats()
     assert (env.batch.counts[:, 0] > 0).all()
+
+
+def test_a_pool_read_in_place_from_its_cache_plays_as_one_read_whole(pool_dir, tmp_path):
+    """load_pool's cache: the sim reads each map's arrays where they're kept, a file made from the map the first time and read
+    after, and the same games come of it.  A changed map file is made again."""
+    maps, cache = tmp_path / "maps", tmp_path / "cache"
+    shutil.copytree(pool_dir, maps)
+    whole = se.load_pool(maps, cache=None)
+    se.load_pool(maps, cache=cache)
+    files = sorted(cache.iterdir())
+    stamps = [f.stat().st_mtime_ns for f in files]
+    kept = se.load_pool(maps, cache=cache)
+    assert [f.stat().st_mtime_ns for f in files] == stamps
+    for (w, _, wf), (k, _, kf) in zip(whole, kept):
+        made, read = w.arrays(), k.arrays()
+        assert made.keys() == read.keys() and all(np.array_equal(made[n], read[n]) for n in made)
+        assert wf.reach.keys() == kf.reach.keys() and all(np.array_equal(wf.reach[n], kf.reach[n]) for n in wf.reach)
+    envs = [se.SimEnv(4, 5, ["scripts"], threads=2, maps=p, variants=True) for p in (whole, kept)]
+    for env in envs:
+        env.begin()
+    for _ in range(200):
+        for env in envs:
+            env.step(0.0)
+        assert (envs[0].batch.counts == envs[1].batch.counts).all() and envs[0].batch.records.tobytes() == envs[1].batch.records.tobytes()
+    source = sorted(maps.glob("*.facts.json"))[0].name[:-len(".facts.json")] + ".npz"
+    t = (maps / source).stat().st_mtime_ns + 10**9
+    os.utime(maps / source, ns=(t, t))
+    se.load_pool(maps, cache=cache)
+    assert [f.name for f, s in zip(files, stamps) if f.stat().st_mtime_ns != s] == [n for n in (f.name for f in files) if n.startswith(source + ".") and n.endswith(".map")]
 
 
 def test_weights_share_between_kinds_and_favour_water(pool):

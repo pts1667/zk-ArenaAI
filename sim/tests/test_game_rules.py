@@ -1,5 +1,6 @@
 """Zero-K's rules for the end of a game (game_over.lua) and what a frame holds of a long one: the reveal rule, the units that keep a
-team in the game (stats[3]), an alliance of AIs destroyed when it has no builder or factory left, the tracked value of what costs nothing, and which features a frame keeps past its cap.  In WSL:
+team in the game (stats[3]), an alliance of AIs destroyed when it has no builder or factory left, the tracked value of what costs nothing, the
+reward's statistics (damage, extractors, the map in sight and radar, the army), and which features a frame keeps past its cap.  In WSL:
 
   ~/zkml/bin/python -m pytest -q sim/tests/test_game_rules.py
 """
@@ -115,6 +116,36 @@ def test_the_damage_a_team_does_is_what_the_other_takes_in_metal_and_a_kill_is_i
     assert dealt[0] == taken[1] == pytest.approx(glaive["cost"])
     lost = 1.0 - float(batch.frame(0, 0).units["hp_frac"][0])
     assert lost > 0.1 and dealt[1] == taken[0] == pytest.approx(lost * scorcher["cost"], rel=1e-4)
+    # Both are army, and what's put into an army counts its dead.
+    assert np.array_equal(batch.stats[0, :, 9], dealt)
+    assert list(batch.stats[0, :, 10]) == pytest.approx([scorcher["cost"], glaive["cost"]])
+
+
+def test_a_team_has_its_finished_extractors_its_share_of_its_allyteams_sight_and_radar_and_the_metal_put_into_its_army():
+    """ZK_STATS [6] to [8] and [10], for the reward's extractors, map and experience: a frame is no extractor and has no eyes,
+    allies split their allyteam's share of the map evenly, and a constructor is no army while a raider's frame is part of one."""
+    batch = zksim.Batch(CAT, 1, threads=1, teams=3)
+    names = ("staticmex", "staticmex", "staticradar", "cloakraid", "cloakcon", "cloakraid")
+    team = np.array([0, 0, 1, 0, 0, 2])
+    x = np.array([1000.0, 1300.0, 2048.0, 1000.0, 1200.0, 3500.0])
+    z = np.array([1000.0, 1000.0, 2048.0, 3000.0, 3000.0, 3500.0])
+    build = np.array([1.0, 0.5, 1.0, 0.5, 1.0, 1.0], np.float32)
+    batch.reset(0, FLAT, 1, np.array([CAT.index[n] for n in names]), team, x, z, build=build, ally_of=[0, 0, 1])
+    batch.refresh(0)
+    stats = batch.stats[0]
+    centres = (np.arange(64) + 0.5) * 64.0       # FLAT's 4096 elmos in cells of ZK_COVER_CELL
+    cx, cz = np.meshgrid(centres, centres)
+
+    def share(eyes, radius):
+        r = np.array([CAT.units[CAT.index[names[k]]][radius] for k in eyes])[:, None, None]
+        return float(((cx - x[eyes, None, None]) ** 2 + (cz - z[eyes, None, None]) ** 2 <= r ** 2).any(0).mean())
+    assert list(stats[:, 6]) == [1, 0, 0]
+    for at, radius in ((7, "los_radius"), (8, "radar_radius")):
+        assert share([2], radius) > 0.05
+        assert stats[0, at] == stats[1, at] == pytest.approx(share([0, 2, 4], radius) / 2, abs=1e-3)
+        assert stats[2, at] == pytest.approx(share([5], radius), abs=1e-3)
+    raider = CAT.units[CAT.index["cloakraid"]]["cost"]
+    assert list(stats[:, 10]) == pytest.approx([0.5 * raider, 0.0, raider])
 
 
 @pytest.mark.parametrize("same", (False, True))

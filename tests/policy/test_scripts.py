@@ -314,15 +314,79 @@ def test_in_sim_games_the_economy_grows_and_its_orders_are_not_the_scripts():
         built_by_script += sum(int((o["kind"] == zksim.ORDER_BUILD).sum()) for o in games.script_record.values())
         games.finished_seats()
     assert built_by_script == 0
-    extractors, builders = [], []
+    extractors, builders, lights = [], [], []
     for seat in range(games.seat_count):
         f = games.frame(seat)
         own = f.units[f.units["player"] == seat % 2]
         rows = games.table.rows(own["def_id"])
         extractors.append(int(games.eco_data.extractor[rows].sum()))
+        lights.append(int((rows == games.table.names.index("turretlaser")).sum()))
         builders.append(int((games.table.builder[rows] & games.table.mobile[rows] & ~games.eco_data.commander[rows]).sum()))
     assert np.median(extractors) > 6        # more than the opening takes
     assert np.median(builders) >= 1     # a game that has just begun again has none
+    assert np.median(lights) >= 1       # from 2:30, an LLT by a contested spot before its extractor
+
+
+def test_the_economy_script_guards_a_fought_over_extractor_and_the_base_against_aircraft():
+    """Each game: our constructor by our extractor, at 33 metal a second, and an enemy constructor a map away.  In the first,
+    800 metal of wrecks by the extractor make it heavily contested: a Stinger, and once that's lost before it's finished, no
+    Stinger or Gauss there for a while.  In the second the wrecks come after two LLTs by it are lost: a Gauss.  In the third an
+    enemy gunship gets AA by our base, a Razor first."""
+    cat = se.catalog()
+    wrecks = lambda x, z: np.array([(x + dx, z + dz, 200.0, 100.0, 16.0, -1) for dx, dz in ((60, 60), (-60, 60), (60, -60), (-60, -60))])
+    spots = {}
+
+    class Guard(se.SimEnv):
+        def _start_armies(env, g, world_map, bundle, x0, z0, x1, z1):
+            s = bundle.spot_list
+            ex, ez = (float(v) for v in s[np.argmin(np.hypot(s[:, 0] - x0, s[:, 1] - z0)), :2])
+            spots[g] = (ex, ez)
+            cx, cz = se.place(bundle, env.rng, env.table.move_class[[env.table.names.index("cloakcon")]].astype(np.int32), ex + 100.0, ez)
+            ours = [("cloakcon", cx[0], cz[0]), ("staticmex", ex, ez)] + [("turretlaser", ex, ez + dz) for dz in (120.0, -120.0)] * (g == 1)
+            theirs = [("cloakcon", x1, z1)] + [("gunshipraid", x1, z1 + 100.0)] * (g == 2)
+            units = ours + theirs
+            env.batch.reset(g, world_map, 7 + g, np.array([cat.index[n] for n, _, _ in units], np.int32),
+                            np.array([0] * len(ours) + [1] * len(theirs)), np.array([x for _, x, _ in units], np.float32),
+                            np.array([z for _, _, z in units], np.float32), base=(x0, z0, x1, z1), sites=bundle.sites())
+            env.batch.economy(g, bundle.spot_list, metal=5000.0, energy=5000.0, innate_metal=33.0)
+            if g == 0:
+                zksim.Batch.add_features(env.batch, g, wrecks(ex, ez))
+            env.cpp.reset(g, env.grounds[id(bundle)], (x0, z0, x1, z1), (x0, z0, x1, z1), economy=True, aimer=False)
+
+    env = Guard(3, 4, ["scripts"], units=1, threads=2)
+    env.early_end = 10 ** 9
+    env.batch.add_features = lambda g, features: None       # the map's own: only ours lie by the extractor
+    env.begin()
+    world = lambda g: zksim._lib.zk_batch_world(env.batch.handle, g)  # noqa: E731
+    named = {cat.index["turretheavylaser"]: "stinger", cat.index["turretgauss"]: "gauss", cat.index["turretaalaser"]: "razor"}
+    row = lambda units, name: env.table.rows(units["def_id"]) == env.table.names.index(name)  # noqa: E731
+    told, begun, lost_at = {0: [], 1: [], 2: []}, None, None
+    for step in range(600):
+        env.step(0.0)
+        orders, offsets = env.eco_orders
+        for g in range(3):
+            for o in orders[offsets[g * env.slots]:offsets[g * env.slots + 1]]:
+                if o["kind"] == zksim.ORDER_BUILD and int(o["target"]) in named:
+                    told[g].append((named[int(o["target"])], float(o["x"]), float(o["z"]), step))
+        own = lambda g: env.batch.records[g, 0, :int(env.batch.counts[g, 0])]  # noqa: E731
+        if step == 0:           # the LLTs, seen standing, are lost; then the wrecks
+            for u in own(1)[row(own(1), "turretlaser")]:
+                zksim._lib.zk_world_kill(world(1), int(u["uid"]))
+            zksim.Batch.add_features(env.batch, 1, wrecks(*spots[1]))
+        frame = own(0)[row(own(0), "turretheavylaser")]
+        begun = step if begun is None and len(frame) else begun
+        if lost_at is None and begun is not None and step >= begun + env.eco_every:      # once the economy has seen it begun
+            assert frame["flags"][0] & rf.BEING_BUILT
+            zksim._lib.zk_world_kill(world(0), int(frame["uid"][0]))
+            lost_at = step
+        if lost_at is not None and step >= lost_at + 240 and told[1]:
+            break
+    near = lambda g, t: np.hypot(t[1] - spots[g][0], t[2] - spots[g][1]) < 300.0  # noqa: E731
+    assert told[0][0][0] == "stinger" and near(0, told[0][0]) and lost_at is not None
+    assert all(t[3] <= lost_at for t in told[0])       # given up there
+    assert told[1][0][0] == "gauss" and near(1, told[1][0])
+    base = env.starts[2, :2]
+    assert told[2][0][0] == "razor" and told[2][0][3] < 10 and np.hypot(told[2][0][1] - base[0], told[2][0][2] - base[1]) < 600.0
 
 
 def test_frame_games_play_their_own_scripts_not_the_cpp_ones():

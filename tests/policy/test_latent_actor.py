@@ -104,6 +104,30 @@ def test_padding_changes_no_decision(actor):
     assert torch.allclose(anchor[0][0, 0, :c + 1], anchor[1][0, 0, :c + 1], atol=1e-3)
 
 
+def test_with_unit_layers_a_units_anchor_reads_the_other_controllable_units_and_no_padding(encoder_path):
+    """Size.unit_layers: a controllable unit's anchor key changes with another's features (with none, it reads only its own and
+    the frame), and padding in a batch changes no real unit's."""
+    actors = {}
+    for layers in (0, 1):
+        torch.manual_seed(2)
+        actors[layers] = pl.make(VOCABULARY, encoder_path, size=pl.Size(64, 4, 1, 1, unit_layers=layers))
+    items = _items(1)
+    assert items[0].controllable >= 2
+    most = _batch(items)
+    x = most.unit_x.clone()
+    x[0, 1] += 1.0                      # the second controllable unit
+    nudged = replace(most, unit_x=x)
+    for layers, actor in actors.items():
+        now = torch.randn(1, actor.encoder.tokens, actor.d)
+        first = [actor.context(b, now).anchor_keys[0, 0] for b in (most, nudged)]
+        assert torch.allclose(first[0], first[1]) == (layers == 0)
+    c = items[0].controllable
+    now = torch.randn(1, actors[1].encoder.tokens, actors[1].d)
+    padded = pm.collate(items, sizes={"c": c + 5}).to("cpu")       # as a CUDA graph of a fixed shape pads it
+    keys = [actors[1].context(b, now).anchor_keys[0, :c] for b in (most, padded)]
+    assert padded.ctrl_mask.shape[1] == c + 5 and torch.allclose(keys[0], keys[1], atol=1e-5)
+
+
 def test_the_order_of_a_batch_changes_nothing(actor):
     """As a plain transformer's: a decision doesn't depend on what else is in its batch, or on any step before it."""
     items = _items(3)

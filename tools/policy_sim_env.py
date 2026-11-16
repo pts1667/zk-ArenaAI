@@ -85,12 +85,18 @@ KEEP_STAT = 3 if zksim.STATS > 3 else 1
 # (policy_train.Config.terms).  "blend" is the reward as one number (`reward`), the shaping fading by beta into the result; the
 # rest are its parts and more, apart and unfaded (`reward_terms`).  GRPO (policy_train.GroupCollector) asks for "income" too,
 # the income balance's level, whose mean over a branch is its economy.
-TERMS = ("blend", "result", "score", "economy", "combat")
+TERMS = ("blend", "result", "score", "economy", "combat", "extractors", "map", "experience")
+# The terms that are a balance's change a step as "combat" is, closer to the decisions (the user, 2026-11-15): `_balances`.
+BALANCE_TERMS = ("extractors", "map", "experience")
 # The terms that are discounted averages, and their horizons in seconds of game: the rest aren't discounted (`term_gamma`).
 TERM_HORIZONS = {"economy": 600.0}
 COMBAT_CONSTANT = 1000.0            # metal: the damage balance's (`_combat`), as VALUE_CONSTANT is the value balance's
-# Which of zksim's stats is the metal a team's damage has cost the others: from ABI 24.  -1 before it, with no combat term.
-DEALT_STAT = 4 if zksim.STATS > 4 else -1
+# zksim's stats (capi.h ZK_STATS): the metal a team's damage has cost the others; its finished extractors; its share of the map in
+# sight and in radar; the part of its damage its army did, and the metal put into its army.
+DEALT_STAT, EXTRACTORS_STAT, SIGHT_STAT, RADAR_STAT, ARMY_DEALT_STAT, ARMY_STAT = 4, 6, 7, 8, 9, 10
+EXTRACTORS_CONSTANT = 4.0           # extractors: the extractor balance's (`_balances`), as VALUE_CONSTANT is the value balance's
+MAP_CONSTANT = 0.2                  # shares of the map, sight's and radar's summed: the map balance's
+ARMY_CONSTANT = 1000.0              # metal: what the army's trades are over besides its own, so that a small army's aren't large
 
 _POOL: list[tuple[zksim.Map, bd.Bundle, "MapFacts"]] = []
 _CATALOG: zksim.Catalog | None = None
@@ -211,23 +217,35 @@ def _map_facts(slug: str) -> MapFacts:
     return MapFacts(_layouts(facts), np.array(facts["features"], np.float32).reshape(-1, 6), name=slug, modes=facts.get("modes") or map_modes.of_facts({"name": slug, "layouts": facts["layouts"]}, area))
 
 
-def load_pool(directory: pathlib.Path | str) -> list[tuple[zksim.Map, bd.Bundle, MapFacts]]:
-    """All the maps of a directory that tools/map_gen.py wrote to, in the order of their names."""
+def load_pool(directory: pathlib.Path | str, cache: pathlib.Path | str | bool | None = True) -> list[tuple[zksim.Map, bd.Bundle, MapFacts]]:
+    """All the maps of a directory that tools/map_gen.py wrote to, in the order of their names.  cache: where what's made of each
+    map and its parts (`reach`) is kept, to be read in place, shared by every process and dropped by the system when it needs the
+    room (zksim.cached_arrays); True for zksim.map_cache(), None to keep it all in this process's memory."""
+    if cache is True:
+        cache = zksim.map_cache()
     out = []
     for path in sorted(pathlib.Path(directory).glob("*.facts.json")):
         slug = path.name[:-len(".facts.json")]
         facts = json.loads(path.read_text(encoding="utf8"))
-        with np.load(path.with_name(f"{slug}.reach.npz")) as d:
-            reach = {k: d[k] for k in d.files}
+        reach_path = path.with_name(f"{slug}.reach.npz")
+        if cache is None:
+            reach = _npz(reach_path)
+        else:
+            reach = zksim.cached_arrays(cache, reach_path, "reach", lambda: ({}, _npz(reach_path)))[1]
         bundle = bd.Bundle.load(path.with_name(f"{slug}.bundle.npz"))
         # A pool written before modes were, from its boxes and names.
         modes = facts.get("modes") or map_modes.of_facts(facts, bundle.map_w * bundle.map_h / (map_modes.SIDE * map_modes.SIDE))
         style = facts.get("style") or {}
         group = f"{style['generator']}:{style.get('bases', '')}" if style.get("generator") else ""
-        out.append((zksim.Map.load(path.with_name(f"{slug}.npz")), bundle,
+        out.append((zksim.Map.load(path.with_name(f"{slug}.npz"), cache), bundle,
                     MapFacts(_layouts(facts), np.array(facts["features"], np.float32).reshape(-1, 6), slug, facts["kind"], float(facts["water"]), facts["liquid"], reach, modes,
                              group)))
     return out
+
+
+def _npz(path: pathlib.Path) -> dict[str, np.ndarray]:
+    with np.load(path) as d:
+        return {k: d[k] for k in d.files}
 
 
 def pool() -> list[tuple[zksim.Map, bd.Bundle, MapFacts]]:
@@ -444,7 +462,7 @@ class SimEnv:
     # What a game is, apart from the sim's and the scripts' state: what `copy_game` copies, and what a test checks is all of it.
     # Arrays whose first axis is the game; lists by game, shared (read-only, or replaced whole) or copied deep; dicts by game and
     # by seat.  Everything else is the env's own, shared by its games.
-    GAME_ARRAYS = ("waiting", "policy_economy", "last_income", "income_delta", "income_now", "last_combat", "combat_delta",
+    GAME_ARRAYS = ("waiting", "policy_economy", "last_income", "income_delta", "income_now", "last_combat", "combat_delta", "last_balances", "balance_delta",
                    "lead_rule", "starts", "decisions", "n_teams", "ally", "n_allies", "chickens", "difficulty", "alive", "paying",
                    "facing", "outcome", "result", "last_raw", "delta", "paid", "speed_paid", "speed_pot", "bonus")
     GAME_LISTS_SHARED = ("mode", "bundle", "kind", "script_kinds", "styles")
@@ -510,6 +528,8 @@ class SimEnv:
         self.income_now = np.zeros((games, self.slots))         # `_income` at the step just taken, before anyone went out at it
         self.last_combat = np.zeros((games, self.slots))       # the damage balance (`_combat`), as `last_raw`
         self.combat_delta = np.zeros((games, self.slots))
+        self.last_balances = np.zeros((games, self.slots, len(BALANCE_TERMS)))     # `_balances`, as `last_raw`
+        self.balance_delta = np.zeros((games, self.slots, len(BALANCE_TERMS)))
         # A small reward for short games (the user, 2026-11-10): an alliance that goes out pays this x the share of the time limit
         # left / (alliances - 1) (`_time_left`), and the survivors at the game's end share what was paid, as the result.  Not faded by
         # beta, so that a sooner win is worth more all through a run.
@@ -1010,13 +1030,28 @@ class SimEnv:
         at two, (dealt - taken) / (dealt + taken + COMBAT_CONSTANT), a side's trades as Zero-K's experience counts a unit's."""
         return self._balance(self.batch.stats[:, :, DEALT_STAT], COMBAT_CONSTANT)
 
+    def _balances(self) -> np.ndarray:
+        """games x slots x BALANCE_TERMS, by alliance, each zero-sum over the live alliances: "extractors", the finished extractors
+        against the others', and "map", the shares of the map in sight and in radar summed against theirs, as `_balance`; and
+        "experience", the army's trades, less the mean of the other live alliances': x / (1 + x) for x the metal its damage
+        cost the others over the metal put into it and ARMY_CONSTANT (Zero-K's experience, the army's not a unit's), so that
+        it's -1 to 1 as the rest, within the critic's span."""
+        stats = self.batch.stats
+        extractors = self._balance(stats[:, :, EXTRACTORS_STAT], EXTRACTORS_CONSTANT)
+        seen = self._balance(stats[:, :, SIGHT_STAT] + stats[:, :, RADAR_STAT], MAP_CONSTANT)
+        dealt = self._by_alliance(stats[:, :, ARMY_DEALT_STAT]).astype(np.float64)
+        trades = np.where(self.alive, dealt / (dealt + self._by_alliance(stats[:, :, ARMY_STAT]) + ARMY_CONSTANT), 0)
+        n = np.maximum(self.alive.sum(1) - 1, 1)
+        experience = np.where(self.alive, trades - self._others(trades, self.alive) / n[:, None], 0)
+        return np.stack((extractors, seen, experience), -1)
+
     def _rebase(self, g: int | slice = slice(None)) -> None:
         """The balances whose changes are rewards, as they are now: at a game's start, and in a game that goes on when an
         alliance goes out, as they're over the alliances still in from then on."""
         self.last_raw[g] = self._raw()[g]
         self.last_income[g] = self._income()[g]
-        if DEALT_STAT >= 0:
-            self.last_combat[g] = self._combat()[g]
+        self.last_combat[g] = self._combat()[g]
+        self.last_balances[g] = self._balances()[g]
 
     def script_production(self, seat: int) -> list[tuple[int, str]]:
         """This decision's production choices by a script-controlled seat: (factory uid, unit name) for each PRODUCE it gave."""
@@ -1171,10 +1206,12 @@ class SimEnv:
         self.income_delta = income - self.last_income
         self.last_income = income
         self.income_now = income
-        if DEALT_STAT >= 0:
-            combat = self._combat()
-            self.combat_delta = combat - self.last_combat
-            self.last_combat = combat
+        combat = self._combat()
+        self.combat_delta = combat - self.last_combat
+        self.last_combat = combat
+        balances = self._balances()
+        self.balance_delta = balances - self.last_balances
+        self.last_balances = balances
         self._diversity()
         self.done, self._replace = [], []
         self.result[:] = 0.0
@@ -1273,7 +1310,9 @@ class SimEnv:
             "lead_rule": bool(self.lead_rule[g]),       # whether a lead could have ended it
             "game_kind": self.kind[g], "team": team, "ally": int(ally[team]), "teams": n, "alliances": int(self.n_allies[g]),
             "outcome": float(self.outcome[g, team]),
-            **({"difficulty": zksim.CHICKEN_DIFFICULTIES[int(self.difficulty[g])]} if chickens >= 0 else {}),
+            # The metal its alliance's damage cost the others, and theirs cost it (ZK_STATS 4 and 5).
+            "damage_dealt": float(stats[mine, DEALT_STAT].sum()), "damage_taken": float(stats[mine, DEALT_STAT + 1].sum()),
+            **({"difficulty":zksim.CHICKEN_DIFFICULTIES[int(self.difficulty[g])]} if chickens >= 0 else {}),
         }
 
     def _time_left(self, g: int) -> float:
@@ -1307,7 +1346,8 @@ class SimEnv:
         "blend", `reward` itself; "result", the result and the speed term; "score", the value balance's change and the diversity
         bonus, as `reward` shapes but for income; "economy", the income balance (`_income`) x (1 - its gamma) each step, a discounted average
         of it, and at the alliance's end the whole level, as if it lasted; "combat", the damage balance's change (`_combat`);
-        "income", the income balance itself, for GRPO's mean of it over a branch."""
+        "extractors", "map" and "experience", their balances' changes (`_balances`); "income", the income balance itself, for
+        GRPO's mean of it over a branch."""
         out = np.zeros(len(names))
         view = self._view(seat)
         if view is None:
@@ -1326,6 +1366,8 @@ class SimEnv:
                 v = self.income_now[g, a] * (1.0 if ended else 1.0 - self.term_gamma(name))
             elif name == "combat":
                 v = self.combat_delta[g, a]
+            elif name in BALANCE_TERMS:
+                v = self.balance_delta[g, a, BALANCE_TERMS.index(name)]
             elif name == "income":
                 v = self.income_now[g, a]
             else:

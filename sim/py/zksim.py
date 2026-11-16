@@ -6,7 +6,9 @@ ZKSIM_LIB overrides where the library is looked for.
 from __future__ import annotations
 
 import ctypes as ct
+import hashlib
 import json
+import mmap
 import os
 import pathlib
 import sys
@@ -19,7 +21,7 @@ sys.path.insert(0, str(ROOT / "py"))
 sys.path.insert(0, str(ROOT.parent / "bots"))
 import zknav  # noqa: E402
 from zkbot.policy import rawframe  # noqa: E402
-ABI_VERSION = 26
+ABI_VERSION = 28
 WARD_TARGETS = 4
 MAX_MOUNTS = 8
 MAX_TEAMS = 8                       # players in a game, and so allyteams too
@@ -124,6 +126,22 @@ class EggRec(ct.Structure):
     _fields_ = [("feature", ct.c_int32), ("metal", ct.c_float), ("hp", ct.c_float), ("radius", ct.c_float)]
 
 
+# capi.h zk_map_arrays and zk_routes_arrays: each array's name, as Map.arrays gives it, with its type.
+MAP_ARRAYS = {"height": np.float32, "speed": np.float32, "slope_mod": np.float32, "slopes": np.float32, "clearance": np.uint8,
+              "clear_skip": np.int32, "stand": np.uint64, "nearest_segment": np.int16}
+ROUTE_FIELDS = {"centre_x": np.float32, "centre_z": np.float32, "edge_to": np.int32, "gate_x": np.float32, "gate_z": np.float32,
+                "next_edge": np.int32}
+
+
+class MapArrays(ct.Structure):
+    _fields_ = [(k, ct.c_int32) for k in ("cols", "rows", "classes", "clear_cols", "clear_rows")] + [
+        ("cell", ct.c_float), ("stand_words", ct.c_int64)] + [(k, ct.c_void_p) for k in MAP_ARRAYS]
+
+
+class RoutesArrays(ct.Structure):
+    _fields_ = [("nodes", ct.c_int32), ("edges", ct.c_int32)] + [(k, ct.c_void_p) for k in ROUTE_FIELDS]
+
+
 def _load_library() -> ct.CDLL:
     path = os.environ.get("ZKSIM_LIB") or os.path.expanduser("~/zksim/build/libzksim.so")
     lib = ct.CDLL(path)
@@ -141,6 +159,14 @@ def _load_library() -> ct.CDLL:
     lib.zk_map_set_routes.restype = None
     lib.zk_map_set_routes.argtypes = [vp, it, it, fp, it, ct.POINTER(ct.c_int), fp, ct.POINTER(ct.c_int)]
     lib.zk_map_free.argtypes = [vp]
+    lib.zk_map_arrays_get.restype = None
+    lib.zk_map_arrays_get.argtypes = [cvp, ct.POINTER(MapArrays)]
+    lib.zk_map_routes_get.restype = None
+    lib.zk_map_routes_get.argtypes = [cvp, it, ct.POINTER(RoutesArrays)]
+    lib.zk_map_view.restype = vp
+    lib.zk_map_view.argtypes = [ct.POINTER(MapArrays)]
+    lib.zk_map_view_routes.restype = None
+    lib.zk_map_view_routes.argtypes = [vp, it, ct.POINTER(RoutesArrays)]
     lib.zk_world_new.restype = vp
     lib.zk_world_new.argtypes = [cvp, cvp, ct.c_uint64, it]
     lib.zk_world_free.argtypes = [vp]
@@ -360,7 +386,114 @@ def load_routes(data) -> list[dict]:
     return [{k: data[f"class{c}_{k}"] for k in ROUTE_ARRAYS} for c in range(data["speed"].shape[0])]
 
 
+# What a file of Map.load's cache holds: one more whenever that changes.  A change to how libzksim makes a map's arrays needs
+# none, as the library's size and time are part of each file's key.
+MAP_CACHE_VERSION = 1
+_ARRAYS_MAGIC = b"ZKARRAY1"
+_ARRAYS_ALIGN = 64
+
+
+def map_cache() -> pathlib.Path | None:
+    """Where Map.load and policy_sim_env.load_pool keep what they make of a pool's maps: $ZKSIM_MAP_CACHE (none if it's empty), or
+    ~/zksim/map-cache.  It should be on the machine's own disk: in WSL, not under /mnt."""
+    got = os.environ.get("ZKSIM_MAP_CACHE")
+    if got is None:
+        return pathlib.Path.home() / "zksim" / "map-cache"
+    return pathlib.Path(got) if got else None
+
+
+def write_arrays(path: pathlib.Path | str, arrays: dict[str, np.ndarray], key: dict, meta: dict | None = None) -> None:
+    """Arrays to a file that open_arrays reads in place: a header (the key, `meta`, and each array's type, shape and place), then
+    each array on a 64-byte boundary.  Through a file of its own first, so that no reader sees half of one."""
+    path = pathlib.Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    arrays = {k: np.ascontiguousarray(a) for k, a in arrays.items()}
+    index, size = {}, 0
+    for name, a in arrays.items():
+        index[name] = [a.dtype.str, list(a.shape), size]
+        size += -(-a.nbytes // _ARRAYS_ALIGN) * _ARRAYS_ALIGN
+    head = json.dumps({"key": key, "meta": meta or {}, "arrays": index}).encode()
+    start = _arrays_start(len(head))
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    with open(tmp, "wb") as f:
+        f.write(_ARRAYS_MAGIC + len(head).to_bytes(8, "little") + head)
+        for name, a in arrays.items():
+            f.seek(start + index[name][2])
+            f.write(a.tobytes())
+        f.truncate(start + size)
+    os.replace(tmp, path)
+
+
+def _arrays_start(head: int) -> int:
+    return -(-(16 + head) // mmap.PAGESIZE) * mmap.PAGESIZE
+
+
+def open_arrays(path: pathlib.Path | str, key: dict) -> tuple[dict, dict[str, np.ndarray]] | None:
+    """`meta` and the arrays of a file that write_arrays made with this key, read-only and read in place: the file is mapped into
+    memory, which processes share and the system can drop when it needs the room, to read again when next asked for.  None if
+    there's no such file, or it was made with another key."""
+    try:
+        f = open(path, "rb")
+    except FileNotFoundError:
+        return None
+    with f:
+        start = f.read(16)
+        if len(start) < 16 or start[:8] != _ARRAYS_MAGIC:
+            return None
+        n = int.from_bytes(start[8:], "little")
+        head = json.loads(f.read(n))
+        if head["key"] != key:
+            return None
+        mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+    first = _arrays_start(n)
+    arrays = {}
+    for name, (dtype, shape, offset) in head["arrays"].items():
+        count = int(np.prod(shape, dtype=np.int64))
+        a = np.frombuffer(mm, np.dtype(dtype), count, first + offset).reshape(shape) if count else np.zeros(shape, np.dtype(dtype))
+        a.flags.writeable = False
+        arrays[name] = a
+    return head["meta"], arrays
+
+
+def _stamp(path: pathlib.Path | str) -> list[int]:
+    s = os.stat(path)
+    return [s.st_size, s.st_mtime_ns]
+
+
+def cached_arrays(cache: pathlib.Path | str, source: pathlib.Path | str, kind: str, make, also: tuple = ()) -> tuple[dict, dict[str, np.ndarray]]:
+    """What `make()` gives for this source file, (meta, arrays): kept in the cache directory the first time, and made again when
+    the source, any of the files `also` names, or MAP_CACHE_VERSION changes.  Either way read from the cache in place (open_arrays)."""
+    source = pathlib.Path(source).resolve()
+    path = pathlib.Path(cache) / f"{source.name}.{hashlib.sha1(str(source.parent).encode()).hexdigest()[:10]}.{kind}"
+    key = {"version": MAP_CACHE_VERSION, "source": _stamp(source), "also": [_stamp(p) for p in also]}
+    got = open_arrays(path, key)
+    if got is None:
+        meta, arrays = make()
+        write_arrays(path, arrays, key, meta)
+        got = open_arrays(path, key)
+    return got
+
+
+def _view(address: int | None, dtype, shape: tuple) -> np.ndarray:
+    """Read-only, the memory the sim keeps there."""
+    dtype = np.dtype(dtype)
+    count = int(np.prod(shape, dtype=np.int64))
+    if count and address:
+        out = np.frombuffer((ct.c_char * (count * dtype.itemsize)).from_address(address), dtype, count).reshape(shape)
+    else:
+        out = np.zeros(shape, dtype)
+    out.flags.writeable = False
+    return out
+
+
+def _address(a: np.ndarray, dtype) -> int | None:
+    assert a.dtype == np.dtype(dtype) and a.flags.c_contiguous, (a.dtype, dtype)
+    return a.ctypes.data if a.size else None
+
+
 class Map:
+    """The sim's map.  Python keeps none of its arrays but `height`, a read-only view of the sim's own (Map.arrays has them all)."""
+
     def __init__(self, height: np.ndarray, speed: np.ndarray, cell: float = 16.0, name: str = "",
                  slope: np.ndarray | None = None, slope_mod: np.ndarray | None = None,
                  segments: np.ndarray | None = None, routes: list[dict] | None = None):
@@ -368,7 +501,7 @@ class Map:
         worked out here, splitting the segments first; without segments, the whole map starts as one for each class."""
         height = np.asarray(height, np.float32)
         speed = np.asarray(speed, np.float32)
-        self.name, self.cell, self.height, self.speed = name, cell, height, speed
+        self.name, self.cell = name, cell
         rows, cols = height.shape
         # The downhill direction, of unit length like the engine's GetCenterNormals2D: only the
         # slope map says how steep it is.
@@ -376,24 +509,23 @@ class Map:
         flat = np.maximum(np.sqrt(dx * dx + dz * dz), 1e-9)
         normal_x = (-dx / flat).astype(np.float32)
         normal_z = (-dz / flat).astype(np.float32)
-        self.slope = np.asarray(1.0 - 1.0 / np.sqrt(dx * dx + dz * dz + 1.0) if slope is None else slope, np.float32)
-        self.slope_mod = np.zeros(speed.shape[0], np.float32) if slope_mod is None else np.asarray(slope_mod, np.float32)
-        self.segments = np.zeros(speed.shape, np.int16) if segments is None else np.asarray(segments, np.int16)
+        slope = np.ascontiguousarray(1.0 - 1.0 / np.sqrt(dx * dx + dz * dz + 1.0) if slope is None else slope, np.float32)
+        slope_mod = np.zeros(speed.shape[0], np.float32) if slope_mod is None else np.ascontiguousarray(slope_mod, np.float32)
+        segments = np.zeros(speed.shape, np.int16) if segments is None else np.ascontiguousarray(segments, np.int16)
         if routes is None:
             # Classes that move alike here get one answer between them: on a map made by hand, usually all of them do.
             known: dict[tuple[bytes, bytes], tuple] = {}
             built = []
-            for s, v in zip(self.segments, speed):
+            for s, v in zip(segments, speed):
                 key = (s.tobytes(), v.tobytes())
                 if key not in known:
                     known[key] = zknav.navigation(s, v)
                 built.append(known[key])
-            self.segments = np.stack([labels for labels, _ in built])
+            segments = np.ascontiguousarray(np.stack([labels for labels, _ in built]), np.int16)
             routes = [r for _, r in built]
-        self.routes = routes
         self.handle = _lib.zk_map_new(cols, rows, cell, _floats(height), _floats(speed), speed.shape[0],
-                                      _floats(self.slope), _floats(normal_x), _floats(normal_z), _floats(self.slope_mod),
-                                      self.segments.ctypes.data_as(ct.POINTER(ct.c_short)))
+                                      _floats(slope), _floats(normal_x), _floats(normal_z), _floats(slope_mod),
+                                      segments.ctypes.data_as(ct.POINTER(ct.c_short)))
         for c, r in enumerate(routes):
             centres = np.asarray(r["centres"], np.float32) * cell
             gates = np.asarray(r["gates"], np.float32) * cell
@@ -401,11 +533,56 @@ class Map:
             next_edge = np.asarray(r["next_edge"], np.int32)
             _lib.zk_map_set_routes(self.handle, c, len(centres), _floats(centres), len(edge_to), edge_to.ctypes.data_as(ct.POINTER(ct.c_int)),
                                    _floats(gates), next_edge.ctypes.data_as(ct.POINTER(ct.c_int)))
+        self.height = self.arrays()["height"]
+
+    def arrays(self) -> dict[str, np.ndarray]:
+        """Read-only views of everything the sim reads of this map, as it keeps it (capi.h zk_map_arrays): MAP_ARRAYS, and each
+        class's routes as class{c}_{ROUTE_FIELDS}."""
+        a = MapArrays()
+        _lib.zk_map_arrays_get(self.handle, ct.byref(a))
+        rows, cols, classes = a.rows, a.cols, a.classes
+        shapes = {"height": (rows, cols), "speed": (classes, rows, cols), "slope_mod": (classes,), "slopes": (rows, cols, 3),
+                  "clearance": (classes, a.clear_rows, a.clear_cols), "clear_skip": (256,), "stand": (classes, a.stand_words),
+                  "nearest_segment": (classes, rows, cols)}
+        out = {k: _view(getattr(a, k), dtype, shapes[k]) for k, dtype in MAP_ARRAYS.items()}
+        for c in range(classes):
+            r = RoutesArrays()
+            _lib.zk_map_routes_get(self.handle, c, ct.byref(r))
+            for k, dtype in ROUTE_FIELDS.items():
+                out[f"class{c}_{k}"] = _view(getattr(r, k), dtype, (r.nodes, r.nodes) if k == "next_edge" else (r.nodes if k.startswith("centre") else r.edges,))
+        return out
 
     @classmethod
-    def load(cls, path: pathlib.Path | str) -> "Map":
-        d = np.load(path)
-        return cls(d["height"], d["speed"], float(d["cell"]), str(d["name"]), d["slope"], d["slope_mod"], d["segments"], load_routes(d))
+    def of_arrays(cls, meta: dict, arrays: dict[str, np.ndarray]) -> "Map":
+        """A map that reads these arrays (Map.arrays') where they are, and keeps them: a file of the cache mapped into memory."""
+        height, clearance = arrays["height"], arrays["clearance"]
+        a = MapArrays(cols=height.shape[1], rows=height.shape[0], classes=arrays["speed"].shape[0], clear_cols=clearance.shape[2],
+                      clear_rows=clearance.shape[1], cell=meta["cell"], stand_words=arrays["stand"].shape[1],
+                      **{k: _address(arrays[k], dtype) for k, dtype in MAP_ARRAYS.items()})
+        m = cls.__new__(cls)
+        m.handle = _lib.zk_map_view(ct.byref(a))
+        for c in range(a.classes):
+            r = RoutesArrays(nodes=len(arrays[f"class{c}_centre_x"]), edges=len(arrays[f"class{c}_edge_to"]),
+                             **{k: _address(arrays[f"class{c}_{k}"], dtype) for k, dtype in ROUTE_FIELDS.items()})
+            _lib.zk_map_view_routes(m.handle, c, ct.byref(r))
+        m.name, m.cell, m.height, m._arrays = meta["name"], meta["cell"], height, arrays
+        return m
+
+    @classmethod
+    def load(cls, path: pathlib.Path | str, cache: pathlib.Path | str | None = None) -> "Map":
+        """A map file of tools/sim_data.py's.  cache: a directory (map_cache()) where what the sim makes of it is kept, the first time,
+        as a file that the map then reads in place (cached_arrays): shared by every process, and dropped by the system when it needs
+        the room, to be read again when next asked for.  Made again when the map file, libzksim or MAP_CACHE_VERSION changes."""
+        if cache is None:
+            with np.load(path) as d:
+                return cls(d["height"], d["speed"], float(d["cell"]), str(d["name"]), d["slope"], d["slope_mod"], d["segments"], load_routes(d))
+
+        def make():
+            fresh = cls.load(path)
+            arrays = {k: np.array(v) for k, v in fresh.arrays().items()}
+            _lib.zk_map_free(fresh.handle)
+            return {"name": fresh.name, "cell": fresh.cell}, arrays
+        return cls.of_arrays(*cached_arrays(cache, path, "map", make, also=(_lib._name,)))
 
     @classmethod
     def flat(cls, width: float = 4096.0, depth: float = 4096.0, cell: float = 16.0) -> "Map":
@@ -594,8 +771,10 @@ ORDER_DTYPE = np.dtype([("unit", "i4"), ("kind", "i4"), ("x", "f4"), ("z", "f4")
 # capi.h zk_group_rec: one order to the anchor and every unit of its team that's mobile and finished, of a role in `roles`, within `radius` of it
 GROUP_DTYPE = np.dtype([("anchor", "i4"), ("roles", "u4"), ("radius", "f4"), ("kind", "i4"), ("x", "f4"), ("z", "f4"), ("target", "i4")], align=True)
 # Per team: tracked value, live units, metal a second from reclaim, live units that keep the team in the game, and since the game began
-# the damage its units have done to enemies' and had done to them by enemies', in metal (capi.h ZK_STATS).
-STATS = 6
+# the damage its units have done to enemies' and had done to them by enemies', in metal; then its finished extractors, its share of
+# its allyteam's share of the map in sight and in radar, the part of its damage its army did, and the metal put into its army
+# (capi.h ZK_STATS).
+STATS = 11
 
 
 class Batch:

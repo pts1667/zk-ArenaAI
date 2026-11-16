@@ -547,7 +547,8 @@ def main() -> None:
                     help="the time transformer's attention on CUDA: flex skips the keys out of the window (a step 32%% faster, 2026-11-09)")
     ap.add_argument("--gpu-memory", type=float, default=0.85, help="share of the GPU's memory this may use before it fails")
     ap.add_argument("--ordered-weight", type=float, default=1.0, help="the side loss of whether each unit is told anything (P2)")
-    ap.add_argument("--size", choices=("default", "small"), default="default", help="the actor's: policy_latent.SIZE or SMALL (P5)")
+    ap.add_argument("--size", choices=("default", "small", "wide"), default="default",
+                    help="a new actor's: policy_latent.SIZE, SMALL (P5) or WIDE (with self-attention among its controllable units)")
     ap.add_argument("--init", help="start from this cloning checkpoint's weights (its size), as for DAgger's fine-tuning")
     ap.add_argument("--eval-only", action="store_true",
                     help="with --init: only the held-out measures, as trained, blind, and with z unknown if there's z (P4)")
@@ -589,7 +590,7 @@ def main() -> None:
         torch.cuda.set_per_process_memory_fraction(args.gpu_memory)
     autocast = torch.autocast(device, dtype=torch.bfloat16, enabled=device == "cuda")
     assert se.SCRIPT_EVERY % args.decide_every == 0, "the actor's decisions must include each one where the script looks"
-    size = policy_latent.SMALL if args.size == "small" else None
+    size = {"small": policy_latent.SMALL, "wide": policy_latent.WIDE}.get(args.size)
     if args.init:
         actor = load_actor(args.init, vocabulary, args.encoder, args.decide_every, device, size)
     else:

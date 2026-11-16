@@ -138,13 +138,14 @@ def test_collector_processes_play_train_and_test(tmp_path, encoder_path):
     the collectors' training games (none here), and the tests keep the rule in every game.  Not collecting while it trains, as
     policy_pipeline runs; the CUDA test below does."""
     _train_with_collectors(tmp_path, encoder_path, "cpu", concurrent=False, replay_hours=1e-9, replay_games=1, lead_fade=((0, 0.0),), speed_weight=0.1)
-    rows = [json.loads(line) for line in (tmp_path / "metrics.jsonl").read_text().splitlines()]
+    first, *rows = [json.loads(line) for line in (tmp_path / "metrics.jsonl").read_text().splitlines()]
+    assert first["iteration"] == 0 and "eval_fight_score" in first         # the test of what it starts from
     assert len(rows) == 3 and all(r["masked_out"] == 0 and r["decisions"] >= 8 for r in rows)
-    assert all("eval_fight" in r and "collector_seconds_max" in r for r in rows)
+    assert all("eval_fight" in r and "collector_seconds_max" in r and r["eval_fight_paired"] == 2 for r in rows)    # its games again
     assert sum(r.get("games_fight", 0) for r in rows) > 0         # games ended while collecting, and counted
     assert all(r["lead_share"] == 0.0 and r.get("lead_rule_games", 0.0) == 0.0 for r in rows) and any("lead_rule_games" in r for r in rows)
     tests = [json.loads(line) for line in (tmp_path / "tests.jsonl").read_text().splitlines()]
-    assert len(tests) == 3 and all(len(t["games"]) == 2 for t in tests)
+    assert len(tests) == 4 and all(len(t["games"]) == 2 for t in tests)
     assert all(g["lead_rule"] for t in tests for g in t["games"])
     assert len(list((tmp_path / "replays").rglob("*.json.gz"))) == 3
 
@@ -202,6 +203,6 @@ def test_a_graph_decides_as_the_plain_forward_pass_and_follows_the_weights(encod
 def test_collector_processes_play_as_graphs_on_cuda(tmp_path, encoder_path):
     """Each collector plays its games as CUDA graphs, by the weights sent for each collection (policy_collectors.fingerprint)."""
     _train_with_collectors(tmp_path, encoder_path, "cuda", concurrent=True)
-    rows = [json.loads(line) for line in (tmp_path / "metrics.jsonl").read_text().splitlines()]
+    _, *rows = [json.loads(line) for line in (tmp_path / "metrics.jsonl").read_text().splitlines()]     # the first, iteration 0's test
     assert len(rows) == 3 and all(r["masked_out"] == 0 and r["graphs_captured"] >= 2 and r["collector_reserved_gb"] > 0 for r in rows)
     assert all("eval_fight" in r for r in rows)

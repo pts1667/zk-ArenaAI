@@ -30,7 +30,7 @@ bool Ground::fits(double x, double z, double hx, double hz, double height_dif, i
     if (x < hx || z < hz || x > map_w - hx || z > map_h - hz) return false;
     int r0 = (int)((z - hz) / cell), r1 = std::min((int)((z + hz) / cell) + 1, rows);
     int c0 = (int)((x - hx) / cell), c1 = std::min((int)((x + hx) / cell) + 1, cols);
-    const std::vector<uint8_t>& m = masks[mask];
+    const zk::Span<uint8_t>& m = masks[mask];
     for (int a = r0; a < r1; a++)
         for (int b = c0; b < c1; b++)
             if (!m[(size_t)a * cols + b]) return false;
@@ -194,6 +194,11 @@ void Seat::reset(const Data* d, const Ground* g, const Game& game_, int team_, P
     going.clear();
     avoid.clear();
     for (int& f : finished) f = 0;
+    spot_raided.assign(g->n_spots, -1e9);
+    watched.clear();
+    turrets_lost.clear();
+    heavy_off.clear();
+    armour_seen = false;
     draws.seed(seed);
 }
 
@@ -424,6 +429,7 @@ zks_data* zks_data_new(const zks_data_desc* s) {
     std::memcpy(d.special, s->special, sizeof d.special);
     std::memcpy(d.second_factories, s->second_factories, sizeof d.second_factories);
     d.caretaker = s->caretaker;
+    std::memcpy(d.defences, s->defences, sizeof d.defences);
     std::memcpy(d.group_radii, s->group_radii, sizeof d.group_radii);
     d.cerberus_reach = s->cerberus_reach;
     d.missile_reach = s->missile_reach;
@@ -443,6 +449,9 @@ zks_data* zks_data_new(const zks_data_desc* s) {
     d.special_of.assign(n, -1);
     for (int k = 0; k < 7; k++)
         if (d.special[k] >= 0) d.special_of[d.special[k]] = (int8_t)k;
+    d.defence_of.assign(n, -1);
+    for (int k = 0; k < ZKS_DEFENCES; k++)
+        if (d.defences[k] >= 0) d.defence_of[d.defences[k]] = (int8_t)k;
     int most = 0;
     for (int r = 0; r < n; r++) most = std::max(most, d.catalog_row[r] + 1);
     d.row_of_catalog.assign(most, -1);
@@ -461,14 +470,14 @@ int zks_data_add_map(zks_data* data, const zks_map_desc* m) {
     g.spots.assign(m->spots, m->spots + 3 * m->n_spots);
     size_t cells = (size_t)m->rows * m->cols;
     for (int f = 0; f < d.n_footings; f++) {
-        g.masks.emplace_back(m->masks[f], m->masks[f] + cells);
-        g.sites.emplace_back(m->sites[f], m->sites[f] + 2 * (size_t)m->site_counts[f]);
+        g.masks.emplace_back(m->masks[f], cells);
+        g.sites.emplace_back(m->sites[f], 2 * (size_t)m->site_counts[f]);
     }
     for (int c = 0; c < ZKS_MOVE_CLASSES; c++) {
-        g.labels.emplace_back(m->labels[c], m->labels[c] + cells);
+        g.labels.emplace_back(m->labels[c], cells);
         g.largest[c] = m->largest[c];
     }
-    if (m->height) g.height.assign(m->height, m->height + cells);
+    if (m->height) g.height = {m->height, cells};
     d.maps.push_back(std::move(gp));
     return (int)d.maps.size() - 1;
 }

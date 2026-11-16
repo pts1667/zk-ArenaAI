@@ -19,11 +19,12 @@
 extern "C" {
 #endif
 
-#define ZKS_ABI_VERSION 13
+#define ZKS_ABI_VERSION 16
 #define ZKS_MAX_TEAMS 8              /* ZK_MAX_TEAMS: the most teams a game has room for */
 #define ZKS_MOVE_CLASSES 6
 #define ZKS_ROLE_KNOBS 7             /* raid, riot, assault, skirm, arty, aa, snipe: the roles ROLE_ORDER of policy_mix.py has */
 #define ZKS_GROUP_RADII 10           /* zkbot.policy.groups.GROUP_RADII */
+#define ZKS_DEFENCES 6               /* zks_data_desc.defences */
 #define ZKS_GROUP_MARK 100           /* in the army script's orders as recorded, after a group's anchor's: x the radius, target the roles */
 
 /* Per type-table row bits (zks_data_desc.bits). */
@@ -47,7 +48,8 @@ enum {
     ZKS_CONSTRUCTOR = 1 << 16,   /* counted by the mix as a constructor: role "builder" and mobile */
     ZKS_SINGULARITY = 1 << 17,   /* energy of 100 or more: EcoData.finished["singularity"] */
     ZKS_QUEEN = 1 << 18,         /* the chicken queen, in either form (rules.json's chickens: each difficulty's queen and queen_morph) */
-    ZKS_TRANSPORT = 1 << 19      /* tables.transport: it carries units, and isn't one of the army's fighters (army.cpp, "Transports") */
+    ZKS_TRANSPORT = 1 << 19,     /* tables.transport: it carries units, and isn't one of the army's fighters (army.cpp, "Transports") */
+    ZKS_TANK = 1 << 20           /* what a tank plant makes that fights: the "early tanks" LLTs and Pickets answer (eco.cpp, "Defences") */
 };
 
 /* What the type table and the scripts' data say, by row.  Row `rows - 1` is the unknown type.  Arrays have `rows` entries
@@ -89,6 +91,9 @@ typedef struct {
     /* What the second factory may be, -1 where absent: factoryplane, factorygunship, striderhub */
     int32_t second_factories[3];
     int32_t caretaker;              /* staticcon's row, -1 where absent */
+    /* The defences the economy script builds, -1 where absent: turretlaser (LLT), turretmissile (Picket), turretheavylaser
+       (Stinger), turretgauss (Gauss), turretaalaser (Razor), turretaaclose (Hacksaw) */
+    int32_t defences[ZKS_DEFENCES];
     /* The radii a group order may have, ascending (zkbot.policy.groups.GROUP_RADII).  Role bits are `role` indices. */
     double group_radii[ZKS_GROUP_RADII];
     double cerberus_reach;          /* EcoData.reach["staticarty"] */
@@ -97,7 +102,8 @@ typedef struct {
     int n_footings;                 /* (low, high) pairs: each map has a mask and a site sample for each */
 } zks_data_desc;
 
-/* One map's ground, from policy_opening.Ground.  Copied. */
+/* One map's ground, from policy_opening.Ground.  The spots are copied; masks, sites, labels and height are read where they
+ * are, and must outlive the data (tools/policy_scripts_cpp.py keeps them), so that processes forked after share them. */
 typedef struct {
     int rows, cols;                 /* of bundle.passable, at `cell` elmos */
     double cell, map_w, map_h;

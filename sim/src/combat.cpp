@@ -737,8 +737,8 @@ void World::fire_weapons() {
 }
 
 // What a team's units do to enemies' units, for the reward (capi.h ZK_STATS): the health a hit is about to take off, as metal.
-// dealer: the team whose unit did it, or -1.
-void World::count_damage(int victim, float amount, int dealer) {
+// dealer: the team whose unit did it, or -1.  source: the unit, or -1 when none says (a fire, a death's blast).
+void World::count_damage(int victim, float amount, int dealer, int source) {
     const size_t i = size_t(victim);
     const float removed = std::min(amount, hp[i]);
     if (dealer < 0 || !(removed > 0.0f)) return;
@@ -748,9 +748,10 @@ void World::count_damage(int victim, float amount, int dealer) {
     const double metal = double(removed) * (d.cost > 0.0f ? d.cost : d.build_time) / d.hp;
     metal_dealt[dealer] += metal;
     metal_taken[owner] += metal;
+    if (source >= 0 && army(source)) army_dealt[dealer] += metal;
 }
 
-void World::damage_unit(int u, const zk_weapon_rec& w, float mult, int dealer) {
+void World::damage_unit(int u, const zk_weapon_rec& w, float mult, int dealer, int source) {
     const auto& d = type_of(u);
     const float amount = w.damage[d.armor_class] * mult * armor_mult(u) * damage_mult[size_t(u)];
     // energysolar.lua's HitByWeapon: anything that does damage by the book, except a weapon that can't hurt friends.  Each hit starts it over.
@@ -774,7 +775,7 @@ void World::damage_unit(int u, const zk_weapon_rec& w, float mult, int dealer) {
         add_slow(amount * w.slow_factor);
         return;
     }
-    count_damage(u, amount, dealer);
+    count_damage(u, amount, dealer, source);
     hp[size_t(u)] -= amount;
     damage_taken[size_t(u)] += amount;
     recent_damage[size_t(u)] += amount;
@@ -820,12 +821,12 @@ void World::explode(int weapon, float px, float pz, int source, int source_side,
         // Engine falloff (GameHelper.cpp:146-150).
         const float rim = surface * edge;
         const float mod = (edge >= 1.0f || surface < 1.0f) ? 1.0f : (radius + 0.001f - surface) / (radius + 0.001f - rim);
-        damage_unit(u, w, mod * power, dealer);
+        damage_unit(u, w, mod * power, dealer, source);
         if (w.impulse != 0.0f && source >= 0) push_from(u, source, w.impulse);
         note_attacker(u, source, source_side);
     });
     if (impact_only && direct >= 0) {
-        damage_unit(direct, w, power, dealer);
+        damage_unit(direct, w, power, dealer, source);
         if (w.impulse != 0.0f && source >= 0) push_from(direct, source, w.impulse);
         note_attacker(direct, source, source_side);
     }

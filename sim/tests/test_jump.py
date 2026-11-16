@@ -163,7 +163,7 @@ def test_what_cant_jump_doesnt():
 def _with_wall() -> zksim.Map:
     """A cliff across the map at z 2100, higher than anything can jump."""
     height = np.array(FLAT.height, dtype=np.float32, copy=True)
-    speed = np.array(FLAT.speed, dtype=np.float32, copy=True)
+    speed = np.array(FLAT.arrays()["speed"], dtype=np.float32, copy=True)
     rows = int(2100 / FLAT.cell), int(2200 / FLAT.cell)
     height[rows[0]:rows[1], :] += 1000.0
     speed[:, rows[0]:rows[1], :] = 0.0

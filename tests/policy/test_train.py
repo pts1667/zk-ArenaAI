@@ -328,8 +328,9 @@ def test_a_game_that_ends_forgets_its_frames(encoder_path):
 
 
 def test_grpo_judges_each_branch_of_a_copied_game_against_the_other_and_trains_with_no_critic(tmp_path, encoder_path, monkeypatch):
-    """A group of two games: each stretch's two branches start from the same frame and what the actor kept, and with two, every
-    decision's advantage is +1 or -1, its branch's score above the other's or below."""
+    """A group of two games: each stretch's two branches start from the same frame and what the actor kept.  A decision is judged
+    on what its branch scored from it on, against the other branch's from the same moment, its economy on the change from it;
+    an optimizer step takes whole groups; and the advantages aren't normalized again by the learner, so all of them above 0 push every action up."""
     cfg = _config(encoder_path, games=2, group=2, horizon=(5.0, 10.0), terms=(("result", 1.0), ("score", 0.5), ("economy", 0.3), ("combat", 0.3)))
     env = pt.make_sim(cfg.games, cfg.seed)
     learner = pt.Learner(cfg, tmp_path, pt.DataWorkers(0, env.bundles(), cfg.enabled_kinds), "cpu")
@@ -342,17 +343,137 @@ def test_grpo_judges_each_branch_of_a_copied_game_against_the_other_and_trains_w
         opened.setdefault((self.env.slot, seat % self.env.slots), []).append((self.env.frame(seat).units.copy(), self.current[seat].history.copy()))
 
     monkeypatch.setattr(pt.GroupCollector, "_open", spy)
+    real_terms = env.reward_terms
+
+    def terms(seat, names, b):      # each branch's income balance steady, at a level of its own
+        return np.where(np.array(names) == "income", float(seat), real_terms(seat, names, b))
+
+    monkeypatch.setattr(env, "reward_terms", terms)
     segments, tally = pt.GroupCollector(learner, env, np.random.default_rng(1)).collect_tally(40)
     assert tally.stored == sum(len(seg.steps) for seg in segments) >= 40 and tally.groups["branches"] >= 4
-    assert np.allclose(np.abs([s.advantage for seg in segments for s in seg.steps]), 1.0)
+    moments: dict[tuple[int, int], list[np.ndarray]] = {}
+    for seg in segments:
+        for s in seg.steps:
+            moments.setdefault((seg.group, s.slot), []).append(s.advantages)
+    both = [v for v in moments.values() if len(v) == 2]
+    assert len(both) >= 10 and all(np.allclose(a + b, 0.0) for a, b in both)
+    assert any(len({tuple(s.advantages) for s in seg.steps}) > 1 for seg in segments)     # from each decision on, not the stretch
+    # The economy is judged on the income balance's change from each decision on (Config.economy_change): a steady one is nothing.
+    assert all(np.allclose(s.advantages[2], 0.0) for seg in segments for s in seg.steps)
     stretches = sorted(opened)
     assert len(stretches) >= 2 and all(len(opened[k]) == 2 for k in stretches)
     for (units_a, kept_a), (units_b, kept_b) in (opened[k] for k in stretches):
         assert np.array_equal(units_a, units_b) and np.array_equal(kept_a, kept_b)
     assert np.abs(opened[stretches[-1]][0][1]).sum() > 0.0          # a later stretch goes on from what the actor kept
+    learner.cfg.group_step = 12
+    plan = learner._plan(segments, np.random.default_rng(0))
+    groups = [{seg.group for batch in step for seg in batch} for step in plan]
+    assert len(plan) >= 2 and sum(map(len, groups)) == len({seg.group for seg in segments})       # no group split over steps
+    for seg in segments:
+        for s in seg.steps:
+            s.advantages = np.abs(s.advantages)
     before = learner.actor.latent_in.weight.detach().clone()
+    learner.cfg.group_step = 10**6          # one step, so every ratio is 1 and the loss is minus the advantages' mean
     metrics = learner.train(segments, np.random.default_rng(0))
-    assert "loss_pg" in metrics and "loss_value" not in metrics and not torch.equal(before, learner.actor.latent_in.weight)
+    assert "loss_value" not in metrics and {f"term_scale_{name}" for name in learner.term_names} <= metrics.keys()
+    assert metrics["loss_pg"] < -0.5 * np.mean([s.advantage for seg in segments for s in seg.steps]) < 0.0
+    assert not torch.equal(before, learner.actor.latent_in.weight)
     learner.save()
     saved = torch.load(tmp_path / json.loads((tmp_path / "latest.json").read_text())["checkpoint"], weights_only=True)
     assert "critic" not in saved and "ema_critic" not in saved
+
+
+def test_spo_bound_keeps_the_pull_back_on_a_ratio_what_it_is_at_the_edge():
+    """Within bound x eps of 1 the objective is SPO's own; past it, its penalty's pull on the ratio grows no more."""
+    eps, bound, adv = 0.2, 2.0, torch.tensor(-1.5, dtype=torch.float64)
+
+    def slope(b):
+        r = torch.linspace(0.0, 3.0, 301, dtype=torch.float64, requires_grad=True)
+        pt.spo_objective(r, adv, eps, b).sum().backward()
+        return r.detach(), r.grad
+    ratio, plain = slope(0.0)
+    _, bounded = slope(bound)
+    near = (ratio - 1.0).abs() <= bound * eps
+    assert torch.allclose(plain[near], bounded[near])
+    pull = (bounded - adv).abs()
+    assert torch.allclose(pull[~near], torch.full_like(pull[~near], bound * abs(float(adv)))) and (plain - adv).abs().max() > 3 * bound * abs(float(adv))
+
+
+def test_tests_of_one_seed_play_the_same_games_and_pair_their_scores(tmp_path, encoder_path):
+    """Each test game's record has what its score reads and what pairs it (seed and slot), and a second test of the seed plays
+    the same games: here two cut short at their time limit, so drawn."""
+    cfg = _config(encoder_path)
+    learner = pt.Learner(cfg, tmp_path, pt.DataWorkers(0, pt.make_sim(2, 7).bundles(), cfg.enabled_kinds), "cpu")
+
+    def short(*args, **kw):
+        env = pt.make_sim(*args, **kw)
+        env.time_limit = 6
+        return env
+    first, again = (pt.evaluate(learner, short, "fight", 2, 7)["records"] for _ in range(2))
+    assert len(first) == 2 and [(r["slot"], r["map"]) for r in first] == [(r["slot"], r["map"]) for r in again]
+    assert all(r["result"] == "drew" and r["seed"] == 7 and r["income_own"] > 0.0 and "damage_dealt" in r for r in first)
+    m = pt.score_test("eval_fight", again, first)
+    assert m["eval_fight_paired"] == 2 and m["eval_fight_result"] == 0.5 and 0.0 < m["eval_fight_score"] < 1.0
+
+
+def test_bootstrapped_grpo_adds_the_critics_value_of_where_each_branch_ended_and_trains_the_critic(tmp_path, encoder_path, monkeypatch):
+    """A decision's return is its branch's terms to its stretch's end and the critic's value of where the branch ended,
+    discounted to it, against its group's: with that value 1 more for one branch's end, each of that branch's decisions gains
+    its discount x (1 - 1 / branches), and the group's other branch's lose the same moment's discount / branches.  The critic
+    learns the returns; it plays nothing."""
+    monkeypatch.setattr(pm, "Critic", functools.partial(pm.Critic, d=64, layers=1, queries=4))
+    cfg = _config(encoder_path, games=4, group=2, horizon=(5.0, 10.0), bootstrap=True, critic_bins=51, critic_span=2.0,
+                  terms=(("result", 1.0), ("score", 0.5), ("economy", 0.3), ("combat", 0.3)))
+    env = pt.make_sim(cfg.games, cfg.seed)
+    learner = pt.Learner(cfg, tmp_path, pt.DataWorkers(0, env.bundles(), cfg.enabled_kinds), "cpu")
+    assert learner.critic is not None and learner.player.critic is None
+    segments, _ = pt.GroupCollector(learner, env, np.random.default_rng(1)).collect_tally(40)
+    learner.prepare(segments)
+    before = {id(s): s.advantages.copy() for seg in segments for s in seg.steps}
+    raised = next(seg for seg in segments if seg.end is not None)
+    assert len({seg.group for seg in segments}) >= 2
+    real = learner.values_of
+    monkeypatch.setattr(learner, "values_of", lambda frames: [v + (f is raised.end) for (f, _, _), v in zip(frames, real(frames))])
+    learner.prepare(segments)
+    at = {s.slot: s.discount for seg in segments if seg.branch == raised.branch for s in seg.steps}
+    for seg in segments:
+        for s in seg.steps:
+            if seg.group != raised.group:
+                want = 0.0
+            elif seg.branch == raised.branch:
+                want = s.discount * (1.0 - 1.0 / seg.members)
+            else:
+                want = -at[s.slot] / seg.members
+            assert np.allclose(s.advantages - before[id(s)], want)
+    critic = learner.critic.value.weight.detach().clone()
+    metrics = learner.train(segments, np.random.default_rng(0))
+    assert metrics["loss_value"] > 0.0 and "explained_variance_economy" in metrics and not torch.equal(critic, learner.critic.value.weight)
+
+
+def test_resignation_plays_games_out_to_measure_then_gives_up_those_under_the_threshold(tmp_path, encoder_path, monkeypatch):
+    """As AlphaGo Zero: with no threshold every game is played out, saying the least result the critic gave it where its group
+    went on and whether it was then lost; with one, a game the critic puts under it is given up there.  The threshold is the
+    highest under which enough played-out games fell and few enough of them weren't lost."""
+    monkeypatch.setattr(pm, "Critic", functools.partial(pm.Critic, d=64, layers=1, queries=4))     # fresh: its result is 0 everywhere
+    cfg = _config(encoder_path, games=4, group=2, horizon=(5.0, 5.0), bootstrap=True, resign=True, resign_free=0.0, critic_bins=51,
+                  critic_span=2.0, terms=(("result", 1.0), ("score", 0.5)))
+    env = pt.make_sim(cfg.games, cfg.seed)
+    env.time_limit = 20
+    learner = pt.Learner(cfg, tmp_path, pt.DataWorkers(0, env.bundles(), cfg.enabled_kinds), "cpu")
+    collector = pt.GroupCollector(learner, env, np.random.default_rng(1))
+    collector.measuring = True
+    played, resigned = [], 0
+    for _ in range(8):
+        tally = collector.collect_tally(20)[1]
+        played, resigned = played + tally.lineages, resigned + tally.groups.get("resigned", 0)
+        if played:
+            break
+    assert played and resigned == 0 and all(abs(low) < 1e-6 and kept == 1.0 for low, kept in played)     # drawn at the limit
+    collector.resign_at = 0.5
+    for _ in range(8):
+        resigned += collector.collect_tally(20)[1].groups.get("resigned", 0)
+        if resigned:
+            break
+    assert resigned
+    learner.follow_resignation([(-1.0, 0.0)] * 20 + [(-0.65, 1.0)] * 2)
+    assert learner.resign_at == -0.7

@@ -332,6 +332,14 @@ In a 1v1, for side A against side B at decision t:
     it lasted, so a game won early isn't worth less of it than one that drags on;
   * `combat`: the change in the balance of damage dealt, in the metal it cost (libzksim's stat 4, ABI 24): at two,
     (dealt - taken) / (dealt + taken + 1000).  That's a side's trades, as Zero-K's experience counts a unit's.
+  * Closer to the decisions (the user, 2026-11-15, after GRPO's gradient was found to be noise: "Signal or noise"), each
+    the change of a balance a step as `combat` is, -1 to 1, zero-sum over the alliances (`SimEnv._balances`; libzksim ABI 27,
+    01-simulator.md, "Teams and alliances"):
+    * `extractors`: finished extractors, at two (A - B) / (A + B + 4);
+    * `map`: the shares of the map in sight and in radar, summed, at two (A - B) / (A + B + 0.2);
+    * `experience`: the army's trades, x / (1 + x) for x the metal its damage cost the others over the metal put into it
+      and 1000, less the others' mean.  The user's idea was each combat unit's damage over its cost, averaged; an average
+      falls with every unit built and rises with every fresh one lost, so it's the army's whole.
   
   A decision's advantage is each term's weighed over its returns' spread that iteration (5th to 95th percentile) where
   that's over 1, as DreamerV3 scales returns: a wide-spread term doesn't drown the rest, and a near-constant one isn't
@@ -355,9 +363,13 @@ In a 1v1, for side A against side B at decision t:
   `ratio_deviation` the mean of |r - 1|, the paper's measure.  Dual-clip went with the clip: it capped the loss of a ratio
   far past the region, which is the gradient SPO keeps.  `spo-1` ran it for 140 iterations ("What the earlier runs showed"):
   its tests can't be told from `full-1`'s PPO.
-* **Entropy**: a bonus per head (0.01), raised for any head below 30% of its maximum entropy (`--entropy-floor`; 0 from a
-  clone).
+* **Entropy**: a bonus per head (0.01, `--entropy-base`), raised for any head below 30% of its maximum entropy
+  (`--entropy-floor`; 0 from a clone).  None under GRPO ("GRPO from branched games").
 * **One pass** over each sample (`passes` 1).  An EMA of the weights (0.99) plays the tests and is saved.
+* **Gradient clipping** (0.5, `grad_clip`) is the actor's and the critic's apart since 2026-11-14 (`grad_norm`,
+  `grad_norm_critic`).  Together, a critic's gradient, large while it learns, shrank the actor's, and under Adam's eps (1e-5)
+  a gradient shrunk that far makes a smaller step, not the same one: an actor's gradient cut to a norm of 0.01 is about 2e-6
+  a weight over 27M, under eps.  How much it cut in past runs wasn't measured: they logged the norm of both together.
 * **The critic** is a separate network over the privileged frame, with the enemies the seat can't see.  It's never in the bot.
   With `--critic-bins` its value is a distribution over bins from -span to span, trained by HL-Gauss.  `--critic-lr` gives it a
   rate of its own, falling in step with the actor's: at the actor's 1e-5 a new critic learned nothing (explained variance
@@ -441,8 +453,31 @@ dual clip 3, as above.
 
 ### Opponents
 
-Training starts against the scripts.  Every `--eval-every` iterations, 64 test games against the script count wins, with draws
-and losses logged (`metrics.jsonl`, `tests.jsonl`).  `SelfPlay` then moves to self-play:
+Training starts against the scripts.  Every `--eval-every` iterations, and at iteration 0 in a run that tests at all, 128 test
+games against the script (`--eval-games`; 64 until 2026-11-14) count wins, with draws and losses logged (`metrics.jsonl`,
+`tests.jsonl`).  Since 2026-11-14 (the user, after `full-3`'s tests of 64 games went 17%, 8%, 11% with no telling what moved):
+
+* **The same games every test**: the seed is the run's x 1,000, not that plus the iteration, so each test plays the maps,
+  starts and variants of the first, and a game's record says its `seed` and `slot`.  Only the policy's choices, and what
+  follows from them, differ.  The replays' games still vary.
+* **In chunks**, with collectors (2026-11-15): of at most a collector's share of the training games (`--games` over
+  `--collectors`, 16 in `full-4`), chunk r from a seed drawn from the test's and r, played by collector r mod their count,
+  the same chunks every test.  A collector's part of the card is sized for its training games: a test of 128 shared out,
+  43 a collector, ran the wide actor's 1 GB out capturing its graph.
+* **Scored beyond the result** (`game_score`): each game's result (1, 0.5 for a draw, 0) and its alliance's shares of the
+  value at the end, of the metal income over the game (summed each step: `income_own`, `income_enemy`) and of the damage
+  done (`damage_dealt`, `damage_taken`, in metal: ZK_STATS 4 and 5), each 0.5 when even, weighed 1 : 0.5 : 0.3 : 0.3 as
+  GRPO's terms (result, score, economy, combat) and averaged: `eval_fight_score`, with `eval_fight_score_se` and each part
+  (`eval_fight_result`, `_value_share`, `_income_share`, `_damage_share`).  A loss scores 0.26 with its shares even and
+  0.52 at most, a win 0.48 at least, an even draw 0.5.
+* **Paired**: `eval_fight_score_change` is the mean of each game's score less its score in the run's first test (from
+  `tests.jsonl`), with `_se` and the count paired (`eval_fight_paired`): what a map or a start makes of a score cancels.
+* **The economy** at 3, 6 and 10 minutes, the policy's and the script's (`eval_fight_income_at6`,
+  `eval_fight_script_extractors_at6` and so on, as the clone's evals give them: `policy_clone_eval.Notes`).
+* Checked by `test_tests_of_one_seed_play_the_same_games_and_pair_their_scores`: two tests of a seed, their games cut short
+  at the time limit, play the same maps in the same slots, and pair.
+
+`SelfPlay` then moves to self-play:
 
 * it **starts** when the last two tests average 80% wins;
 * it **adds** 1% of new games each iteration;
@@ -515,11 +550,97 @@ the sim copies games (01-simulator.md, "The batch").
   a group" with the trunk a branch drawn after each stretch, rather than a ninth game that's only played on.
 * **Scores.**  A branch's score is its terms over the stretch (`--terms`, as PPO's): `result` and `score` and `combat` their
   sums over it (the result only if its game or its alliance ended in it), and `economy` the mean of the income balance over
-  it, what it earned against the other branches.  They're weighed by `--terms`' weights.
-* **Advantages.**  A branch's advantage is its score less its group's mean, over its group's spread (Dr. GRPO, Liu et al.
-  2025, drops the spread: `--no-group-std`), and each of its decisions takes it.  The branches of each seat are compared
-  only with the same seat's in the group's other games.  A seat whose branches all scored the same is dropped
-  (`branches_dropped`).  The update is PPO's (SPO's loss, the KL to the clone, the cloning loss), with no value loss.
+  it, what it earned against the other branches.  They're weighed by `--terms`' weights.  From a decision on (below), the
+  economy is the balance's change from the decision's moment, (1/span) x the sum over the steps after it of (income -
+  income then) (`--economy-change`, the default since 2026-11-14): the level a branch had reached when a decision was
+  taken isn't the decision's doing, and a branch ahead then would otherwise credit each later decision with it.
+* **Advantages** (as they are since 2026-11-13, the user; the trial's are under "It broke at the end").  The branches of
+  each seat are compared only with the same seat's in the group's other games.  A decision is judged on what its branch
+  scored from it on, each term apart, less the group's mean of that from the same moment (`step.slot`; a branch whose game
+  had ended by then counts 0): what came before it, which it couldn't change, doesn't count for it or against it, as
+  DeepSeekMath's process supervision has it (`--no-reward-to-go` judges every decision on the whole stretch's).  The terms
+  are then weighed by `--terms`, each first over its spread among the groups' branches, on average over the iteration's
+  groups where it varied (`--group-scale terms`, `term_scale_result` and so on): so a term whose branches differ a lot
+  doesn't drown the rest.  `--group-scale group` divides by each group's own spread of weighed scores instead, as GRPO does,
+  and `none` leaves them; Dr. GRPO (Liu et al. 2025) dropped the group's spread for its bias toward groups that hardly
+  differ.  A seat whose branches all scored the same is dropped (`branches_dropped`).
+* **The update** is PPO's (SPO's loss, the KL to the clone, the cloning loss) with no value loss, and three differences.
+  The advantages aren't scaled again over a minibatch: they're already against their groups, and scaling them over a third of
+  a group's branches could flip their signs.  A decision's actions are summed, over the iteration's mean count of them
+  (done included), not averaged: each order counts alike however many its decision has (Dr. GRPO's length bias).  And an
+  optimizer step takes whole groups, `--group-step` decisions of them (1,024, about 3 groups of 8) or just past, with the
+  gradients of their minibatches added up, each by its share of the step's decisions (`step_decisions`), so a group's
+  branches pull against each other within a step.  At an iteration of 16,384 that's 16 steps, as DAPO takes 16 a rollout
+  batch, where one a minibatch would be about 110: the trial took about 35 an iteration of 4,768 (minibatches of 100-200
+  decisions), at 0.001-0.01 of KL an iteration.  If `kl` stays far under `--kl-target`, the rate can go up.
+* **Bounds on any one action's pull** (2026-11-14, the user, after a review of arXiv 2508.08221 here; `full-3`'s `loss_pg`
+  jumped to 2.585 at iteration 130 against about 0.06): a decision's weighed advantage is clipped to ±3 (`--adv-clip`;
+  `adv_abs_max` the iteration's largest before it, `adv_clipped` the share cut), and SPO's penalty goes on in a straight line
+  past |r - 1| = 2 eps (`--spo-bound`), as Huber's loss, so its pull back on a ratio stays 2 |A| where the square's grew
+  without end (`ratio_deviation_max`, the largest |r - 1|).  `test_spo_bound_keeps_the_pull_back_on_a_ratio_what_it_is_at_the_edge`.
+* **No entropy bonus** (`--entropy-base`, 0 under GRPO since 2026-11-14): with the KL to the clone and the cloning loss gone,
+  it was all that held the heads' spread, and it outweighed the advantages: in `full-3` the offset head's entropy went from
+  1.84 to 3.06, of ln 25 = 3.22 at most, and the place and wreck heads' rose too.
+* **Bootstrapped** (`--bootstrap`, the user, 2026-11-14).  A stretch is 60-180 s, so a decision's result reached it only if
+  its game ended in its stretch, and the rest only through the shaping terms.  Bootstrapped, a decision's return is its
+  branch's terms from it to the stretch's end, each discounted as the critic's are (the economy a discounted average of the
+  income balance, as PPO's, not the stretch's mean), plus the critic's value of where the branch ended, discounted to it
+  (nothing if its game or its alliance had ended).  Its advantages are that, the economy less the balance when it was taken,
+  less the group's mean of the same from the same moment (`Learner.bootstrap`); each group's spreads, for the terms' scales,
+  are of the same at the stretch's start.  So what the critic gets wrong alike for a group's ends cancels, and only how they
+  differ counts.
+  * The collector keeps each branch's terms from each decision (`Step.rest`), their discount to the stretch's end
+    (`Step.discount`) and the raw frame where the branch ended (`Segment.end`); the learner values those ends with its
+    critic before training, about 440 of them an iteration of 16,384, and trains the critic on the returns (n-step ones, the
+    critic's own value at their ends) with the actor.  The collectors play no critic, nor do the tests.
+  * The critic is PPO's (`--critic-bins`, `--critic-span`, `--critic-lr`, `--critic-muon-lr`, a head a term), and the actor
+    waits `--critic-warmup` iterations (10 in the pipeline) while it learns.  `explained_variance` and
+    `explained_variance_TERM` are of its values in training against those returns.
+  * A seat whose branches all scored alike over the stretch isn't dropped: their ends may still differ.
+  * `test_bootstrapped_grpo_adds_the_critics_value_of_where_each_branch_ended_and_trains_the_critic`: with the critic's value
+    of one branch's end 1 higher, each of its decisions gains its discount x (1 - 1 / branches), the other branch's lose the
+    same moment's discount / branches, other groups none; the critic learns.  Leaving the discount out fails it.
+* **Hopeless play** (with `--bootstrap` and the result term): `hopeless80` and `hopeless90`, the share of an iteration's
+  decisions whose branch ended where the critic gave the policy's side a result under -0.8 or -0.9, and `end_value_result`,
+  the critic's mean result at the ends: how much play goes where the game is already lost.
+* **Resignation** (`--resign`, the user, 2026-11-14, as AlphaGo Zero's: resign under a threshold, kept to 5% false
+  positives by games played out with resignation off).  At a stretch's end, the game a group would go on from is given up,
+  and a new one started, when the critic's result for the policy's side of it (the least, with several of its seats) is under
+  `Learner.resign_at`.  The branches just played were judged already, with the critic's value of where they ended, so
+  giving up pays nothing more: the group just stops spending play on it (`resigned` counts them).
+  * The collectors keep a copy of the critic for it (`GroupCollector._value`), sent with the actor's weights; it plays
+    nothing.  Nothing is measured while the critic warms up.
+  * Each game a group starts is played out, never given up, while there's no threshold, and then `--resign-free` of them
+    (10%).  A played-out game says the least result the critic gave it where its group went on, and at its end the share of
+    its copies' ends that weren't losses (`Learner.follow_resignation`, `played_out`).
+  * `resign_at` is the highest of -0.95, -0.9, ..., -0.5 under which at least `--resign-least` (20) of the latest 500
+    played-out games fell and at most `--resign-false` (5%) of them weren't lost (`resign_false80` and so on, each line's
+    share); none qualifying, nothing resigns (`resigning` 0).  It and the window are in the checkpoints.
+  * The share leans to keeping games: a group goes on through whichever copy is still going, so a played-out game's end is
+    its likeliest survivors', and a draw at the time limit counts as not lost.
+  * Given-up games aren't in the training games' `wins_` counts, which lean higher for it.
+  * `test_resignation_plays_games_out_to_measure_then_gives_up_those_under_the_threshold`: a fresh critic (0 everywhere)
+    plays games out with no threshold, each saying 0 and not lost (drawn at the limit); with a threshold of 0.5 they're
+    given up; and the threshold from made-up records is the highest that keeps to 5%.
+* **Signal or noise** (`--grad-check DECISIONS`): plays that many decisions from the run's checkpoint (or `--init`), splits
+  their groups in two at random 3 times (`--grad-splits`), and writes the cosine of the two halves' actor gradients to `RUN/grad-check.json`
+  (with `--bootstrap`, a checkpoint's critic bootstraps the advantages, and its own gradient, which doesn't depend on them,
+  is left out): with the advantages as trained, with each term's share alone, and with them shuffled among the decisions, a
+  floor for what the halves share whatever the advantages; no entropy bonus.  A cosine near the floor (under about 0.05
+  above it) says an iteration's gradient is mostly noise, so bigger steps and a slower rate (`--group-step 4096 --lr-start
+  3e-6`); over about 0.2 says the signal is there and the objective is what to look at.  `full-4`'s DAgger actor
+  (2026-11-15, not bootstrapped, 16,960 decisions in 55 groups of the games' first stretches): all -0.03 against shuffled
+  -0.06 (splits 0.02, -0.06, -0.05), result 0.02 (no game ended), score -0.01, economy -0.11, combat 0.06.  Noise: its
+  GRPO took `--group-step 4096 --lr-start 3e-6`.  Its GRPO's iteration 120, bootstrapped (explained variance 0.7-0.8,
+  16,474 decisions in 57 groups of fresh games): all -0.06 against shuffled 0.05 (splits -0.18, 0.04, -0.05 against
+  -0.11, 0.12, 0.14), result 0.06, score 0.06, economy -0.08, combat 0.01.  Still noise: the critic didn't bring the signal
+  out, and the floor swings by about 0.1 between splits.  The same actor unbootstrapped (`--init`), with the terms closer to
+  the decisions ("Reward") at 0.3 each, 16,608 decisions in 56 groups, 8 splits (`full-4/grad-check-terms`): all 0.12
+  against shuffled 0.01, above the floor in all 8 (0.05 to 0.21); economy 0.10 (above in 7); result -0.03, score -0.01,
+  combat -0.01, extractors -0.01, map -0.04, experience 0.02, each above in 2 to 4.  The new terms alone are noise, but the
+  mix has a signal the bootstrapped advantages didn't: the critic's values at branches' ends seem to add more noise than the
+  small differences between branches.  So `full-4`'s GRPO went on unbootstrapped from that actor, with these terms and
+  `--group-step 2048 --lr-start 1e-5 --kl-target 0.005`.
 * **A collection** stores decisions only of branches that have been judged: a branch still being played at its end goes to
   a later one, its decisions played by the weights of their time, as concurrent collection's are.
 * **The learner has no critic**, nor do the collectors, the checkpoints or the moving average.  A run can't go between PPO and
@@ -527,10 +648,24 @@ the sim copies games (01-simulator.md, "The batch").
 * **Metrics**: `branches`, `branches_dropped`, `new_games`, `branch_decisions` (a branch's on average), and `group_spread`,
   a group's spread of weighed scores on average, with each term's (`group_spread_result` and so on).  No explained variance.
 * **Checked** by `test_grpo_judges_each_branch_of_a_copied_game_against_the_other_and_trains_with_no_critic`: in a group of
-  two, each stretch's branches start from the same frame and the same kept history, and every advantage is +1 or -1.
-  Leaving out the copy of the game or of the actor's memory fails it.
+  two, each stretch's branches start from the same frame and the same kept history; at each moment both branches decided,
+  their advantages sum to 0, and they change along a branch; a plan of small steps splits no group; and with every
+  advantage set above 0, one step's policy loss is about minus their mean.  Leaving out the copy of the game or of the
+  actor's memory fails it, as do scaling over the minibatch again, judging on the whole stretch, and planning by segment.
+  Each branch's income held at a level of its own, every decision's economy advantage is 0, which the level failed.
 * **An iteration** ends when its decisions are in and its groups' stretches have ended, so it holds more than `--iteration`
   (4,768 at first against 4,096), and a run reaches `--decisions` in fewer iterations than PPO.
+* **Memory, and bigger batches** (2026-11-13, `results/grpo-mem.sh`: a random encoder of the pipeline's shape, a fresh actor,
+  the trial's flags, 64 games in 4 collectors, 2 iterations of 16,384).  A copy is the game's own `World` copied over the
+  other's (the map is shared), the scripts' seats and `SimEnv`'s arrays in place, and the actor's memory rows within its
+  buffers: a group of 8 holds what 8 games do, and nothing grows with branching.  An iteration of 16,384 held 440 branches
+  (55 groups scored, against about 13 at 4,096), 38 decisions each.  RAM peaked at 27.1 of 39 GB (the learner 4.5 GB, each
+  collector 3, each of 6 featurizing workers 1.5, the map pool shared among them); a stored decision is its raw frame (80
+  bytes a unit, 24 a wreck) and 40 latent tokens, so about 20-120 KB, 0.5-2 GB an iteration.  The card: the learner 3.2 GB
+  (minibatches are by tokens, whatever the iteration), a collector 0.28 GB in these early games, and about 1 GB at 16
+  games late in mixed games (`full-2`).  So the batch grows by iterations, not games: past 64 games in 4 collectors, the
+  collectors' graphs (about 50 MB a game at the caps) and the learner's 4.5 GB don't fit in 85% of the 12 GB card.  The
+  fades (`--kl-fade`, `--clone-fade`) and `--eval-every` go by iterations, so at 16,384 they come 4x later in decisions.
 * **The trial** (2026-11-13, `runs/grpo-trial`, at FEATURE_VERSION 9): from `full-2`'s DAgger actor, which won 9.4% of 64
   1v1s on the sim as it is now, with the pipeline's PPO flags and `full-2`'s, 8 groups of 8 in 4 collectors, tested every
   25 iterations on 64 1v1s:
@@ -545,6 +680,14 @@ the sim copies games (01-simulator.md, "The batch").
   learns faster.  GRPO played 150-265 decisions a second overall against PPO's 105, having no critic to run.  In GRPO's
   first minutes the groups' scores spread most in the damage balance (0.062, against 0.011 for value and 0.006 for
   income), and its orders moved from FIGHT towards MOVE (MOVE 6% of them at iteration 25, 47% at 75).
+* **It broke at the end** (found 2026-11-13, after): between iterations 72 and 79 MOVE went from 5% of orders to 71% and
+  FIGHT from 74% to 10%, the unit pointer's entropy from 1.0 to 2.8, and orders a decision from 2.3 to 5-7.  The test at 75
+  caught it half way; nothing after was tested.  The likely causes, in `Learner._update_loss`: it scales the advantages
+  again over each minibatch (`(a - mean) / std`, about a third of a group's branches in one), which can flip their signs,
+  breaks each group's sum of zero and undid the trial's dropping of the group's spread; and it averages a decision's
+  actions, so a losing decision's orders weigh less the more of them there are (Dr. GRPO's length bias).  Also the entropy
+  bonus, unopposed as the KL and cloning weights fade.  The first two are fixed ("The update"), with the advantages by
+  reward-to-go and by term (the user, 2026-11-13, after a survey of GRPO's variants); the entropy bonus went on 2026-11-14.
 
 ## Speed
 

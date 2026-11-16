@@ -94,8 +94,9 @@ int overlapping(const float* sx, const float* sz, const float* radius, int from,
 
 void Map::set_slopes(const float* slope, const float* normal_x, const float* normal_z) {
     const size_t cells = size_t(cols) * size_t(rows);
-    slopes.resize(cells);
-    for (size_t i = 0; i < cells; ++i) slopes[i] = {height[i] < 0.0f ? 0.0f : slope[i], normal_x[i], normal_z[i]};
+    own.slopes.resize(cells);
+    for (size_t i = 0; i < cells; ++i) own.slopes[i] = {height[i] < 0.0f ? 0.0f : slope[i], normal_x[i], normal_z[i]};
+    slopes = own.slopes;
 }
 
 // The distance from each cell to the nearest the class can't stand on, by the larger of the two axes, in two sweeps; then the
@@ -103,17 +104,19 @@ void Map::set_slopes(const float* slope, const float* normal_x, const float* nor
 void Map::set_standing() {
     const size_t cells = size_t(cols) * size_t(rows);
     stand_words = (cells + 63) / 64;
-    stand.assign(stand_words * size_t(classes), 0);
+    own.stand.assign(stand_words * size_t(classes), 0);
+    stand = own.stand;
     for (int c = 0; c < classes; ++c) {
         const float* grid = speed_grid(c);
-        uint64_t* bits = &stand[size_t(c) * stand_words];
+        uint64_t* bits = &own.stand[size_t(c) * stand_words];
         for (size_t i = 0; i < cells; ++i)
             if (grid[i] > 0.0f) bits[i >> 6] |= uint64_t(1) << (i & 63);
     }
     clear_cols = (cols + CLEAR_BLOCK - 1) / CLEAR_BLOCK;
     clear_rows = (rows + CLEAR_BLOCK - 1) / CLEAR_BLOCK;
     const size_t blocks = size_t(clear_cols) * size_t(clear_rows);
-    clearance.assign(blocks * size_t(classes), 255);
+    own.clearance.assign(blocks * size_t(classes), 255);
+    clearance = own.clearance;
     std::vector<int> far(cells);
     constexpr int FAR = 1 << 20;
     for (int c = 0; c < classes; ++c) {
@@ -132,7 +135,7 @@ void Map::set_standing() {
                 }
                 at(cx, cz) = best;
             }
-        uint8_t* out = &clearance[size_t(c) * blocks];
+        uint8_t* out = &own.clearance[size_t(c) * blocks];
         for (int cz = rows - 1; cz >= 0; --cz)
             for (int cx = cols - 1; cx >= 0; --cx) {
                 int best = at(cx, cz);
@@ -156,10 +159,13 @@ void Map::set_standing() {
 
 void Map::set_segments(const short* labels) {
     const size_t cells = size_t(cols) * size_t(rows);
-    nearest_segment.assign(labels, labels + cells * size_t(classes));
+    own.nearest_segment.assign(labels, labels + cells * size_t(classes));
+    nearest_segment = own.nearest_segment;
     routes.assign(size_t(classes), Routes{});
+    for (auto* v : {&own.centre_x, &own.centre_z, &own.gate_x, &own.gate_z}) v->assign(size_t(classes), {});
+    for (auto* v : {&own.edge_to, &own.next_edge}) v->assign(size_t(classes), {});
     for (int c = 0; c < classes; ++c) {
-        short* fill = &nearest_segment[size_t(c) * cells];
+        short* fill = &own.nearest_segment[size_t(c) * cells];
         std::vector<int> frontier;
         for (size_t i = 0; i < cells; ++i)
             if (fill[i] >= 0) frontier.push_back(int(i));

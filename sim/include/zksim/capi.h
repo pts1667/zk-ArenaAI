@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define ZK_ABI_VERSION 26
+#define ZK_ABI_VERSION 28
 #define ZK_WARD_TARGETS 4
 #define ZK_MAX_MOUNTS 8
 #define ZK_MAX_TEAMS 8     /* players in a game, and so allyteams too */
@@ -334,6 +334,40 @@ void zk_map_set_routes(void* map, int move_class, int nodes, const float* centre
                        const float* gates, const int* next_edge);
 void zk_map_free(void* map);
 
+/* Everything the sim reads of a map, as it keeps it: zk_map_arrays_get gives a map's, and zk_map_view makes a map that reads
+   them where they are, which must outlive it.  So a map's arrays can be a file mapped into memory (sim/py/zksim.py, Map.load's
+   cache), shared by every process and dropped by the system when it needs the room. */
+typedef struct {
+    int32_t cols, rows, classes, clear_cols, clear_rows;
+    float cell;
+    int64_t stand_words;
+    const float* height;            /* rows x cols */
+    const float* speed;             /* classes x rows x cols */
+    const float* slope_mod;         /* classes */
+    const float* slopes;            /* rows x cols x 3: the slope (0 under water), normal_x, normal_z */
+    const uint8_t* clearance;       /* classes x clear_rows x clear_cols */
+    const int32_t* clear_skip;      /* 256 */
+    const uint64_t* stand;          /* classes x stand_words */
+    const int16_t* nearest_segment; /* classes x rows x cols */
+} zk_map_arrays;
+
+/* One class's routes, in elmos. */
+typedef struct {
+    int32_t nodes, edges;
+    const float* centre_x;          /* nodes */
+    const float* centre_z;
+    const int32_t* edge_to;         /* edges */
+    const float* gate_x;            /* edges */
+    const float* gate_z;
+    const int32_t* next_edge;       /* nodes x nodes */
+} zk_routes_arrays;
+
+void zk_map_arrays_get(const void* map, zk_map_arrays* out);
+void zk_map_routes_get(const void* map, int move_class, zk_routes_arrays* out);
+void* zk_map_view(const zk_map_arrays* arrays);
+/* Per class, after zk_map_view. */
+void zk_map_view_routes(void* map, int move_class, const zk_routes_arrays* routes);
+
 void* zk_world_new(const void* catalog, const void* map, uint64_t seed, int behaviour);
 void zk_world_free(void* world);
 /* Teams (players: a purse, orders, a frame of their own) and their allyteams (who share sight and don't fight each other).
@@ -431,8 +465,15 @@ int zk_world_order_group(void* world, const zk_group_rec* group);
    [4] and [5], since the game began: the damage the team's units have done to enemies' units, and the damage enemies' units have done
    to its own, in metal.  A hit counts the health it takes off, no more than its victim had, times the victim's cost (a chicken's
    build time) over its full health.  Health only: not what a shield takes, nor stun, slow or disarm.  A fire counts for whoever lit
-   it, a death's blast for the team of what died; a fall counts for no one.  Nothing between allies or to oneself. */
-#define ZK_STATS 6
+   it, a death's blast for the team of what died; a fall counts for no one.  Nothing between allies or to oneself.
+   [6] its finished extractors.  [7] and [8], the share of the map its allyteam has in sight and in radar, split evenly among the
+   allyteam's teams, so that its teams' sum is its share: circles of its finished units' ground sight and radar (not those whose
+   upkeep wasn't paid) on a grid of ZK_COVER_CELL elmos, a cell counting when its centre is in one, terrain not looked at.
+   [9] the part of [4] its army did: a mobile, armed unit that isn't a commander, a builder or a missile, by its own shot or blast
+   (a fire or a death's blast has no unit to say).  [10] the metal put into its army, dead units' too: cost x build progress, a
+   chicken's build time for its cost as in [0].  Zero-K's experience is a unit's [9] over its cost; this is the army's. */
+#define ZK_STATS 11
+#define ZK_COVER_CELL 64.0f
 
 int zk_sizeof_unit_record(void);
 int zk_sizeof_site_record(void);

@@ -41,6 +41,10 @@ simulator (`sim/`): first by cloning scripted players, then DAgger, then PPO.
   destroyed (`game_over.lua`'s `vitalAlive`; libzksim ABI 25, `rules.json`'s `vital`), so a game of two ends.  Every team
   in the sim stands for an AI, so it's always on but for the chickens.  The 25x reveal was already in.  The lead rule and
   the time limit stay, on top, to hurry games.  01-simulator.md, "Teams and alliances" ("No builder left").
+* **The economy script builds defences** (the user, 2026-11-13; libzkscripts ABI 14): LLTs by contested spots from 2:30
+  (before the extractor), Pickets among them against tanks, AA once the enemy flies, and from 30 metal a second a Stinger
+  by an extractor with 700 metal of wrecks near it, or a Gauss where turrets are being lost.  Before, it built none but
+  Cerberus and Lucifer, so no clone built a turret.  01-simulator.md, "The economy script" ("Defences").
 * **Two damage stats a team** (2026-11-12, the user; libzksim ABI 24, `ZK_STATS` 6): `[4]` the damage its units have done
   to enemies' units, in metal, and `[5]` what enemies' have done to its own, for a combat-efficiency head.  01-simulator.md,
   "Teams and alliances".
@@ -79,6 +83,125 @@ simulator (`sim/`): first by cloning scripted players, then DAgger, then PPO.
     being built in their reach, as Zero-K's default widget has them patrol).  01-simulator.md, "Economy" and "The economy script".
   * Plates are factories in the policy's type table (masks only, and no new feature version for it, since no data held one).
   * `clone/army-6` was recorded by the old scripts, so a clone of it learns factory copies: new recordings are needed first.
+
+## `runs/full-3` (started 2026-11-13 21:44)
+
+The user's next whole run, `results/launch-full3.sh` (the same command again carries on):
+
+    policy_pipeline.py --root /mnt/d/zk-learned/runs/full-3 --train-encoder --data /mnt/d/zk-learned/clone/army-8         --encoder-steps 75000 --clone-steps 10000 --dagger-rounds 1 --ppo-hours 10 --ppo-decisions 100000000         --ppo-iteration 16384 --record-args "--workers 4 --threads 16"         --ppo-args "--group 8 --collectors 4 --concurrent --economy-start 1 --economy-end 1 --eval-every 50"
+
+* Recorded anew (`army-8`) on the sim as it is now, with the economy script's defences: the encoder 3x its default steps,
+  the clone 2x `full-2`'s, one DAgger round (the user), then GRPO for 10 hours with the policy's own economy in every game.
+* 16,384 decisions an iteration, 4x the trial's: 55 groups scored an update (03-training.md, "GRPO from branched games",
+  "Memory, and bigger batches").  To change GRPO's flags, stop the pipeline before its `ppo` stage and run it again with
+  them: the stages done are kept.
+* Deleted for room, the user asked: `clone/army-7`, and `full-2`'s `frames`, `ppo`, `ppo-kl-127` and `dagger`; on
+  2026-11-14, during GRPO, `full-3/frames`' shards (118 GB).  Its `manifest.json` is kept so that the pipeline, run again,
+  doesn't plan a `frames` stage (it's planned whenever the manifest is missing, and no longer in `pipeline.json`'s done).
+* Its recording thrashed WSL at 100% of its memory at first (the user saw it, 2026-11-13 22:05): a recorder worker of 64 games now holds about
+  2.5 GB beside the map pool's 14.7 GB, against about 1 GB in `full-2`, and 12 of them don't fit in 40 GB.  Killed, and
+  relaunched at 22:17 with 4 workers of 16 threads (`--record-args`, new in the pipeline), and
+  `results/mem-guard.sh` watching: it kills the run when less than 4 GB is left (`full-3/memguard.log`; 8 GB at first, but
+  recording leaves about 15 and GRPO's measurement 12, so 8 risked killing a healthy stage overnight).
+* Recorded in 89 minutes (8,800 games or so, 100M decisions, about 1,775 bytes a decision against `full-2`'s 1,420), frames
+  in 29.  The encoder levelled off from about step 10,000 (loss 0.02-0.04, the probes' R² flat), so the user had it
+  stopped at step 20,600 of 75,000 (2026-11-14 02:16, 2 hours in, the rate still 4e-4): its `stop` file, then
+  `encoder` marked done in `pipeline.json` by hand and the same command run again.
+* GRPO started at 13:42 on 2026-11-14 and ran to iteration 105 (1.79M decisions), tests winning 17.2% of 64 1v1s at 50 and
+  7.8% at 100.  WSL's memory went from 26 GB to 32 in its first hour, then about 1 GB an hour more as the lead rule faded
+  (none from iteration 100), to 35.5 of 40, and `mem-guard.sh` killed it at 17:34 under 4 GB free.  Its rates fell as games
+  grew: collecting from 415 decisions a second to about 150, training from 340 to about 140.  Resumed at about 18:40 from
+  iteration 100 (the logs cut there, the originals kept as `*.before-resume`) with 3 featurizing workers, not 6 (each about
+  1.5 GB, and far from the bottleneck), and `--hours 6.3`, 10 in all; `results/pss-log.sh` logs each process's memory
+  every 10 minutes to `full-3/pss.log`.
+* Minutes after, WSL held 33.5 GB: the collectors 4-6 GB each (3 GB in the measurement), with games no longer ended by a
+  lead, and training the limit (60-85 decisions a second against collecting's 125; the 3 featurizing workers at 13% CPU).
+  Stopped at iteration 111 by its `stop` file (a checkpoint saved) and resumed with 3 collectors of 16 games (48; games
+  must be a multiple of `--group` times `--collectors`) and `--hours 5.85`, the 10 hours in all kept.
+* GRPO moved the policy about 3x less a decision than the trial's PPO (KL 0.0006 per 1,000 decisions against 0.0019): 0.8
+  optimizer steps per 1,000 decisions against 9.7, at the pipeline's rate of 1e-5, and the cloning loss (weight 0.095 at
+  iteration 122, about 0.31 of the loss against the policy loss's 0.06) and the KL to the clone (about 0.04) holding it to
+  the scripts' play.  So, the user (2026-11-14, after cameronrwolfe.substack.com/p/grpo-tricks, whose methods drop the
+  KL penalty): from iteration 123 or so `--kl-start 0 --clone-weight 0 --kl-target 0 --group-step 256`, no KL loss, no
+  cloning loss (the scripts no longer advise), no KL guard, and an optimizer step a group or so.  About 40 optimizer steps an
+  iteration, but the KL an iteration fell (0.002-0.008): the cloning loss had been what moved it.  Twice as fast (170-385
+  decisions a second), as the clone's forward pass and the scripts' advice went.  The test at 150 won 10.9%, as the DAgger
+  actor had.
+* `mem-guard.sh` killed it at 20:15 when I ran tests and a parameter count beside it (resumed from 140), and the user then
+  stopped it: iteration 141 (2.41M decisions) is its last checkpoint, `ppo` not marked done.  The user asked for a critic-free
+  method's review (arXiv 2508.08221) before the next RL stage.
+
+## `runs/full-4` (2026-11-14)
+
+The user's next run, with a bigger model, `results/launch-full4.sh`, started 2026-11-14 20:56: the encoder 192 wide (was 144)
+with 64 latent tokens (was 40), and the actor `policy_latent.WIDE`, 384 wide in 12 heads (was 256 in 8) with two layers of
+self-attention among the controllable units (`Size.unit_layers`, `LatentActor.among`): 27.0M trained parameters, was 10.5M.
+On `army-8`, frames collected anew, the encoder at its default 25,000 steps, the clone 10,000 (`--clone-args "--size wide
+--pass-gb 4.5"`), one DAgger round, then GRPO.  The pipeline's `--encoder-args` is new for it.
+* `--pass-gb 4.5` for the clone and DAgger (`results/wide-smoke.sh`, 60 steps from a random encoder): at the default 7.0 the
+  wide actor's passes split 19 times and the allocator retried 258, at 382 decisions a second; at 4.5 none split, 2
+  retries, 410-585 a second.  So its clone takes about 5-7 hours more than `full-3`'s 553 minutes.
+* `results/stop-before-ppo.sh` puts a `stop` file in its root when the eval stage starts, so it halts before GRPO.  Then,
+  before GRPO: `policy_train.py --grad-check 16384` from the DAgger actor (03-training.md, "GRPO from branched games",
+  "Signal or noise"; without `--bootstrap`, as the critic is untrained then), which decides `--group-step` and `--lr-start`,
+  and a short GRPO run to size the wide actor's memory with 3 collectors and a test of 128 games (below).  GRPO then starts with what the review of arXiv 2508.08221 brought (the user,
+  2026-11-14): tests of the same 128 games each time, scored and paired; the economy as the change from each decision;
+  no entropy bonus; advantages clipped at ±3 and SPO's pull bounded.  And bootstrapped (`--bootstrap`, the user's choice
+  over alternating GRPO and PPO by the hour): each branch's return to its stretch's end plus the critic's value of where it
+  ended, the critic learning in the learner only, the actor waiting 10 iterations for it; the actor's and the critic's
+  gradients clipped apart; and resignation as AlphaGo Zero's (`--resign`), with how much play goes to lost games logged
+  (`hopeless80`).  `full-3`'s GRPO had none of it.
+* The memory guard killed its encoder at step 5,100 (2026-11-14 22:01): I ran a CPU smoke run of GRPO through collectors
+  beside it, whose main process grew to 31 GB.  Relaunched at 22:02, the encoder from step 0 (it saves only at its end; the
+  killed one's log is `encoder-killed-5100/`).  Run again alone at the stop (2026-11-15), with stacks dumped as it grew: it's
+  the learner's first training step on the CPU, the time transformer's dense attention (`policy_latent.py`,
+  `F.scaled_dot_product_attention` with a mask, which on the CPU keeps every score), 1 to 23 GB in 6 s.  CPU-only: on the
+  GPU it's a fused kernel in the card's memory.
+* Done in 637 minutes, the clone (held out: unit kind 0.971, anchor 0.910) played as `full-3`'s: record-1 15.6% / 4.7% /
+  79.7% of 64 mixed games (`full-3` 15.6% / 6.3% / 78.1%), extractors at 6 minutes 5.3 against the script's 8.8.  DAgger's
+  actor, 64 1v1s: 9.4% / 3.1% / 87.5% (`full-3`'s 10.9% / 1.6% / 87.5%), extractors 4.36 against 9.89.  The wide actor
+  bought nothing in play by cloning.  The clone's memory spiked by 4-6 GB for a minute twice (02:09, 10:05), to 4.0 GB
+  available; the guard's floor is 3 GB since 07:48 (the user: 3-4 GB available is fine).
+* Before GRPO (2026-11-15): the gradient check from the DAgger actor, unbootstrapped, found noise (03-training.md, "Signal
+  or noise": all -0.03 against shuffled -0.06), so `--group-step 4096 --lr-start 3e-6`.  The A/B, 3 iterations each:
+  bootstrapped with resignation, 125-130 decisions a second overall (training 128-141, the learner's 4.8 GB of the card
+  full: minibatches split, the token budget down to 72,900); unbootstrapped 235-245.  WSL at 29.0 GB at most with a test.
+  Its first try ran a collector out of its 1 GB in the iteration-0 test (128 games, 43 a collector): tests through
+  collectors now go in chunks of a collector's training share (16; 03-training.md, "Opponents"), and `--collector-gb 1.4`
+  (a collector held 1.07 GB).  A test of 128 takes 13-16 minutes.
+* GRPO started 2026-11-15 15:08 (`results/launch-full4.sh`, `full-4/pss.log` every 10 minutes): 10 hours, bootstrapped,
+  resigning, the actor waiting 10 iterations for the critic.  `full-4/ab-*` and `full-4/grad-check` are the checks'.
+* Stopped at iteration 120 (2026-11-15 22:06, 2.03M decisions, about 6.9 of its 10 hours; `ppo` not marked done), the user
+  asked, for a bootstrapped gradient check (`full-4/grad-check-120`).  By then the critic had learnt (explained variance
+  0.7-0.8 from iteration 60), but the policy barely moved (KL 0.0006-0.0008 an iteration, 4 optimizer steps of 3e-6), and
+  tests of 128 games won 15.6%, 10.9% and 14.8% at 0, 50 and 100, the score's change from iteration 0 -0.029 +- 0.020 and
+  -0.003 +- 0.023.  The check found noise still (03-training.md, "Signal or noise").  The user's next idea: more reward
+  terms, closer to the decisions.  Built the same night: `--terms` `extractors`, `map` (the shares of the map in sight
+  and radar) and `experience` (the army's trades), from five new team stats (libzksim ABI 27, `ZK_STATS` 11; 03-training.md,
+  "Reward"), and `--grad-splits`.  An unbootstrapped gradient check from iteration 120's actor (`full-4/grad-check-terms`,
+  8 splits) found each new term noise alone, but the mix of all seven above the floor in every split (0.12 against 0.01),
+  where the bootstrapped check of that actor wasn't.
+* So GRPO began again at 23:34 (the user asked for the RL phase to go on, and for adjustments if it still didn't learn):
+  unbootstrapped from iteration 120's actor (`--init`), the seven terms (`result:1 score:0.5 economy:0.3 combat:0.3
+  extractors:0.3 map:0.3 experience:0.3`), `--group-step 2048 --lr-start 1e-5 --kl-target 0.005`, 10 hours
+  (`results/launch-full4.sh`).  Its iterations count from 0 again, so the lead rule fades anew.  The bootstrapped run is
+  `full-4/ppo-boot` (its replays `replays/ppo-boot`): to resume it, put it back as `ppo` and run the launch file with its old
+  ppo-args (in its comments).
+* It moved (KL 0.002-0.018 an iteration, the guard slowing it at times), but tests of the same 128 games didn't rise: the
+  score's change from iteration 0 -0.022 +- 0.028 at 50 and -0.026 +- 0.023 at 100.  At 50 its economy was up 2-3 SE
+  (extractors at 6 minutes 5.27 to 5.92, income at 3 minutes +1.4), but back to 5.06 at 100.  The user stopped it at
+  iteration 141 (2026-11-16 07:41, 2.38M decisions, `ppo/ckpt/it-000141.pt`, `ppo` not marked done): WSL held 33-34.5 GB
+  of its 40, and Windows, on 48 GB, ran short.  Where it went (smaps, iteration 140): the map pool 13.8 GB, shared by
+  all 7 processes through fork; the learner's own 5.7 GB; each collector's own 3.5-4.1 GB, growing with games' length;
+  each featurizing worker's own 0.2 GB (their 2.2 GB in `pss.log` is their share of the pool).  A pool map was about 20 MB
+  as `zksim.Map`, which kept its numpy arrays (height, speed, slope, segments, routes: about 8 MB) beside the C++ copies.
+  So, the user asked (2026-11-16): `zksim.Map` keeps none, the C++ scripts copy no ground, and the sim reads each map from
+  a file of the map cache mapped into memory (01-simulator.md, "The map cache"): the pool now takes 1.36 GB of the
+  processes' own memory, and the cache's pages are shared and droppable.
+* `results/mem-guard.sh` watches it (`full-4/memguard.log`).
+* Its frames (118 GB, D: down to 31 GB free) are deleted once the encoder is done, the user asked (2026-11-14), but
+  `manifest.json`, as `full-3`'s: `results/delete-frames-after-encoder.sh`, which says what it did in
+  `full-4/frames-deleted.log`.
 
 ## `runs/full-2` (started 2026-11-11 04:15)
 
@@ -233,7 +356,7 @@ tool that loads an actor needs `--encoder`.
 
   | Path | What |
   |---|---|
-  | `maps/` | the map pool: 204 real (18 of them Violet Rampart) and 200 made-up maps, 31 held out, each with its `modes`.  It loads in 61 s to 10.8 GB (14.3 GB after two envs had played on every map) |
+  | `maps/` | the map pool: 204 real (18 of them Violet Rampart) and 200 made-up maps, 31 held out, each with its `modes`.  It loads through the map cache in 27 s, to 1.4 GB of a process's own memory (01-simulator.md, "The map cache") |
   | `maps-old/` | the pool's old Violet Rampart map, set aside |
   | `clone/army-6` | what was cloned: 83,820 script 1v1s with variants, 300.6M decisions, 105 GB, data version 6, with `z.npz` and `sides.npz`.  By the scripts before the economy change |
   | `clone/army-6-test` | about 1,000 games of the same, for `check` and smoke runs |
@@ -297,7 +420,7 @@ report, and the same command resumes it.
 `--encoder` is needed by every tool that loads an actor until `policy_latent.ENCODER` names a new encoder: its default is
 `encoder-big`, which no longer loads.
 
-**The tests** (819 pass, 3 of them need CUDA and are skipped without it): `pytest.ini` runs them on 8 processes, a file's tests in
+**The tests** (825 pass, 3 of them need CUDA and are skipped without it): `pytest.ini` runs them on 8 processes, a file's tests in
 one process so that what they share is made once, and `tests/policy/conftest.py` keeps each process's maths to one thread.
 That took the suite from 211 s to about 60 (2026-11-11), with the slowest learning runs cut down and those of paths the
 pipeline doesn't use removed: the variational encoder's fits, checkpoints from before feature version 7, the trainer's
@@ -316,7 +439,14 @@ README.md has the rules for engine games: headless at max speed, windowed only w
    (`/mnt/d/zk-learned/runs/grpo-trial`, at FEATURE_VERSION 9), from `full-2`'s DAgger actor, which won 9.4% of 64 1v1s on
    the sim as it is now: GRPO won 14.1%, 15.6% and 14.1% at iterations 25, 50 and 75, PPO 6.2%, 7.8% and 20.3%.  The user
    stopped it at PPO's 75th, its results not needed.  At 64 games a test it says no more than that neither fell; GRPO
-   played 1.5-2.5x as fast (no critic).  The next run (item 3) records and clones anew at FEATURE_VERSION 10 anyway.
+   played 1.5-2.5x as fast (no critic).  But GRPO's orders swung from FIGHT to MOVE at iterations 72-79 (03-training.md,
+   "It broke at the end"): the per-minibatch scaling in `_update_loss` and the average over a decision's actions the likely
+   causes.  Fixed (the user, 2026-11-13, after a survey of GRPO's variants), with reward-to-go within a stretch, each term
+   over its spread, and an optimizer step over whole groups (03-training.md, "Advantages", "The update").  Before `full-3`
+   reaches GRPO, nothing to do: it starts with them, 16 optimizer steps an iteration of 16,384 (`--group-step` 1,024).
+   Watch its `kl` (the trial's was 0.001-0.01 an iteration) and the share of MOVE orders on the dashboard.  Since
+   `full-3`, the changes from the review of arXiv 2508.08221 (the user, 2026-11-14): built and tested, for `full-4`'s GRPO
+   (above).  Judge it by `eval_fight_score_change` and its `_se`, not the win rate alone.
 2. **The bot's inference in C++** (02-policy.md, "Deployment"; the nets in ONNX not for now, the user, 2026-11-13).
    Built and checked, not yet used: `libzkpolicy` (`sim/policy/`, `zkpolicy.h`, binding `sim/py/zkpolicy.py`,
    table file `bots/zkbot/data/policy_table.bin`, written by `python sim/py/zkpolicy.py table`) has the type table, the
@@ -330,11 +460,7 @@ README.md has the rules for engine games: headless at max speed, windowed only w
      game dropped its name), decode's fine point in float64 as encode's, and encode's last order whole.  Parity held after
      (`/mnt/d/zk-learned/parity/check-fv10.json`).  Left: the bits match on glibc's libm only, so the bot on Windows will
      need the same.
-3. **Run the pipeline again whole** (the user starts it): record the scripts' games with the new economy and the new kinds
-   of game into a new `--data`, collect frames, train an encoder, clone, DAgger, PPO.  Before it: a small smoke run of the
-   whole pipeline hasn't been done since the variety work (only `--dry-run`, the suite, and each stage's own tests), and
-   the unconfirmed choices under "Variety" are the user's to settle.  Check `wsl free -g` first: the pool is 10.8 GB now
-   (it was 7.5), and a sample from late in an 80-minute game takes 1.3 to 2 GB of the card.
+3. **`runs/full-3`** is the next whole run (above), started 2026-11-13 21:44.
 4. **PPO's speed**: with concurrent collectors, training was longer than collecting, and in `full-2` fell to 70 decisions a
    second as frames grew.  A step takes about 0.5 s whatever its size, so with minibatches as big as memory allows
    (2026-11-12) collecting (about 150 a second in `full-2`) should be the limit; check it in `metrics.jsonl`'s `train_rate`
@@ -351,9 +477,13 @@ README.md has the rules for engine games: headless at max speed, windowed only w
 
 ## Traps
 
-* **Leftover build directories**: `~/zksim/build` is the one in use (libzksim ABI 26 and libzkscripts ABI 13 since a game
-  could be copied, 2026-11-13; libzkrecord ABI 2).  One built before that needs rebuilding.  The `build-*` and `agent*` directories beside it are leftovers of comparisons and of agents' tree
+* **Leftover build directories**: `~/zksim/build` is the one in use (libzksim ABI 28 and libzkscripts ABI 16 since the
+  map cache, 2026-11-16; libzkrecord ABI 2).  One built before that needs rebuilding.  The `build-*` and `agent*` directories beside it are leftovers of comparisons and of agents' tree
   copies, safe to delete, except `agent-maps-lupa` (above).
+* **The map cache** (`~/zksim/map-cache`, 6.1 GB; `ZKSIM_MAP_CACHE` moves it, empty turns it off): `load_pool` makes a
+  map's file again when the map file or libzksim changes.  A change to what's kept, or to how `zksim.Map` makes what it gives
+  the sim, needs `zksim.MAP_CACHE_VERSION` raised, or the old files are read.  The tests keep theirs in pytest's temporary
+  directory (`tests/policy/conftest.py`).
 * **Memory**: check `wsl free -g` before a launch.  Never run two jobs that load the map pool at once.  Every GPU trainer caps
   itself at 85% of the card (`--gpu-memory`): past the card, the Windows driver spills into system RAM instead of failing.
   With collectors, the learner's cap leaves each `--collector-gb` plus about 0.4 GB of CUDA's own.

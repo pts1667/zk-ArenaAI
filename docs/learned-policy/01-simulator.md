@@ -16,8 +16,8 @@ This builds three libraries in `~/zksim/build` (`ZKSIM_LIB` overrides where they
 
 | Library | What | Python side |
 |---|---|---|
-| `libzksim.so` | the sim (`sim/src`, `sim/include/zksim`, C ABI in `capi.h`, ABI 26) | `sim/py/zksim.py` (`Batch`), `sim/py/zknav.py` (routes) |
-| `libzkscripts.so` | the army and economy scripts (`sim/scripts`, `zkscripts.h`, ABI 13) | `tools/policy_scripts_cpp.py` |
+| `libzksim.so` | the sim (`sim/src`, `sim/include/zksim`, C ABI in `capi.h`, ABI 28) | `sim/py/zksim.py` (`Batch`), `sim/py/zknav.py` (routes) |
+| `libzkscripts.so` | the army and economy scripts (`sim/scripts`, `zkscripts.h`, ABI 16) | `tools/policy_scripts_cpp.py` |
 | `libzkrecord.so` | the game recorder (`sim/record`, `zkrecord.h`, ABI 2), needs `libzstd-dev` | `sim/py/zkrecord.py` |
 
 `sim/include/zksim/rawframe.hpp` is generated from `bots/zkbot/policy/rawframe.py` (`python tools/policy_schema.py`), and a test
@@ -38,7 +38,7 @@ compares the two.  The game around the sim (starts, scripts, rewards, the policy
   `Batch.copy_game`; ABI 26, 2026-11-13): given the same orders, the copy and its original play on the same, bit for bit,
   so several futures of one moment can be played (GRPO's branches, 03-training.md).  A `World` holds no pointers but to the
   catalog's and the map's read-only data, so a plain copy of it is whole.  The scripts' seats copy the same way
-  (`zks_copy_game`, libzkscripts ABI 13), and `SimEnv.copy_game` copies the rest of a game: what it is is declared in its
+  (`zks_copy_game`, libzkscripts ABI 13, 14 since the defences), and `SimEnv.copy_game` copies the rest of a game: what it is is declared in its
   `GAME_ARRAYS`, `GAME_LISTS_*`, `GAME_DICTS` and `SEAT_DICTS`, and a test fails on any per-game field they leave out.  A
   game's own draws while it's played (where the policy's builds go) come from its own generator, `game_rng`, and the
   diversity bonus is counted the same whatever order the games come in, so a copy's play doesn't depend on its slot.
@@ -80,9 +80,20 @@ one there, and the unit AI as a whole 8.3%, beside movement's 56%.
 * **The five training maps** (`TRAINING_MAPS`): Agalta, Faultline, FrostyCove, Red Comet and TitanDuel.
 * **The map pool** (`/mnt/d/zk-learned/maps`, `tools/map_gen.py`): 404 maps.  204 are real, 18 of them Violet Rampart; 200
   are made up (relief, water and symmetry drawn per map, with starts made reachable).  31 are held out (`held_out_maps`):
-  TitanDuel and a tenth by the hash of the name.  The pool loads in 61 s to 10.8 GB (11.6 GB once games have run on every
-  map), so load it once before forking workers, and never in two jobs at once.  `policy_sim_env.share_maps` builds each map's derived data before
-  the fork too, so workers share it.
+  TitanDuel and a tenth by the hash of the name.  Load it once before forking workers, and never in two jobs at once.
+  `policy_sim_env.share_maps` builds each map's derived data (`Ground.warm`, and the C++ scripts' index of it) before the fork
+  too, so workers share it.
+* **The map cache** (2026-11-16, the user, when `full-4`'s GRPO filled WSL): `load_pool` reads each map through a directory
+  (`zksim.map_cache()`: `$ZKSIM_MAP_CACHE`, none if it's empty, else `~/zksim/map-cache`).  What the sim makes of a map
+  (`Map.arrays`, `capi.h` `zk_map_arrays`: heights, speeds, slopes, clearance, standing bits, segments, routes) and its
+  `reach` are a file each, made from the map file the first time and read in place after (`zksim.cached_arrays`): mapped
+  into memory, so a run's processes share one copy that the system can drop when it needs the room and read again when the
+  map is next played.  The sim reads the mapped arrays where they are (`zk_map_view`), and the C++ scripts read each map's
+  masks, sites, labels and height where Python keeps them (libzkscripts ABI 16).  A file is made again when its map file,
+  libzksim (its size and time) or `zksim.MAP_CACHE_VERSION` changes.  The pool, loaded and shared as a trainer does: 1.36 GB
+  of a process's own memory and 1.14 GB of the cache read in, against 13.8 GB before, when `zksim.Map` kept numpy copies of
+  the arrays it gave the sim and the scripts copied the ground.  The cache is 6.1 GB (808 files), made in 87 s; the pool loads
+  from it in 27 s (61 s before).
 * **What each pool map can play** is its facts' `modes` (`tools/map_modes.py`; `python tools/map_gen.py modes` writes them):
   * `1v1`: any playable map with two start boxes or more (381 maps);
   * `teams`: players a side (332 maps).  Whether it's a team map is Zero-K's listing (`maps.json`), or two boxes on a map
@@ -361,15 +372,25 @@ order: never an ally's.  Roles are the bot catalog's (`zkbot.policy.groups`).  G
   A raw frame's `player` is the team and its `ally_team` the allyteam.  A frame lists the viewer's own units first, then its
   allies' (seen whole), then what it sees, radar blips, memories, and what's hidden (the critic's).
 * **What keeps a team in the game** is any finished unit not on Zero-K's don't-count list (`game_over.lua`: the Flea, the
-  bombs, terraform units and the like; 42 in `rules.json`).  The batch's six stats a team (`ZK_STATS`) are its tracked
-  value, its live units, its reclaim income, its finished units that keep it in, and two for the trainer's combat
-  efficiency (ABI 24, 2026-11-12):
+  bombs, terraform units and the like; 42 in `rules.json`).  The batch's eleven stats a team (`ZK_STATS`) are its tracked
+  value, its live units, its reclaim income, its finished units that keep it in, two for the trainer's combat efficiency
+  (ABI 24, 2026-11-12), and five for its terms closer to the decisions (ABI 27, the user, 2026-11-15; libzkscripts ABI 15,
+  which reads the stats by their width):
   * `[4]` the damage its units have done to enemies' units since the game began, in metal, and `[5]` the damage enemies'
     units have done to its own.  Each hit counts the health it takes off, no more than the victim had, times the victim's
     cost over its full health (a chicken's build time for its cost, as the value stat has it).  What one team deals another
     takes, so over a game's teams the two sum to the same.
   * Health only: not what a shield takes, nor stun, slow or disarm, nor reclaim.  Buildings count as units.  A fire counts
     for the team that lit it (a burning unit's, for whoever set it alight last), a death's blast for the team of what died.
+  * `[6]` its finished extractors.
+  * `[7]` and `[8]` the share of the map its allyteam has in sight and in radar, split evenly among the allyteam's teams so
+    that they sum to it: circles of its finished units' ground sight and radar (not a radar whose upkeep went unpaid) on a
+    grid of 64 elmos (`ZK_COVER_CELL`), a cell counting when its centre is in one.  Terrain isn't looked at, so what a
+    hill hides counts as seen.
+  * `[9]` the part of `[4]` its army did, and `[10]` the metal put into its army, the dead's too (cost x build progress).
+    The army is what's mobile and armed but not a commander, a builder or a missile.  A shot or blast says which unit it's
+    from; a fire or a death's blast doesn't, so it's no army's.  Zero-K's experience is a unit's `[9]` over its cost; these
+    are the army's.
     A fall counts for no one, and nothing does between allies or to oneself.
 * **The reveal rule** (`game_over.lua`): with two allyteams left and one worth over 25 times the other, the weaker one's
   units are always visible, and any off the map are destroyed.  It's checked every 45 frames, never in chicken games, and
@@ -537,18 +558,36 @@ It runs every `ECO_EVERY` 6 slots, as the actor decides.  A free constructor (id
 1. finish what's being built nearby, or the big project;
 2. the big project, once due: Cerberus or Lucifer and a silo from 16 minutes and 55 metal a second, when map control has
    stalled; the Trinity from 18 minutes and 60, by a 30% chance;
-3. energy, while energy made is under 1.5x metal income;
-4. expand to the nearest free metal spot on our half with no enemy near;
-5. spend while metal floats over 50% of storage (the user, 2026-11-10): energy if short; else help a factory or plate that
+3. a defence, one a pass (below);
+4. energy, while energy made is under 1.5x metal income;
+5. expand to the nearest free metal spot on our half with no enemy near, a contested one's LLT first (below);
+6. spend while metal floats over 50% of storage (the user, 2026-11-10): energy if short; else help a factory or plate that
    fewer than 2 are helping; else more production beside the first factory, one per 12 metal a second and 8 at most counting
    the factory, one started a minute: its plate, within 300 elmos, then caretakers within 380 of both, which help them; else
    help the nearest factory anyway.  Never another factory like the first, nor a second plate;
-6. energy up to a share of income that grows over the game (solars, then fusions, then a Singularity);
-7. radars and pylons;
-8. help the factory.
+7. energy up to a share of income that grows over the game (solars, then fusions, then a Singularity);
+8. radars and pylons;
+9. help the factory.
 
 Further rules:
 
+* **Defences** (the user, 2026-11-13; libzkscripts ABI 14).  Until then the scripts built none but the big projects, so no clone
+  built a turret.  Most pressing first, one started a pass:
+  * AA by our first factory once the enemy has armed aircraft, a Razor then a Hacksaw in turn, one for each 600 metal of them,
+    4 at most;
+  * from 30 metal a second, a Stinger by an extractor with 700 metal of wrecks within 400 elmos (heavily contested, the
+    user's measure), or a Gauss where our turrets are getting destroyed (2 finished ones lost within 800 elmos in 5 minutes),
+    and so at the front too; 6 at most.  Neither within 600 elmos of where one was lost before it was finished, for 4 minutes;
+  * from 2:30 an LLT by a contested extractor that no LLT, Picket, Stinger or Gauss stands within 300 elmos of, and one
+    beside a contested spot before its extractor.  A spot is contested once an armed enemy has come within 500 elmos of it in
+    the last 3 minutes, or where it's at least 0.7 times as far from our base as from an enemy's.  Once the enemy has tanks
+    or slow heavies, every extractor, and every third light turret is a Picket.  One light turret for each 3 extractors, 2
+    to 12.
+
+  In 16 script 1v1s over 15 minutes, the first of each ordered: an LLT on all 32 sides, at a median of 3 minutes, and about
+  4.5 a side standing at 10; AA on 24 sides (a median of 9.5 minutes); a Gauss on 11 and a Stinger on 4 (10-11).  700 metal
+  of wrecks by an extractor is rare before 15 minutes (the 90th percentile of the most by any of a side's extractors was
+  390-550 from minute 10), and reclaimers take wrecks away.
 * **Reclaim**: up to 2 constructors (one in 3) reclaim full time.  Others with nothing better reclaim within 1,200 elmos rather
   than assist.  They avoid enemies, and go home when hurt.
 * **Constructors** come from the factory: the larger of a schedule by minute and one per 3 metal a second of income, 2 more

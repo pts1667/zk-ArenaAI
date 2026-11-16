@@ -80,6 +80,45 @@ constexpr float RECLAIM_FLEE = 500.0f;        // a reclaimer with an enemy army 
 constexpr float RECLAIM_HURT = 0.5f;          // and one below this share of its health
 constexpr float RECLAIM_FIT = 0.7f;           // a constructor below this isn't sent to reclaim
 constexpr double HOME_REACH = 300.0;          // one sent home is home within this (Seat::stuck)
+// Defences (the user, 2026-11-13).  The scripts built none but the big projects' Cerberus and Lucifer, so nothing cloned from
+// them ever built a turret.  Now, as the user plays (Seat::defence_job, and Seat::spot_job for an LLT before its extractor):
+//   * from LIGHT_FROM, an LLT beside a contested metal spot that no defence of ours covers, before its extractor, and beside
+//     each such extractor we have.  A spot is contested once an armed enemy has come within CONTEST_REACH of it in the last
+//     CONTEST_FOR, or where it's nearly as near an enemy base as ours (CONTESTED_BAND);
+//   * once the enemy has tanks or slow heavies, every extractor of ours, and every third light turret is a Picket ("LLT plus
+//     the occasional Picket");
+//   * once the enemy has armed aircraft, AA by our first factory, a Razor then a Hacksaw in turn, one for each AA_PER_METAL of
+//     them;
+//   * at HEAVY_FROM_M metal a second, a Stinger by each extractor with HEAVY_WRECKS of wrecks within HEAVY_REACH of it (heavily
+//     contested, by the user's measure), or a Gauss where our turrets are getting destroyed (DYING_LOSSES finished ones lost
+//     within DYING_REACH in the last DYING_FOR), and so at the front too; neither within GIVE_UP_REACH of where one was lost
+//     unfinished, for GIVE_UP_FOR.
+// One defence is started a pass at most, after the second factory and before energy.
+constexpr double LIGHT_FROM = 150.0;
+constexpr double LIGHT_COVER = 300.0;            // a spot or extractor with an LLT, Picket, Stinger or Gauss this near is covered
+constexpr double LIGHT_AHEAD = 70.0;             // the turret goes this far from it towards the enemy
+constexpr double LIGHT_SPREAD = 40.0;
+constexpr double LIGHT_PER_EXTRACTOR = 1.0 / 3.0;    // light turrets at most: one for each three extractors, from 2 to 12
+constexpr int LIGHT_LEAST = 2, LIGHT_MOST = 12;
+constexpr int PICKET_EVERY = 3;
+constexpr double CONTESTED_BAND = 0.7;           // as far from our base as this times its distance from an enemy base, or farther
+constexpr float CONTEST_REACH = 500.0f;
+constexpr double CONTEST_FOR = 180.0;
+constexpr double HEAVY_FROM_M = 30.0;
+constexpr float HEAVY_WRECKS = 700.0f;           // metal
+constexpr float HEAVY_REACH = 400.0f;
+constexpr double HEAVY_COVER = 400.0;            // an extractor with a Stinger or Gauss this near has one
+constexpr double HEAVY_BACK = 80.0;              // the turret goes this far from it towards our base
+constexpr double HEAVY_SPREAD = 50.0;
+constexpr int HEAVY_MOST = 6;
+constexpr int DYING_LOSSES = 2;
+constexpr double DYING_FOR = 300.0;
+constexpr double DYING_REACH = 800.0;
+constexpr double GIVE_UP_FOR = 240.0;
+constexpr double GIVE_UP_REACH = 600.0;
+constexpr double AA_PER_METAL = 600.0;
+constexpr int AA_MOST = 4;
+constexpr double AA_SPREAD = 150.0;
 
 zk_order_rec order(int64_t uid, int kind, double x, double z, int64_t target) {
     zk_order_rec o;
@@ -139,6 +178,20 @@ struct Pass {
     int reclaimers = 0, reclaimers_wanted = 0;
     std::vector<int64_t> helping;   // what each ASSIST of this pass helps: every constructor helping is idle, so asked again
     int helpers(int64_t uid) const { return (int)std::count(helping.begin(), helping.end(), uid); }
+    // Defences (Seat::defences_of): x, z and D_* of ours, finished, begun or sent, and of allies' that guard against the ground
+    std::vector<float> guards;
+    int light = 0, heavy = 0, aa = 0, light_cap = 0;   // ours, by kind
+    bool defence = false;           // one started this pass
+    double enemy_air = 0.0;         // the metal of the enemy's armed aircraft
+    P2 aa_near{};
+    struct Hot { P2 at; float metal; };
+    std::vector<Hot> hot;           // our extractors with HEAVY_WRECKS of wrecks near them, most first
+    void guard(float x, float z, int k) {
+        guards.insert(guards.end(), {x, z, (float)k});
+        light += k == D_LLT || k == D_PICKET;
+        heavy += k == D_STINGER || k == D_GAUSS;
+        aa += k == D_RAZOR || k == D_HACKSAW;
+    }
 };
 
 bool Seat::avoided(double x, double z) const {
@@ -371,7 +424,7 @@ bool Seat::site(int row, P2 near, const std::vector<float>& taken, double spread
             return true;
         }
     }
-    const std::vector<float>& cells = g.sites[mask];
+    const zk::Span<float>& cells = g.sites[mask];
     size_t nc = cells.size() / 2;
     if (!nc) return false;
     float fx = (float)near.x, fz = (float)near.z;
@@ -605,7 +658,6 @@ Job Seat::link_job(const Ctx& c, int i, const GridOf& grid, Pass& pass) {
 }
 
 Job Seat::spot_job(const Ctx& c, int i, Pass& pass) {
-    (void)c;
     const Data& d = *data;
     const Ground& g = *ground;
     int row = own_rows[i];
@@ -670,6 +722,17 @@ Job Seat::spot_job(const Ctx& c, int i, Pass& pass) {
         }
         if (blocked) continue;
         if (c_ != -1 && !g.joined(c_, {x, z}, {sx, sz})) continue;
+        // A contested spot that nothing of ours covers gets its LLT first (Defences); one a pass, so the next waits.
+        if (c.seconds >= LIGHT_FROM && pass.light < pass.light_cap && (armour_seen || contested({sx, sz}, c.seconds)) &&
+            !covered(pass, {sx, sz}, LIGHT_COVER, false)) {
+            if (pass.defence) continue;
+            Job j = defend(i, light_kind(pass), along({sx, sz}, enemy_base, LIGHT_AHEAD), LIGHT_SPREAD, pass);
+            if (j.has) {
+                pass.claimed.push_back(sx);
+                pass.claimed.push_back(sz);
+                return j;
+            }
+        }
         pass.claimed.push_back(sx);
         pass.claimed.push_back(sz);
         return make(own[i]->uid, K_BUILD, sx, sz, d.catalog_row[ext_row]);
@@ -724,6 +787,167 @@ Job Seat::reclaim_job(const Ctx& c, int i, Pass& pass, double reach) {
     return make(u->uid, K_RECLAIM, c.features[best].x, c.features[best].z, c.features[best].feat_id);
 }
 
+// A spot (or an extractor on one) is contested once an armed enemy has come near it lately, or where it's nearly as near an
+// enemy base as ours.
+bool Seat::contested(P2 p, double seconds) const {
+    const Ground& g = *ground;
+    const float fx = (float)p.x, fz = (float)p.z;
+    for (int s = 0; s < g.n_spots && s < (int)spot_raided.size(); s++)
+        if (seconds - spot_raided[s] < CONTEST_FOR && hypotf(g.spots[3 * s] - fx, g.spots[3 * s + 1] - fz) <= 64.0f) return true;
+    const double home = py_hypot(p.x - base.x, p.z - base.z);
+    for (P2 b : bases)
+        if (home >= CONTESTED_BAND * py_hypot(p.x - b.x, p.z - b.z)) return true;
+    return false;
+}
+
+// Our armed buildings since the last pass: a finished one gone is a turret lost; a Stinger or Gauss gone before it was finished
+// keeps the next ones from near where it stood for GIVE_UP_FOR.
+void Seat::watch(double seconds) {
+    const Data& d = *data;
+    for (size_t k = 0; k < watched.size();) {
+        const Watch& w = watched[k];
+        if (w.uid < (int64_t)stamp.size() && stamp[w.uid] == call) {
+            k++;
+            continue;
+        }
+        if (w.finished) turrets_lost.push_back({seconds, (double)w.x, (double)w.z});
+        else if (w.heavy) heavy_off.push_back({(double)w.x, (double)w.z, seconds + GIVE_UP_FOR});
+        watched.erase(watched.begin() + (std::ptrdiff_t)k);
+    }
+    while (!turrets_lost.empty() && turrets_lost.front().t <= seconds - DYING_FOR) turrets_lost.pop_front();
+    heavy_off.erase(std::remove_if(heavy_off.begin(), heavy_off.end(), [&](const Off& o) { return o.until <= seconds; }), heavy_off.end());
+    for (size_t i = 0; i < own.size(); i++) {
+        const int r = own_rows[i];
+        if (!d.has(r, ZKS_STATIC_ARMED)) continue;
+        const int64_t uid = own[i]->uid;
+        auto it = std::find_if(watched.begin(), watched.end(), [&](const Watch& w) { return w.uid == uid; });
+        if (it != watched.end()) {
+            it->finished = built(own[i]);
+            continue;
+        }
+        const int k = d.defence_of[r];
+        watched.push_back({uid, own[i]->x, own[i]->z, k == D_STINGER || k == D_GAUSS, built(own[i])});
+    }
+}
+
+// What guards what this pass: our defences, finished, begun or that a constructor was sent to start (one being built counts
+// once), and our allies' against the ground; the metal the enemy flies; and our heavily contested extractors.
+void Seat::defences_of(const Ctx& c, Pass& pass, double income) const {
+    const Data& d = *data;
+    int extractors = 0;
+    const Rec* factory = nullptr;
+    for (size_t j = 0; j < own.size(); j++) {
+        const int r = own_rows[j];
+        if (d.defence_of[r] >= 0) pass.guard(own[j]->x, own[j]->z, d.defence_of[r]);
+        extractors += d.has(r, ZKS_EXTRACTOR) && built(own[j]);
+        if (!factory && d.has(r, ZKS_FACTORY) && built(own[j])) factory = own[j];
+    }
+    const size_t begun = pass.guards.size();
+    for (size_t j = 0; j < own.size(); j++) {
+        const int t = told_to_build(j);
+        if (t < 0 || d.defence_of[t] < 0) continue;
+        const float ox = own[j]->ord_x, oz = own[j]->ord_z;
+        bool there = false;
+        for (size_t q = 0; q < begun && !there; q += 3)
+            there = (int)pass.guards[q + 2] == d.defence_of[t] && hypotf(pass.guards[q] - ox, pass.guards[q + 1] - oz) < 48.0f;
+        if (!there) pass.guard(ox, oz, d.defence_of[t]);
+    }
+    for (size_t a = 0; a < allies.size(); a++) {
+        const int k = d.defence_of[ally_rows[a]];
+        if (k >= 0 && k <= D_GAUSS) pass.guards.insert(pass.guards.end(), {allies[a]->x, allies[a]->z, (float)k});
+    }
+    pass.light_cap = std::min(LIGHT_MOST, std::max(LIGHT_LEAST, (int)(extractors * LIGHT_PER_EXTRACTOR)));
+    for (size_t e = 0; e < enemies.size(); e++) {
+        const int r = enemy_rows[e];
+        if (d.has(r, ZKS_MOBILE) && d.has(r, ZKS_AIR) && d.has(r, ZKS_ARMED) && built(enemies[e])) pass.enemy_air += (double)d.cost[r];
+    }
+    pass.aa_near = factory ? P2{(double)factory->x, (double)factory->z} : base;
+    if (income < HEAVY_FROM_M) return;
+    for (size_t j = 0; j < own.size(); j++) {
+        if (!d.has(own_rows[j], ZKS_EXTRACTOR) || !built(own[j])) continue;
+        float metal = 0.0f;
+        for (int k = 0; k < c.feature_n; k++)
+            if (hypotf(c.features[k].x - own[j]->x, c.features[k].z - own[j]->z) <= HEAVY_REACH) metal += c.features[k].metal;
+        if (metal >= HEAVY_WRECKS) pass.hot.push_back({{(double)own[j]->x, (double)own[j]->z}, metal});
+    }
+    std::stable_sort(pass.hot.begin(), pass.hot.end(), [](const Pass::Hot& a, const Pass::Hot& b) { return a.metal > b.metal; });
+}
+
+// Whether a defence against the ground (heavy: a Stinger or Gauss) stands within reach of p, ours or an ally's.
+bool Seat::covered(const Pass& pass, P2 p, double reach, bool heavy) const {
+    for (size_t q = 0; q < pass.guards.size(); q += 3) {
+        const int k = (int)pass.guards[q + 2];
+        if ((heavy ? k == D_STINGER || k == D_GAUSS : k <= D_GAUSS) && py_hypot(pass.guards[q] - p.x, pass.guards[q + 1] - p.z) <= reach)
+            return true;
+    }
+    return false;
+}
+
+bool Seat::given_up_near(P2 p) const {
+    for (const Off& o : heavy_off)
+        if (py_hypot(o.x - p.x, o.z - p.z) <= GIVE_UP_REACH) return true;
+    return false;
+}
+
+bool Seat::dying(P2 p) const {
+    int n = 0;
+    for (const Lost& l : turrets_lost) n += py_hypot(l.x - p.x, l.z - p.z) <= DYING_REACH;
+    return n >= DYING_LOSSES;
+}
+
+int Seat::light_kind(const Pass& pass) const {
+    return armour_seen && pass.light % PICKET_EVERY == PICKET_EVERY - 1 ? D_PICKET : D_LLT;
+}
+
+// Defence k started near `near` by own unit i, if it can build it there.
+Job Seat::defend(int i, int k, P2 near, double spread, Pass& pass) {
+    const Data& d = *data;
+    const int row = own_rows[i], r = d.defences[k];
+    if (r < 0 || !d.can_build(row, r)) return {};
+    Job j = build(own[i]->uid, r, near, pass.taken, spread, nullptr, -1, d.move_class[row], {(double)own[i]->x, (double)own[i]->z}, true);
+    if (j.has) {
+        pass.defence = true;
+        pass.guard(j.o.x, j.o.z, k);
+    }
+    return j;
+}
+
+// The defences ("Defences" above), most pressing first: AA, then a Stinger or Gauss, then an LLT or Picket.
+Job Seat::defence_job(const Ctx& c, int i, Pass& pass, double income) {
+    const Data& d = *data;
+    if (pass.defence) return {};
+    if (pass.enemy_air > 0.0 && pass.aa < std::min((double)AA_MOST, std::ceil(pass.enemy_air / AA_PER_METAL))) {
+        Job j = defend(i, pass.aa % 2 ? D_HACKSAW : D_RAZOR, pass.aa_near, AA_SPREAD, pass);
+        if (j.has) return j;
+    }
+    if (income >= HEAVY_FROM_M && pass.heavy < HEAVY_MOST) {
+        std::vector<P2> places;
+        for (const Pass::Hot& h : pass.hot) places.push_back(h.at);
+        const P2 f = front();
+        if ((f.x != base.x || f.z != base.z) && dying(f)) places.push_back(f);
+        for (P2 p : places) {
+            if (covered(pass, p, HEAVY_COVER, true) || given_up_near(p) || unsafe(p, SAFE_FROM_ARMY)) continue;
+            Job j = defend(i, dying(p) ? D_GAUSS : D_STINGER, along(p, base, HEAVY_BACK), HEAVY_SPREAD, pass);
+            if (j.has) return j;
+        }
+    }
+    if (c.seconds >= LIGHT_FROM && pass.light < pass.light_cap) {
+        std::vector<std::pair<double, P2>> bare;
+        for (size_t j = 0; j < own.size(); j++) {
+            if (!d.has(own_rows[j], ZKS_EXTRACTOR) || !built(own[j])) continue;
+            const P2 p{(double)own[j]->x, (double)own[j]->z};
+            if ((armour_seen || contested(p, c.seconds)) && !covered(pass, p, LIGHT_COVER, false) && !unsafe(p, SAFE_FROM_ARMY))
+                bare.push_back({py_hypot(p.x - enemy_base.x, p.z - enemy_base.z), p});
+        }
+        std::stable_sort(bare.begin(), bare.end(), [](const std::pair<double, P2>& a, const std::pair<double, P2>& b) { return a.first < b.first; });
+        for (const auto& b : bare) {
+            Job j = defend(i, light_kind(pass), along(b.second, enemy_base, LIGHT_AHEAD), LIGHT_SPREAD, pass);
+            if (j.has) return j;
+        }
+    }
+    return {};
+}
+
 Job Seat::job(const Ctx& c, int i, const GridOf& grid, bool has_project, int prow, P2 pat, Pass& pass, double income) {
     const Data& d = *data;
     const double seconds = c.seconds;
@@ -770,6 +994,10 @@ Job Seat::job(const Ctx& c, int i, const GridOf& grid, bool has_project, int pro
     }
     {
         Job j = second_factory_job(c, i, grid, pass, income, by_class, by_at);
+        if (j.has) return j;
+    }
+    {
+        Job j = defence_job(c, i, pass, income);
         if (j.has) return j;
     }
     if (pass.made < ENERGY_FIRST * income) {
@@ -858,6 +1086,19 @@ void Seat::eco(const Ctx& c) {
         uint8_t fresh = bits & ~noted[own[i]->uid];
         noted[own[i]->uid] |= bits;
         for (int k = 0; k < 7; k++) finished[k] += (fresh >> k) & 1;
+    }
+    // Defences: which of our spots armed enemies have come near, whether the enemy has armour, and our turrets lost
+    {
+        const Ground& g = *ground;
+        for (size_t e = 0; e < enemies.size(); e++) {
+            const int r = enemy_rows[e];
+            if (!built(enemies[e])) continue;
+            if (d.has(r, ZKS_TANK) || d.has(r, ZKS_SLOW_HEAVY)) armour_seen = true;
+            if (!d.has(r, ZKS_ARMED) || !d.has(r, ZKS_MOBILE)) continue;
+            for (int s = 0; s < g.n_spots && s < (int)spot_raided.size(); s++)
+                if (hypotf(enemies[e]->x - g.spots[3 * s], enemies[e]->z - g.spots[3 * s + 1]) <= CONTEST_REACH) spot_raided[s] = seconds;
+        }
+        watch(seconds);
     }
     std::vector<uint8_t> builders(n);
     for (size_t i = 0; i < n; i++) {
@@ -970,6 +1211,7 @@ void Seat::eco(const Ctx& c) {
             pass.expanding += best < 64.0f;
         }
     }
+    defences_of(c, pass, income);
     int prow = -1;
     P2 pat{};
     bool has_project = project(c, income, grid, prow, pat);

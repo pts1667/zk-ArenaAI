@@ -71,16 +71,19 @@ DECISIONS_A_SECOND = 2.0    # at decide_every 1
 
 @dataclass(frozen=True)
 class Size:
-    """How big the actor is: its width, attention heads, layers of the time transformer, and of the decoder that chooses a
-    decision's actions one after another.  Kept in each checkpoint (`asdict`), to build the same again."""
+    """How big the actor is: its width, attention heads, layers of the time transformer, of the decoder that chooses a
+    decision's actions one after another, and of self-attention among the controllable units before they read the frame
+    (`LatentActor.among`).  Kept in each checkpoint (`asdict`), to build the same again."""
     d: int = 256
     heads: int = 8
     layers: int = 4
     plan_layers: int = 4
+    unit_layers: int = 0        # none in any actor before 2026-11-14, whose checkpoints load as they were
 
 
 SIZE = Size()               # the user's, 2026-11-09: about 10M trained parameters (it was d 128, 4 heads, 2 and 2: 1.9M)
 SMALL = Size(128, 4, 2, 2)
+WIDE = Size(384, 12, 4, 4, 2)   # the user's, 2026-11-14: 1.5x as wide, and two layers of the controllable units reading each other
 
 
 def window_frames(decide_every: int = 1) -> int:
@@ -252,7 +255,8 @@ class Context:
     """What a decision's actions read: the frame as the sequence left it (B x tokens x D), every unit token's raw embedding (B x U x D)
     and key (B x U x KEY), the regions' keys (B x R x KEY), the sites' (B x S x KEY) and the feature tokens' (B x F x KEY).  Then each
     controllable unit's key as an anchor (B x C x KEY), from its reading of the frame, and the logit that it's told anything at all
-    this decision (B x C, float32; cloning's side loss)."""
+    this decision (B x C, float32; cloning's side loss).  Last, the controllable units as they read each other (B x C x D,
+    `LatentActor.among`): an action's anchor reads the frame from its row."""
     now: torch.Tensor
     hu: torch.Tensor
     keys: torch.Tensor
@@ -261,6 +265,7 @@ class Context:
     feat_h: torch.Tensor
     anchor_keys: torch.Tensor
     ordered: torch.Tensor
+    mine: torch.Tensor
 
 
 class LatentActor(nn.Module):
@@ -364,6 +369,8 @@ class LatentActor(nn.Module):
         with torch.no_grad():
             self.group1.bias[0] = pm.ALONE_START
             self.head_done.bias[0] = pm.DONE_START
+        # The controllable units reading each other (Size.unit_layers): made last, so that every weight before is drawn as it was.
+        self.unit_blocks = nn.ModuleList(pm.Block(self.d, size.heads) for _ in range(size.unit_layers))
 
     def code(self, place: torch.Tensor) -> torch.Tensor:
         """... x 2 to ... x CODE: every sine, then every cosine."""
@@ -534,9 +541,22 @@ class LatentActor(nn.Module):
         now = now.to(hu.dtype)
         units = b.ctrl_mask.shape[1]
         everyone = torch.ones(now.shape[:2], dtype=torch.bool, device=now.device)
-        read = self.unit_read(hu[:, :units], now, everyone)
+        mine = self.among(hu[:, :units], b.ctrl_mask)
+        read = self.unit_read(mine, now, everyone)
         anchor_keys = torch.cat((self.key_anchor(read), keys[:, :units, self.d:]), -1)
-        return Context(now, hu, keys, reg_h, site_h, feat_h, anchor_keys, self.head_ordered(read)[..., 0].float())
+        return Context(now, hu, keys, reg_h, site_h, feat_h, anchor_keys, self.head_ordered(read)[..., 0].float(), mine)
+
+    def among(self, mine: torch.Tensor, real: torch.Tensor) -> torch.Tensor:
+        """mine: B x C x D, the controllable units' embeddings; real: B x C, which are units and not padding.  Returns them after
+        `Size.unit_layers` of self-attention among the real ones: who's beside whom, which the frame's latent tokens blur.  A row
+        with none reads its padding, so that nothing is NaN.  Only here, at a decision: the action tokens of frames before (with no
+        `ctrl_mask`) read units' raw embeddings."""
+        if not len(self.unit_blocks):
+            return mine
+        seen = real | ~real.any(1, keepdim=True)
+        for block in self.unit_blocks:
+            mine = block(mine, None, seen)
+        return mine
 
     # Actions, one after another -------------------------------------------------------------------------------------------------------------------
 
@@ -558,7 +578,7 @@ class LatentActor(nn.Module):
 
     def reading(self, ctx: Context, anchor: torch.Tensor, h: torch.Tensor) -> torch.Tensor:
         """B x K x D: each action's anchor reads the frame, as itself and with what the action is about (h, its slot)."""
-        hu = torch.gather(ctx.hu, 1, anchor.clamp_min(0)[..., None].expand(-1, -1, ctx.hu.shape[-1]))
+        hu = torch.gather(ctx.mine, 1, anchor.clamp_min(0)[..., None].expand(-1, -1, ctx.mine.shape[-1]))
         everyone = torch.ones(ctx.now.shape[:2], dtype=torch.bool, device=hu.device)
         return self.read_unit(hu + self.slot_unit(h).to(hu.dtype), ctx.now.to(hu.dtype), everyone)
 

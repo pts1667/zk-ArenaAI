@@ -139,7 +139,7 @@ def test_the_rewards_terms_are_zero_sum_and_the_economy_a_discounted_average_who
         held(*args, **kwargs)
         env.batch.globs[0, :2, rf.G["metal_income"]] = (15.0, 5.0)
     env.batch.step = step
-    names = se.TERMS if se.DEALT_STAT >= 0 else se.TERMS[:-1]
+    names = se.TERMS
     level, gamma = 10.0 / (20.0 + se.INCOME_CONSTANT), env.term_gamma("economy")
     assert gamma == pytest.approx(math.exp(-0.5 / se.TERM_HORIZONS["economy"]))     # a decision is 15 frames
     for _ in range(se.EARLY_END_DECISIONS):
@@ -174,7 +174,7 @@ def test_a_copied_game_plays_on_as_its_original_given_the_same_orders():
     env = se.SimEnv(2, 5, ["fight"], threads=1)
     env.policy_economy_share, env.advise, env.diversity = 1.0, True, 0.05
     env.begin()
-    terms = ("result", "score", "economy", "combat") if se.DEALT_STAT >= 0 else ("result", "score", "economy")
+    terms = ("result", "score", "economy", "combat", "extractors", "map", "experience")
 
     def play(steps: int, compare: bool) -> None:
         for _ in range(steps):
