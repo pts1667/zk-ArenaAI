@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define ZK_ABI_VERSION 28
+#define ZK_ABI_VERSION 29
 #define ZK_WARD_TARGETS 4
 #define ZK_MAX_MOUNTS 8
 #define ZK_MAX_TEAMS 8     /* players in a game, and so allyteams too */
@@ -46,8 +46,10 @@ enum {
     ZK_W_DROPPED = 8388608,         /* fired by the script a shot at a time straight down, when the unit's marking bomb would drop */
     ZK_W_ROCKET = 16777216,         /* flies under its own power, a missile or a torpedo: as far as its fuel takes it, and then it goes off */
     ZK_W_BURNBLOW = 33554432,       /* goes off where it was aimed, whether or not anything's there (selfExplode) */
-    ZK_W_LEAD_ADDED = 67108864      /* its lead is put on once it's fired (weapon_projectile_retarget.lua): the weapon itself aims at the
+    ZK_W_LEAD_ADDED = 67108864,     /* its lead is put on once it's fired (weapon_projectile_retarget.lua): the weapon itself aims at the
                                        target, and that's where it tests its range */
+    ZK_W_WATER = 134217728,         /* a water weapon: aims at what's under water, and fires from under water (Weapon.cpp) */
+    ZK_W_TORPEDO = 268435456        /* a torpedo: aims only at what's in water (TorpedoLauncher.cpp, and BombDropper.cpp for a plane's) */
 };
 
 /* Times are in frames and distances in elmos. */
@@ -155,6 +157,10 @@ typedef struct {
        load it takes, as load_size is measured (the engine's transportSize against xsize). */
     float lift_light, lift_medium, lift_heavy, lift_size;
     float load_size, load_height;   /* as a load: its footprint, and how far under its transport it hangs (its model's height) */
+    /* Water (CSolidObject::UpdatePhysicalState; tools/sim_engine.py muzzles).  It's in water when its base is at or below the surface,
+       and under water when its middle, mid_height over its base, is more than body_radius below it.  water_y: where its base rides
+       over water (-waterline: ships, submarines, hovercraft and what floats), or -1e30 for what stands on the sea bed. */
+    float mid_height, body_radius, water_y;
     int32_t move_state, fire_state;   /* to start with: hold position 0, maneuver 1, roam 2; hold fire 0, return fire 1, fire at will 2 */
     int32_t no_chase;                 /* categories it doesn't go after on its own */
     int32_t bait_level;               /* unit_bait_prevention.lua: 0 shoots at anything */
@@ -175,6 +181,7 @@ typedef struct {
     int32_t mount_weapon[ZK_MAX_MOUNTS];
     int32_t mount_only[ZK_MAX_MOUNTS];
     int32_t mount_bad[ZK_MAX_MOUNTS];
+    float mount_aim[ZK_MAX_MOUNTS];   /* each weapon's aim-from point over its base: what isn't a water weapon doesn't fire with it under water */
 } zk_type_rec;
 
 /* unit_tactical_ai.lua's table for one unit type, after its defaults.  Distances in elmos, times in frames.  A negative stands for what it leaves out. */
@@ -248,6 +255,7 @@ typedef struct {
     float heat;
     float jump_charge;     /* 1 when it can jump */
     float altitude;        /* off the ground: flying, jumping, thrown or pushed */
+    float base_y;          /* where its base is, as the engine's pos.y: on the ground or the sea bed, on the water, floating, flying */
     int32_t alive, order, target, stock, cloaked;
     int32_t chasing;       /* the enemy its fight order or idleness has it attacking, or -1 */
     int32_t dodging;       /* the tactical AI has it stepping away */
@@ -262,6 +270,7 @@ typedef struct {
     int32_t air_state;     /* aircraft: 0 flying, 1 landed, 2 taking off, 3 landing, 4 on a pad rearming */
     int32_t carrier;       /* the transport that carries it, or -1 */
     int32_t cargo;         /* what it carries, or -1 */
+    int32_t floating;      /* an amphibious unit floating up to fire, or sinking back (unit_impulsefloat_toggle.lua) */
 } zk_unit_state;
 
 int zk_abi_version(void);
@@ -323,6 +332,21 @@ typedef struct {
     float metal, hp, radius;
 } zk_egg_rec;
 void zk_catalog_eggs(void* catalog, const zk_egg_rec* eggs /* n_types */);
+/* Amphibious units that float up to fire (unit_impulsefloat_toggle.lua with LuaRules/Configs/float_defs.lua; rules.json "floats"):
+   float_defs' settings, per frame and in elmos, as named there, and what the unit's script adds (tools/sim_rules.py FLOAT_SCRIPTS). */
+typedef struct {
+    int32_t type;
+    float init_speed, rise_accel, rise_up_drag, rise_down_drag, sink_accel, sink_up_drag, sink_down_drag;
+    float air_accel, air_drag, water_hit_drag, float_point, surface_dampen;
+    float depth;             /* depthRequirement: it floats only where the sea bed is deeper than this */
+    float wait_y, wait_min, wait_max;   /* surfaceWaitPos and its two waits in frames: what sinks it pushes up for a while once it has
+                                           been near the surface.  wait_max 0 for none */
+    float reload_frames;     /* it floats only once its first weapon's reload has less than this left; 0 for whenever it aims */
+    float block_below;       /* its script holds its fire while its base is below this; -1e30 for never */
+    int32_t sink_on_para;    /* it sinks while stunned */
+} zk_float_rec;
+void zk_catalog_floats(void* catalog, const zk_float_rec* floats, int n);
+int zk_sizeof_float_rec(void);
 
 /* height, slope, normal_x, normal_z: rows x cols.  speed: classes x rows x cols, the multiplier
    CMoveMath gives without a direction, 0 impassable.  slope_mod: one per class. */

@@ -118,7 +118,7 @@ class _Serving:
             getattr(self, command)(**args)
 
     def start(self, size: dict, vocabulary: int, games: int, seed: int, iteration: int, play: Weights, test: Weights, threads: int,
-              device: str, gb: float, economy: float, self_play: float, lead: float) -> None:
+              device: str, gb: float, games_now: dict) -> None:
         cfg = self.cfg
         if device == "cuda":
             torch.cuda.set_per_process_memory_fraction(min(1.0, gb * 2**30 / torch.cuda.mem_get_info()[1]))
@@ -133,7 +133,7 @@ class _Serving:
         self.play.read(self.nets)
         self.make_env = functools.partial(self.make_env, threads=threads)
         env = self.make_env(games, seed)
-        env.policy_economy_share, env.self_play_share, env.lead_share = economy, self_play, lead
+        pt.set_games(env, games_now)        # from the first games, which the collector starts
         self.index = {id(b): i for i, b in enumerate(env.bundles())}
         self.shell = Shell(cfg, actor, critic, device, vocabulary, env.bundles(), cfg.graphs)
         self.collector = (pt.GroupCollector if cfg.group else pt.Collector)(self.shell, env, np.random.default_rng((cfg.seed, iteration, self.k)))
@@ -142,14 +142,12 @@ class _Serving:
     def _memory(self) -> dict[str, float]:
         return {"collector_reserved_gb": torch.cuda.max_memory_reserved() / 2**30} if self.device == "cuda" else {}
 
-    def collect(self, want: int, progress: float, economy: float, self_play: float, advising: bool, lead: float,
-                resign: tuple = (False, None)) -> None:
+    def collect(self, want: int, progress: float, games_now: dict, advising: bool, resign: tuple = (False, None)) -> None:
         began = time.perf_counter()
         self.play.read(self.nets)
         weights = fingerprint(self.nets)
-        self.shell.progress, self.shell.economy_share, self.shell.advising = progress, economy, advising
-        env = self.collector.env
-        env.policy_economy_share, env.self_play_share, env.lead_share = economy, self_play, lead
+        self.shell.progress, self.shell.economy_share, self.shell.advising = progress, games_now["policy_economy_share"], advising
+        pt.set_games(self.collector.env, games_now)
         self.collector.measuring, self.collector.resign_at = resign
         segments, tally = self.collector.collect_tally(want)
         segments = [replace(s, bundle=self.index[id(s.bundle)]) for s in segments]
@@ -236,8 +234,7 @@ class Collectors:
         for k, games in enumerate(split(self.cfg.games, self.count)):
             self._send(k, ("start", {"size": asdict(learner.actor.size), "vocabulary": learner.vocabulary, "games": games, "seed": seed_of(seed, k),
                                  "iteration": learner.iteration, "play": self.play, "test": self.test, "threads": threads, "device": device,
-                                 "gb": self.cfg.collector_gb, "economy": learner.economy_share, "self_play": learner.self_play.share,
-                                 "lead": learner.lead_share}))
+                                 "gb": self.cfg.collector_gb, "games_now": learner.games}))
         for k in range(self.count):
             self._expect(k, "started")
 
@@ -248,8 +245,8 @@ class Collectors:
         self.play.write(nets)
         self.sent_weights = fingerprint(nets)
         for k, part in enumerate(split(want, self.count)):
-            self._send(k, ("collect", {"want": part, "progress": learner.progress, "economy": learner.economy_share, "self_play": learner.self_play.share,
-                                       "advising": learner.advising, "lead": learner.lead_share, "resign": learner.resign_state}))
+            self._send(k, ("collect", {"want": part, "progress": learner.progress, "games_now": learner.games, "advising": learner.advising,
+                                       "resign": learner.resign_state}))
         self.collecting, self.sent = True, time.perf_counter()
 
     def result(self) -> tuple[list[pt.Segment], dict[str, float], float]:

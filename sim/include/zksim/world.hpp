@@ -1,6 +1,7 @@
 // Struct-of-arrays state of one game, and the read-only catalog and map it shares with others.
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -18,6 +19,7 @@ constexpr float GRAVITY = 120.0f / 900.0f;   // elmos a frame squared: Game.grav
 constexpr float SEARCH_PAD = 1.0f;      // elmos added to a grid search's radius, so rounding can't leave out what the exact test takes
 constexpr float WALK_LINE_STEP = 16.0f; // cmd_raw_move.lua's test spacing along a line a unit would walk (movement.cpp line_free)
 constexpr int CLEAR_BLOCK = 4;          // cells a side of a block of Map::clearance
+constexpr uint8_t WET_IN = 1, WET_UNDER = 2;   // World::wet: in water, and under it (water.cpp)
 
 struct Catalog {
     std::vector<zk_type_rec> types;
@@ -31,6 +33,11 @@ struct Catalog {
     zk_chicken_rules chickens[6] = {};
     bool has_chickens[6] = {};
     std::vector<zk_egg_rec> eggs;          // per type, once given
+    std::vector<zk_float_rec> floats;      // capi.h zk_catalog_floats
+    std::vector<int> float_of_type;        // each type's in floats, or -1; empty until given
+    const zk_float_rec* float_def(int type) const {
+        return float_of_type.empty() || float_of_type[size_t(type)] < 0 ? nullptr : &floats[size_t(float_of_type[size_t(type)])];
+    }
     float target_priority(int weapon, int type) const { return priority[size_t(weapon) * types.size() + size_t(type)]; }
     uint8_t relation(int type, int enemy_type) const { return relations[size_t(type) * types.size() + size_t(enemy_type)]; }
 };
@@ -469,6 +476,26 @@ struct World {
     std::vector<int> drop_ready;           // frame from which a transport can drop again
     std::vector<int> held_for_lift;        // frame a transport of its allyteam, come to pick it up, last had it stand still
     std::vector<int> transports;
+    // Water (water.cpp; 01-simulator.md, "Water").  has_water: the map has ground below the surface, so that the rules apply.
+    // base_at and wet: each unit's base height as the tick began, and WET_IN and WET_UNDER then.  What floats up to fire
+    // (unit_impulsefloat_toggle.lua): floaters, the handles of what can; floating; float_up, rising rather than sinking; its height,
+    // its speed up, and the frame it came above its float's wait height, or -1.
+    bool has_water = false;
+    std::vector<float> base_at;
+    std::vector<uint8_t> wet;
+    std::vector<int> floaters;
+    std::vector<uint8_t> floating, float_up;
+    std::vector<float> float_y, float_speed;
+    std::vector<int> float_since;
+    float base_y(int u) const;
+    void update_water();
+    void update_floats();
+    bool water_allows(int u, const zk_weapon_rec& w, int target, bool surfaced) const;
+    bool water_hits(const zk_weapon_rec& w, int target) const;
+    bool fires_in_water(int u, int mount, const zk_weapon_rec& w) const;
+    bool may_float(int u) const;
+    bool float_aims(int u, const zk_float_rec& f) const;
+    float sunk(int u) const { return has_water ? std::max(0.0f, -(base_at[size_t(u)] + type_of(u).mid_height)) : 0.0f; }
     // Wrecks, by id.  One with nothing left stays in the list, so an id stays good, and leaves the others.
     std::vector<Wreck> wrecks;
     std::vector<int> live_wrecks;
@@ -647,8 +674,9 @@ private:
     void resolve_shots();
     void apply_shot(const Shot& s);
     void note_attacker(int u, int source, int source_side);
+    // depth: how far under the surface it goes off, for a water weapon's at what's under water (water.cpp).
     void explode(int weapon, float px, float pz, int source, int source_side, bool air, float power = 1.0f, float height = 0.0f, int struck = -1,
-                 int source_team = -1);
+                 int source_team = -1, float depth = 0.0f);
     void pierce(const Shot& s, float px, float pz, float power);
     void damage_unit(int u, const zk_weapon_rec& w, float mult, int dealer, int source = -1);
     void count_damage(int victim, float amount, int dealer, int source = -1);
@@ -775,7 +803,7 @@ private:
     bool within(int u, float px, float pz, float reach) const;
     void update_status();
     void burn_areas();
-    float target_score(int u, int slot, int target);
+    float target_score(int u, int slot, int target, bool surfaced);
     bool in_range(int u, const zk_weapon_rec& w, int target) const { return in_range_at(u, w, target, x[size_t(target)], z[size_t(target)]); }
     bool in_range_at(int u, const zk_weapon_rec& w, int target, float tx, float tz) const;
     bool can_reach(int u, const zk_weapon_rec& w, int target) const;

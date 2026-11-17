@@ -45,6 +45,13 @@ bool Ground::fits(double x, double z, double hx, double hz, double height_dif, i
     return true;
 }
 
+// The ground at the cell holding (x, z), 0 where the map has no heights: below 0 is under water.
+float Ground::height_at(double x, double z) const {
+    if (height.empty()) return 0.0f;
+    const int r = std::clamp((int)(z / cell), 0, rows - 1), c = std::clamp((int)(x / cell), 0, cols - 1);
+    return height[(size_t)r * cols + c];
+}
+
 // Data
 
 bool Data::can_build(int builder, int row) const {
@@ -199,6 +206,7 @@ void Seat::reset(const Data* d, const Ground* g, const Game& game_, int team_, P
     turrets_lost.clear();
     heavy_off.clear();
     armour_seen = false;
+    under_water_seen = false;
     draws.seed(seed);
 }
 
@@ -422,6 +430,7 @@ zks_data* zks_data_new(const zks_data_desc* s) {
     d.load_class.assign(s->load_class, s->load_class + n);
     d.n_transports = s->n_transports;
     d.fall_loss.assign(s->fall_loss, s->fall_loss + (size_t)s->n_transports * n);
+    d.under_water.assign(s->under_water, s->under_water + n);
     d.transport_of.assign(n, -1);
     for (int r = 0, k = 0; r < n; r++)
         if (d.has(r, ZKS_TRANSPORT)) d.transport_of[r] = k < d.n_transports ? k++ : -1;

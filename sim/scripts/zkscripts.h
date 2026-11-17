@@ -19,12 +19,12 @@
 extern "C" {
 #endif
 
-#define ZKS_ABI_VERSION 16
+#define ZKS_ABI_VERSION 17
 #define ZKS_MAX_TEAMS 8              /* ZK_MAX_TEAMS: the most teams a game has room for */
 #define ZKS_MOVE_CLASSES 6
 #define ZKS_ROLE_KNOBS 7             /* raid, riot, assault, skirm, arty, aa, snipe: the roles ROLE_ORDER of policy_mix.py has */
 #define ZKS_GROUP_RADII 10           /* zkbot.policy.groups.GROUP_RADII */
-#define ZKS_DEFENCES 6               /* zks_data_desc.defences */
+#define ZKS_DEFENCES 7               /* zks_data_desc.defences */
 #define ZKS_GROUP_MARK 100           /* in the army script's orders as recorded, after a group's anchor's: x the radius, target the roles */
 
 /* Per type-table row bits (zks_data_desc.bits). */
@@ -84,6 +84,9 @@ typedef struct {
     int n_transports;               /* rows with ZKS_TRANSPORT */
     const float* fall_loss;         /* n_transports x rows: ScriptData.fall_loss, the share of its health a unit loses when this
                                        transport, of the transports in row order, drops it in flight */
+    const float* under_water;       /* EcoData.under_water: how far under the surface a unit of the row has its base once it's
+                                       under water, where only water weapons reach it: its middle's height and its radius
+                                       together; -1 for what flies or doesn't move */
     /* Role indices, -1 where the table has none: raid, riot, assault, skirm, arty, aa, snipe, scout, builder, bomb */
     int32_t role_ids[10];
     /* Special rows, -1 where absent: staticarty, turretantiheavy, staticmissilesilo, staticnuke, energyfusion, energypylon, staticradar */
@@ -92,7 +95,7 @@ typedef struct {
     int32_t second_factories[3];
     int32_t caretaker;              /* staticcon's row, -1 where absent */
     /* The defences the economy script builds, -1 where absent: turretlaser (LLT), turretmissile (Picket), turretheavylaser
-       (Stinger), turretgauss (Gauss), turretaalaser (Razor), turretaaclose (Hacksaw) */
+       (Stinger), turretgauss (Gauss), turretaalaser (Razor), turretaaclose (Hacksaw), turrettorp (Urchin) */
     int32_t defences[ZKS_DEFENCES];
     /* The radii a group order may have, ascending (zkbot.policy.groups.GROUP_RADII).  Role bits are `role` indices. */
     double group_radii[ZKS_GROUP_RADII];

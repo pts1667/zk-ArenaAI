@@ -389,6 +389,63 @@ def test_the_economy_script_guards_a_fought_over_extractor_and_the_base_against_
     assert told[2][0][0] == "razor" and told[2][0][3] < 10 and np.hypot(told[2][0][1] - base[0], told[2][0][2] - base[1]) < 600.0
 
 
+def test_by_an_extractor_in_water_the_economy_script_builds_an_urchin_once_an_enemy_has_been_seen_under_water():
+    """Our ship constructor, radar and extractor in deep water, and an enemy tank and amphibious constructor in sight of the
+    radar: in the first game the constructor stands under water, in the second on land, and both are gone once our economy
+    has looked.  From 2:30 the extractor gets light turrets (the tank makes every extractor want them): Urchins in the first
+    game, as an LLT or Picket couldn't fire at what's under water, and LLTs in the second.  A ship constructor builds only in
+    water."""
+    cat = se.catalog()
+    faultline = se.pool()[se.TRAINING_MAPS.index("faultline_v1_0")]
+
+    class Water(se.SimEnv):
+        def _start_armies(env, g, world_map, bundle, x0, z0, x1, z1):
+            h, cell = world_map.height, world_map.cell
+            rows, cols = np.indices(h.shape)
+            x, z = (cols + 0.5) * cell, (rows + 0.5) * cell
+            deep = h < -45.0         # deeper than an amphibious constructor is tall
+            k = np.argmin(np.where(deep, np.hypot(x - x0, z - z0), np.inf))
+            wx, wz = float(x.flat[k]), float(z.flat[k])
+            ring = (np.abs(np.hypot(x - wx, z - wz) - 750.0) < 50.0)
+            if g == 0:
+                k = np.flatnonzero(ring & deep)[0]
+            else:           # on land, and far enough from deep water not to walk under it before it's gone
+                dx, dz = x[deep][::7], z[deep][::7]
+                dry = np.flatnonzero(ring & (h > 20.0))
+                k = dry[np.argmax([np.min(np.hypot(dx - x.flat[c], dz - z.flat[c])) for c in dry])]
+            ship = env.table.move_class[[env.table.names.index("shipcon")]].astype(np.int32)
+            cx, cz = se.place(bundle, env.rng, ship, wx + 80.0, wz)
+            units = [("shipcon", cx[0], cz[0]), ("staticmex", wx, wz), ("staticradar", wx, wz + 100.0),
+                     ("cloakcon", x1, z1), ("tankraid", x1 + 60.0, z1), ("amphcon", float(x.flat[k]), float(z.flat[k]))]
+            env.batch.reset(g, world_map, 7 + g, np.array([cat.index[n] for n, _, _ in units], np.int32), np.array([0, 0, 0, 1, 1, 1]),
+                            np.array([x for _, x, _ in units], np.float32), np.array([z for _, _, z in units], np.float32),
+                            base=(x0, z0, x1, z1), sites=bundle.sites())
+            env.batch.economy(g, bundle.spot_list, metal=5000.0, energy=5000.0, innate_metal=0.0)
+            env.cpp.reset(g, env.grounds[id(bundle)], (x0, z0, x1, z1), (x0, z0, x1, z1), economy=True, aimer=False)
+
+    env = Water(2, 4, ["scripts"], units=1, threads=2, maps=[faultline])
+    env.early_end = 10 ** 9
+    env.begin()
+    lights = {cat.index[n]: n for n in ("turretlaser", "turretmissile", "turrettorp")}
+    gone = [env.table.names.index(n) for n in ("amphcon", "tankraid")]
+    told = {0: [], 1: []}
+    for step in range(int(180.0 / env.seconds_a_step)):
+        env.step(0.0)
+        orders, offsets = env.eco_orders
+        for g in range(2):
+            told[g] += [lights[int(o["target"])] for o in orders[offsets[g * env.slots]:offsets[g * env.slots + 1]]
+                        if o["kind"] == zksim.ORDER_BUILD and int(o["target"]) in lights]
+        if step == env.eco_every:
+            for g in range(2):
+                theirs = env.batch.records[g, 1, :int(env.batch.counts[g, 1])]
+                for u in theirs[np.isin(env.table.rows(theirs["def_id"]), gone)]:
+                    zksim._lib.zk_world_kill(zksim._lib.zk_batch_world(env.batch.handle, g), int(u["uid"]))
+        if told[0] and told[1]:
+            break
+    assert told[0] and set(told[0]) == {"turrettorp"}, told
+    assert told[1] and "turrettorp" not in told[1], told
+
+
 def test_frame_games_play_their_own_scripts_not_the_cpp_ones():
     import frame_world as fw
     env = fw.FrameGames(2, 3, threads=2)

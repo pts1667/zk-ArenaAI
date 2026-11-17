@@ -16,8 +16,8 @@ This builds three libraries in `~/zksim/build` (`ZKSIM_LIB` overrides where they
 
 | Library | What | Python side |
 |---|---|---|
-| `libzksim.so` | the sim (`sim/src`, `sim/include/zksim`, C ABI in `capi.h`, ABI 28) | `sim/py/zksim.py` (`Batch`), `sim/py/zknav.py` (routes) |
-| `libzkscripts.so` | the army and economy scripts (`sim/scripts`, `zkscripts.h`, ABI 16) | `tools/policy_scripts_cpp.py` |
+| `libzksim.so` | the sim (`sim/src`, `sim/include/zksim`, C ABI in `capi.h`, ABI 29) | `sim/py/zksim.py` (`Batch`), `sim/py/zknav.py` (routes) |
+| `libzkscripts.so` | the army and economy scripts (`sim/scripts`, `zkscripts.h`, ABI 17) | `tools/policy_scripts_cpp.py` |
 | `libzkrecord.so` | the game recorder (`sim/record`, `zkrecord.h`, ABI 2), needs `libzstd-dev` | `sim/py/zkrecord.py` |
 
 `sim/include/zksim/rawframe.hpp` is generated from `bots/zkbot/policy/rawframe.py` (`python tools/policy_schema.py`), and a test
@@ -67,9 +67,13 @@ one there, and the unit AI as a whole 8.3%, beside movement's 56%.
   `python tools/sim_data.py`), because `armordefs.lua` and `unitdefs_post.lua` change values the raw unit files don't show.
   `sim_data.py` also flags what isn't modelled (`ZK_W_UNMODELLED`: capture, spawned units, area impulse) and reads each
   `customParams` that changes a weapon's meaning.  A unit's record has its footprint (`foot_x`, `foot_z`: half its `xsize` and
-  `zsize` in elmos) and `max_height_dif`, for "Where a building can go".
+  `zsize` in elmos) and `max_height_dif`, for "Where a building can go".  For "Water", it has its middle's height and its
+  radius, where it rides on water, and each weapon's aim-from point, from the engine's own numbers for every type that doesn't
+  fly (`python tools/sim_engine.py muzzles --map ThreeReefs16`, into the dump's `muzzles.json`: each made alone, on land or in
+  deep water for what rides it, and read 2.5 s later, as a Cutter's script raises its missile 20 elmos over 1.25 s).
 * **The game's rules** (`sim/data/rules.json`, from `python tools/sim_rules.py`, which needs a Python with `lupa`): the 42
-  units that don't keep a team in the game, the reveal rule's numbers, the six chicken difficulties and the 21 egg features.
+  units that don't keep a team in the game, the reveal rule's numbers, the six chicken difficulties and the 21 egg features,
+  and the 7 amphibious units that float up to fire ("Water").
 * **Maps** are exported by `tools/sim_data.py`, with their routes worked out at export (see "Movement").  `sim/data/maps` is
   gitignored: after a pull, run `python tools/sim_data.py maps`.  A map built by hand (`zksim.Map(...)` without routes) works
   them out when made, once for the move classes that move alike on it.
@@ -202,6 +206,45 @@ Tags in this section: what's left out is listed under "Known gaps", and what was
 * **Death**: a death explosion, then a wreck (40% of the unit's metal) or a heap (20%), by its recent damage.  A frame over 5%
   built leaves a heap in proportion.  A wreck in a blast becomes a heap.
 
+### Water (`sim/src/water.cpp`)
+
+The engine's rules for weapons in water, and the amphibious units that float up to fire (the user, 2026-11-16; libzksim ABI
+29).  A map has water where its ground is below 0 (201 of the pool's 404); one whose ground never is has none, as the sim had
+before, though the engine would count what stands at exactly 0 as in water (`Map.flat`, and Deserted Gully).  On a map with no
+water the sim plays bit for bit as it did ("Validation").
+
+* **Where a unit is**: its base on the ground or the sea bed, riding the water at `-waterline` for ships, submarines (45 down),
+  hovercraft and what floats (`water_y`), or where it has floated to.  It's in water with its base at or below the surface, and
+  under water once its middle plus its radius is below it (`CSolidObject::UpdatePhysicalState`): a Duck once it's 31 elmos
+  down, a Buoy 39.  Frames give a unit's base as its `y`, where they gave ships and submarines the surface.  A weapon's reach on
+  a map with water is tested from base to base, so a ship shooting at a Duck on the sea bed reaches less far.
+* **What can aim at what** (`Weapon.cpp` `TestTarget`): a weapon that isn't a water weapon aims at nothing under water from
+  above it, and from under water at nothing in it.  A water weapon (`waterWeapon`: 79 on 54 types) aims at anything: the
+  Duck's, Scallop's and Claymore's torpedoes and depth charges, the Dagger's, Gauss's and Ultimatum's guns, the Hunter's, the
+  Siren's and the submarines', a commander's torpedo, the Raven's, the other amphibious units' fake weapons, and most
+  chickens'.  No other ship's: a Corsair, Mistral or Envoy fires at nothing under water.  A torpedo (the 9
+  `TorpedoLauncher`s, the Raven's among them) aims only at what's in water, so not at what's on land.
+* **What can fire** (`CanFire`): a weapon that isn't a water weapon doesn't fire with its aim-from point at or under the
+  surface: a Duck's missiles don't fire from the sea bed, though they keep their target.
+* **Shots**: one that isn't a water weapon goes off at the surface, through nothing under water and with no blast below it, so
+  that a shell at a ship doesn't reach a Duck on the sea bed beside it.  A torpedo passes under what's out of the water.  A
+  water weapon goes off at the depth of what it hits, and a Gauss's shot goes down along its line to what it was aimed at.
+  Everything under water is as far from a blast as their depths are apart; a unit dying under water explodes there.
+* **Floating up to fire** (`unit_impulsefloat_toggle.lua` with `float_defs.lua`): Buoy, Grizzly, Bulkhead, Scallop, Archer,
+  Angler and Aspis (which, with no weapon to aim, never does in the sim).  One that has a target and isn't told to move, on a sea bed deeper than its float's depth, leaves the
+  bottom and rises, then treads water at its float point, held where it is and with its tactical AI off.  Every 16 frames the
+  gadget looks again: once it hasn't aimed since the last look, or is told to move, it sinks, and on the sea bed it's let go.
+  * Its targets are picked as if it were up already, the way the fake weapons of the Buoy, Grizzly and Bulkhead, water
+    weapons that aim with the real one, float them in a game.  Its weapons fire once they can from where it is.
+  * Each frame is the gadget's: its speed up by its rise or sink acceleration, times its drag one way or the other, blended
+    with gravity and the air's drag over its float point, and a splash's drag coming back down.  Then the engine's own drag in
+    water, the speed less 0.07 times its square, fitted to the engine's rises ("Validation").  Near the surface for a while,
+    what sinks a Buoy, Scallop or Bulkhead first pushes it up (`surfaceWaitPos`).
+  * From their scripts (`tools/sim_rules.py`, `FLOAT_SCRIPTS`): a Grizzly floats only with its laser under 90 frames from
+    reloaded, and an Angler under 70, so a Grizzly sinks between salvos; an Archer's sonic gun, a water weapon, holds its fire
+    while the Archer is below 32 down.  A Scallop's torpedoes fire from the sea bed, and it floats up all the same.
+  * Stunned, a Scallop, Archer, Angler or Aspis sinks (`sink_on_emp`); a Buoy, Grizzly or Bulkhead keeps afloat.
+
 ### Aircraft
 
 * Made on the ground, an aircraft takes off when it has somewhere to be, and flies at its `wantedHeight`, climbing at
@@ -266,7 +309,7 @@ told, for tests that measure one mechanic.
   * Its numbers and tables are the gadget's (`tactical_ai_defs.lua`, through `tools/simgame`'s dump and `tools/sim_data.py`
     into `catalog.json`'s `tactics`): a row for each unit type, then the rows that some types go by instead.
   * Under water a Duck, a Scallop and a Claymore go by their `sea` tables: where the ground under them is below their
-    waterline of -5.  The sim's weapons don't know water ("Known gaps"), so this changes the distances they keep and no more.
+    waterline of -5.  With the weapons' limits in water ("Water"), a Duck on the sea bed keeps a torpedo's distances there.
   * Against what a type deals with only on a fight order, it goes by its `fightOnlyOverride` (Mace, Ogre, Ripper, Dart),
     unless that enemy is stunned.  A Mace sent to fight onto a fusion reactor stays 339 elmos off, of its range of 345;
     without the table it went in to 149.
@@ -582,7 +625,17 @@ Further rules:
     beside a contested spot before its extractor.  A spot is contested once an armed enemy has come within 500 elmos of it in
     the last 3 minutes, or where it's at least 0.7 times as far from our base as from an enemy's.  Once the enemy has tanks
     or slow heavies, every extractor, and every third light turret is a Picket.  One light turret for each 3 extractors, 2
-    to 12.
+    to 12;
+  * by a spot or extractor in water, an Urchin in place of an LLT or Picket once an enemy has been seen under water (the
+    user, 2026-11-16; libzkscripts ABI 17): in our sight or radar, a submarine, or anything that walks the sea bed in water
+    deeper than its middle and its radius, as the engine has it ("Water").  Neither an LLT nor a Picket fires at what's under
+    water.  From then on only an Urchin or a Gauss covers a place in water, and an Urchin never covers one on land, its
+    torpedoes keeping to the water.
+
+  In 32 script 1v1s over 15 minutes on the 16 pool maps with the most water (79-97% of the map), 23 games ordered Urchins.
+  At 15 minutes 161 Urchins stood, and 166 LLTs and Pickets, 132 of them in water: built before an enemy was seen under
+  water.  Before the sim had the weapons' limits in water ("Water"), and with the scripts' old depth (twice a hit radius),
+  it was 23 games, 159 Urchins and 159 LLTs and Pickets, 120 in water.
 
   In 16 script 1v1s over 15 minutes, the first of each ordered: an LLT on all 32 sides, at a median of 3 minutes, and about
   4.5 a side standing at 10; AA on 24 sides (a median of 9.5 minutes); a Gauss on 11 and a Stinger on 4 (10-11).  700 metal
@@ -654,6 +707,17 @@ in `tools/simgame/`.  Mechanics are pinned by `sim/tests/test_*.py` with the eng
   * piercing shots: Pyro 0.9-1.1, Dagger 0.83;
   * push, throw, silos and teleporting;
   * aircraft: plane turns within 10%, rearm times within 3 frames, strafing circles within 8 elmos.
+* **Water** (`tools/sim_engine.py water --map ThreeReefs16`; `sim/tests/test_water.py`; 2026-11-16).  Each of these did in
+  the sim what it did in a game: an LLT riding the water and a Glaive on the shore don't fire at a Duck on the sea bed, an
+  Urchin's torpedoes and a Dagger's gauss hit it; a Duck's torpedoes hit a ship over it, its missiles don't fire from the sea
+  bed, and an Urchin doesn't fire at a Duck on land; a Cutter's missiles, raised above the water by its script, hit a ship.
+  * The floats of the Buoy, Grizzly, Scallop, Bulkhead and Archer from 150 down, logged every frame: the gadget's own
+    arithmetic ran ahead of the engine's.  The engine's speed in water was the gadget's less 0.069 to 0.076 times its
+    square, for each type, so the sim takes 0.07.  With it the sim's Buoy is within 3 elmos of the engine's at every 15
+    frames of its rise, leap and settling, fires 55 frames after it left the sea bed (the engine's 60), and is back down 6 s
+    after its target has gone (6.1).  The others' rises match as closely in the same arithmetic in Python.
+  * On a hilly map with no water, 40 units a side of 16 kinds, amphibious and torpedo units among them, fought for 2 minutes
+    bit for bit as before.  On the same fight with the sea in it, 13 survived where 6 had.
 * **Raiders against slow shooters** (`tools/sim_fights.py`: `engine` on Windows, `sim --tag T` and `compare` in WSL;
   2026-11-12).  Equal metal, two lines 950 elmos apart, each on a fight order onto the other's place, 5 fights of each in the
   sim as it was before projectiles, in the sim now, and in a game (two runs of 5):
@@ -795,7 +859,12 @@ What's left out on purpose, so it isn't mistaken for modelled:
   * Gauss rifles hitting everything along their line;
   * friends on a piercing shot's line (the game holds fire);
   * the first-shot timing of some heavy guns;
-  * shots at a jumper in the air use its map position only.
+  * shots at a jumper in the air use its map position only;
+  * in water ("Water"): sonar.  The engine sees what's under water only by sonar, which most units have as far as they see;
+    the sim's sight sees it.  A shot's path tests what it passes through at no depth, so a torpedo at a Duck on the sea bed
+    can stop in a ship over it.  A floating unit isn't pushed, and has no float state but the default (it floats to attack),
+    which a player can set to always or never.  A transport doesn't pick up a floating unit, and one set down in deep water
+    walks the sea bed.  The Angler floats on its reload alone, not its four guns' turns.
 * **Shields:** they all start full (several start empty in the game), a stun doesn't drain them, and there are no charge
   priorities when energy is short.
 * **Unit AI:**
@@ -804,8 +873,6 @@ What's left out on purpose, so it isn't mistaken for modelled:
   * the same gadget's shots at extractors in passing (`mex_shoot_defs.lua`: Ripper, Claymore, Archer, Pyro, Kodachi, Ogre);
   * a clear line to where ward fire aims: the engine's weapon won't fire at a place on the ground with a rise in the way, and
     the sim's does;
-  * what the sea tables are mostly for: a weapon's limits in water aren't modelled (a Duck's rockets fire from the sea bed),
-    so a unit under water keeps its sea table's distances with its land weapons;
   * not checked against a game: the sea tables, `selfVelocityPrediction`, `skirmBlockApproachHeadingBlock`, and what the AI
     order turns on (`alwaysJinkFight`, the Swift's `skirmJinkLength`, the planes' loopback);
   * a unit made since sight was last brought up to date, at most 15 frames before, isn't seen by the tactical AI yet;

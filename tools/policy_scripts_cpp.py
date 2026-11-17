@@ -28,7 +28,7 @@ import policy_eco as eco  # noqa: E402
 from policy_mix import menu as factory_menu  # noqa: E402
 from policy_variants import ROLES, Variant  # noqa: E402
 
-ABI_VERSION = 16
+ABI_VERSION = 17
 MAX_TEAMS = 8           # ZKS_MAX_TEAMS
 MOVE_CLASSES = 6
 SEAT_ARMY = 1
@@ -53,6 +53,7 @@ class DataDesc(ct.Structure):
                 ("needs_link", c_f32p), ("half_x", c_f32p), ("half_z", c_f32p), ("height_dif", c_f32p), ("footing", c_i32p), ("best_missile", c_i32p),
                 ("generators", c_i32p), ("option_offsets", c_i32p), ("options", c_i32p), ("n_roles", ct.c_int), ("menu", c_i32p),
                 ("plate_of", c_i32p), ("lift", c_f32p), ("load_class", c_i8p), ("n_transports", ct.c_int), ("fall_loss", c_f32p),
+                ("under_water", c_f32p),
                 ("role_ids", ct.c_int32 * 10), ("special", ct.c_int32 * 7), ("second_factories", ct.c_int32 * 3),
                 ("caretaker", ct.c_int32), ("defences", ct.c_int32 * len(eco.DEFENCES)),
                 ("group_radii", ct.c_double * len(groups.GROUP_RADII)), ("cerberus_reach", ct.c_double),
@@ -208,7 +209,8 @@ class ScriptsData:
             option_offsets=np.array(offsets, np.int32), options=np.array(options + [0], np.int32), menu=menu,
             plate_of=np.ascontiguousarray(ed.plate_of[:n], np.int32), lift=np.ascontiguousarray(t.lift[:n], np.float32),
             load_class=np.ascontiguousarray(t.load_class[:n], np.int8),
-            fall_loss=np.ascontiguousarray(sd.fall_loss if len(sd.transports) else np.zeros((1, n)), np.float32))
+            fall_loss=np.ascontiguousarray(sd.fall_loss if len(sd.transports) else np.zeros((1, n)), np.float32),
+            under_water=np.ascontiguousarray(ed.under_water[:n], np.float32))
         assert (sd.transports == np.flatnonzero(bits & TRANSPORT)).all()
         a = self._arrays
         assert tuple(self.roles) == groups.roles()[0], "the policy's group roles are numbered as the scripts' are"
@@ -222,6 +224,7 @@ class ScriptsData:
                         options=_ptr(a["options"], c_i32p), n_roles=len(self.roles), menu=_ptr(menu, c_i32p),
                         plate_of=_ptr(a["plate_of"], c_i32p), lift=_ptr(a["lift"], c_f32p), load_class=_ptr(a["load_class"], c_i8p),
                         n_transports=len(sd.transports), fall_loss=_ptr(a["fall_loss"], c_f32p),
+                        under_water=_ptr(a["under_water"], c_f32p),
                         cerberus_reach=float(ed.reach.get(eco.CERBERUS, 0.0)), missile_reach=float(ed.missile_reach),
                         spot_half=float(ed.spot_half), n_footings=len(self.footings))
         desc.role_ids[:] = [role_index.get(r, -1) for r in ROLE_NAMES]

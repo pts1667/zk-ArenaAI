@@ -179,8 +179,7 @@ int World::emit_view(int viewer, UnitRecord* out, int cap, float* glob, int comm
         r.def_id = d.def_id;
         r.x = x[i];
         r.z = z[i];
-        const bool water_top = d.move_class == 4 || d.move_class == 5 || (d.flags & ZK_U_FLOATS);   // hovers, ships and what floats ride on the water
-        r.y = (water_top ? surface(*map, x[i], z[i]) : map->height_at(x[i], z[i])) + flight_height(u) + (carrier[i] >= 0 ? carried_altitude(u) : jump_altitude(u));
+        r.y = base_y(u);   // where its base is: on the water for what rides it, under it for a submarine (water.cpp)
         r.vx = vx[i];
         r.vz = vz[i];
         r.hp_frac = hp[i] / d.hp;

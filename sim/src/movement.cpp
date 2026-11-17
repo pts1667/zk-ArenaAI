@@ -391,7 +391,8 @@ enum : int8_t { PLAN_BUSY, PLAN_SKID, PLAN_STAND, PLAN_FACE, PLAN_WALK };
 // moves any.  Asked as each came to move, a unit made before its target walked on while the target, asked after, found it
 // already in reach and stood.  PLAN_WALK: to x, z.  PLAN_FACE: standing, turned to what it shoots at, which is at x, z.
 World::MovePlan World::plan_move(int u) {
-    if (jump[size_t(u)].busy) return {PLAN_BUSY, 0.0f, 0.0f};
+    // Floating, it's held where it is (unit_impulsefloat_toggle.lua): it only goes up and down.
+    if (jump[size_t(u)].busy || floating[size_t(u)]) return {PLAN_BUSY, 0.0f, 0.0f};
     const auto& d = type_of(u);
     if (skid[size_t(u)].on && !(d.flags & ZK_U_AIR)) return {PLAN_SKID, 0.0f, 0.0f};
     float gx = 0.0f, gz = 0.0f;

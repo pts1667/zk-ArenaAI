@@ -12,6 +12,9 @@
 * `chickens`: chicken defense (LuaRules/Gadgets/unit_spawner.lua with LuaRules/Configs/spawn_defs.lua): for each difficulty,
   Beginner to Suicidal, the settings the gadget ends up with (spawn_defs' defaults with the difficulty's own over them), its
   kinds of chicken by role, and the eggs chickens leave (features/chicken_eggs.lua, by the engine dump's feature ids).
+* `floats`: the amphibious units that float up to fire (LuaRules/Gadgets/unit_impulsefloat_toggle.lua with
+  LuaRules/Configs/float_defs.lua), each with its settings, whether it sinks when stunned (its customParams' sink_on_emp, from
+  the engine dump), and what its script adds: FLOAT_SCRIPTS.
 
 spawn_defs.lua is run, in Lua 5.1 (`pip install lupa`), with no mod options: what it computes (times in seconds, the
 difficulties' time modifiers) comes out as the game has it.  Times stay in seconds, as the gadget's formulas use them.
@@ -114,6 +117,40 @@ def chickens(zk: pathlib.Path, dump: pathlib.Path) -> dict:
     return out
 
 
+# float_defs.lua's names, as the sim takes them (capi.h zk_float_rec).  A missing one is the gadget's nil: no surface wait.
+FLOAT_FIELDS = {"initialRiseSpeed": "init_speed", "riseAccel": "rise_accel", "riseUpDrag": "rise_up_drag", "riseDownDrag": "rise_down_drag",
+                "sinkAccel": "sink_accel", "sinkUpDrag": "sink_up_drag", "sinkDownDrag": "sink_down_drag", "airAccel": "air_accel",
+                "airDrag": "air_drag", "waterHitDrag": "water_hit_drag", "floatPoint": "float_point", "surfaceDampen": "surface_dampen",
+                "depthRequirement": "depth", "surfaceWaitPos": "wait_y", "surfaceMinWait": "wait_min", "surfaceMaxWait": "wait_max"}
+# What each unit's script does about floating (scripts/amph*.lua), where it's more than floating whenever a weapon aims
+# (GG.Floating_AimWeapon).  reload_frames: it calls that only once its first weapon's reload has less than this left
+# (amphassault.lua's AimWeapon(2), amphaa.lua's AimWeapon).  block_below: its BlockShot holds every shot while its base is
+# below this (amphimpulse.lua's UNDERWATER_DEPTH), its weapon being a water weapon the engine would let fire.  The fake weapons
+# of the Buoy, Grizzly and Bulkhead (amphfloater.lua, amphassault.lua, amphsupport.lua), which aim with the real one but as
+# water weapons, so from under water too, are what float those: the sim has the real one aim as from the surface instead.
+FLOAT_SCRIPTS = {
+    "amphassault": {"reload_frames": 90.0},
+    "amphaa": {"reload_frames": 70.0},
+    "amphimpulse": {"block_below": -32.0},
+}
+
+
+def floats(zk: pathlib.Path, dump: pathlib.Path) -> dict:
+    lua = lupa.LuaRuntime(unpack_returned_tuples=True)
+    lua.execute(PRELUDE + "UnitDefs = setmetatable({}, {__index = function() return {customParams = {}} end})")
+    defs = table(lua.execute((zk / "LuaRules" / "Configs" / "float_defs.lua").read_text("utf8")))
+    units = json.loads((dump / "units.json").read_text("utf8", "replace"))
+    assert set(FLOAT_SCRIPTS) <= set(defs), "a script's floating for a unit float_defs.lua doesn't have"
+    out = {}
+    for name, d in sorted(defs.items()):
+        rec = {ours: float(d[theirs]) for theirs, ours in FLOAT_FIELDS.items() if theirs in d}
+        rec.setdefault("wait_max", 0.0)
+        rec["sink_on_para"] = int((units[name].get("customParams") or {}).get("sink_on_emp") != "0")
+        rec.update({"reload_frames": 0.0, "block_below": -1.0e30, **FLOAT_SCRIPTS.get(name, {})})
+        out[name] = rec
+    return out
+
+
 def game_over(zk: pathlib.Path, dump: pathlib.Path) -> tuple[list[str], dict, list[str]]:
     text = (zk / "LuaRules" / "Gadgets" / "game_over.lua").read_text("utf8")
     # The list for ordinary games is the second (the first is a campaign's).
@@ -136,10 +173,11 @@ def main() -> None:
     ap.add_argument("--out", type=pathlib.Path, default=OUT)
     args = ap.parse_args()
     dont_count, reveal, vital = game_over(args.zk, args.dump)
-    rules = {"dont_count": dont_count, "reveal": reveal, "vital": vital, "chickens": chickens(args.zk, args.dump)}
+    rules = {"dont_count": dont_count, "reveal": reveal, "vital": vital, "chickens": chickens(args.zk, args.dump),
+             "floats": floats(args.zk, args.dump)}
     args.out.write_text(json.dumps(rules, indent=1) + "\n", "utf8")
     print(f"{args.out}: {len(dont_count)} that don't count, {len(vital)} vital, {len(rules['chickens']['difficulties'])} difficulties, "
-          f"{len(rules['chickens']['eggs'])} eggs")
+          f"{len(rules['chickens']['eggs'])} eggs, {len(rules['floats'])} that float")
 
 
 if __name__ == "__main__":

@@ -135,9 +135,11 @@ float World::armor_mult(int u) const {
 // Weapon.cpp TestRange, of a target taken to be at a place.
 bool World::in_range_at(int u, const zk_weapon_rec& w, int t, float tx, float tz) const {
     const float dx = tx - x[size_t(u)], dz = tz - z[size_t(u)];
-    // A jumper in the air may be out of reach of what's right under it: a game's Jack didn't get to use its spike.  So may what flies.
-    const float dy = (map->height_at(x[size_t(t)], z[size_t(t)]) + jump_altitude(t) + flight_height(t) - map->height_at(x[size_t(u)], z[size_t(u)]) -
-                      jump_altitude(u) - flight_height(u)) * w.height_mod;
+    // A jumper in the air may be out of reach of what's right under it: a game's Jack didn't get to use its spike.  So may what flies,
+    // and, on a map with water, what's at the bottom of it.
+    const float dy = (has_water ? base_y(t) - base_y(u)
+                                : map->height_at(x[size_t(t)], z[size_t(t)]) + jump_altitude(t) + flight_height(t) - map->height_at(x[size_t(u)], z[size_t(u)]) -
+                                      jump_altitude(u) - flight_height(u)) * w.height_mod;
     const float r2 = w.range * w.range - dy * dy;
     return r2 > 0.0f && dx * dx + dz * dz <= r2;
 }
@@ -159,13 +161,15 @@ bool World::faces(int u, const zk_weapon_rec& w, int t) const {
     return (std::sin(heading[size_t(u)]) * dx + std::cos(heading[size_t(u)]) * dz) / dist >= FORWARD_COS;
 }
 
-float World::target_score(int u, int slot, int t) {
+// surfaced: an amphibious unit that floats up to fire aims as from the surface (may_float).
+float World::target_score(int u, int slot, int t, bool surfaced) {
     const auto& d = type_of(u);
     const auto& w = cat->weapons[size_t(d.mount_weapon[slot])];
     const auto& td = type_of(t);
     const int s = side[size_t(u)];
     // In range where it is (GameHelper.cpp GenerateWeaponTargets) and where the weapon would aim (Weapon.cpp AutoTarget).
     if ((td.flags & ZK_U_NEUTRAL) || !(td.category & d.mount_only[slot]) || !in_range(u, w, t) || !can_be_aimed_at(s, t) || bait_blocks(u, t)) return -1.0f;
+    if (!water_allows(u, w, t, surfaced)) return -1.0f;
     if (!can_reach(u, w, t)) return -1.0f;
     const bool known = identified(s, t);
     float p = known ? cat->target_priority(d.mount_weapon[slot], type[size_t(t)]) : UNIDENTIFIED_PRIORITY;
@@ -214,6 +218,7 @@ void World::pick_targets() {
         const int u = live[k];
         if (!alive[size_t(u)] || !active(u)) continue;
         const auto& d = type_of(u);
+        const bool surfaced = has_water && may_float(u);
         for (int m = 0; m < d.n_mounts; ++m) {
             const auto& w = cat->weapons[size_t(d.mount_weapon[m])];
             int& current = weapon_target[size_t(u) * ZK_MAX_MOUNTS + size_t(m)];
@@ -226,7 +231,7 @@ void World::pick_targets() {
             // target (Weapon.cpp:1023).
             if (w.flags & ZK_W_MANUAL) {
                 const int t = order[size_t(u)] == ZK_ORDER_MANUAL_FIRE ? order_target[size_t(u)] : -1;
-                current = t >= 0 && alive[size_t(t)] && can_reach(u, w, t) && (type_of(t).category & d.mount_only[m]) ? t : -1;
+                current = t >= 0 && alive[size_t(t)] && can_reach(u, w, t) && (type_of(t).category & d.mount_only[m]) && water_allows(u, w, t, surfaced) ? t : -1;
                 continue;
             }
             if (w.kind == ZK_WEAPON_SHIELD || (w.flags & ZK_W_NO_AUTO_TARGET)) {
@@ -244,20 +249,22 @@ void World::pick_targets() {
                 current = runs && forced >= 0 && alive[size_t(forced)] && (type_of(forced).category & d.mount_only[m]) ? forced : -1;
                 continue;
             }
-            if (forced >= 0 && alive[size_t(forced)] && can_reach(u, w, forced) && (type_of(forced).category & d.mount_only[m]) && can_be_aimed_at(side[size_t(u)], forced)) {
+            if (forced >= 0 && alive[size_t(forced)] && can_reach(u, w, forced) && (type_of(forced).category & d.mount_only[m]) && can_be_aimed_at(side[size_t(u)], forced) &&
+                water_allows(u, w, forced, surfaced)) {
                 current = forced;
                 continue;
             }
             if (behaviour == ZK_BEHAVIOUR_ORDERS && a.fire_state < 2) {
                 // Nothing of its own choosing: on return fire, only what hit it last.
                 const int back = a.fire_state == 1 ? a.last_attacker : -1;
-                current = back >= 0 && alive[size_t(back)] && can_reach(u, w, back) && (type_of(back).category & d.mount_only[m]) && can_be_aimed_at(side[size_t(u)], back) ? back : -1;
+                current = back >= 0 && alive[size_t(back)] && can_reach(u, w, back) && (type_of(back).category & d.mount_only[m]) && can_be_aimed_at(side[size_t(u)], back) &&
+                          water_allows(u, w, back, surfaced) ? back : -1;
                 continue;
             }
             float best = 1e30f;
             int chosen = -1;
             for_enemies(side[size_t(u)], x[size_t(u)], z[size_t(u)], w.range + SEARCH_MARGIN, [&](int t) {
-                const float score = target_score(u, m, t);
+                const float score = target_score(u, m, t, surfaced);
                 if (score >= 0.0f && score < best) {
                     best = score;
                     chosen = t;
@@ -584,7 +591,7 @@ bool World::fly(Projectile& p) {
         const float n = float(flew);
         for_enemies(s.source_side, (x0 + x1) * 0.5f, (z0 + z1) * 0.5f, std::hypot(x1 - x0, z1 - z0) * 0.5f + SEARCH_MARGIN + BLAST_MARGIN, [&](int e) {
             const size_t i = size_t(e);
-            if (!alive[i] || e == s.source || airborne(e) != s.air) return;
+            if (!alive[i] || e == s.source || airborne(e) != s.air || !water_hits(w, e)) return;
             const float r = type_of(e).hit_radius, up = jump_altitude(e) + flight_height(e) - p.base;
             const float ax = x0 - (x[i] - vx[i] * n), ay = y0 - up, az = z0 - (z[i] - vz[i] * n);
             const float dx = x1 - x[i] - ax, dy = y1 - up - ay, dz = z1 - z[i] - az;
@@ -695,6 +702,8 @@ void World::fire_weapons() {
                         weapon_target[i] = -1;
                         continue;
                     }
+                    // In water, the target is kept: what floats up to fire picked it as from the surface (water.cpp).
+                    if (has_water && (!water_allows(u, w, weapon_target[i], false) || !fires_in_water(u, m, w))) continue;
                     if ((w.flags & ZK_W_BOMB) || faces(u, w, weapon_target[i])) {
                         const int t = weapon_target[i];
                         const float apart = std::hypot(x[size_t(t)] - x[size_t(u)], z[size_t(t)] - z[size_t(u)]);
@@ -720,7 +729,7 @@ void World::fire_weapons() {
                         if ((w.flags & ZK_W_MANUAL) && order[size_t(u)] == ZK_ORDER_MANUAL_FIRE) order[size_t(u)] = ZK_ORDER_NONE;
                         if (d.flags & ZK_U_MISSILE) launch_missile(u);
                     }
-                } else if (cooldown[i] <= 0.0f && weapon_target[i] < 0 && !out_of_ammo(u) && can_ward(u, m)) {
+                } else if (cooldown[i] <= 0.0f && weapon_target[i] < 0 && !out_of_ammo(u) && can_ward(u, m) && fires_in_water(u, m, w)) {
                     // Ward fire: with no target of its own, at the place its unit has named (unit_ai.cpp run_ward_fire).
                     if (!pay_for_shot(u, w)) continue;
                     fire_at_point(u, m, f);
@@ -796,7 +805,8 @@ void World::damage_unit(int u, const zk_weapon_rec& w, float mult, int dealer, i
 // height: where it goes off, for a jumper being hit in the air.  Everything else is on the ground, as far as a flat sim goes.
 // struck: the unit a projectile went off in, which gets all of it; without one, a weapon that only hurts what it hits takes whoever's there.
 // source_team: whose it is when there's no unit to say (a death's blast).
-void World::explode(int weapon, float px, float pz, int source, int source_side, bool air, float power, float height, int struck, int source_team) {
+void World::explode(int weapon, float px, float pz, int source, int source_side, bool air, float power, float height, int struck, int source_team,
+                    float depth) {
     const auto& w = cat->weapons[size_t(weapon)];
     const int dealer = source >= 0 ? team[size_t(source)] : source_team;
     const float radius = std::max(w.blast_radius, 1.0f);
@@ -810,7 +820,9 @@ void World::explode(int weapon, float px, float pz, int source, int source_side,
         if (u == source && (w.flags & ZK_W_NO_SELF_DAMAGE)) return;
         if ((w.flags & ZK_W_NO_FRIENDLY_FIRE) && side[size_t(u)] == source_side) return;
         const float dx = x[size_t(u)] - px, dz = z[size_t(u)] - pz;
-        const float dy = jump_altitude(u) - height;
+        float dy = jump_altitude(u) - height;
+        // What's under water is as far from it as their depths are apart: a shot at the surface doesn't reach the sea bed.
+        if (has_water) dy += depth - sunk(u);
         const float dist = std::sqrt(dx * dx + dz * dz + dy * dy);
         const float surface = u == struck ? 0.0f : std::max(0.0f, dist - type_of(u).hit_radius);
         if (struck < 0 && surface <= 0.0f && dist < best) {
@@ -902,8 +914,14 @@ void World::land_shot(const Shot& s, float px, float pz, int struck, float heigh
         left -= taken;
     }
     if (left <= 0.0f || fades) return;
+    // A water weapon goes off where what it hit is, under the water as well; anything else at the surface.
+    float depth = 0.0f;
+    if (has_water && (w.flags & ZK_W_WATER)) {
+        const int hit = struck >= 0 ? struck : s.target;
+        if (hit >= 0 && alive[size_t(hit)]) depth = sunk(hit);
+    }
     if (w.flags & ZK_W_PIERCES) pierce(s, px, pz, s.power * left);
-    else explode(s.weapon, px, pz, s.source, s.source_side, s.air, s.power * left, height, struck);
+    else explode(s.weapon, px, pz, s.source, s.source_side, s.air, s.power * left, height, struck, -1, depth);
 }
 
 // A noExplode shot (WeaponProjectile.cpp) goes off in every unit it's inside on a frame, and flies on to the end of its range; what it
@@ -918,22 +936,26 @@ void World::pierce(const Shot& s, float px, float pz, float power) {
         return;
     }
     const float ux = (px - ox) / aimed, uz = (pz - oz) / aimed, reach = std::max(w.range, aimed);
-    // Up to a jumper it was aimed at, and on.
+    // Up to a jumper it was aimed at, and on; for a water weapon, down to what's under water it was aimed at.
     const float rise = s.target >= 0 && jump[size_t(s.target)].flying ? jump_altitude(s.target) / aimed : 0.0f;
+    const float dive = has_water && (w.flags & ZK_W_WATER) && s.target >= 0 && alive[size_t(s.target)] ? sunk(s.target) / aimed : 0.0f;
     std::vector<PierceHit>& hits = pierce_hits;      // nothing below pierces again
     hits.clear();
     for_enemies(s.source_side, ox + ux * reach * 0.5f, oz + uz * reach * 0.5f, reach * 0.5f + BLAST_MARGIN, [&](int u) {
         if (!alive[size_t(u)] || u == s.source) return;
-        if (airborne(u) != s.air) return;
+        if (airborne(u) != s.air || !water_hits(w, u)) return;
         const float r = type_of(u).hit_radius, dx = x[size_t(u)] - ox, dz = z[size_t(u)] - oz;
         const float along = dx * ux + dz * uz;
         if (along < -r || along > reach + r) return;
-        const float at = std::clamp(along, 0.0f, reach), off = dx * uz - dz * ux, dy = jump_altitude(u) - rise * at;
+        const float at = std::clamp(along, 0.0f, reach), off = dx * uz - dz * ux;
+        float dy = jump_altitude(u) - rise * at;
+        if (has_water) dy += dive * at - sunk(u);
         const float left = r * r - off * off - dy * dy;
         if (left <= 0.0f) return;
         hits.push_back({at, (w.flags & ZK_W_ONE_HIT_EACH) || w.speed <= 0.0f ? 1.0f : 1.0f + 2.0f * std::sqrt(left) / w.speed});
     });
-    for (const PierceHit& h : hits) explode(s.weapon, ox + ux * h.along, oz + uz * h.along, s.source, s.source_side, s.air, power * h.times, rise * h.along);
+    for (const PierceHit& h : hits)
+        explode(s.weapon, ox + ux * h.along, oz + uz * h.along, s.source, s.source_side, s.air, power * h.times, rise * h.along, -1, -1, dive * h.along);
 }
 
 void World::resolve_shots() {
@@ -953,7 +975,7 @@ void World::finish_deaths() {
         // unit_nanoframe_death.lua: a frame explodes only if it's nearly done.
         // No one to return fire at, but a side for no friendly fire.  Before its remains, as in ForcedKillUnit, so a blast doesn't eat its own heap.
         if (d.explode_weapon >= 0 && build[size_t(u)] > NANOFRAME_EXPLODES_ABOVE && !(d.flags & ZK_U_AIR))
-            explode(d.explode_weapon, x[size_t(u)], z[size_t(u)], -1, side[size_t(u)], false, 1.0f, 0.0f, -1, team[size_t(u)]);
+            explode(d.explode_weapon, x[size_t(u)], z[size_t(u)], -1, side[size_t(u)], false, 1.0f, 0.0f, -1, team[size_t(u)], sunk(u));
         if (d.drop_weapon >= 0 && build[size_t(u)] >= 1.0f) drop_bomb(u);
         leave_remains(u);
         if (d.missile_pads > 0) destroy_missiles_of(u);

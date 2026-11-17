@@ -55,7 +55,7 @@ free-for-alls of up to 8 and chicken defense, each on the maps that hold it (01-
 | What the actor sees | What a player sees: its own units, enemies in sight, radar blips and remembered structures.  The critic sees everything, in training only |
 | Units | One token per unit: type stats from the catalog, a name embedding with 30% dropout to "unknown", and instance state.  No logic keyed on a unit's name |
 | Players | One pool of units.  Each unit carries its player and allyteam, numbered from the viewer: up to 64 players and 8 allyteams.  The sim plays up to 8 teams a game, in alliances |
-| Games | 1v1s, team games of 2 to 4 a side, free-for-alls of 3 to 8, and chicken defense at Zero-K's own timings (the user, 2026-11-10).  Up to 80 minutes.  The policy plays one team, and scripts its allies and enemies; the headline test stays a 1v1 |
+| Games | 1v1s, team games of 2 to 4 a side, free-for-alls of 3 to 8, and chicken defense at Zero-K's own timings (the user, 2026-11-10).  Up to 80 minutes.  Against the scripts the policy plays one team, and scripts its allies and enemies; against itself, every team.  RL plays 1v1s alone till iteration 500, then the rest mixed in, to half its games by 2,500 (the user, 2026-11-16); the headline test stays a 1v1 |
 | Raw frame | The sim and the live bot emit the same frame (`bots/zkbot/policy/rawframe.py`), and one featurizer reads it in both |
 | Weapons | No projectiles.  Beams hit at once; other weapons' damage lands after the flight time, if the target is still within the blast |
 | Re-ordering | Costs what it costs in the engine: a plain move stops a unit until its next slow update, and a fight order costs nothing |
@@ -63,7 +63,7 @@ free-for-alls of up to 8 and chicken defense, each on the maps that hold it (01-
 | Economy | The policy runs its own economy too (the user, 2026-11-09).  Constructors and the commander are anchors like any unit.  An idle constructor stays idle until told: there's no default job.  There's no grid feature: the encoder reads every generator and pylon, and income from overdrive is in the reward |
 | Opening | A fixed script on both sides (`tools/policy_opening.py`), not the policy's |
 | Strategy z | The actor can be told a side's strategy (the army script's knobs).  The user goes on with `clone-8` told its variant (2026-11-10) |
-| Opponents | The scripts first, and self-play once tests reach 80% wins against them.  A league only if that stalls |
+| Opponents | In RL, itself in nine training games of ten and the scripts in the rest (the user, 2026-11-16); every test is against the scripts.  A league only if that stalls |
 | Terraform | Off |
 | Storage | Runs and data go on `D:\zk-learned` (`/mnt/d/zk-learned`), not C:.  C: backs WSL's disk, even though `df` in WSL shows far more free than C: has |
 

@@ -495,6 +495,9 @@ class SimEnv:
         self.weights = weights
         self._kind_names = list(self.kinds)
         self._kind_p = np.array(list(self.kinds.values())) / sum(self.kinds.values())
+        # Of games starting from now on, the share that aren't 1v1s, split among the other kinds as `kinds` weighs them, the rest
+        # 1v1s; None for `kinds`' own weights.  The trainer raises it by iteration (policy_train.Config.kinds_ramp).
+        self.other_kinds_share: float | None = None
         self._map_draws = {kind: self._map_choices(kind) for kind in self.kinds}
         shared = _SHARED.get(id(self.maps))
         shared = shared if shared is not None and shared[0] is self.maps else None
@@ -709,7 +712,19 @@ class SimEnv:
         """Drawn only where there's a choice, so that a 1v1-only environment's draws, and so its games, are as they were."""
         if len(self._kind_names) == 1:
             return self._kind_names[0]
-        return self._kind_names[int(self.rng.choice(len(self._kind_names), p=self._kind_p))]
+        return self._kind_names[int(self.rng.choice(len(self._kind_names), p=self.kind_shares()))]
+
+    def kind_shares(self) -> np.ndarray:
+        """How likely each of `kinds` is for a game starting now: its weight there, or with `other_kinds_share` that much among
+        the kinds that aren't 1v1s, in their weights' proportions, and the rest 1v1s."""
+        if self.other_kinds_share is None:
+            return self._kind_p
+        single = np.array([k == "1v1" for k in self._kind_names])
+        if not single.any() or single.all():
+            raise ValueError(f"other_kinds_share is between 1v1s and other kinds: the games' kinds are {', '.join(self._kind_names)}")
+        others = np.where(single, 0.0, self._kind_p)
+        share = min(max(float(self.other_kinds_share), 0.0), 1.0)
+        return np.where(single, 1.0 - share, share * others / others.sum())
 
     def _draw_difficulty(self) -> int:
         keys = list(self.chicken_difficulties)

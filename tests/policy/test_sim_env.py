@@ -474,6 +474,24 @@ def test_self_play_takes_its_share_of_new_games_only():
     assert set(env.mode) == {"mirror"} and len(env.policy_seats_to_act()) == 128
 
 
+def test_other_kinds_take_their_share_of_new_games_in_their_weights_proportions():
+    env = se.SimEnv(32, 3, ["fight"], threads=1, kinds={"1v1": 0.5, "teams": 0.3, "chicken": 0.2})
+    assert env.kind_shares().tolist() == pytest.approx([0.5, 0.3, 0.2]), "with no share given, the kinds' own weights"
+    env.other_kinds_share = 0.0
+    env.begin()
+    assert set(env.kind) == {"1v1"}
+    env.other_kinds_share = 0.25
+    assert env.kind_shares().tolist() == pytest.approx([0.75, 0.15, 0.1]) and set(env.kind) == {"1v1"}, "games under way stay as they are"
+    env.other_kinds_share = 1.0
+    for g in range(32):
+        env._reset(g)
+    assert set(env.kind) == {"teams", "chicken"}
+    teams_only = se.SimEnv(1, 3, ["fight"], threads=1, kinds={"teams": 0.5, "chicken": 0.5})
+    teams_only.other_kinds_share = 0.5
+    with pytest.raises(ValueError):
+        teams_only.kind_shares()        # no 1v1s to take the rest
+
+
 def test_a_finished_game_is_noted_from_the_policys_side():
     env = se.SimEnv(1, 3, ["fight"], threads=1)
     env.begin()

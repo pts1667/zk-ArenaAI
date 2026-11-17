@@ -518,7 +518,8 @@ def test_something_afloat_stands_on_the_water_and_the_rest_on_the_sea_bed():
     afloat, sunk = w.add("turretlaser", 0, 500.0, 500.0), w.add("factoryamph", 0, 900.0, 900.0)
     w.step(1)
     u = w.view(0).units
-    assert u["y"][u["uid"] == afloat][0] == pytest.approx(0.0, abs=1.0)
+    # A frame's y is a unit's base: an LLT rides the water at its waterline, 5 down (01-simulator.md, "Water").
+    assert u["y"][u["uid"] == afloat][0] == pytest.approx(-5.0, abs=1.0)
     assert u["y"][u["uid"] == sunk][0] == pytest.approx(-depth, abs=1.0)
 
 

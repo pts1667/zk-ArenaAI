@@ -89,6 +89,10 @@ constexpr double HOME_REACH = 300.0;          // one sent home is home within th
 //     the occasional Picket");
 //   * once the enemy has armed aircraft, AA by our first factory, a Razor then a Hacksaw in turn, one for each AA_PER_METAL of
 //     them;
+//   * once an enemy has been seen under water (zks_data_desc.under_water: a submarine, or what walks the sea bed in water
+//     deeper than its middle and radius), by a spot or extractor in water an Urchin in place of an LLT or Picket, as neither fires at
+//     what's under water (the user, 2026-11-16).  There, only an Urchin or a Gauss covers it from then on, and an Urchin
+//     covers nothing on land, its torpedoes keeping to the water;
 //   * at HEAVY_FROM_M metal a second, a Stinger by each extractor with HEAVY_WRECKS of wrecks within HEAVY_REACH of it (heavily
 //     contested, by the user's measure), or a Gauss where our turrets are getting destroyed (DYING_LOSSES finished ones lost
 //     within DYING_REACH in the last DYING_FOR), and so at the front too; neither within GIVE_UP_REACH of where one was lost
@@ -179,6 +183,7 @@ struct Pass {
     std::vector<int64_t> helping;   // what each ASSIST of this pass helps: every constructor helping is idle, so asked again
     int helpers(int64_t uid) const { return (int)std::count(helping.begin(), helping.end(), uid); }
     // Defences (Seat::defences_of): x, z and D_* of ours, finished, begun or sent, and of allies' that guard against the ground
+    // or in water
     std::vector<float> guards;
     int light = 0, heavy = 0, aa = 0, light_cap = 0;   // ours, by kind
     bool defence = false;           // one started this pass
@@ -188,7 +193,7 @@ struct Pass {
     std::vector<Hot> hot;           // our extractors with HEAVY_WRECKS of wrecks near them, most first
     void guard(float x, float z, int k) {
         guards.insert(guards.end(), {x, z, (float)k});
-        light += k == D_LLT || k == D_PICKET;
+        light += k == D_LLT || k == D_PICKET || k == D_URCHIN;
         heavy += k == D_STINGER || k == D_GAUSS;
         aa += k == D_RAZOR || k == D_HACKSAW;
     }
@@ -726,7 +731,7 @@ Job Seat::spot_job(const Ctx& c, int i, Pass& pass) {
         if (c.seconds >= LIGHT_FROM && pass.light < pass.light_cap && (armour_seen || contested({sx, sz}, c.seconds)) &&
             !covered(pass, {sx, sz}, LIGHT_COVER, false)) {
             if (pass.defence) continue;
-            Job j = defend(i, light_kind(pass), along({sx, sz}, enemy_base, LIGHT_AHEAD), LIGHT_SPREAD, pass);
+            Job j = defend(i, light_kind(pass, {sx, sz}), along({sx, sz}, enemy_base, LIGHT_AHEAD), LIGHT_SPREAD, pass);
             if (j.has) {
                 pass.claimed.push_back(sx);
                 pass.claimed.push_back(sz);
@@ -831,7 +836,7 @@ void Seat::watch(double seconds) {
 }
 
 // What guards what this pass: our defences, finished, begun or that a constructor was sent to start (one being built counts
-// once), and our allies' against the ground; the metal the enemy flies; and our heavily contested extractors.
+// once), and our allies' against the ground or in water; the metal the enemy flies; and our heavily contested extractors.
 void Seat::defences_of(const Ctx& c, Pass& pass, double income) const {
     const Data& d = *data;
     int extractors = 0;
@@ -854,7 +859,7 @@ void Seat::defences_of(const Ctx& c, Pass& pass, double income) const {
     }
     for (size_t a = 0; a < allies.size(); a++) {
         const int k = d.defence_of[ally_rows[a]];
-        if (k >= 0 && k <= D_GAUSS) pass.guards.insert(pass.guards.end(), {allies[a]->x, allies[a]->z, (float)k});
+        if (k >= 0 && (k <= D_GAUSS || k == D_URCHIN)) pass.guards.insert(pass.guards.end(), {allies[a]->x, allies[a]->z, (float)k});
     }
     pass.light_cap = std::min(LIGHT_MOST, std::max(LIGHT_LEAST, (int)(extractors * LIGHT_PER_EXTRACTOR)));
     for (size_t e = 0; e < enemies.size(); e++) {
@@ -873,12 +878,16 @@ void Seat::defences_of(const Ctx& c, Pass& pass, double income) const {
     std::stable_sort(pass.hot.begin(), pass.hot.end(), [](const Pass::Hot& a, const Pass::Hot& b) { return a.metal > b.metal; });
 }
 
-// Whether a defence against the ground (heavy: a Stinger or Gauss) stands within reach of p, ours or an ally's.
+// Whether a defence against the ground (heavy: a Stinger or Gauss) stands within reach of p, ours or an ally's.  An Urchin guards
+// only p in water, and there, once an enemy has been seen under water, only an Urchin or a Gauss does: they fire under water.
 bool Seat::covered(const Pass& pass, P2 p, double reach, bool heavy) const {
+    const bool in_water = wet(p), sunk = in_water && under_water_seen;
     for (size_t q = 0; q < pass.guards.size(); q += 3) {
         const int k = (int)pass.guards[q + 2];
-        if ((heavy ? k == D_STINGER || k == D_GAUSS : k <= D_GAUSS) && py_hypot(pass.guards[q] - p.x, pass.guards[q + 1] - p.z) <= reach)
-            return true;
+        const bool guards = heavy ? k == D_STINGER || k == D_GAUSS
+                            : sunk ? k == D_URCHIN || k == D_GAUSS
+                                   : k <= D_GAUSS || (k == D_URCHIN && in_water);
+        if (guards && py_hypot(pass.guards[q] - p.x, pass.guards[q + 1] - p.z) <= reach) return true;
     }
     return false;
 }
@@ -895,7 +904,9 @@ bool Seat::dying(P2 p) const {
     return n >= DYING_LOSSES;
 }
 
-int Seat::light_kind(const Pass& pass) const {
+// The light turret for p: an Urchin in water once an enemy has been seen under water, else an LLT, or a Picket every third.
+int Seat::light_kind(const Pass& pass, P2 p) const {
+    if (under_water_seen && wet(p)) return D_URCHIN;
     return armour_seen && pass.light % PICKET_EVERY == PICKET_EVERY - 1 ? D_PICKET : D_LLT;
 }
 
@@ -941,7 +952,7 @@ Job Seat::defence_job(const Ctx& c, int i, Pass& pass, double income) {
         }
         std::stable_sort(bare.begin(), bare.end(), [](const std::pair<double, P2>& a, const std::pair<double, P2>& b) { return a.first < b.first; });
         for (const auto& b : bare) {
-            Job j = defend(i, light_kind(pass), along(b.second, enemy_base, LIGHT_AHEAD), LIGHT_SPREAD, pass);
+            Job j = defend(i, light_kind(pass, b.second), along(b.second, enemy_base, LIGHT_AHEAD), LIGHT_SPREAD, pass);
             if (j.has) return j;
         }
     }
@@ -1087,13 +1098,17 @@ void Seat::eco(const Ctx& c) {
         noted[own[i]->uid] |= bits;
         for (int k = 0; k < 7; k++) finished[k] += (fresh >> k) & 1;
     }
-    // Defences: which of our spots armed enemies have come near, whether the enemy has armour, and our turrets lost
+    // Defences: which of our spots armed enemies have come near, whether the enemy has armour, whether one has been seen under
+    // water (a submarine rides on the water in the sim, so only its type tells), and our turrets lost
     {
         const Ground& g = *ground;
         for (size_t e = 0; e < enemies.size(); e++) {
             const int r = enemy_rows[e];
             if (!built(enemies[e])) continue;
             if (d.has(r, ZKS_TANK) || d.has(r, ZKS_SLOW_HEAVY)) armour_seen = true;
+            if (!under_water_seen && d.under_water[r] >= 0.0f && enemies[e]->y < -d.under_water[r] &&
+                std::binary_search(seen.begin(), seen.end(), enemies[e]->uid))
+                under_water_seen = true;
             if (!d.has(r, ZKS_ARMED) || !d.has(r, ZKS_MOBILE)) continue;
             for (int s = 0; s < g.n_spots && s < (int)spot_raided.size(); s++)
                 if (hypotf(enemies[e]->x - g.spots[3 * s], enemies[e]->z - g.spots[3 * s + 1]) <= CONTEST_REACH) spot_raided[s] = seconds;

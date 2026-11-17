@@ -1,4 +1,4 @@
-"""The trainer: minibatches within their budget, playing many games in pieces, the move to self-play, the card's memory shared
+"""The trainer: minibatches within their budget, playing many games in pieces, what its games are, the card's memory shared
 between runs, and a short run of the actor on latents (tests/policy/test_latent_actor.py has the actor itself)."""
 from __future__ import annotations
 
@@ -53,7 +53,8 @@ def test_a_minibatch_budgets_its_padded_size(learner):
 
 def test_a_minibatch_that_does_not_fit_is_done_in_runs_of_its_segments(learner, monkeypatch):
     """Each run's loss weighed by its share of the decisions, the gradient is the whole minibatch's; and the budget shrinks, once
-    in an iteration however many times it runs out, as the iteration's minibatches were planned before."""
+    in an iteration however many times it runs out, as the iteration's minibatches were planned before.  The next minibatch's
+    gradient adds to it."""
     weight = learner.trained[0]
     segments = [pt.Segment([None] * n, None, None, None, np.full(1, v)) for n, v in ((3, 1.0), (5, 2.0), (8, -1.0))]
 
@@ -72,6 +73,8 @@ def test_a_minibatch_that_does_not_fit_is_done_in_runs_of_its_segments(learner, 
         learner.token_budget = budget
     assert torch.allclose(weight.grad, torch.full_like(weight, (3 * 1.0 + 5 * 2.0 - 8 * 1.0) / 16))
     assert notes == [("tried", 1.0)] * 3 + [("minibatch_decisions", 16)]
+    learner._backward(segments[1:2], 0.2, lambda *a: None, 0.5)
+    assert torch.allclose(weight.grad, torch.full_like(weight, (3 * 1.0 + 5 * 2.0 - 8 * 1.0) / 16 + 0.5 * 2.0))
 
 
 def test_playing_in_pieces_decides_the_same_as_in_one(learner, monkeypatch):
@@ -93,56 +96,23 @@ def test_playing_in_pieces_decides_the_same_as_in_one(learner, monkeypatch):
         assert t.kind_mask[cut["anchor"][k][picked], cut["kind"][k][picked]].all()
 
 
-def _self_play():
-    return pt.SelfPlay(start_at=0.8, hold_below=0.7, per_iteration=0.01)
+def test_a_graphs_pass_takes_at_most_the_rows_it_is_given():
+    """Against itself the policy has every seat of a game: a collector's passes stay a seat a game wide, as its memory is sized."""
+    assert pt._act_slices([None] * 5, graphed=True) == [slice(0, 5)]
+    assert pt._act_slices([None] * 5, graphed=True, rows=2) == [slice(0, 2), slice(2, 4), slice(4, 6)]
 
 
-def test_self_play_waits_for_two_tests_that_beat_the_script():
-    plan = _self_play()
-    assert plan.advance() == 0.0
-    plan.note_test(0.95, 10)
-    assert plan.advance() == 0.0, "one good test is mostly luck"
-    plan.note_test(0.5, 20)
-    assert plan.advance() == 0.0
-    plan.note_test(0.9, 30)
-    assert plan.advance() == 0.0, "0.9 and 0.5"
-    plan.note_test(0.8, 40)
-    assert plan.started_at == 40 and plan.advance() == 0.01
-
-
-def test_self_play_grows_a_little_at_a_time_up_to_all_of_it():
-    plan = _self_play()
-    plan.note_test(0.8, 10)
-    plan.note_test(0.8, 20)
-    shares = [plan.advance() for _ in range(150)]
-    assert shares[0] == 0.01 and shares[49] == pytest.approx(0.5) and shares[-1] == 1.0
-    assert all(b >= a and b - a <= 0.0101 for a, b in zip(shares, shares[1:]))
-
-
-def test_self_play_pauses_if_the_script_starts_winning_and_never_goes_back():
-    plan = _self_play()
-    plan.note_test(0.8, 10)
-    plan.note_test(0.8, 20)
-    for _ in range(30):
-        plan.advance()
-    held = plan.share
-    plan.note_test(0.6, 30)
-    plan.note_test(0.6, 40)
-    assert plan.advance() == held and plan.started_at == 20
-    plan.note_test(0.9, 50)
-    assert plan.advance() > held, "0.6 and 0.9"
-
-
-def test_a_run_remembers_how_far_self_play_got(tmp_path, encoder_path):
-    cfg = pt.Config(decisions=0, games=2, iteration=4, latent_encoder=str(encoder_path))
-    workers = pt.DataWorkers(0, [], cfg.enabled_kinds)
-    first = pt.Learner(cfg, tmp_path, workers, "cpu")
-    first.self_play.note_test(0.8, 10)
-    first.self_play.note_test(0.9, 20)
-    first.self_play.share = 0.25
-    first.save()
-    second = pt.Learner(cfg, tmp_path, workers, "cpu")
-    assert second.resume() and second.self_play.share == 0.25 and second.self_play.started_at == 20 and second.self_play.tests == [0.8, 0.9]
+def test_training_games_are_against_itself_by_a_fixed_share_and_of_other_kinds_than_1v1s_by_the_iteration(learner):
+    held = learner.cfg, learner.iteration
+    try:
+        assert learner.games["self_play_share"] == 0.0 and learner.games["other_kinds_share"] is None, "the kinds' own weights"
+        learner.cfg = replace(learner.cfg, self_play=0.9, kinds_ramp=((500, 0.0), (2500, 0.5)))
+        shares = []
+        for learner.iteration in (0, 500, 1500, 2500, 4000):
+            shares.append(learner.games["other_kinds_share"])
+        assert shares == pytest.approx([0.0, 0.0, 0.25, 0.5, 0.5]) and learner.games["self_play_share"] == 0.9
+    finally:
+        learner.cfg, learner.iteration = held
 
 
 def test_runs_sharing_the_card_stay_inside_their_share():
@@ -381,6 +351,43 @@ def test_grpo_judges_each_branch_of_a_copied_game_against_the_other_and_trains_w
     learner.save()
     saved = torch.load(tmp_path / json.loads((tmp_path / "latest.json").read_text())["checkpoint"], weights_only=True)
     assert "critic" not in saved and "ema_critic" not in saved
+    # With data workers in processes, each minibatch's decisions are asked of them once, the next one's before this one's loss.
+    asked, before_loss = [], []
+
+    def batches(steps, regions):
+        asked.append(sum(map(len, steps)))
+        return [pt._worker_batch(([(f, id(b), n) for f, b, n in step], regions), learner.workers.state) for step in steps]
+
+    real_loss = learner._loss
+    monkeypatch.setattr(learner.workers, "batches", batches)
+    monkeypatch.setattr(learner.workers, "pool", object())
+    monkeypatch.setattr(learner, "token_budget", 1)         # a segment a minibatch
+    monkeypatch.setattr(learner, "_loss", lambda run, eps, note: (before_loss.append(len(asked)), real_loss(run, eps, note))[1])
+    learner.train(segments, np.random.default_rng(0))
+    assert len(segments) >= 3 and sorted(asked) == sorted(len(seg.steps) for seg in segments) and not learner.ahead
+    assert before_loss[:2] == [1, 3]
+
+
+def test_grpo_against_itself_judges_each_side_against_the_same_side_of_the_other_copies(tmp_path, encoder_path, monkeypatch):
+    """Every game the policy's against itself from the first (Config.self_play 1): both sides of a copy decide, each side's
+    branches are a group of their own, and with a zero-sum score what one side's decision gained its copy the other's lost."""
+    cfg = _config(encoder_path, games=2, group=2, horizon=(5.0, 10.0), self_play=1.0, terms=(("score", 1.0),))
+    env = pt.make_sim(cfg.games, cfg.seed)
+    learner = pt.Learner(cfg, tmp_path, pt.DataWorkers(0, env.bundles(), cfg.enabled_kinds), "cpu")
+    pt.set_games(env, learner.games)
+    # Each copy's score at a level of its own, one side's what the other's isn't.
+    monkeypatch.setattr(env, "reward_terms", lambda seat, names, b: np.full(len(names), (1.0 - 2.0 * env.team_of(seat)) * (1.0 + env.game_of(seat))))
+    segments, tally = pt.GroupCollector(learner, env, np.random.default_rng(1)).collect_tally(40)
+    assert set(env.mode) == {"mirror"} and tally.groups["branches"] >= 4
+    moments: dict[int, dict[int, list[float]]] = {}
+    for seg in segments:
+        for s in seg.steps:
+            moments.setdefault(s.slot, {}).setdefault(seg.group, []).append(float(s.advantages[0]))
+    whole = [list(sides.values()) for sides in moments.values() if sorted(map(len, sides.values())) == [2, 2]]
+    assert len(whole) >= 5
+    for one, other in whole:
+        assert sum(one) == pytest.approx(0.0) and sorted(one) == pytest.approx(sorted(-x for x in other))
+    assert any(abs(x) > 0.1 for one, _ in whole for x in one)
 
 
 def test_spo_bound_keeps_the_pull_back_on_a_ratio_what_it_is_at_the_edge():

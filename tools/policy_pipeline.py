@@ -33,7 +33,8 @@ The stages:
   eval         the last clone against the army script, z from its variant, in 1v1s, the headline: ROOT/evals/final.json
   eval-KIND    the same in games of each of --test-kinds alone: ROOT/evals/final-KIND.json
   ppo          policy_train.py --init the last clone, --z variant, --fine-sim, with the PPO smoke run's flags (03-training.md,
-               "From a clone") at a run's size, playing --kinds and testing --test-kinds besides the 1v1 test, to ROOT/ppo
+               "From a clone") at a run's size, nine games in ten against itself, 1v1s at first and --kinds' others mixed in
+               from iteration 500 to half of them at 2,500, testing --test-kinds besides the 1v1 test, to ROOT/ppo
 
 Every stage that plays games plays the kinds of game --kinds says (1v1s, team games, free-for-alls, chicken games:
 policy_sim_env.GAME_KINDS), in batches with --slots teams a game, and chicken games at --chicken-difficulties.  The tests' headline
@@ -77,8 +78,9 @@ CLONE_FLAGS = ["--decide-every", "6", "--samples", "4", "--accumulate", "16", "-
 # A win sooner is worth up to 0.1 more (the user, 2026-11-10); the lead rule fades by policy_train's default --lead-fade.  Muon
 # trains the critic's hidden matrices (the user, 2026-11-12) at about 13x its Adam rate, as cloning's 0.008 is to its 6e-4.  The
 # reward's terms apart, a head of the critic each (the user, 2026-11-12; 03-training.md, "Reward"), whose economy term is income's,
-# so --income-weight weighs only the one reward they replace, "blend".
-PPO_FLAGS = ["--variants", "--z", "variant", "--fine-sim", "--decide-every", "6", "--segment", "16",
+# so --income-weight weighs only the one reward they replace, "blend".  Nine training games in ten are the policy against
+# itself, the rest against the scripts (the user, 2026-11-16); `ramp_flags` has their kinds.
+PPO_FLAGS = ["--variants", "--z", "variant", "--fine-sim", "--decide-every", "6", "--segment", "16", "--self-play", "0.9",
              "--no-concurrent", "--critic-bins", "51", "--critic-span", "2", "--kl-start", "0.5",
              "--clone-weight", "0.5", "--economy-start", "0.25", "--economy-end", "1", "--income-weight", "0.5",
              "--speed-weight", "0.1", "--lr-start", "1e-5", "--lr-end", "3e-6", "--critic-lr", "3e-4", "--critic-muon-lr", "0.004",
@@ -125,6 +127,13 @@ def recorded(data: pathlib.Path) -> bool:
     """Whether --data holds a finished recording: the recorder's summary.json, or the sides.npz that reading it leaves (army-6
     was stopped before it wrote its summary)."""
     return (data / "summary.json").exists() or (data / "sides.npz").exists()
+
+
+def ramp_flags(kinds: list[str]) -> list[str]:
+    """PPO's --kinds-ramp where the run's kinds are 1v1s and others: 1v1s alone till iteration 500, then the others mixed in, up
+    to half the training games from iteration 2,500 (the user, 2026-11-16)."""
+    names = {k.partition(":")[0] for k in kinds}
+    return ["--kinds-ramp", "500:0", "2500:0.5"] if "1v1" in names and len(names) > 1 else []
 
 
 def kinds_flags(args: argparse.Namespace, kinds: list[str] | None = None, difficulties: bool = True, slots: bool = True) -> list:
@@ -228,7 +237,7 @@ def stages(args: argparse.Namespace) -> list[Stage]:
                                      "--games", args.ppo_games, "--iteration", args.ppo_iteration, "--decisions", args.ppo_decisions,
                                      "--hours", args.ppo_hours, "--critic-warmup", args.ppo_critic_warmup,
                                      "--replays", root / "replays" / "ppo", "--replay-hours", args.replay_hours if args.replay_games else 0,
-                                     "--replay-games", args.replay_games, *kinds_flags(args),
+                                     "--replay-games", args.replay_games, *kinds_flags(args), *ramp_flags(args.kinds),
                                      *(["--test-kinds", *args.test_kinds] if args.test_kinds else []), *PPO_FLAGS,
                                      *shlex.split(args.ppo_args)), own=ppo))
     return out

@@ -48,6 +48,13 @@ World::World(const Catalog* c, const Map* m, uint64_t seed, int behaviour_)
     grid_rows = std::max(1, int(std::ceil(m->depth() / GRID_CELL)));
     cell_start.resize(size_t(n_allies) * grid_cells() + 1);
     for (const auto& t : c->types) cat_max_footprint = std::max(cat_max_footprint, t.footprint_radius);
+    // Water is where the ground is below the surface.  A map whose ground never is has none, though the engine would count a unit
+    // standing at height 0 in water: Map.flat's is, and so is Deserted Gully's, and neither is meant as sea.
+    for (const float h : m->height)
+        if (h < 0.0f) {
+            has_water = true;
+            break;
+        }
 }
 
 void World::set_teams(int n, const int32_t* ally_of_team) {
@@ -143,6 +150,14 @@ int World::add(int t, int owner, float px, float pz, float head, float hp_frac, 
     burrow_at.push_back(frame + BURROW_FRAMES);
     jump.emplace_back();
     if (d.jump_range > 0.0f) jumpers.push_back(u);
+    base_at.push_back(std::max(map->height_at(px, pz), d.water_y));
+    wet.push_back(uint8_t((base_at.back() <= 0.0f ? WET_IN : 0) | (base_at.back() + d.mid_height + d.body_radius < 0.0f ? WET_UNDER : 0)));
+    floating.push_back(0);
+    float_up.push_back(0);
+    float_y.push_back(0.0f);
+    float_speed.push_back(0.0f);
+    float_since.push_back(-1);
+    if (cat->float_def(t)) floaters.push_back(u);
     skid.emplace_back();
     {
         // An aircraft starts on the ground, as one the engine makes does, and takes off when it has somewhere to be.
@@ -327,6 +342,7 @@ void World::step(int ticks) {
 
 void World::tick() {
     { ZK_PROF(GRID); drop_the_dead(); rebuild_grid(); }
+    if (has_water) update_water();
     if (tick_count % 3 == 0) {  // the engine's 15-frame weapon update
         { ZK_PROF(CLOAK); update_cloak(); }
         if (behaviour == ZK_BEHAVIOUR_ADVANCE) { ZK_PROF(NEAREST); find_nearest(); }
@@ -354,6 +370,7 @@ void World::tick() {
             update_jumps();
             update_air();
             update_transports();
+            if (has_water) update_floats();
         }
         move_units();
     }

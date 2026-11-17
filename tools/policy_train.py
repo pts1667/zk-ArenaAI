@@ -102,9 +102,9 @@ class Config:
     concurrent: bool = True         # collect the next iteration during this one's training
     decide_every: int = 1           # in 15-frame slots: 1 is 2 Hz, 2 is 1 Hz.  Scripted opponents keep their own rate.
     hours: float = 0.0              # stop after this long as well as at `decisions`, if not 0
-    self_play_at: float = 0.8       # wins against the script over the last two tests that start the move to self-play
-    self_play_holds_below: float = 0.7      # and over the same two, what pauses it
-    self_play_per_iteration: float = 0.01   # share of new games added each iteration: 100 iterations from none to all
+    # The share of training games the policy plays against itself, every player's team of them (policy_sim_env's mode "mirror"),
+    # each side's decisions learnt from; the rest it plays against the scripts, as it does every test.
+    self_play: float = 0.0
     latent_encoder: str = policy_latent.ENCODER     # the trained frame encoder whose latents the actor reads
     diversity: float = 0.05         # a finished unit of a type the policy rarely makes is worth up to this (policy_sim_env._diversity;
                                     # 03-training.md, "Reward"): about a 300-metal unit's loss mid-game
@@ -142,6 +142,10 @@ class Config:
     # them needs, 2 for 1v1s alone.  The headline test stays a 1v1 against the script, so that runs stay comparable; `test_kinds`
     # adds a test of each of those kinds, the policy on team 0 and the scripts on every other (the user, 2026-11-10).
     kinds: tuple[tuple[str, float], ...] = (("1v1", 1.0),)
+    # The share of training games that aren't 1v1s, by iteration, linear between and the last after, as kl_fade: split among
+    # `kinds`' other kinds as they're weighed there, the rest 1v1s (policy_sim_env.other_kinds_share).  (): `kinds`' own weights
+    # throughout.  The pipeline's: none till iteration 500, half from 2,500 (the user, 2026-11-16).
+    kinds_ramp: tuple[tuple[int, float], ...] = ()
     slots: int = 0
     test_kinds: tuple[str, ...] = ()
     # How likely each chicken difficulty is, by name (zksim.CHICKEN_DIFFICULTIES): () for policy_sim_env.CHICKEN_DIFFICULTY_WEIGHTS.
@@ -277,37 +281,17 @@ def fade_share(iteration: int, fade: tuple[tuple[int, float], ...]) -> float:
     return float(np.interp(iteration, at, share))
 
 
+def set_games(env, games: dict[str, float | None]) -> None:
+    """Learner.games, for the env's games starting from now on."""
+    for name, value in games.items():
+        setattr(env, name, value)
+
+
 def beta(progress: float) -> float:
     """How much of the reward is the final result: 03-training.md, "Reward"."""
     if progress < 0.1:
         return 0.0
     return min(0.9, 0.9 * (progress - 0.1) / 0.5)
-
-
-@dataclass
-class SelfPlay:
-    """How much of training is against itself: none until it beats the script, then more each iteration, pausing if it slips."""
-    start_at: float
-    hold_below: float
-    per_iteration: float
-    share: float = 0.0
-    started_at: int = -1            # iteration
-    tests: list[float] = field(default_factory=list)
-
-    def _recent(self) -> float | None:
-        """Two tests, since one of 64 games has a standard error of about 5 points."""
-        return sum(self.tests[-2:]) / 2.0 if len(self.tests) >= 2 else None
-
-    def note_test(self, wins: float, iteration: int) -> None:
-        self.tests.append(wins)
-        recent = self._recent()
-        if self.started_at < 0 and recent is not None and recent >= self.start_at:
-            self.started_at = iteration
-
-    def advance(self) -> float:
-        if self.started_at >= 0 and self._recent() >= self.hold_below:
-            self.share = min(1.0, self.share + self.per_iteration)
-        return self.share
 
 
 @dataclass
@@ -439,12 +423,14 @@ class DataWorkers:
             self.pool.join()
 
 
-def _act_slices(items: list[fz.Tensors], graphed: bool = False) -> list[slice]:
+def _act_slices(items: list[fz.Tensors], graphed: bool = False, rows: int = 0) -> list[slice]:
     """Seats in order, cut where the next would take a forward pass's padded pairs over the limit.  graphed: all at once, as a
     graph pads every batch to the widest yet (policy_graphs.py), and this actor's attention keeps no table of pairs: 64 seats of
-    up to 1,000 tokens each are a few hundred MB."""
+    up to 1,000 tokens each are a few hundred MB; or `rows` at a time, if not 0, as a graph's rows only grow too and its memory
+    with them."""
     if graphed:
-        return [slice(0, len(items))]
+        step = rows or max(len(items), 1)
+        return [slice(at, at + step) for at in range(0, max(len(items), 1), step)]
     out, start, most = [], 0, 0
     for i, t in enumerate(items):
         tokens = len(t.unit_x) + len(t.reg_x) + len(t.site_x) + len(t.feat_x) + 2
@@ -497,11 +483,12 @@ class Player:
         out.update({k: v.cpu().numpy() for k, v in keep.items()})
         return out, value.float().cpu().numpy(), new_history.float(), new_seen.float()
 
-    def act(self, frames: list[tuple[rf.Frame, bd.Bundle, np.ndarray]], history: torch.Tensor, seen: torch.Tensor, z: torch.Tensor | None = None):
+    def act(self, frames: list[tuple[rf.Frame, bd.Bundle, np.ndarray]], history: torch.Tensor, seen: torch.Tensor, z: torch.Tensor | None = None,
+            rows: int = 0):
         """Forward passes for many games, as few as fit the memory.  Returns tensors, numpy actions, values and the new state.
-        z: each seat's strategy (policy_latent.Z_DIM), or None."""
+        z: each seat's strategy (policy_latent.Z_DIM), or None.  rows: the most seats a graph's pass takes (0: all of them)."""
         items = self._features(frames)
-        parts = [self._forward(items[s], history[s], seen[s], None if z is None else z[s]) for s in _act_slices(items, self.graphs is not None)]
+        parts = [self._forward(items[s], history[s], seen[s], None if z is None else z[s]) for s in _act_slices(items, self.graphs is not None, rows)]
         if len(parts) == 1:
             return (items, *parts[0])
         out = {k: _stack_padded([p[0][k] for p in parts]) for k in parts[0][0]}
@@ -567,8 +554,8 @@ class Learner:
         self.actions_scale = 1.0                    # GRPO: the iteration's mean actions a decision, done included (_update_loss)
         self.splits = 0
         self.shrunk = False                         # this iteration
+        self.ahead: dict[tuple, object] = {}        # the next minibatch's decisions, asked for already (_fetch_ahead)
         self.memory_limit = 0.0                     # what the learner may reserve on the card, if it's on one
-        self.self_play = SelfPlay(cfg.self_play_at, cfg.self_play_holds_below, cfg.self_play_per_iteration)
         self.autocast = torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda")
         self.graphs = cfg.graphs and not cfg.concurrent
         self.player = Player(self.actor, None if cfg.group else self.critic, workers, device, self.graphs)     # GRPO plays no critic
@@ -645,13 +632,25 @@ class Learner:
             batches.append(current)
         return [batches[int(k)] for k in rng.permutation(len(batches))]
 
+    def _featurize(self, batch: list[Segment]):
+        """A minibatch's decisions as the data workers make them ready for the GPU, in chunks: with processes, begun now."""
+        work = [(step.frame, seg.bundle, seg.names) for seg in batch for step in seg.steps]
+        chunks = [work[i:i + FLAT_CHUNK] for i in range(0, len(work), FLAT_CHUNK)]
+        return self.workers.batches(chunks, max(seg.bundle.regions for seg in batch))
+
+    def _fetch_ahead(self, batch: list[Segment]) -> None:
+        """The next minibatch's decisions asked of the data workers while the GPU is on this one's: `_loss` waited on them for a
+        fifth of a minibatch's time, the GPU with nothing of the learner's to do (py-spy, 2026-11-16).  `_loss` takes them when
+        it's handed these same segments; a minibatch done again in parts is asked for then."""
+        if self.workers.pool is not None:
+            self.ahead[tuple(map(id, batch))] = self._featurize(batch)
+
     def _loss(self, batch: list[Segment], eps: float, note) -> torch.Tensor:
         """Every decision of each segment in one forward pass, from the latents it was played with."""
         device = self.device
         steps = [step for seg in batch for step in seg.steps]
-        work = [(step.frame, seg.bundle, seg.names) for seg in batch for step in seg.steps]
-        chunks = [work[i:i + FLAT_CHUNK] for i in range(0, len(work), FLAT_CHUNK)]
-        whole = pm.join(list(self.workers.batches(chunks, max(seg.bundle.regions for seg in batch)))).to(device)
+        ahead = self.ahead.pop(tuple(map(id, batch)), None)
+        whole = pm.join(list(ahead if ahead is not None else self._featurize(batch))).to(device)
         lengths = [len(seg.steps) for seg in batch]
         latents = np.zeros((len(batch), max(lengths), *steps[0].latents.shape), np.float32)
         for i, seg in enumerate(batch):
@@ -769,6 +768,18 @@ class Learner:
         return fade_share(self.iteration, self.cfg.lead_fade)
 
     @property
+    def other_kinds_share(self) -> float | None:
+        """The share of the training games starting now that aren't 1v1s (Config.kinds_ramp); None without a ramp."""
+        return fade_share(self.iteration, self.cfg.kinds_ramp) if self.cfg.kinds_ramp else None
+
+    @property
+    def games(self) -> dict[str, float | None]:
+        """What the training games starting now are, as policy_sim_env.SimEnv's attributes (`set_games`): who runs the policy's
+        economy in them, who plays its enemies, whether a lead can end them, and their kinds.  A test's are its own (`evaluate`)."""
+        return {"policy_economy_share": self.economy_share, "self_play_share": self.cfg.self_play, "lead_share": self.lead_share,
+                "other_kinds_share": self.other_kinds_share}
+
+    @property
     def advising(self) -> bool:
         """Whether the scripts should advise in what's collected now: while the cloning loss has weight this iteration or the next,
         which is when what's collected concurrently trains."""
@@ -784,36 +795,34 @@ class Learner:
         for group in self.muon.param_groups if self.muon is not None else ():
             group["lr"] = (cfg.actor_muon_lr * actor if group["role"] == "actor" else cfg.critic_muon_lr * lr) / cfg.lr_start
 
-    def _restore(self, kept: list | None) -> None:
-        """The parameters' gradients back to `kept` (`_backward`), or to none."""
-        if kept is None:
-            self.optimizer.zero_grad(set_to_none=True)
-            if self.muon is not None:
-                self.muon.zero_grad(set_to_none=True)
-            return
-        for p, g in zip(self.trained, kept):
-            p.grad = None if g is None else g.clone()
+    def _clear_grads(self) -> None:
+        self.optimizer.zero_grad(set_to_none=True)
+        if self.muon is not None:
+            self.muon.zero_grad(set_to_none=True)
 
     def _backward(self, batch: list[Segment], eps: float, note, share: float = 1.0) -> None:
-        """The minibatch's gradient, `share` of it, added to what the parameters hold (`train` clears them at each step).  One that
-        doesn't fit the card is done again in 2, then 4... runs of its segments, each loss weighed by its share of the decisions,
-        from the gradient as it was before, and the budget shrinks for the rest of the run."""
+        """The minibatch's gradient, `share` of it, added to what the parameters hold (`train` clears them at each step).  It's
+        taken apart from theirs and added once it's whole, so one that doesn't fit the card leaves theirs as it was (copying
+        theirs first, to put back, was an eighth of training's time: py-spy, 2026-11-16).  That one is done again in 2, then
+        4... runs of its segments, each loss weighed by its share of the decisions, and the budget shrinks for the rest of the
+        run."""
         decisions = sum(len(seg.steps) for seg in batch)
-        kept = [None if p.grad is None else p.grad.clone() for p in self.trained] if any(p.grad is not None for p in self.trained) else None
         parts = 1
         while True:
             notes = []
+            grads = part = None
             try:
                 for piece in np.array_split(np.arange(len(batch)), parts):
                     run = [batch[int(k)] for k in piece]
                     weight = share * sum(len(seg.steps) for seg in run) / decisions
-                    (self._loss(run, eps, lambda *a: notes.append(a)) * weight).backward()
+                    part = torch.autograd.grad(self._loss(run, eps, lambda *a: notes.append(a)) * weight, self.trained, allow_unused=True)
+                    grads = list(part) if grads is None else [b if a is None else a if b is None else a + b for a, b in zip(grads, part)]
                 break
             except torch.OutOfMemoryError:
                 if parts >= len(batch):
                     raise
-            # Out of the handler, so the failed attempt's tensors are freed; and the gradient as it was.
-            self._restore(kept)
+            # Out of the handler, so the failed attempt's tensors are freed.
+            grads = part = None
             torch.cuda.empty_cache()
             parts = min(2 * parts, len(batch))
             self.splits += 1
@@ -821,6 +830,12 @@ class Learner:
                 self.shrunk = True
                 self.token_budget = int(self.token_budget * SPLIT_SHRINK)
             print(json.dumps({"split": parts, "decisions": decisions, "token_budget": self.token_budget}), flush=True)
+        more = [(p, g) for p, g in zip(self.trained, grads) if g is not None and p.grad is not None]
+        for p, g in zip(self.trained, grads):
+            if g is not None and p.grad is None:
+                p.grad = g.contiguous()         # its own memory, to add the next ones in place: a sum's gradient is one number, expanded
+        if more:
+            torch._foreach_add_([p.grad for p, _ in more], [g for _, g in more])
         for a in notes:
             note(*a)
         note("minibatch_decisions", decisions)
@@ -846,13 +861,20 @@ class Learner:
         peaks = [0, 0]
         log = (self.run / "minibatches.jsonl").open("a") if self.memory_limit else None
         for _ in range(cfg.passes):
-            for batches in self._plan(segments, rng):
+            plan = self._plan(segments, rng)
+            # One minibatch ahead of the GPU (_fetch_ahead).
+            self.ahead = {}
+            coming = iter([batch for batches in plan for batch in batches][1:])
+            for batches in plan:
                 total = sum(len(seg.steps) for batch in batches for seg in batch)
-                self._restore(None)
+                self._clear_grads()
                 for batch in batches:
                     if log is not None:
                         torch.cuda.reset_peak_memory_stats()
                     splits = self.splits
+                    following = next(coming, None)
+                    if following is not None:
+                        self._fetch_ahead(following)
                     self._backward(batch, eps, note, sum(len(seg.steps) for seg in batch) / total)
                     if log is not None:
                         allocated, reserved = torch.cuda.max_memory_allocated(), torch.cuda.max_memory_reserved()
@@ -989,11 +1011,11 @@ class Learner:
         cfg = self.cfg
         eps = cfg.epsilon_start + (cfg.epsilon_end - cfg.epsilon_start) * self.progress
         total = sum(len(seg.steps) for seg in segments)
-        self._restore(None)
+        self._clear_grads()
         for batch in self._minibatches(segments, rng):
             self._backward(batch, eps, lambda *a: None, sum(len(seg.steps) for seg in batch) / total)
         out = torch.cat([(torch.zeros_like(p) if p.grad is None else p.grad).flatten().float() for p in self.actor_trained])
-        self._restore(None)
+        self._clear_grads()
         return out
 
     def _plan(self, segments: list[Segment], rng: np.random.Generator) -> list[list[list[Segment]]]:
@@ -1086,7 +1108,7 @@ class Learner:
         muon = {"muon": self.muon.state_dict()} if self.muon is not None else {}
         torch.save({"actor": self.actor.state_dict(), **critic, "optimizer": self.optimizer.state_dict(), **ema, **muon,
                     "size": asdict(self.actor.size),
-                    "iteration": self.iteration, "decisions": self.decisions, "entropy_coef": self.entropy_coef, "self_play": asdict(self.self_play), "lr_scale": self.lr_scale,
+                    "iteration": self.iteration, "decisions": self.decisions, "entropy_coef": self.entropy_coef, "lr_scale": self.lr_scale,
                     "terms": list(self.term_names), "warm_until": self.warm_until,
                     "lineages": [list(r) for r in self.lineages], "resign_at": self.resign_at}, temp)
         os.replace(temp, directory / name)
@@ -1125,8 +1147,6 @@ class Learner:
         self.lr_scale = state.get("lr_scale", 1.0)
         self.lineages.extend(tuple(r) for r in state.get("lineages", ()))
         self.resign_at = state.get("resign_at")
-        if "self_play" in state:
-            self.self_play = SelfPlay(**state["self_play"])
         return True
 
 
@@ -1288,7 +1308,10 @@ class Collector:
         frames = [(env.frame(seat), env.bundle_of(seat), current[seat].names) for seat in acting]
         index = torch.as_tensor(acting, device=learner.device)
         told = seat_z(env, acting, cfg.z)
-        items, out, value, new_history, new_seen = self.player.act(frames, seats.history[index], seats.seen[index], _z_tensor(told, learner.device))
+        # A pass of a seat a game at most, which a collector's part of the card is sized for: against itself the policy has every
+        # player's seat of a game, 2 to 8 of them.
+        items, out, value, new_history, new_seen = self.player.act(frames, seats.history[index], seats.seen[index], _z_tensor(told, learner.device),
+                                                                   rows=env.count)
         for k, seat in enumerate(acting):
             t = items[k]
             raw = frames[k][0]
@@ -1369,7 +1392,8 @@ class Collector:
         if acting:
             frames = [(env.frame(seat), env.bundle_of(seat), current[seat].names) for seat in acting]
             index = torch.as_tensor(acting, device=learner.device)
-            _, _, value, _, _ = self.player.act(frames, seats.history[index], seats.seen[index], _z_tensor(seat_z(env, acting, cfg.z), learner.device))
+            _, _, value, _, _ = self.player.act(frames, seats.history[index], seats.seen[index], _z_tensor(seat_z(env, acting, cfg.z), learner.device),
+                                                rows=env.count)
             for k, seat in enumerate(acting):
                 tr = current[seat]
                 tr.bootstrap = value[k].copy()
@@ -1895,7 +1919,7 @@ def train(cfg: Config, run: pathlib.Path, make_env, device: str = "cuda") -> Non
     rng = np.random.default_rng(cfg.seed + learner.iteration)
     learner.economy_share = cfg.economy_start + (cfg.economy_end - cfg.economy_start) * learner.progress
     if remote is None:
-        env.lead_share = learner.lead_share         # from the first games, which the collector starts
+        set_games(env, learner.games)       # from the first games, which the collector starts
         collector = (GroupCollector if cfg.group else Collector)(learner, env, np.random.default_rng((cfg.seed, learner.iteration)))
     else:
         remote.start(learner, cfg.seed + learner.iteration, device)
@@ -1904,7 +1928,6 @@ def train(cfg: Config, run: pathlib.Path, make_env, device: str = "cuda") -> Non
     collect_s = train_s = 0.0
     log = (run / "metrics.jsonl").open("a")
     began = last_replays = time.perf_counter()
-    env.self_play_share = learner.self_play.share
     test = remote.evaluate if remote is not None else functools.partial(evaluate, make_env=make_env)
 
     def tests() -> dict[str, float]:
@@ -1922,8 +1945,6 @@ def train(cfg: Config, run: pathlib.Path, make_env, device: str = "cuda") -> Non
             with (run / "tests.jsonl").open("a") as file:
                 file.write(json.dumps({"iteration": learner.iteration, "decisions": learner.decisions, "opponent": opponent,
                                        **({"kind": kind} if kind else {}), "games": result["records"]}) + "\n")
-            if name == "eval_fight":
-                learner.self_play.note_test(result["win_rate"], learner.iteration)
         return out
 
     if learner.iteration == 0 and cfg.eval_every * cfg.iteration <= cfg.decisions:
@@ -1934,9 +1955,10 @@ def train(cfg: Config, run: pathlib.Path, make_env, device: str = "cuda") -> Non
         print(f"it 0 {({k: round(v, 3) for k, v in first.items() if k.startswith('eval_') and isinstance(v, float)})}", flush=True)
     while learner.decisions < cfg.decisions:
         learner.economy_share = cfg.economy_start + (cfg.economy_end - cfg.economy_start) * learner.progress
-        env.policy_economy_share = learner.economy_share
-        # The training games' only: a test makes its own, with the rule in every game.  Collectors are sent it with each collection.
-        lead_share = env.lead_share = learner.lead_share
+        # The training games' only: a test makes its own, 1v1s against the script with the lead rule in every game.  Collectors are
+        # sent them with each collection.
+        now = learner.games
+        set_games(env, now)
         if remote is None and cfg.group:
             collector.measuring, collector.resign_at = learner.resign_state
         t0 = time.perf_counter()
@@ -1971,7 +1993,10 @@ def train(cfg: Config, run: pathlib.Path, make_env, device: str = "cuda") -> Non
         metrics.update(iteration=learner.iteration, total_decisions=learner.decisions, collect_s=collect_s, wait_s=t1 - t0, train_s=train_s,
                        collect_rate=metrics["decisions"] / max(collect_s, 1e-9), train_rate=metrics["decisions"] * cfg.passes / train_s,
                        overall_rate=metrics["decisions"] / (t2 - t0), game_minutes=learner.decisions * cfg.decide_every / 120.0,
-                       beta=beta(learner.progress), entropy_coef=dict(learner.entropy_coef), lead_share=lead_share)
+                       beta=beta(learner.progress), entropy_coef=dict(learner.entropy_coef), lead_share=now["lead_share"],
+                       self_play_share=now["self_play_share"])
+        if now["other_kinds_share"] is not None:
+            metrics["other_kinds_share"] = now["other_kinds_share"]
         if device == "cuda":        # the most this process's allocator held while training, for sizing gpu_share's parts
             metrics.setdefault("learner_reserved_gb", torch.cuda.max_memory_reserved() / 2**30)
             metrics.setdefault("learner_allocated_gb", torch.cuda.max_memory_allocated() / 2**30)
@@ -1987,7 +2012,6 @@ def train(cfg: Config, run: pathlib.Path, make_env, device: str = "cuda") -> Non
                 "prefix": f"it{learner.iteration:05d}-", "info": {"iteration": learner.iteration, "decisions": learner.decisions, "hours": round(hours, 2)}})
             metrics["replays_win_rate"], metrics["replays_seconds"] = result["win_rate"], time.perf_counter() - tested
             last_replays = time.perf_counter()
-        env.self_play_share = metrics["self_play_share"] = learner.self_play.advance()
         if learner.iteration % cfg.checkpoint_every == 0:
             learner.save()
         log.write(json.dumps(metrics) + "\n")
@@ -2043,8 +2067,8 @@ def grad_check(cfg: Config, run: pathlib.Path, make_env, decisions: int, splits:
     learner = Learner(cfg, run, workers, device)
     learner.resume()
     learner.entropy_coef = {h: 0.0 for h in HEADS}
-    env.policy_economy_share = learner.economy_share = cfg.economy_start + (cfg.economy_end - cfg.economy_start) * learner.progress
-    env.lead_share = learner.lead_share
+    learner.economy_share = cfg.economy_start + (cfg.economy_end - cfg.economy_start) * learner.progress
+    set_games(env, learner.games)
     rng = np.random.default_rng(cfg.seed)
     segments, metrics = GroupCollector(learner, env, np.random.default_rng((cfg.seed, learner.iteration))).collect(decisions)
     scales = learner.prepare(segments)
@@ -2124,6 +2148,13 @@ def main() -> None:
     ap.add_argument("--kinds", nargs="+", default=[f"{k}:{w:g}" for k, w in Config.kinds], metavar="KIND:WEIGHT",
                     help="kinds of game and how likely each, among 1v1, teams, ffa and chicken, as 1v1:0.5 teams:0.2 ffa:0.2 chicken:0.1 "
                          "(default: %(default)s)")
+    ap.add_argument("--kinds-ramp", nargs="*", default=[f"{i}:{s:g}" for i, s in Config.kinds_ramp], metavar="ITERATION:SHARE",
+                    help="the share of training games that aren't 1v1s, by iteration, as --kl-fade: split among --kinds' other kinds "
+                         "as they're weighed there, the rest 1v1s (500:0 2500:0.5: none till iteration 500, half from 2500); "
+                         "without it, --kinds' own weights throughout")
+    ap.add_argument("--self-play", type=float, default=Config.self_play,
+                    help="the share of training games the policy plays against itself, every player's team of them; the rest are "
+                         "against the scripts, as every test is")
     ap.add_argument("--slots", type=int, default=Config.slots, help="teams a game has room for; 0: what the biggest of --kinds needs")
     ap.add_argument("--test-kinds", nargs="*", default=list(Config.test_kinds),
                     help="kinds of game to test the policy at too, on team 0, besides the 1v1 test that's the headline")
@@ -2215,14 +2246,20 @@ def main() -> None:
         ap.error("--z variant needs --variants: without them there are no knobs to tell")
     if args.group and (args.group < 2 or args.games % (args.group * max(args.collectors, 1))):
         ap.error(f"--group: {args.games} games don't make groups of {args.group} in each of {max(args.collectors, 1)} collectors")
+    if not 0.0 <= args.self_play <= 1.0:
+        ap.error("--self-play is a share of the games, 0 to 1")
     fades = {}
-    for name in ("kl_fade", "clone_fade", "lead_fade"):
+    for name in ("kl_fade", "clone_fade", "lead_fade", "kinds_ramp"):
         fade = fades[name] = tuple((int(i), float(s)) for i, s in (point.split(":") for point in getattr(args, name)))
         if any(a[0] >= b[0] for a, b in zip(fade, fade[1:])):
             ap.error(f"--{name.replace('_', '-')}'s iterations must rise")
     import policy_sim_env
     try:
         kinds = policy_sim_env.parse_kinds(args.kinds)
+        if fades["kinds_ramp"] and not (kinds.get("1v1", 0.0) > 0.0 and any(w > 0.0 for k, w in kinds.items() if k != "1v1")):
+            raise ValueError("--kinds-ramp is between 1v1s and --kinds' other kinds: --kinds needs both")
+        if any(not 0.0 <= s <= 1.0 for _, s in fades["kinds_ramp"]):
+            raise ValueError("--kinds-ramp's shares are of the games, 0 to 1")
         policy_sim_env.parse_kinds(args.test_kinds)
         difficulties = {policy_sim_env.zksim.CHICKEN_DIFFICULTIES[d]: w for d, w in
                         policy_sim_env.difficulty_weights(args.chicken_difficulties).items()} if args.chicken_difficulties else {}
@@ -2244,7 +2281,7 @@ def main() -> None:
                  group=args.group, horizon=tuple(args.horizon), group_scale=args.group_scale, reward_to_go=args.reward_to_go,
                  group_step=args.group_step, economy_change=args.economy_change, adv_clip=args.adv_clip, spo_bound=args.spo_bound,
                  entropy_base=args.entropy_base, eval_games=args.eval_games, bootstrap=args.bootstrap, resign=args.resign,
-                 resign_free=args.resign_free, resign_false=args.resign_false, resign_least=args.resign_least)
+                 resign_free=args.resign_free, resign_false=args.resign_false, resign_least=args.resign_least, self_play=args.self_play)
     if args.action_kinds:
         cfg.enabled_kinds = tuple(int(k) for k in args.action_kinds.split(","))
     run = pathlib.Path(args.run)

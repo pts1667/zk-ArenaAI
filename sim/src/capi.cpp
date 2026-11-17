@@ -348,6 +348,16 @@ void zk_catalog_eggs(void* catalog, const zk_egg_rec* eggs) {
     c->eggs.assign(eggs, eggs + c->types.size());
 }
 
+void zk_catalog_floats(void* catalog, const zk_float_rec* floats, int n) {
+    auto* c = static_cast<Catalog*>(catalog);
+    c->floats.assign(floats, floats + n);
+    c->float_of_type.assign(c->types.size(), -1);
+    for (int k = 0; k < n; ++k)
+        if (floats[k].type >= 0 && size_t(floats[k].type) < c->types.size()) c->float_of_type[size_t(floats[k].type)] = k;
+}
+
+int zk_sizeof_float_rec(void) { return int(sizeof(zk_float_rec)); }
+
 void* zk_map_new(int cols, int rows, float cell, const float* height, const float* speed, int classes,
                  const float* slope, const float* normal_x, const float* normal_z, const float* slope_mod,
                  const short* segments) {
@@ -574,6 +584,8 @@ void zk_world_get(const void* world, int unit, zk_unit_state* out) {
     out->pulling = w->pulling[u];
     out->carrier = w->carrier[u];
     out->cargo = w->cargo[u];
+    out->base_y = w->base_y(unit);
+    out->floating = w->floating[u];
     {
         const Teleporter* t = w->teleporter_of(unit);
         out->deployed = t && t->deployed;

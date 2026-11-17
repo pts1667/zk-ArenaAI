@@ -1,6 +1,7 @@
 """Builds the simulator's data from the engine dump and the map archives.
 
   python tools/sim_engine.py dump           # writes results/simtools/simdump (engine, 20-45 s)
+  python tools/sim_engine.py muzzles --map ThreeReefs16   # simdump/muzzles.json: where units are and aim from (engine, 1 min)
   python tools/sim_data.py catalog          # sim/data/catalog.json, priority.npz; cross-checks
   python tools/sim_data.py maps "TitanDuel 2.2" "Carabanossi 1.0"     # sim/data/maps/*.npz: the gate's
   python tools/sim_data.py maps "Agalta v1.0" "Faultline v1.0" "FrostyCove v1.13" "Red Comet Remake 1.7"     # and training's: policy_sim_env.py
@@ -27,6 +28,7 @@ sys.path.insert(0, str(ROOT / "bots"))
 sys.path.insert(0, str(ROOT / "tools"))
 
 DUMP = ROOT / "results/simtools/simdump"
+MUZZLES = DUMP / "muzzles.json"
 DATA = ROOT / "sim/data"
 FRAMES = 30.0
 HEADING_CIRCLE = 65536.0
@@ -50,6 +52,11 @@ W_IMPACT_ONLY, W_TURRET, W_PARALYZER, W_NO_SELF_DAMAGE, W_NO_AUTO_TARGET, W_NO_F
 W_OKP_STATIC_ONLY, W_OKP_FLIGHT, W_OKP_TARGET_SPEED, W_SCRIPT_BURST = 32768, 65536, 131072, 262144
 W_PIERCES, W_ONE_HIT_EACH, W_THROWS, W_BOMB, W_DROPPED = 524288, 1048576, 2097152, 4194304, 8388608
 W_ROCKET, W_BURNBLOW, W_LEAD_ADDED = 16777216, 33554432, 67108864
+W_WATER, W_TORPEDO = 134217728, 268435456
+# Water (01-simulator.md, "Water").  What stands on the sea bed has no height it rides at over water.  The engine takes an aim-from
+# point under the ground to be this far over the unit's base (CWeapon::UpdateWeaponVectors: a weapon that pops up).
+SEA_BED = -1.0e30
+AIM_FROM_UNDERGROUND = 10.0
 ROCKET_TYPES = {"MissileLauncher", "TorpedoLauncher"}       # fly under their own power, as far as their fuel goes
 # Metal and energy per second from the module all new commanders have (dynamic_comm_defs.lua, "econ"); it's not in the unit def.
 # Logged games agree: income less 2 per extractor and solar is 6 and 8, this and the team's innate 2 and 2.
@@ -212,6 +219,13 @@ def _weapon_record(w: dict, velocity: tuple[float, float, float], alpha: float, 
         flags |= W_ROCKET
     if w.get("selfExplode"):
         flags |= W_BURNBLOW
+    # Weapon.cpp TestTarget and CanFire: a water weapon aims at what's under water and fires from under water (fireSubmersed falls
+    # back to waterweapon, which Zero-K never sets apart).  TorpedoLauncher.cpp: a torpedo aims only at what's in water, and so
+    # does one a plane drops (BombDropper.cpp).  None of Zero-K's is a submissile.
+    if w.get("waterWeapon"):
+        flags |= W_WATER
+    if w["type"] == "TorpedoLauncher":
+        flags |= W_TORPEDO
     # A bomber's fake bomb only marks where it's going: Odin's script blocks it, and Thunderbird's starts its run when it would
     # drop (bomberassault.lua, bomberdisarm.lua).  Thermite falls from the plane, and then burns where it lands.
     if flags & W_BOMB and "fake_weapon" in custom:
@@ -396,19 +410,38 @@ def _transport(u: dict, custom: dict, air: bool, mobile: bool) -> dict:
             "load_class": 0 if not carried else 3 if custom.get("requireheavytrans") else 2 if custom.get("requiremediumtrans") else 1}
 
 
+def _water(u: dict, measured: dict | None, slots: list[int], air: bool, move_class: int) -> dict:
+    """Where a unit is in water (01-simulator.md, "Water"), from the engine's own numbers 2.5 s after it's made
+    (tools/sim_engine.py muzzles): its middle over its base and its radius, which say when it's under water
+    (CSolidObject::UpdatePhysicalState: its middle plus its radius below the surface); where its base rides over water, which
+    the engine has at -waterline for all 74 that ride it; and each weapon's aim-from point over its base: one that isn't a water
+    weapon doesn't fire with that under water.  What flies keeps over the water; it has no numbers, and needs none."""
+    rides = bool(u.get("floatOnWater")) or (move_class >= 0 and MOVE_CLASS_NAMES[move_class] in ("hover", "ship"))
+    water_y = 0.0 if air else -float(u.get("waterline") or 0.0) + 0.0 if rides else SEA_BED
+    if measured is None:
+        return {"mid_height": 0.0, "body_radius": float(u["radius"]), "water_y": water_y, "mount_aim": [AIM_FROM_UNDERGROUND] * len(slots)}
+    aims = []
+    for s in slots:
+        a = measured["aim_from"][s] if s < len(measured["aim_from"]) and measured["aim_from"][s] is not None else measured["aim"]
+        aims.append(a if a >= 0.0 else AIM_FROM_UNDERGROUND)
+    return {"mid_height": measured["mid"], "body_radius": measured["radius"], "water_y": water_y, "mount_aim": aims}
+
+
 def _unit_record(u: dict, weapon_index: dict[str, int], weapons_by_id: dict[int, dict], records: list[dict],
-                 categories: dict[str, float], features: dict[str, dict], features_by_id: dict[int, dict]) -> tuple[dict, bool]:
+                 categories: dict[str, float], features: dict[str, dict], features_by_id: dict[int, dict],
+                 muzzles: dict[str, dict]) -> tuple[dict, bool]:
     mounts = sorted((u.get("weapons") or {}).items(), key=lambda kv: int(kv[0]))
     only_name = COMMANDER_WEAPONS.get(u["name"])
-    picked, seen = [], set()
-    for _, m in mounts:
+    picked, seen, slots = [], set(), []
+    for key, m in mounts:
         name = weapons_by_id[int(m["weaponDef"])]["name"]
         if only_name and (name != only_name or name in seen):
             continue
         seen.add(name)
         picked.append((name, m))
+        slots.append(int(key) - 1)
     truncated = len(picked) > MAX_MOUNTS
-    picked = picked[:MAX_MOUNTS]
+    picked, slots = picked[:MAX_MOUNTS], slots[:MAX_MOUNTS]
     # bomberdisarm.lua: where the fake bomb would drop, the script fires what targets nothing, a shot a frame straight down.
     marks = any(records[weapon_index[n]]["flags"] & W_BOMB and max(records[weapon_index[n]]["damage"]) <= 0.0 for n, _ in picked)
     for n, m in picked:
@@ -473,6 +506,7 @@ def _unit_record(u: dict, weapon_index: dict[str, int], weapons_by_id: dict[int,
         flags |= U_KAMIKAZE_BLIND
     return {
         **_remains(u, features, features_by_id), **cloak, **_bait(u, custom), **_heat(custom),
+        **_water(u, muzzles.get(u["name"]), slots, air, _move_class(u)),
         "kamikaze_distance": kamikaze, **_jump(custom, mobile), "burrow_speed": _burrow(custom, air),
         # The Lua's *_landing weapon goes off when it lands, from its script.  Nothing aims it.
         "landing_weapon": next((weapon_index[n] for n, _ in picked if n.endswith(LANDING_SUFFIX)), -1),
@@ -831,6 +865,9 @@ def catalog() -> None:
     raw_features = json.loads((DUMP / "features.json").read_text("utf8", "replace"))
     features_by_id = {int(f["id"]): f for f in raw_features.values()}
     game = json.loads((DUMP / "game.json").read_text("utf8", "replace"))
+    if not MUZZLES.exists():
+        raise SystemExit(f"no {MUZZLES}: run tools/sim_engine.py muzzles --map ThreeReefs16")
+    muzzles = json.loads(MUZZLES.read_text("utf8"))
     categories = game["springCategories"]
     unit_order, priority = _read_priority()
     weapon_order = sorted(raw_weapons)
@@ -843,7 +880,7 @@ def catalog() -> None:
     by_id = {int(w["id"]): w for w in raw_weapons.values()}
     units, truncated = [], []
     for n in unit_order:
-        rec, cut = _unit_record(raw_units[n], weapon_index, by_id, weapons, categories, raw_features, features_by_id)
+        rec, cut = _unit_record(raw_units[n], weapon_index, by_id, weapons, categories, raw_features, features_by_id, muzzles)
         units.append(rec)
         if cut:
             truncated.append(n)

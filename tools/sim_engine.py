@@ -6,6 +6,9 @@
   python tools/sim_engine.py mechanics           log what wrecks, reclaim, upkeep, cloak, stockpiling, a shot solar and shields come to (SIMMECH lines)
   python tools/sim_engine.py pierce              only what shots that go through what they hit come to
   python tools/sim_engine.py air                 how aircraft fly, bomb, rearm and fight (SIMMECH lines)
+  python tools/sim_engine.py muzzles --map ThreeReefs16  where each armed type's weapons fire from, on land or in the sea, into
+                                                 results/simtools/simdump/muzzles.json
+  python tools/sim_engine.py water --map ThreeReefs16    who can shoot whom in water, and floating up to fire (SIMMECH lines)
 
 These come from a game on the map rather than from its files, since Zero-K decides between its own configs, the map's and a
 fallback, and a map's file is Lua that may depend on the number of teams or build its list in code.
@@ -172,9 +175,29 @@ def facts(maps: list[str], timeout: float, launches: int, out: pathlib.Path = FA
         out.write_text(json.dumps(table, indent=1, sort_keys=True) + "\n", encoding="utf8")
 
 
+MUZZLES_FILE = WRITE_DIR / "simdump" / "muzzles.json"
+
+
+def muzzles(log: pathlib.Path, out: pathlib.Path = MUZZLES_FILE) -> None:
+    """The muzzle run's lines as a table by type: its middle's and aim point's height over its base, its radius and height, each
+    weapon's muzzle and aim-from point's heights over its base, in the order of its def's weapons (null where there was none), and
+    for what rides on water, where its base was in deep water."""
+    table = {}
+    for line in log.read_text(encoding="utf8", errors="replace").splitlines():
+        if "SIMMECH,muzzle," not in line:
+            continue
+        _, _, name, mid, aim, radius, height, weapons, froms, where, base = line[line.index("SIMMECH"):].split(",")
+        table[name] = {"mid": float(mid), "aim": float(aim), "radius": float(radius), "height": float(height),
+                       "sea_base": float(base) if where == "sea" else None,
+                       "muzzles": [None if w == "nan" else float(w) for w in weapons.split(";") if w],
+                       "aim_from": [None if w == "nan" else float(w) for w in froms.split(";") if w]}
+    out.write_text(json.dumps(table, indent=1, sort_keys=True) + "\n", encoding="utf8")
+    print(f"{out}: {len(table)} types")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=("dump", "facts", "overdrive", "mechanics", "pierce", "pierce_slow", "abilities", "air"))
+    ap.add_argument("mode", choices=("dump", "facts", "overdrive", "mechanics", "pierce", "pierce_slow", "abilities", "air", "muzzles", "water"))
     ap.add_argument("maps", nargs="*")
     ap.add_argument("--map", default="TitanDuel 2.2")
     ap.add_argument("--timeout", type=float, default=240.0)
@@ -185,7 +208,11 @@ def main() -> None:
         facts(a.maps, a.timeout, a.launches, a.out)
     else:
         wd = run(a.mode, a.map, a.timeout)
-        marker = {"overdrive": "SIMOD", "mechanics": "SIMMECH", "pierce": "SIMMECH", "pierce_slow": "SIMMECH", "abilities": "SIMMECH", "air": "SIMMECH"}.get(a.mode)
+        if a.mode == "muzzles":
+            muzzles(wd / "engine-muzzles.log")
+            return
+        marker = {"overdrive": "SIMOD", "mechanics": "SIMMECH", "pierce": "SIMMECH", "pierce_slow": "SIMMECH", "abilities": "SIMMECH", "air": "SIMMECH",
+                  "water": "SIMMECH"}.get(a.mode)
         if marker:
             for line in (wd / f"engine-{a.mode}.log").read_text(encoding="utf8", errors="replace").splitlines():
                 if marker in line:

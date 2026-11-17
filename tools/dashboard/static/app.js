@@ -182,7 +182,7 @@
       { title: 'largest |advantage|, share clipped', series: ['adv_abs_max', 'adv_clipped'] },
       { title: 'decisions / s', series: ['overall_rate', 'collect_rate', 'train_rate'] },
       { title: 'returns', series: ['return_min', 'return_max'] },
-      { title: 'self-play share, beta', series: ['self_play_share', 'beta'] },
+      { title: 'self-play share, share of games other than 1v1s, beta', series: ['self_play_share', 'other_kinds_share', 'beta'] },
       { title: 'lead rule: share drawn, games it could end', series: ['lead_share', 'lead_rule_games'], y: [0, 1] },
     ],
   };

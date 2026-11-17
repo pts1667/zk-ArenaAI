@@ -20,7 +20,7 @@ a process of its own.  So no two stages load the map pool at once, and each hand
 | `dagger-N` | 500 steps from the last clone, half the samples from every round's games and half from `army-6`; lr 2e-4, Muon 0.003 | DAgger |
 | `eval` | the last clone, 64 1v1s, the headline: `evals/final.json` | |
 | `eval-KIND` | the same in games of each of `--test-kinds` alone: `evals/final-KIND.json` | |
-| `ppo` | `policy_train.py --init` the last clone, 64 games of `--kinds`, 4,096 decisions an iteration, 2M decisions (`--ppo-decisions`; `--ppo-hours` caps it), the critic alone for 10 iterations at its own rate; tested in 1v1s and in each of `--test-kinds` | the PPO smoke run, `full-1` |
+| `ppo` | `policy_train.py --init` the last clone, 64 games, nine in ten against itself (`--self-play 0.9`), 1v1s till iteration 500 and `--kinds`' others mixed in to half by 2,500 (`--kinds-ramp`), 4,096 decisions an iteration, 2M decisions (`--ppo-decisions`; `--ppo-hours` caps it), the critic alone for 10 iterations at its own rate; tested against the script in 1v1s and in each of `--test-kinds` | the PPO smoke run, `full-1` |
 
 * **Options**: `--dagger-rounds` (2).  `--clone-args`, `--dagger-args` and `--ppo-args` go at the end of their commands, so they
   override what's set.
@@ -413,6 +413,13 @@ In a 1v1, for side A against side B at decision t:
     budget then shrinks by a tenth, once in the iteration, as its minibatches were all planned before.  After an iteration
     without a split whose training's tensors peaked under 85% of the learner's limit, it grows by a twentieth, up to
     `--token-budget` (what the allocator reserves stays near the limit, so it's no measure).
+  * A minibatch's gradient is taken apart from the parameters' (`torch.autograd.grad`) and added to theirs once it's
+    whole, so one that doesn't fit leaves theirs as it was.  Until 2026-11-16 every parameter's gradient was copied before
+    each minibatch, to put back: an eighth of training's time (py-spy on `full-4`'s learner).
+  * The next minibatch's decisions are asked of the data workers while the GPU is on this one's (`Learner._fetch_ahead`,
+    2026-11-16): the learner had waited on them for a fifth of each minibatch's time.  With both, `full-4`'s self-play run
+    trained at 166 decisions a second at iterations 2 and 3 where the run before them had at 129-132, and made 163 and 156
+    overall against 124 and 124, its collectors having the GPU the learner left.
   * The 200: with 800, from the critic's 14 KiB a token and the first segments' 14 MiB a decision, 241 decisions of about 280
     tokens fit the learner's 4.6 GB, but 151 of about 590 and 103 of about 860 didn't, and the budget shrank to fit them, from
     260,000 to 154,000 by iteration 7.  The actor's reading of the units grows with the tokens too.  Shrunk at every split,
@@ -453,7 +460,7 @@ dual clip 3, as above.
 
 ### Opponents
 
-Training starts against the scripts.  Every `--eval-every` iterations, and at iteration 0 in a run that tests at all, 128 test
+Every `--eval-every` iterations, and at iteration 0 in a run that tests at all, 128 test
 games against the script (`--eval-games`; 64 until 2026-11-14) count wins, with draws and losses logged (`metrics.jsonl`,
 `tests.jsonl`).  Since 2026-11-14 (the user, after `full-3`'s tests of 64 games went 17%, 8%, 11% with no telling what moved):
 
@@ -477,19 +484,31 @@ games against the script (`--eval-games`; 64 until 2026-11-14) count wins, with 
 * Checked by `test_tests_of_one_seed_play_the_same_games_and_pair_their_scores`: two tests of a seed, their games cut short
   at the time limit, play the same maps in the same slots, and pair.
 
-`SelfPlay` then moves to self-play:
+**Against itself** (`--self-play SHARE`; the user, 2026-11-16, 0.9 in the pipeline): that share of the training games
+starting, drawn game by game, the policy plays every player's team of, by the same weights, each told its own side's variant
+(`mirror`); the rest it plays against the scripts as before.  Every seat's decisions are learnt from, and under GRPO each
+side's branches are judged against the same side's in the group's other copies.  The tests stay against the script, so they
+stay comparable, and are now of games most of training isn't.  `wins_mirror` counts both sides, so it's a half.  Why: the
+policy won 10-20% of its training 1v1s against the script, where a small gain rarely changes a result, and the script's
+level is the most that playing it can teach.  Until then self-play was to start once two tests averaged 80% wins, which no
+run came near.
 
-* it **starts** when the last two tests average 80% wins;
-* it **adds** 1% of new games each iteration;
-* it **pauses** while those two tests are under 70%.
-
-The test stays against the script throughout, so it stays comparable.
+* **A pass is a seat a game at most** (`Player.act`'s `rows`): against itself the policy has 2 seats of a 1v1 and up to 8 of
+  a team game or a free-for-all, and a graph's rows only grow, its memory with them.  A collector's round of more seats than
+  it has games goes in passes of that many, so its part of the card is what it was with one seat a game.
 
 **Kinds of game** (`--kinds`, `--slots`, `--test-kinds`, `--chicken-difficulties`; the flag for action kinds is now
 `--action-kinds`).  Against the scripts the policy plays team 0, and scripts play every other team, its allies too; in
 self-play it plays every team.  The headline test stays the 1v1; each of `--test-kinds` is tested as well, on team 0.
 `metrics.jsonl` has `wins_{mode}_{kind}`, `games_{mode}_{kind}` and `eval_fight_{kind}`, and each line of `tests.jsonl` its
-`kind`.  No run has trained on the new kinds yet.
+`kind`.
+
+* **1v1s first** (`--kinds-ramp ITERATION:SHARE ...`; the user, 2026-11-16): the share of the training games starting that
+  aren't 1v1s, by iteration, linear between its points and the last after.  That share is split among `--kinds`' other
+  kinds as they're weighed there, and the rest are 1v1s (`SimEnv.other_kinds_share`, `kind_shares`).  The pipeline's
+  `500:0 2500:0.5`: 1v1s alone till iteration 500, then team games, free-for-alls and chicken games mixed in, to half the
+  games from 2,500, which with the default `--kinds` is its own mix.  Without the flag, `--kinds`' weights throughout.  The
+  games have room for the biggest kind from the start.  `metrics.jsonl` has `other_kinds_share` and `self_play_share`.
 
 ### Checkpoints and stopping
 
@@ -531,6 +550,21 @@ every seat that decides.
   caps, a collector's 16 games reserve 0.65 GB with one shape and 0.83 with two; at 1.0 one reached 0.96 by iteration 16,
   holding the shape before while capturing the next.  So a shape narrower than the widest now goes before the next capture.
   With 4 at 1.0 the learner keeps about 4.6.  With `--concurrent` they collect the next iteration while this one trains.
+* **What a pass costs** (2026-11-16, the wide actor in self-play with the learner training beside; py-spy by
+  `results/profile-run.sh`, and runs of 5 iterations from the DAgger actor).  The GPU is the limit, about 90% busy: a
+  collector of 16 games waits on its passes for three quarters of its time, the sim and featurizing 6% together.  A pass
+  takes about 0.09 s at iteration 1 and 0.25-0.3 s by iteration 5, as frames grow, and about the same whether of 16, 24
+  or 48 rows, and whether one, two or three collectors play.  So one collector of 48 games collected as fast as three of
+  16, and the learner, left more of the card, trained nearly twice as fast (249 decisions a second against 136 at
+  iteration 4); two of 24 did best overall, 136 decisions a second at iteration 5 against about 105.  But those runs
+  had no test, whose long games widen every pass after it.  With one, two collectors of 24 made 108 decisions a second
+  at iteration 2 where three of 16 had made 128, the learner waiting 70 s of the iteration's 158, and the test took 24
+  minutes, not 13: collecting is the limit, and three processes get more of the GPU and of the CPUs than two.  So the
+  self-play run keeps three of 16 (`--collector-gb 1.4`).  Time a way of collecting with a test before it.
+  * Two things made a pass no faster, and are not in the code: a `Graphs` for each class of frame size, so that small
+    frames don't pad to the widest frame of the run (2 to 6 times their tokens), with fewer rows a pass the wider the
+    class (the same time a pass and more passes a round: 98 decisions a second collecting against 147); and no stops among
+    the action steps.  More rows a pass is what's left, and a collector's memory limits it.
 
 ### GRPO from branched games (`--group`)
 

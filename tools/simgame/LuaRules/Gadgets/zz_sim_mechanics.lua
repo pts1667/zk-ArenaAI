@@ -5,7 +5,8 @@ function gadget:GetInfo()
 end
 
 local mode = (Spring.GetModOptions() or {}).sim_mode
-local active = mode == "mechanics" or mode == "pierce" or mode == "pierce_slow" or mode == "abilities" or mode == "air"
+local active = mode == "mechanics" or mode == "pierce" or mode == "pierce_slow" or mode == "abilities" or mode == "air" or mode == "muzzles"
+	or mode == "water"
 local SPEED = 40
 local LEAD_IN = 300    -- frames before the first case: commanders exist
 local SAFE = 1500      -- elmos from any other unit
@@ -395,7 +396,12 @@ function gadget:ShieldPreDamaged(proID, proOwnerID, emitter, carrier, bounce, be
 	return false
 end
 
+local damageBy = nil     -- water: the damage each attacker has done in a case
+
 function gadget:UnitDamaged(unit, def, team, damage, paralyzer, weaponDef, projectile, attacker)
+	if damageBy and attacker then
+		damageBy[attacker] = (damageBy[attacker] or 0) + damage
+	end
 	if tracing and unit == traceTarget then
 		local x, y, z = Spring.GetUnitPosition(unit)
 		log(tracing, "target_hit_frame", Spring.GetGameFrame() - traceStart, "damage", damage, "weapon", weaponDef or -1, "attacker", attacker or -1, "y", y)
@@ -1788,8 +1794,181 @@ local function air()
 	end
 end
 
+-- Where each type that doesn't fly is, and its weapons fire from, for the sim's rules in water (tools/sim_engine.py muzzles):
+-- alone for 2.5 s, as its script's start-up moves its pieces (a Cutter raises its missile 20 elmos over 1.25 s), on land, or
+-- in deep water for what floats there (a ship, a hovercraft, a building that floats), its middle, aim point and each weapon's
+-- muzzle and aim-from point over its base, its radius and height.
+local function muzzles(land, sea)
+	for _, ud in pairs(UnitDefs) do
+		if not ud.canFly then
+			local class = ud.moveDef and ud.moveDef.smClass
+			local at = (ud.floatOnWater or class == 2 or class == 3) and sea or land
+			local unit = Spring.CreateUnit(ud.name, at.x, Spring.GetGroundHeight(at.x, at.z), at.z, 0, OWN)
+			if unit then
+				Spring.SetUnitRulesParam(unit, "disable_tac_ai", 1)
+				wait(75)
+				if Spring.ValidUnitID(unit) then
+					local _, by, _, _, my, _, _, ay = Spring.GetUnitPosition(unit, true, true)
+					-- The aim-from point is what the engine tests against the water (CWeapon::CanFire): the script's piece, or the
+					-- unit's base where the script names none (CLuaUnitScript::AimFromWeapon).
+					local env = Spring.UnitScript.GetScriptEnv(unit)
+					local aimFrom = env and env.script and env.script.AimFromWeapon
+					local heights, froms = {}, {}
+					for w = 1, #ud.weapons do
+						local _, py = Spring.GetUnitWeaponVectors(unit, w)
+						heights[w] = py and string.format("%.2f", py - by) or "nan"
+						froms[w] = "0.00"
+						if aimFrom then
+							local ok, piece = pcall(Spring.UnitScript.CallAsUnit, unit, aimFrom, w)
+							froms[w] = "nan"
+							if ok and piece then
+								local _, fy = Spring.GetUnitPiecePosition(unit, piece)
+								froms[w] = fy and string.format("%.2f", fy) or "nan"
+							end
+						end
+					end
+					log("muzzle", ud.name, my - by, ay - by, Spring.GetUnitRadius(unit), Spring.GetUnitHeight(unit), table.concat(heights, ";"),
+						table.concat(froms, ";"), at == sea and "sea" or "land", by)
+					Spring.DestroyUnit(unit, false, true)
+				end
+				wait(1)
+			else
+				log("FAILED", ud.name)
+			end
+		end
+	end
+end
+
+-- Deep water: the sea floor at least `depth` down at a place and `reach` round it.
+local function findWater(depth, reach)
+	for z = reach + 64, Game.mapSizeZ - reach - 64, 64 do
+		for x = reach + 64, Game.mapSizeX - reach - 64, 64 do
+			local ok = Spring.GetGroundHeight(x, z) < -depth
+			for a = 0, 7 do
+				ok = ok and Spring.GetGroundHeight(x + math.cos(a * math.pi / 4) * reach, z + math.sin(a * math.pi / 4) * reach) < -depth
+			end
+			if ok then
+				log("water_place", x, z, "floor", Spring.GetGroundHeight(x, z))
+				return {x = x, z = z}
+			end
+		end
+	end
+	log("FAILED", "no water", depth, reach)
+end
+
+-- A shore: land at least `rise` high at a place, and the sea floor at least `depth` down `gap` along x and round there.
+local function findShore(rise, depth, gap)
+	for z = 200, Game.mapSizeZ - 200, 32 do
+		for x = 200, Game.mapSizeX - gap - 200, 32 do
+			local ok = Spring.GetGroundHeight(x, z) > rise
+			for dz = -64, 64, 64 do
+				ok = ok and Spring.GetGroundHeight(x + gap, z + dz) < -depth and Spring.GetGroundHeight(x + gap + 64, z + dz) < -depth
+			end
+			if ok then
+				log("shore_place", x, z, "land", Spring.GetGroundHeight(x, z), "sea", Spring.GetGroundHeight(x + gap, z))
+				return {x = x, z = z}
+			end
+		end
+	end
+	log("FAILED", "no shore", rise, depth, gap)
+end
+
+-- A unit of ours that fires at will and stays put, and its target, which takes it all and does nothing: the damage it does
+-- every 3 frames, and its own height.  Then, the target gone, its height for `after` seconds more.
+local function waterCase(case, shooter, sx, sz, target, tx, tz, seconds, after)
+	local unit = add(shooter, OWN, sx, sz)
+	states(unit, 0, 2)
+	local foe = dummy(target, tx, tz, 100000)
+	damageBy, shotCounts = {}, {}
+	wait(1)
+	log(case, "start", "shooter_y", (select(2, Spring.GetUnitPosition(unit))), "target_y", (select(2, Spring.GetUnitPosition(foe))))
+	for f = 3, seconds * 30, 3 do
+		wait(3)
+		log(case, f, "y", (select(2, Spring.GetUnitPosition(unit))), "dealt", damageBy[unit] or 0, "shots", shotCounts[unit] or 0,
+			"lost", 100000 - (Spring.GetUnitHealth(foe) or 0), "target_y", (select(2, Spring.GetUnitPosition(foe))))
+	end
+	shotCounts = nil
+	Spring.DestroyUnit(foe, false, true)
+	for f = 3, (after or 0) * 30, 3 do
+		wait(3)
+		log(case, "after", f, "y", (select(2, Spring.GetUnitPosition(unit))))
+	end
+	damageBy = nil
+	clear()
+end
+
+-- An amphibious unit on the sea floor and a target it floats up to fire at: its height every frame until the target is gone
+-- after `seconds`, then as it sinks for `after` seconds more.  A target that flies is kept in the air by an order to move.
+local function floatTrace(name, target, gap, seconds, after, flies)
+	local unit = add(name, OWN, 0, 0)
+	states(unit, 0, 2)
+	local foe = dummy(target, gap, 0, 100000)
+	if flies then
+		Spring.GiveOrderToUnit(foe, CMD.MOVE, {here.x + gap, 0, here.z}, 0)
+	end
+	shotCounts = {}
+	local ys, fired = {}, {}
+	for f = 1, (seconds + after) * 30 do
+		wait(1)
+		if f == seconds * 30 then
+			Spring.DestroyUnit(foe, false, true)
+		end
+		ys[f] = string.format("%.2f", select(2, Spring.GetUnitPosition(unit)))
+		if (shotCounts[unit] or 0) > #fired then
+			fired[#fired + 1] = f
+		end
+	end
+	shotCounts = nil
+	log("float_trace", name, "shots", table.concat(fired, ";"), "y", table.concat(ys, ";"))
+	clear()
+end
+
+-- Who can shoot whom in water, and floating up to fire (tools/sim_engine.py water; 01-simulator.md, "Water").
+local function water()
+	here = findWater(100, 400)
+	if not here then
+		return
+	end
+	floatTrace("amphfloater", "shipscout", 300, 10, 10)
+	floatTrace("amphassault", "shipscout", 300, 12, 10)
+	floatTrace("amphriot", "shipscout", 200, 8, 10)
+	floatTrace("amphsupport", "shipscout", 500, 12, 10)
+	floatTrace("amphimpulse", "shipscout", 200, 8, 10)
+	floatTrace("amphaa", "gunshipraid", 300, 8, 10, true)
+	-- Rising to the surface to fire at a ship, and sinking back once it's gone.
+	waterCase("float_buoy", "amphfloater", 0, 0, "shipscout", 300, 0, 10, 8)
+	waterCase("float_grizzly", "amphassault", 0, 0, "shipscout", 300, 0, 12, 10)
+	-- A floating LLT, and an Urchin, against a Duck on the sea floor.
+	waterCase("llt_duck_under", "turretlaser", 0, 0, "amphraid", 200, 0, 8)
+	waterCase("urchin_duck_under", "turrettorp", 0, 0, "amphraid", 200, 0, 8)
+	-- A Duck on the sea floor against a ship, which its torpedoes reach.
+	waterCase("duck_ship", "amphraid", 0, 0, "shipscout", 140, 0, 8)
+	-- A Cutter, whose missiles aren't a water weapon, against a ship; a Dagger's gauss against a Duck on the sea floor.
+	waterCase("cutter_ship", "shipscout", 0, 0, "shiptorpraider", 200, 0, 6)
+	waterCase("dagger_duck_under", "hoverraid", 0, 0, "amphraid", 150, 0, 6)
+	here = findShore(20, 60, 260)
+	if not here then
+		return
+	end
+	-- An Urchin on the water against a Duck on land, and a Duck on the sea floor against a Glaive on land.
+	waterCase("urchin_duck_land", "turrettorp", 260, 0, "amphraid", 0, 0, 8)
+	waterCase("duck_under_glaive", "amphraid", 260, 0, "cloakraid", 60, 0, 8)
+end
+
 local script = coroutine.create(function()
 	wait(LEAD_IN)
+	if mode == "muzzles" then
+		local sea = findWater(60, 300)
+		here = findShore(20, 30, 300)
+		muzzles(here, sea)
+		Spring.SetGameRulesParam("sim_mechanics_done", 1)
+		return
+	end
+	if mode == "water" then
+		water()
+		Spring.SetGameRulesParam("sim_mechanics_done", 1)
+		return
+	end
 	if mode == "air" then
 		here = findOpenPlace() or findSafePlace()
 		air()

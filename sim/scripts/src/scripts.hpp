@@ -25,8 +25,8 @@ enum { S_NEW = 0, S_WAITING = 1, S_SENT = 2, S_RETREATING = 3 };
 enum { R_RAID, R_RIOT, R_ASSAULT, R_SKIRM, R_ARTY, R_AA, R_SNIPE, R_SCOUT, R_BUILDER, R_BOMB, R_COUNT };
 // Special rows; X_FACTORY and X_SECOND are pending slots only
 enum { X_CERBERUS, X_LUCIFER, X_SILO, X_NUKE, X_FUSION, X_PYLON, X_RADAR, X_FACTORY, X_SECOND };
-// The defences, as zks_data_desc.defences lists them: the first four guard against the ground
-enum { D_LLT, D_PICKET, D_STINGER, D_GAUSS, D_RAZOR, D_HACKSAW };
+// The defences, as zks_data_desc.defences lists them: the first four guard against the ground, and the Urchin what's in water
+enum { D_LLT, D_PICKET, D_STINGER, D_GAUSS, D_RAZOR, D_HACKSAW, D_URCHIN };
 
 // The standard army script's knobs (army.cpp): what a seat has when it's given none.
 zks_style standard_style();
@@ -49,6 +49,7 @@ struct Ground {
         return p >= 0 && p == part_at(c, b.x, b.z);
     }
     bool fits(double x, double z, double half_x, double half_z, double height_dif, int mask) const;
+    float height_at(double x, double z) const;
 };
 
 struct Data {
@@ -67,6 +68,7 @@ struct Data {
     std::vector<int8_t> load_class;     // 1 light, 2 medium, 3 heavy, 0 for what can't be carried
     std::vector<int32_t> transport_of;  // a transport's index among the transports, -1 for any other row
     std::vector<float> fall_loss;       // n_transports x rows
+    std::vector<float> under_water;     // the depth of water at its feet past which a unit of the row is under water, -1 for never
     int n_transports = 0;
     int n_roles = 0;
     int role_ids[10] = {};
@@ -280,6 +282,7 @@ struct Seat {
     struct Off { double x, z, until; };
     std::vector<Off> heavy_off;         // where a Stinger or Gauss was lost unfinished: none near there until `until`
     bool armour_seen = false;           // enemy tanks or slow heavies
+    bool under_water_seen = false;      // an enemy in our sight or radar under water
     Draws draws;
 
     // This step's inputs, filtered, and outputs.  Enemies are every enemy team's own units, read from its frame, a team after
@@ -357,9 +360,10 @@ struct Seat {
     void watch(double seconds);
     void defences_of(const Ctx& c, Pass& pass, double income) const;
     bool covered(const Pass& pass, P2 p, double reach, bool heavy) const;
+    bool wet(P2 p) const { return ground->height_at(p.x, p.z) < 0.0f; }
     bool given_up_near(P2 p) const;
     bool dying(P2 p) const;
-    int light_kind(const Pass& pass) const;
+    int light_kind(const Pass& pass, P2 p) const;
     Job defend(int i, int k, P2 near, double spread, Pass& pass);
     Job defence_job(const Ctx& c, int i, Pass& pass, double income);
     bool unsafe(P2 p, float army_reach) const;

@@ -21,7 +21,7 @@ sys.path.insert(0, str(ROOT / "py"))
 sys.path.insert(0, str(ROOT.parent / "bots"))
 import zknav  # noqa: E402
 from zkbot.policy import rawframe  # noqa: E402
-ABI_VERSION = 28
+ABI_VERSION = 29
 WARD_TARGETS = 4
 MAX_MOUNTS = 8
 MAX_TEAMS = 8                       # players in a game, and so allyteams too
@@ -45,6 +45,9 @@ CHICKEN_STATE = ("queen", "until_queen", "burrows", "burrows_killed", "chickens"
                  "difficulty", "team")
 W_TURRET, W_NO_AUTO_TARGET, W_MANUAL, W_UNMODELLED = 2, 16, 512, 2048
 W_PIERCES, W_ONE_HIT_EACH, W_THROWS, W_BOMB, W_DROPPED = 524288, 1048576, 2097152, 4194304, 8388608
+W_WATER, W_TORPEDO = 134217728, 268435456
+SEA_BED = -1.0e30       # a type's water_y when it stands on the sea bed (tools/sim_data.py)
+AIM_FROM_UNDERGROUND = 10.0
 
 
 class WeaponRec(ct.Structure):
@@ -73,11 +76,12 @@ class TypeRec(ct.Structure):
         "cloak_cost", "cloak_cost_moving", "decloak_distance", "bestowed_decloak", "area_cloak_radius", "area_cloak_upkeep",
         "perceived_range", "heat_per_shot", "heat_decay", "heat_max_slow", "heat_initial", "bait_cost", "kamikaze_distance", "detonate_reach", "drop_height", "drop_gravity", "jump_range", "jump_speed", "jump_height", "jump_reload", "jump_delay", "burrow_speed", "mass", "push_scale", "needed_link", "throw_radius", "teleport_rate", "beacon_frames",
         "cruise_height", "vertical_speed", "turn_speed", "strafe_radius", "strafe_speed", "reammo_frames", "reammo_energy", "pad_bp",
-        "lift_light", "lift_medium", "lift_heavy", "lift_size", "load_size", "load_height")] + [(n, ct.c_int32) for n in (
+        "lift_light", "lift_medium", "lift_heavy", "lift_size", "load_size", "load_height", "mid_height", "body_radius", "water_y")] + [
+        (n, ct.c_int32) for n in (
             "move_state", "fire_state", "no_chase", "bait_level", "bait_target", "bait_target_armor",
             "def_id", "wreck_feature", "heap_feature", "armor_class", "move_class", "category", "flags", "explode_weapon", "n_mounts", "landing_weapon", "drop_weapon", "missile_pads", "beacon_type", "ammo", "pad_count", "plate_parent", "load_class")] + [
         ("mount_weapon", ct.c_int32 * MAX_MOUNTS), ("mount_only", ct.c_int32 * MAX_MOUNTS),
-        ("mount_bad", ct.c_int32 * MAX_MOUNTS)]
+        ("mount_bad", ct.c_int32 * MAX_MOUNTS), ("mount_aim", ct.c_float * MAX_MOUNTS)]
 
 
 class TacticsRec(ct.Structure):
@@ -95,8 +99,18 @@ class TacticsRec(ct.Structure):
 
 class UnitState(ct.Structure):
     _fields_ = [(n, ct.c_float) for n in (
-        "x", "z", "vx", "vz", "heading", "speed", "hp", "damage_taken", "para", "shield", "disarm", "build", "heat", "jump_charge", "altitude")] + [
-        (n, ct.c_int32) for n in ("alive", "order", "target", "stock", "cloaked", "chasing", "dodging", "shots_fired", "jumping", "skidding", "low_power", "deployed", "beacon", "pulling", "ammo", "air_state", "carrier", "cargo")]
+        "x", "z", "vx", "vz", "heading", "speed", "hp", "damage_taken", "para", "shield", "disarm", "build", "heat", "jump_charge", "altitude",
+        "base_y")] + [
+        (n, ct.c_int32) for n in ("alive", "order", "target", "stock", "cloaked", "chasing", "dodging", "shots_fired", "jumping", "skidding", "low_power", "deployed", "beacon", "pulling", "ammo", "air_state", "carrier", "cargo",
+                                  "floating")]
+
+
+class FloatRec(ct.Structure):
+    """capi.h zk_float_rec: an amphibious unit that floats up to fire (rules.json "floats")."""
+    _fields_ = [("type", ct.c_int32)] + [(n, ct.c_float) for n in (
+        "init_speed", "rise_accel", "rise_up_drag", "rise_down_drag", "sink_accel", "sink_up_drag", "sink_down_drag",
+        "air_accel", "air_drag", "water_hit_drag", "float_point", "surface_dampen", "depth", "wait_y", "wait_min", "wait_max",
+        "reload_frames", "block_below")] + [("sink_on_para", ct.c_int32)]
 
 
 class ChickenKind(ct.Structure):
@@ -154,6 +168,7 @@ def _load_library() -> ct.CDLL:
     lib.zk_catalog_reveal.argtypes = [vp, fl, it]
     lib.zk_catalog_chickens.argtypes = [vp, it, ct.POINTER(ChickenRules)]
     lib.zk_catalog_eggs.argtypes = [vp, ct.POINTER(EggRec)]
+    lib.zk_catalog_floats.argtypes = [vp, ct.POINTER(FloatRec), it]
     lib.zk_map_new.restype = vp
     lib.zk_map_new.argtypes = [it, it, fl, fp, fp, it, fp, fp, fp, fp, ct.POINTER(ct.c_short)]
     lib.zk_map_set_routes.restype = None
@@ -220,7 +235,7 @@ def _load_library() -> ct.CDLL:
             or lib.zk_global_count() != len(rawframe.GLOBAL_FIELDS)):
         raise RuntimeError("libzksim was built from another raw frame schema: rebuild it")
     for got, want in ((lib.zk_sizeof_weapon(), WeaponRec), (lib.zk_sizeof_type(), TypeRec), (lib.zk_sizeof_state(), UnitState),
-                      (lib.zk_sizeof_chicken_rules(), ChickenRules)):
+                      (lib.zk_sizeof_chicken_rules(), ChickenRules), (lib.zk_sizeof_float_rec(), FloatRec)):
         if got != ct.sizeof(want):
             raise RuntimeError(f"{want.__name__}: {ct.sizeof(want)} bytes here, {got} in libzksim: rebuild it")
     return lib
@@ -278,6 +293,7 @@ class Catalog:
         for rec, u in zip(types, self.units):
             rec.move_state, rec.fire_state = 1, 2      # the engine's defaults, for records that don't say
             rec.plate_parent = -1
+            rec.water_y, rec.body_radius = SEA_BED, u.get("hit_radius", 0.0)      # a test's record: on the sea bed, as big as it's hit
             _fill(rec, u)
             if u["name"] in dont_count:
                 rec.flags |= DONT_COUNT
@@ -288,6 +304,7 @@ class Catalog:
                 rec.mount_weapon[i] = u["mount_weapon"][i]
                 rec.mount_only[i] = u["mount_only"][i]
                 rec.mount_bad[i] = u["mount_bad"][i]
+                rec.mount_aim[i] = u["mount_aim"][i] if "mount_aim" in u else AIM_FROM_UNDERGROUND
         weapons = (WeaponRec * len(self.weapons))()
         for rec, w in zip(weapons, self.weapons):
             rec.lead_limit, rec.predict_boost = -1.0, 1.0      # the engine's defaults again: no limit to its lead, and no error in it
@@ -308,6 +325,13 @@ class Catalog:
     def _install_rules(self, rules: dict) -> None:
         if "reveal" in rules:
             _lib.zk_catalog_reveal(self.handle, rules["reveal"]["value_ratio"], rules["reveal"]["every_frames"])
+        floats = [(self.index[n], f) for n, f in sorted((rules.get("floats") or {}).items()) if n in self.index]
+        if floats:
+            recs = (FloatRec * len(floats))()
+            for rec, (t, f) in zip(recs, floats):
+                rec.type = t
+                _fill(rec, f)
+            _lib.zk_catalog_floats(self.handle, recs, len(floats))
         chickens = rules.get("chickens")
         if not chickens or chickens["burrow"] not in self.index:
             return

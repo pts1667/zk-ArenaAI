@@ -778,7 +778,8 @@ void World::update_tactics() {
     ensure_views();
     for (size_t k = 0, n = live.size(); k < n; ++k) {
         const int u = live[k];
-        if (turn_of(u) != turn || !alive[size_t(u)] || !active(u)) continue;
+        // Floating up to fire turns the tactical AI off (unit_impulsefloat_toggle.lua sets disable_tac_ai) until it's back on the sea bed.
+        if (turn_of(u) != turn || !alive[size_t(u)] || !active(u) || floating[size_t(u)]) continue;
         if (type_of(u).flags & ZK_U_MOBILE) run_tactics(u);
         run_ward_fire(u);
     }

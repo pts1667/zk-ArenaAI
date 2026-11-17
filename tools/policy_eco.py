@@ -17,7 +17,8 @@ Each idle constructor, every few seconds, takes the first of these it can do:
   defence   one a pass (the user, 2026-11-13; eco.cpp, "Defences"): AA by the factory once the enemy has armed aircraft; at 30
             metal a second a Stinger by an extractor with 700 metal of wrecks near it, a Gauss instead once our turrets are
             getting destroyed; and from 2:30 an LLT by a contested extractor that no defence covers, a Picket every third once
-            the enemy has tanks or slow heavies (then by every extractor)
+            the enemy has tanks or slow heavies (then by every extractor), and by one in water an Urchin once an enemy has been
+            seen under water
   energy    first, while energy made is short of ENERGY_FIRST x metal income: building costs as much energy as metal, and
             overdrive only gets what's left, so short of energy, everything slows and metal piles up unspent
   expand    an extractor on the nearest free spot on our half that no enemy defence or army is near; while metal floats, only
@@ -85,10 +86,20 @@ VALUABLE = ("energysingu", "staticarty", "turretantiheavy", "staticnuke", "stati
 FUSION = "energyfusion"             # valuable from the second one on
 PYLON = "energypylon"
 CARETAKER = "staticcon"             # a static constructor: in the sim it helps whatever is being built in its reach
-# The defences it builds (zks_data_desc.defences): LLT, Picket, Stinger, Gauss, Razor, Hacksaw.  And the plant whose fighters
-# are the tanks that LLTs and Pickets answer.
-DEFENCES = ("turretlaser", "turretmissile", "turretheavylaser", "turretgauss", "turretaalaser", "turretaaclose")
+# The defences it builds (zks_data_desc.defences): LLT, Picket, Stinger, Gauss, Razor, Hacksaw, Urchin.  And the plant whose
+# fighters are the tanks that LLTs and Pickets answer.
+DEFENCES = ("turretlaser", "turretmissile", "turretheavylaser", "turretgauss", "turretaalaser", "turretaaclose", "turrettorp")
 TANK_PLANT = "factorytank"
+
+
+def under_water(u: dict) -> float:
+    """How far under the surface a unit of this type has its base once it's under water, where only water weapons reach it
+    (CSolidObject::UpdatePhysicalState: its middle plus its radius below the surface; a frame's y is its base's): the two together.
+    A submarine's base always is that deep, what walks the sea bed is in deep enough water, and a ship's or hovercraft's never is.
+    -1 for what flies or doesn't move."""
+    if not u["flags"] & zksim.MOBILE or u["flags"] & zksim.AIR:
+        return -1.0
+    return float(u["mid_height"]) + float(u["body_radius"])
 
 
 class EcoData:
@@ -106,6 +117,7 @@ class EcoData:
         self.commander = np.zeros(n, bool)
         self.footing: dict[int, Footing] = {}
         self.half = np.zeros((n, 2), np.float32)        # of each type's footprint, along x and z: what a build is tested against
+        self.under_water = np.full(n, -1.0, np.float32)     # `under_water`
         for row, name in enumerate(table.names):
             self.extractor[row] = bool(bot_units.is_mex(bot_units.by_name(name)))
             if name not in cat.index:
@@ -119,6 +131,7 @@ class EcoData:
             self.commander[row] = bool(u["flags"] & zksim.COMMANDER)
             self.footing[row] = Footing.of(u)
             self.half[row] = self.footing[row].half_x, self.footing[row].half_z
+            self.under_water[row] = under_water(u)
         # Half the square kept clear at every metal spot: an extractor's footprint.
         self.spot_half = float(self.half[self.extractor].max()) if self.half[self.extractor].size and self.half[self.extractor].max() > 0.0 else 24.0
         # A factory's plate (the catalog's plate_parent): a production line of its own for a fifth of the metal, beside it.

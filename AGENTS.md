@@ -1,6 +1,6 @@
 # zk-ArenaAI, the learned policy: where it stands
 
-Updated 2026-11-13.  Branch `learned-policy-plan`.  Repo: `C:/Users/Thoma/Documents/sources/zk-ArenaAI`.  This file was
+Updated 2026-11-16.  Branch `learned-policy-plan`.  Repo: `C:/Users/Thoma/Documents/sources/zk-ArenaAI`.  This file was
 `HANDOFF.md`.
 
 The current state only.  How things got here is in git history.  How everything works, with its numbers, is in
@@ -44,7 +44,17 @@ simulator (`sim/`): first by cloning scripted players, then DAgger, then PPO.
 * **The economy script builds defences** (the user, 2026-11-13; libzkscripts ABI 14): LLTs by contested spots from 2:30
   (before the extractor), Pickets among them against tanks, AA once the enemy flies, and from 30 metal a second a Stinger
   by an extractor with 700 metal of wrecks near it, or a Gauss where turrets are being lost.  Before, it built none but
-  Cerberus and Lucifer, so no clone built a turret.  01-simulator.md, "The economy script" ("Defences").
+  Cerberus and Lucifer, so no clone built a turret.  01-simulator.md, "The economy script" ("Defences").  Since 2026-11-16 (the
+  user; libzkscripts ABI 17), by a spot or extractor in water it builds an Urchin in place of an LLT or Picket once an enemy
+  has been seen under water, which neither can fire at.
+* **Weapons know water** (the user, 2026-11-16; libzksim ABI 29), as the engine has them: only a water weapon (torpedoes and
+  depth charges, the Dagger's, Gauss's and Ultimatum's guns, the Hunter's, Siren's and submarines') aims at what's under water,
+  or from under water at what's in it; a torpedo only at what's in water; other weapons don't fire from under the surface, and
+  their shots go off at it.  The amphibious units with a float (Buoy, Grizzly, Bulkhead, Scallop, Archer, Angler) rise to the
+  surface to fire, in 1-3 s, by `unit_impulsefloat_toggle.lua`'s arithmetic and the engine's drag in water, and sink when
+  they've nothing to aim at.  Checked against the engine's cases and float traces.  A frame's `y` is now a unit's base, so a
+  ship's or submarine's is below the surface.  On a map with no ground below 0 the sim plays as before.  01-simulator.md,
+  "Water"; "Known gaps" for sonar, which isn't modelled.
 * **Two damage stats a team** (2026-11-12, the user; libzksim ABI 24, `ZK_STATS` 6): `[4]` the damage its units have done
   to enemies' units, in metal, and `[5]` what enemies' have done to its own, for a combat-efficiency head.  01-simulator.md,
   "Teams and alliances".
@@ -83,6 +93,87 @@ simulator (`sim/`): first by cloning scripted players, then DAgger, then PPO.
     being built in their reach, as Zero-K's default widget has them patrol).  01-simulator.md, "Economy" and "The economy script".
   * Plates are factories in the policy's type table (masks only, and no new feature version for it, since no data held one).
   * `clone/army-6` was recorded by the old scripts, so a clone of it learns factory copies: new recordings are needed first.
+
+## Self-play (2026-11-16): a run of 16 hours, stopped at iteration 275
+
+The user, after Pluto's README (self-play alone, 1v1s) and `full-4`'s RL not improving: train against itself, a tenth of
+the games against the scripts, 1v1s first and the other kinds mixed in later.  03-training.md, "Opponents".
+
+* **The run** (the user, 2026-11-16: 24 hours, the policy's own economy in every game, after a look for easy speed):
+  `results/launch-full4.sh`, the pipeline's `ppo` stage, so `full-4/ppo`, `full-4/logs/ppo.out`, the dashboard at
+  `http://localhost:8765`, `full-4/pss.log` and `memguard.log`.  From the DAgger actor, GRPO as `full-4` ended (unbootstrapped,
+  the seven terms, `--group-step 2048 --lr-start 1e-5 --kl-target 0.005`), `--self-play 0.9`, `--kinds-ramp 500:0 2500:0.5`,
+  `--economy-start 1 --economy-end 1`, `--hours 24`, a test of 128 1v1s against the script every 50 iterations.  Three
+  collectors of 16 games at `--collector-gb 1.4`.  Started 14:17; the user stopped it at iteration 275 (2026-11-17 06:21,
+  4.80M decisions, `ppo/ckpt/it-000275.pt`, `ppo` not marked done) as not learning.  To go on: remove `full-4/ppo/stop` and
+  run the launch file again (with `--ppo-hours` what's left of the 24, about 8).  The script-only GRPO
+  is `full-4/ppo-script` now, its replays `replays/ppo-script`.  Its test at iteration 0 (9.4 minutes): 10.9% wins, 1.6%
+  draws, a score of 0.245 +- 0.019, extractors at 6 minutes 4.8 against the script's 9.2.  At 50 (16:59, 875,000
+  decisions): 10.2% wins, the score's change -0.006 +- 0.021, extractors 5.1 against 9.5.  119 decisions a second over
+  iterations 2-50 (`selfplay-test`'s 2-16 made 98, its own 136), about 2.5 minutes an iteration and 15 a test, so 24
+  hours end at about iteration 500, all of it 1v1s.  A collector 1.05 GB at most, WSL 15-16 GB, the KL past 0.01 in 10
+  iterations of 50, no errors.
+* **At iteration 268** (2026-11-17 05:56, 4.67M decisions, 15.6 hours; the user: "I don't think it's learning").  Tests at
+  100, 150, 200 and 250: wins 11.7%, 17.2%, 13.3%, 13.3%, the score's change +0.017, +0.045, +0.017, +0.028, each +- 0.02.
+  Game by game (`ppo/tests.jsonl`), the mean of those four less iteration 0's: the score +0.027 +- 0.017, the result +0.036
+  +- 0.025, income share +0.019 +- 0.007, extractors at 6 minutes +0.55 +- 0.20 (4.77 to 5.63 at 250, the script's
+  9.2-9.5), games 166 s +- 61 longer.  So a little economy, about 2.7 SE on the best of several measures looked at, and no
+  wins a test can show.  The first RL run here whose tests are all above its start, and far too slow to matter.  In
+  training nothing trends: the KL 0.006-0.008 an iteration with the guard slowing the rate in 201 iterations of 268 (so the
+  step isn't what limits it), about 450 branches (56 groups) an iteration, 1.3-2 new games.
+* **Where the time goes** (py-spy on a run's processes with `results/profile-run.sh`, as root; 03-training.md, "Playing"):
+  the GPU, about 90% busy with the learner and the collectors on it.  A collector of 16 games waited on its passes for
+  about 75% of its time, with the sim 2% and featurizing 4% (one of 48 games: 60%, and featurizing 20%); the learner
+  waited on its data workers for 20%, and copied every gradient before each minibatch for 12%.
+  * Kept: the learner asks for the next minibatch's decisions while the GPU is on this one's, and takes a minibatch's
+    gradient apart from the parameters' (no copy).  With them the run made 163 and 156 decisions a second overall at
+    iterations 2 and 3, where `selfplay-test`, the same but for them, made 124 and 124: training at 166 against 129-132,
+    and collecting at 171 and 154 against 128 and 121, with the GPU the learner leaves.
+  * Not kept: fewer, bigger collectors.  Runs of 5 iterations from the DAgger actor, no test, decisions a second overall
+    at iterations 4 and 5: three of 16 as it was 119 and about 105; one of 48 128 and 102; two of 24 with the learner's
+    changes 138 and 136.  So the run started with two of 24 at `--collector-gb 2.0` (13:42, now `full-4/ppo-2x24`).
+    But those runs had no test, and a test's long games widen every pass after it: with it, two collected 108 decisions
+    a second at iteration 2 where three had made 128, the learner waiting 70 s of the iteration's 158, and the test took
+    24 minutes, not 13.  Collecting is the limit, and three processes get more of the GPU and of the CPUs than two.
+    Restarted at 14:17 with three of 16.
+  * Tried and taken out: a pass takes about 0.25 s by iteration 5 whatever its rows (16, 24 or 48) and however many
+    collectors.  A `Graphs` for each class of frame size, small frames in wide passes and wide ones in narrow, made each
+    pass no faster and a round more of them (98 decisions a second collecting against 147).  No stops among the action
+    steps (one graph for all 16) made it no faster either.  So more rows a pass is what collects faster, and a collector's
+    memory, which grows with rows times the widest frame it has played, is what limits that.
+  * `full-4/selfplay-profile`, `selfplay-ab-*` and `ppo-2x24` are those runs: scratch.
+
+* **`--self-play 0.9`** (the pipeline's `ppo` stage now): nine new training games in ten the policy plays every player's
+  team; the rest it plays team 0 against the scripts, as before.  The gate it replaces (self-play once two tests averaged
+  80% wins) never opened.  Under GRPO each side's branches are judged against the same side's in the group's other copies.
+* **`--kinds-ramp 500:0 2500:0.5`** (the pipeline's): the share of new games that aren't 1v1s, by iteration: none till 500,
+  then up to half at 2,500, split among team games, free-for-alls and chicken games as `--kinds` weighs them.  It counts
+  the learner's iterations, which start at 0 with `--init` and carry on with a resume, as the lead rule's fade does.
+* **A pass is a seat a game at most**: against itself a round has 2 seats a 1v1 and up to 8 a team game, and a collector's
+  graphs grow with a pass's rows, so a round goes in passes of the collector's games (16).
+* **The test** (`results/launch-selfplay-test.sh`, `full-4/selfplay-test`): 16 iterations of 16,384 from `full-4`'s DAgger
+  actor, with `full-4`'s last GRPO flags (unbootstrapped, the seven terms, `--group-step 2048 --lr-start 1e-5 --kl-target
+  0.005`).  It ran through.  Of the games ended, 266 copies were against itself and 61 against the scripts (all lost).
+  82-124 decisions a second overall (the script-only run's first 16: 82-145), a collector 0.95-1.05 GB of its 1.4, WSL
+  17.2 GB at most, the KL 0.002-0.025 an iteration with the guard slowing the rate from iteration 8 to 15.  Tests of the
+  same 128 1v1s against the script: 14.8% wins at 0 and at 16, the score's change -0.009 +- 0.024.  16 iterations say
+  nothing about learning, and weren't meant to.
+* **About 3 minutes an iteration**, so iteration 500 is about a day in and 2,500 about 5 days, tests (13 minutes each) on top.
+  A game is played through as one group of 8 copies, about 2 new games an iteration.
+* **The other kinds' check** (`full-4/selfplay-mixed`: `KINDS_RAMP=0:0.5 ITERATIONS=3`, no test): it ran through, with
+  free-for-alls ended and judged (`wins_mirror_ffa` a third), at 131-201 decisions a second.  Its collectors held 0.5-0.6
+  GB, but it had no test's late frames: `full-4`'s passes of the same 16 rows, of every kind, reached 1.07 GB.
+* **Seen in both, and in `full-4`'s script-only GRPO** (13 of its 141 iterations): `adv_abs_max` in the thousands.  In an
+  iteration where no group's copies differ in who won, the result term's scale (its mean spread over the groups where it
+  varied) is about 1e-4, and a decision taken after other copies of its game had ended is a whole result from its
+  group's mean from that moment (`_judge`, reward-to-go).  The clip at ±3 bounds it.  Not changed: my reading of the
+  code, not reproduced in a test.
+* **The scripts and the sim are being changed** by another agent (the user, 2026-11-16): `~/zksim/build` was rebuilt at
+  11:24, after the test and before the other kinds' check.  A long run plays the build it starts with.
+* **My choices, listed for the user before they asked for the run, and not changed by them**: the method (GRPO as `full-4`
+  ended, not PPO with the critic) and the start (the DAgger actor, not `ppo-script/ckpt/it-000141.pt`); the lead rule
+  fading as before (`--lead-fade 0:0.9 100:0`); the ramp's share split by `--kinds`' weights (two fifths team games, two
+  fifths free-for-alls, a fifth chickens); both flags on by default in the pipeline's `ppo` stage.
 
 ## `runs/full-3` (started 2026-11-13 21:44)
 
@@ -281,7 +372,8 @@ The user asked for it before the next whole run.  All of it is in the tree and d
   libzkrecord ABI 2, clone data version 7).  A 1v1 plays bit for bit as it did.  Allies share income, overdrive and overflow.
 * **Kinds of game**: `SimEnv`, the recorder, the clone eval, the trainer and the pipeline all take `--kinds` (default
   `1v1:0.5 teams:0.2 ffa:0.2 chicken:0.1`), `--slots`, `--test-kinds` and `--chicken-difficulties`.  The policy plays team 0
-  and scripts play its allies and enemies.  The headline test stays a 1v1.
+  and scripts play its allies and enemies (in self-play, since 2026-11-16, it plays every team).  The headline test stays
+  a 1v1.
 * **Maps**: each pool map's `modes` say what it plays (`tools/map_modes.py`); 18 Violet Rampart maps come from a port of
   the map's own generator (`tools/map_rampart.py`).  The pool is 404 maps since 2026-11-11, when 89 of the install's were
   added: 381 play 1v1s, 332 teams, 64 free-for-alls, 5 chickens only.  THISspace and ZeroWars play nothing, and a map
@@ -420,7 +512,7 @@ report, and the same command resumes it.
 `--encoder` is needed by every tool that loads an actor until `policy_latent.ENCODER` names a new encoder: its default is
 `encoder-big`, which no longer loads.
 
-**The tests** (825 pass, 3 of them need CUDA and are skipped without it): `pytest.ini` runs them on 8 processes, a file's tests in
+**The tests** (831 pass, 3 of them need CUDA and are skipped without it): `pytest.ini` runs them on 8 processes, a file's tests in
 one process so that what they share is made once, and `tests/policy/conftest.py` keeps each process's maths to one thread.
 That took the suite from 211 s to about 60 (2026-11-11), with the slowest learning runs cut down and those of paths the
 pipeline doesn't use removed: the variational encoder's fits, checkpoints from before feature version 7, the trainer's
@@ -433,6 +525,15 @@ README.md has the rules for engine games: headless at max speed, windowed only w
 
 ## Next
 
+0. **After the self-play run** ("Self-play" above; stopped 2026-11-17, nothing is running).  The user's idea then: an
+   RL-only run again (no clone), with GRU memory, as Pluto has; not built, and not agreed how.  Mine, put to the user and
+   not answered: before more RL, find why the clone stops expanding.  Held out, `full-4`'s clone gets the kind right for
+   83% of the script's builds (97-100% for fight, move, produce, assist) and a whole build (type, place, offset) costs 7.5
+   nats against 0.3-2.4 for the rest (`clone/log.jsonl`); split that by type, place and offset, and by what's built
+   (extractors and energy against defences, whose rules look back 3-5 minutes, past the actor's 36 s).  If it's what the
+   actor can't see: memory in the features or older frames in the window before a GRU, and the encoder unfrozen for 1,000
+   cloning steps against frozen.  For RL: PPO with the per-term critic, a few maps with the lead rule on, a paired test
+   against the DAgger actor.
 1. **GRPO from branched games** (the user, 2026-11-13, after `full-2`'s PPO got worse), in place of PPO's critic: a game
    copies in the sim and the scripts (libzksim ABI 26, libzkscripts ABI 13) and in `SimEnv` (01-simulator.md, "The batch"),
    and `policy_train.py --group 8` trains by GRPO (03-training.md, "GRPO from branched games").  **The trial**
@@ -477,8 +578,8 @@ README.md has the rules for engine games: headless at max speed, windowed only w
 
 ## Traps
 
-* **Leftover build directories**: `~/zksim/build` is the one in use (libzksim ABI 28 and libzkscripts ABI 16 since the
-  map cache, 2026-11-16; libzkrecord ABI 2).  One built before that needs rebuilding.  The `build-*` and `agent*` directories beside it are leftovers of comparisons and of agents' tree
+* **Leftover build directories**: `~/zksim/build` is the one in use (libzksim ABI 29 since water and libzkscripts ABI 17
+  since the Urchin, both 2026-11-16; libzkrecord ABI 2).  One built before that needs rebuilding.  The `build-*` and `agent*` directories beside it are leftovers of comparisons and of agents' tree
   copies, safe to delete, except `agent-maps-lupa` (above).
 * **The map cache** (`~/zksim/map-cache`, 6.1 GB; `ZKSIM_MAP_CACHE` moves it, empty turns it off): `load_pool` makes a
   map's file again when the map file or libzksim changes.  A change to what's kept, or to how `zksim.Map` makes what it gives
@@ -497,6 +598,10 @@ README.md has the rules for engine games: headless at max speed, windowed only w
   pattern as `[p]olicy_train`.  A `kill -STOP` that way stopped the shell itself.
 * **A background process started by `wsl bash -lc 'nohup X &'`** dies when that call returns.  `setsid nohup X > LOG 2>&1 <
   /dev/null &` outlives it.
+* **A `$` in `wsl bash -c '...'`** is taken by the shell wsl starts first, where the variable isn't set: `F=x; grep y $F`
+  reads stdin, and a `$(...)` runs once, before the loop it's in.  Put it in a script file (`results/wait-lines.sh`).
+* **`NAME` in WSL** is the PC's name, set for every shell: a launch script that reads `${NAME:-...}` gets it (a run started
+  in `full-4/DESKTOP-DS1JCNE`, 2026-11-16).  `results/launch-selfplay-test.sh` reads `RUN_NAME`.
 * **The dashboard's port**: a standalone `policy_dashboard.py` left on 8765 makes the pipeline run without its own (it says so
   and carries on).  Stop it before a launch, or give the pipeline another `--port`.
 * **Engine games**: never start one, or kill engine processes, while the user is playing.  Check
