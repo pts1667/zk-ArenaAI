@@ -391,8 +391,8 @@ def test_the_economy_script_guards_a_fought_over_extractor_and_the_base_against_
 
 def test_by_an_extractor_in_water_the_economy_script_builds_an_urchin_once_an_enemy_has_been_seen_under_water():
     """Our ship constructor, radar and extractor in deep water, and an enemy tank and amphibious constructor in sight of the
-    radar: in the first game the constructor stands under water, in the second on land, and both are gone once our economy
-    has looked.  From 2:30 the extractor gets light turrets (the tank makes every extractor want them): Urchins in the first
+    radar, with a sonar station half-way to the constructor, as only sonar finds what's under water: in the first game the
+    constructor stands under water, in the second on land, and both are gone once our economy has looked.  From 2:30 the extractor gets light turrets (the tank makes every extractor want them): Urchins in the first
     game, as an LLT or Picket couldn't fire at what's under water, and LLTs in the second.  A ship constructor builds only in
     water."""
     cat = se.catalog()
@@ -415,9 +415,10 @@ def test_by_an_extractor_in_water_the_economy_script_builds_an_urchin_once_an_en
                 k = dry[np.argmax([np.min(np.hypot(dx - x.flat[c], dz - z.flat[c])) for c in dry])]
             ship = env.table.move_class[[env.table.names.index("shipcon")]].astype(np.int32)
             cx, cz = se.place(bundle, env.rng, ship, wx + 80.0, wz)
-            units = [("shipcon", cx[0], cz[0]), ("staticmex", wx, wz), ("staticradar", wx, wz + 100.0),
-                     ("cloakcon", x1, z1), ("tankraid", x1 + 60.0, z1), ("amphcon", float(x.flat[k]), float(z.flat[k]))]
-            env.batch.reset(g, world_map, 7 + g, np.array([cat.index[n] for n, _, _ in units], np.int32), np.array([0, 0, 0, 1, 1, 1]),
+            ex, ez = float(x.flat[k]), float(z.flat[k])
+            units = [("shipcon", cx[0], cz[0]), ("staticmex", wx, wz), ("staticradar", wx, wz + 100.0), ("staticsonar", (wx + ex) / 2, (wz + ez) / 2),
+                     ("cloakcon", x1, z1), ("tankraid", x1 + 60.0, z1), ("amphcon", ex, ez)]
+            env.batch.reset(g, world_map, 7 + g, np.array([cat.index[n] for n, _, _ in units], np.int32), np.array([0, 0, 0, 0, 1, 1, 1]),
                             np.array([x for _, x, _ in units], np.float32), np.array([z for _, _, z in units], np.float32),
                             base=(x0, z0, x1, z1), sites=bundle.sites())
             env.batch.economy(g, bundle.spot_list, metal=5000.0, energy=5000.0, innate_metal=0.0)

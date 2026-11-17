@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define ZK_ABI_VERSION 29
+#define ZK_ABI_VERSION 30
 #define ZK_WARD_TARGETS 4
 #define ZK_MAX_MOUNTS 8
 #define ZK_MAX_TEAMS 8     /* players in a game, and so allyteams too */
@@ -107,6 +107,7 @@ enum { ZK_U_MOBILE = 1, ZK_U_AIR = 2, ZK_U_ARMED = 4, ZK_U_FIREPROOF = 8, ZK_U_F
        ZK_U_STRAFES = 262144,          /* a gunship that circles what it attacks (airStrafe) */
        ZK_U_DONT_COUNT = 524288,       /* doesn't keep its team in the game (game_over.lua; sim/data/rules.json) */
        ZK_U_VITAL = 1048576,           /* finished, keeps an alliance of AIs in the game: a builder or factory (game_over.lua; rules.json) */
+       ZK_U_SONAR_TOGGLES = 2097152,   /* its sonar goes off while its upkeep isn't paid, as a radar does (sonar_can_be_disabled) */
        ZK_U_LEAVES_GHOST = 2048 };     /* a building: once seen, radar shows just where it is */
 
 typedef struct {
@@ -161,6 +162,7 @@ typedef struct {
        and under water when its middle, mid_height over its base, is more than body_radius below it.  water_y: where its base rides
        over water (-waterline: ships, submarines, hovercraft and what floats), or -1e30 for what stands on the sea bed. */
     float mid_height, body_radius, water_y;
+    float sonar_radius;   /* how far its sonar finds what's in water: the only way to find what's under it (LosHandler.cpp InRadar) */
     int32_t move_state, fire_state;   /* to start with: hold position 0, maneuver 1, roam 2; hold fire 0, return fire 1, fire at will 2 */
     int32_t no_chase;                 /* categories it doesn't go after on its own */
     int32_t bait_level;               /* unit_bait_prevention.lua: 0 shoots at anything */

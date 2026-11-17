@@ -63,6 +63,7 @@ void World::update_view(int s) {
     std::vector<int>& eyes = scratch_eyes;
     sighted.assign(size_t(count()), 0);
     radar_units.clear();
+    sonar_units.clear();
     eyes.clear();
     float farthest = 0.0f;          // ground sight of any eye
     for (const int o : live) {
@@ -70,6 +71,9 @@ void World::update_view(int s) {
         eyes.push_back(o);
         farthest = std::max(farthest, type_of(o).los_radius);
         if (type_of(o).radar_radius > 0.0f && !unpaid[size_t(o)]) radar_units.push_back(o);
+        // unit_attributes_generic.lua: a sonar goes off with its upkeep unpaid only where its def says it can.
+        if (has_water && type_of(o).sonar_radius > 0.0f && !(unpaid[size_t(o)] && (type_of(o).flags & ZK_U_SONAR_TOGGLES)))
+            sonar_units.push_back(o);
     }
     ZK_PROF(FOG_SWEEP);
     for (int o : eyes) {
@@ -98,9 +102,23 @@ void World::update_view(int s) {
         // What a transport carries is seen when the transport is, and by whoever carries it.
         const int by = carrier[i];
         const bool in_view = by < 0 ? sighted[i] != 0 : (side[size_t(by)] == s || sighted[size_t(by)] != 0);
-        const bool los = in_view || ((revealed >> side[i]) & 1u) != 0;
-        bool radar = false;
-        if (!cloaked[i] && !los)
+        // LosHandler.cpp: what's in water is found by sonar, a circle round each sonar of the allyteam's (InRadar), and what's under
+        // water only by sonar; with Zero-K's requireSonarUnderWater it isn't in sight without it either (InLos).  Cloaked, it's
+        // sonar-stealthy too (unit_stealth.lua).  What the reveal rule shows is always visible, under water or not.
+        const uint8_t wets = has_water ? wet[i] : uint8_t(0);
+        bool sonar = false;
+        if ((wets & WET_IN) && !cloaked[i])
+            for (int o : sonar_units) {
+                const float r = type_of(o).sonar_radius, dx = x[size_t(o)] - x[i], dz = z[size_t(o)] - z[i];
+                if (dx * dx + dz * dz <= r * r) {
+                    sonar = true;
+                    break;
+                }
+            }
+        const bool unfound = (wets & WET_UNDER) && !sonar;
+        const bool los = (in_view && !unfound) || ((revealed >> side[i]) & 1u) != 0;
+        bool radar = !los && sonar;
+        if (!cloaked[i] && !los && !radar && !(wets & WET_UNDER))
             for (int o : radar_units) {
                 const float r = type_of(o).radar_radius, dx = x[size_t(o)] - x[i], dz = z[size_t(o)] - z[i];
                 if (dx * dx + dz * dz <= r * r) {

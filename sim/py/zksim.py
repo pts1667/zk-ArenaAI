@@ -21,7 +21,7 @@ sys.path.insert(0, str(ROOT / "py"))
 sys.path.insert(0, str(ROOT.parent / "bots"))
 import zknav  # noqa: E402
 from zkbot.policy import rawframe  # noqa: E402
-ABI_VERSION = 29
+ABI_VERSION = 30
 WARD_TARGETS = 4
 MAX_MOUNTS = 8
 MAX_TEAMS = 8                       # players in a game, and so allyteams too
@@ -35,7 +35,7 @@ ORDER_BUILD, ORDER_ASSIST, ORDER_RECLAIM, ORDER_PRODUCE, ORDER_MOVE_STATE, ORDER
 ORDER_PLACE_BEACON, ORDER_WAIT_AT_BEACON, ORDER_ON_OFF = 19, 20, 21
 ORDER_LOAD, ORDER_UNLOAD, ORDER_DROP = 22, 23, 24        # an air transport's (sim/src/transport.cpp)
 MOBILE, AIR, ARMED, FIREPROOF, FACTORY, PLOPPABLE, COMMANDER, CAN_CLOAK, STARTS_CLOAKED, FIRES_CLOAKED, AREA_CLOAK_ON, LEAVES_GHOST, KAMIKAZE_BLIND, FLOATS = 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192
-MISSILE, NEUTRAL, PLANE, LANDS, STRAFES, DONT_COUNT, VITAL = 16384, 32768, 65536, 131072, 262144, 524288, 1048576
+MISSILE, NEUTRAL, PLANE, LANDS, STRAFES, DONT_COUNT, VITAL, SONAR_TOGGLES = 16384, 32768, 65536, 131072, 262144, 524288, 1048576, 2097152
 FEATURES_PER_SIDE = 512             # records a frame can hold, as many as featurize keeps; past it, those with the most metal left (sim/src/views.cpp)
 # Chicken defense (sim/src/chickens.cpp): the difficulties, the roles of the gadget's kinds, and what chicken_state gives.
 CHICKEN_DIFFICULTIES = ("Beginner", "Very Easy", "Easy", "Normal", "Hard", "Suicidal")
@@ -76,7 +76,7 @@ class TypeRec(ct.Structure):
         "cloak_cost", "cloak_cost_moving", "decloak_distance", "bestowed_decloak", "area_cloak_radius", "area_cloak_upkeep",
         "perceived_range", "heat_per_shot", "heat_decay", "heat_max_slow", "heat_initial", "bait_cost", "kamikaze_distance", "detonate_reach", "drop_height", "drop_gravity", "jump_range", "jump_speed", "jump_height", "jump_reload", "jump_delay", "burrow_speed", "mass", "push_scale", "needed_link", "throw_radius", "teleport_rate", "beacon_frames",
         "cruise_height", "vertical_speed", "turn_speed", "strafe_radius", "strafe_speed", "reammo_frames", "reammo_energy", "pad_bp",
-        "lift_light", "lift_medium", "lift_heavy", "lift_size", "load_size", "load_height", "mid_height", "body_radius", "water_y")] + [
+        "lift_light", "lift_medium", "lift_heavy", "lift_size", "load_size", "load_height", "mid_height", "body_radius", "water_y", "sonar_radius")] + [
         (n, ct.c_int32) for n in (
             "move_state", "fire_state", "no_chase", "bait_level", "bait_target", "bait_target_armor",
             "def_id", "wreck_feature", "heap_feature", "armor_class", "move_class", "category", "flags", "explode_weapon", "n_mounts", "landing_weapon", "drop_weapon", "missile_pads", "beacon_type", "ammo", "pad_count", "plate_parent", "load_class")] + [

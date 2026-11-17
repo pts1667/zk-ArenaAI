@@ -85,16 +85,42 @@ KEEP_STAT = 3 if zksim.STATS > 3 else 1
 # (policy_train.Config.terms).  "blend" is the reward as one number (`reward`), the shaping fading by beta into the result; the
 # rest are its parts and more, apart and unfaded (`reward_terms`).  GRPO (policy_train.GroupCollector) asks for "income" too,
 # the income balance's level, whose mean over a branch is its economy.
-TERMS = ("blend", "result", "score", "economy", "combat", "extractors", "map", "experience")
+# The exploratory terms (the user, 2026-11-17): what a team has made of a class of unit, each unit paid as it's finished, up to
+# the class's cap (`MADE_CAPS`), so 0 to 1 over a game; "made_roles" is the combat roles (`MADE_ROLES`) it has made a unit of,
+# each paid once.  A team's own, not a balance against the others'.  A learner weighs them for a seat in few of its games,
+# and tells its actor (policy_train.draw_objective); elsewhere their weight is 0 and only their critics learn them.
+MADE_TERMS = ("made_builders", "made_economy", "made_defences", "made_factories", "made_roles")
+MADE_CAPS = (10.0, 30.0, 10.0, 4.0, 8.0)
+MADE_ROLES = ("raid", "scout", "riot", "skirm", "assault", "arty", "snipe", "aa", "antiheavy", "bomb")
+# The leads (the user, 2026-11-17, for a policy that doesn't expand and leaves its army standing): each an alliance's count a
+# player less the mean of the other live alliances', counted from each team's own units (`_counted`, `_leads`), over what
+# makes a lead 1 and held to -1 to 1 for the critic's span:
+# * "extractor_lead": extractors, a finished one 1 and one being built BUILD_RAMP x its build progress, over EXTRACTOR_LEAD;
+# * "idle_lead": finished fighters that move and stand idle, over IDLE_LEAD and turned round: a penalty for more than theirs;
+# * "constructor_lead": constructors (those that move, the commander not among them), counted as extractors are, and no
+#   more a team than 1 at the game's start and 1 more every CONSTRUCTOR_EVERY seconds up to CONSTRUCTORS, over CONSTRUCTORS.
+LEAD_TERMS = ("extractor_lead", "idle_lead", "constructor_lead")
+BUILD_RAMP = 0.2                    # of an extractor or a constructor: what one being built counts, times its build progress
+EXTRACTOR_LEAD = 20.0               # extractors a player: the lead that is 1
+IDLE_LEAD = 20.0                    # idle fighters a player: the lead that is -1
+CONSTRUCTORS = 5.0                  # constructors a team: no more count from 8 minutes, and the lead that is 1
+CONSTRUCTOR_EVERY = 120.0           # seconds of game: how often one more constructor counts, from 1
+TERMS = ("blend", "result", "score", "economy", "combat", "map", "experience") + MADE_TERMS + LEAD_TERMS
 # The terms that are a balance's change a step as "combat" is, closer to the decisions (the user, 2026-11-15): `_balances`.
-BALANCE_TERMS = ("extractors", "map", "experience")
-# The terms that are discounted averages, and their horizons in seconds of game: the rest aren't discounted (`term_gamma`).
-TERM_HORIZONS = {"economy": 600.0}
+# "extractors", the finished extractors' balance, was one of them till "extractor_lead" took its place (the user, 2026-11-17).
+BALANCE_TERMS = ("map", "experience")
+# The terms that are a level's average over time, each with the name its level itself goes by in `reward_terms`: a step
+# pays the level x (1 - gamma), so the return is the level's discounted average over the horizon (TERM_HORIZONS, seconds of
+# game), and the alliance's end pays the whole level, as if it lasted.  The rest aren't discounted (`term_gamma`), and but
+# for the result and MADE_TERMS are a balance's change a step: their sum over a game is where the balance ended, however
+# long it had stood there.
+LEVEL_TERMS = {"economy": "income", "extractor_lead": "extractor_level", "idle_lead": "idle_level", "constructor_lead": "constructor_level"}
+LEAD_LEVELS = tuple(LEVEL_TERMS[name] for name in LEAD_TERMS)
+TERM_HORIZONS = {name: 600.0 for name in LEVEL_TERMS}
 COMBAT_CONSTANT = 1000.0            # metal: the damage balance's (`_combat`), as VALUE_CONSTANT is the value balance's
 # zksim's stats (capi.h ZK_STATS): the metal a team's damage has cost the others; its finished extractors; its share of the map in
 # sight and in radar; the part of its damage its army did, and the metal put into its army.
 DEALT_STAT, EXTRACTORS_STAT, SIGHT_STAT, RADAR_STAT, ARMY_DEALT_STAT, ARMY_STAT = 4, 6, 7, 8, 9, 10
-EXTRACTORS_CONSTANT = 4.0           # extractors: the extractor balance's (`_balances`), as VALUE_CONSTANT is the value balance's
 MAP_CONSTANT = 0.2                  # shares of the map, sight's and radar's summed: the map balance's
 ARMY_CONSTANT = 1000.0              # metal: what the army's trades are over besides its own, so that a small army's aren't large
 
@@ -462,9 +488,10 @@ class SimEnv:
     # What a game is, apart from the sim's and the scripts' state: what `copy_game` copies, and what a test checks is all of it.
     # Arrays whose first axis is the game; lists by game, shared (read-only, or replaced whole) or copied deep; dicts by game and
     # by seat.  Everything else is the env's own, shared by its games.
-    GAME_ARRAYS = ("waiting", "policy_economy", "last_income", "income_delta", "income_now", "last_combat", "combat_delta", "last_balances", "balance_delta",
+    GAME_ARRAYS = ("waiting", "policy_economy", "last_income", "income_delta", "income_now", "lead_now", "last_combat", "combat_delta", "last_balances", "balance_delta",
                    "lead_rule", "starts", "decisions", "n_teams", "ally", "n_allies", "chickens", "difficulty", "alive", "paying",
-                   "facing", "outcome", "result", "last_raw", "delta", "paid", "speed_paid", "speed_pot", "bonus")
+                   "facing", "outcome", "result", "last_raw", "delta", "paid", "speed_paid", "speed_pot", "bonus",
+                   "made_counts", "made_bits", "made_delta")
     GAME_LISTS_SHARED = ("mode", "bundle", "kind", "script_kinds", "styles")
     GAME_LISTS_OWN = ("seats", "scripts", "known", "game_rng")
     GAME_DICTS = ("chicken_states", "_units_of")
@@ -529,6 +556,10 @@ class SimEnv:
         self.last_income = np.zeros((games, self.slots))       # by alliance, as `last_raw`
         self.income_delta = np.zeros((games, self.slots))
         self.income_now = np.zeros((games, self.slots))         # `_income` at the step just taken, before anyone went out at it
+        # `_leads` then, as `income_now`, where they're counted: a run whose terms hold one of LEAD_TERMS says so
+        # (`count_leads`), since reading every team's units is 2 ms a step of 48 games.
+        self.count_leads = False
+        self.lead_now = np.zeros((games, self.slots, len(LEAD_TERMS)))
         self.last_combat = np.zeros((games, self.slots))       # the damage balance (`_combat`), as `last_raw`
         self.combat_delta = np.zeros((games, self.slots))
         self.last_balances = np.zeros((games, self.slots, len(BALANCE_TERMS)))     # `_balances`, as `last_raw`
@@ -628,9 +659,49 @@ class SimEnv:
         self.makeable &= np.asarray(self.table.mobile, bool)
         self.made = np.zeros(len(self.makeable))       # the policy's sides' finished units of those, by row, decayed
         self.known: list[list[np.ndarray | None]] = [[None] * self.slots for _ in range(games)]     # each team's finished units so far
+        # The exploratory terms (MADE_TERMS), counted with the diversity bonus's new units when `count_made`: what each team
+        # has made of each class, the combat roles it has made (bits of MADE_ROLES), and what they pay this decision.
+        self.count_made = False
+        self.made_counts = np.zeros((games, self.slots, len(MADE_TERMS) - 1))
+        self.made_bits = np.zeros((games, self.slots), np.int64)
+        self.made_delta = np.zeros((games, self.slots, len(MADE_TERMS)))
+        self.made_class, self.made_role = self._made_classes()
+        # By type-table row, for the leads: extractors, fighters that move (no builder among them), and constructors.
+        n, t = len(self.makeable), self.table
+        self.extractor_row = np.asarray(self.eco_data.extractor[:n], bool)
+        self.fighter_row = np.asarray(t.mobile, bool)[:n] & np.asarray(t.combat, bool)[:n] & ~np.asarray(t.builder, bool)[:n]
+        self.constructor_row = self.made_class == 0
         self.pending: dict[int, list] = {}
         self.done: list[tuple[int, str, float]] = []
         self._replace: list[int] = []
+
+    def _made_classes(self) -> tuple[np.ndarray, np.ndarray]:
+        """By type-table row: the class of MADE_TERMS a finished unit of it counts in (-1: none), and which of MADE_ROLES it is
+        (-1: not a fighter that moves).  Builders are those that move, the commander not among them; the economy is
+        extractors and what makes energy; defences are what the engine calls so; factories are theirs, plates among them."""
+        t, eco = self.table, self.eco_data
+        n = len(self.makeable)
+        builder, mobile, factory, combat = (np.asarray(x, bool)[:n] for x in (t.builder, t.mobile, t.factory, t.combat))
+        kind = np.full(n, -1, np.int64)
+        kind[np.asarray(t.stats)[:n, 11] > 0] = 2       # units.is_defense, as tables.TypeTable._fill lays a type's numbers out
+        kind[(eco.extractor[:n] | (eco.energy[:n] > 0)) & ~mobile] = 1
+        kind[factory] = 3
+        kind[builder & mobile & ~eco.commander[:n]] = 0
+        role = np.array([MADE_ROLES.index(r) if r in MADE_ROLES else -1 for r in self.script_data.role_of[:n]], np.int64)
+        role[~(mobile & combat)] = -1
+        return kind, role
+
+    def _count_made(self, g: int, side: int, rows: np.ndarray) -> None:
+        """A team's newly finished units, by type-table row, into its counts, and what they pay this decision (MADE_TERMS): each
+        of a class up to the class's cap, and each combat role's first."""
+        caps = np.array(MADE_CAPS)
+        kinds, roles = self.made_class[rows], self.made_role[rows]
+        before = self.made_counts[g, side].copy()
+        self.made_counts[g, side] += np.bincount(kinds[kinds >= 0], minlength=len(before))
+        self.made_delta[g, side, :-1] = (np.minimum(self.made_counts[g, side], caps[:-1]) - np.minimum(before, caps[:-1])) / caps[:-1]
+        bits = int(np.bitwise_or.reduce(np.left_shift(1, roles[roles >= 0]), initial=0))
+        self.made_delta[g, side, -1] = bin(bits & ~int(self.made_bits[g, side])).count("1") / caps[-1]
+        self.made_bits[g, side] |= bits
 
     def _role_of_type(self) -> np.ndarray:
         """Each sim type's role (groups.roles), by the type-table row it is, for the sim's group orders."""
@@ -810,6 +881,7 @@ class SimEnv:
         self.starts[g, :2 * len(starts)] = [v for s in starts for v in s]
         self.decisions[g] = 0
         self.known[g] = [None] * self.slots
+        self.made_counts[g], self.made_bits[g], self.made_delta[g] = 0.0, 0, 0.0
 
     def _draw_styles(self, g: int) -> tuple[pv.Variant, ...] | None:
         """Each team's army script knobs for game `g`: drawn from the environment's generator when variants are on, else None.  The
@@ -1046,19 +1118,55 @@ class SimEnv:
         return self._balance(self.batch.stats[:, :, DEALT_STAT], COMBAT_CONSTANT)
 
     def _balances(self) -> np.ndarray:
-        """games x slots x BALANCE_TERMS, by alliance, each zero-sum over the live alliances: "extractors", the finished extractors
-        against the others', and "map", the shares of the map in sight and in radar summed against theirs, as `_balance`; and
-        "experience", the army's trades, less the mean of the other live alliances': x / (1 + x) for x the metal its damage
-        cost the others over the metal put into it and ARMY_CONSTANT (Zero-K's experience, the army's not a unit's), so that
-        it's -1 to 1 as the rest, within the critic's span."""
+        """games x slots x BALANCE_TERMS, by alliance, each zero-sum over the live alliances: "map", the shares of the map in
+        sight and in radar summed against the others', as `_balance`; and "experience", the army's trades, less the mean of
+        the other live alliances': x / (1 + x) for x the metal its damage cost the others over the metal put into it and
+        ARMY_CONSTANT (Zero-K's experience, the army's not a unit's), so that it's -1 to 1 as the rest, within the critic's
+        span."""
         stats = self.batch.stats
-        extractors = self._balance(stats[:, :, EXTRACTORS_STAT], EXTRACTORS_CONSTANT)
         seen = self._balance(stats[:, :, SIGHT_STAT] + stats[:, :, RADAR_STAT], MAP_CONSTANT)
         dealt = self._by_alliance(stats[:, :, ARMY_DEALT_STAT]).astype(np.float64)
         trades = np.where(self.alive, dealt / (dealt + self._by_alliance(stats[:, :, ARMY_STAT]) + ARMY_CONSTANT), 0)
         n = np.maximum(self.alive.sum(1) - 1, 1)
         experience = np.where(self.alive, trades - self._others(trades, self.alive) / n[:, None], 0)
-        return np.stack((extractors, seen, experience), -1)
+        return np.stack((seen, experience), -1)
+
+    def _counted(self) -> np.ndarray:
+        """games x slots x LEAD_TERMS, by team, of its own units: its extractors, a finished one 1 and one being built
+        BUILD_RAMP x its build progress, so that starting one and building it on are worth something before it's done; its
+        finished fighters that stand idle (the sim's flag: one that moves, its order done); and its constructors, counted as
+        the extractors, up to what counts at the game's time (CONSTRUCTOR_EVERY).  Nothing for the chickens."""
+        out = np.zeros((self.count, self.slots, len(LEAD_TERMS)))
+        out[:, :, 0] = self.batch.stats[:, :, EXTRACTORS_STAT]
+        records, counts = self.batch.records, self.batch.counts
+        most = np.minimum(1.0 + np.floor(self.decisions * self.seconds_a_step / CONSTRUCTOR_EVERY), CONSTRUCTORS)
+        for g in range(self.count):
+            for side in range(int(self.n_teams[g])):
+                if side == self.chickens[g]:
+                    continue
+                u = records[g, side, :int(counts[g, side])]
+                own = u["player"] == side
+                rows, flags, built = self.table.rows(u["def_id"][own]), u["flags"][own], u["build_frac"][own]
+                building = (flags & rf.BEING_BUILT) != 0
+                constructors = self.constructor_row[rows]
+                out[g, side, 0] += BUILD_RAMP * float(built[building & self.extractor_row[rows]].sum())
+                out[g, side, 1] = np.count_nonzero(((flags & rf.IDLE) != 0) & ~building & self.fighter_row[rows])
+                out[g, side, 2] = min(np.count_nonzero(~building & constructors) + BUILD_RAMP * float(built[building & constructors].sum()), most[g])
+        return out
+
+    def _leads(self) -> np.ndarray:
+        """games x slots x LEAD_TERMS, by alliance, each the level its term averages: a live alliance's count a player
+        (`_counted` over its teams) less the mean of the other live alliances', over what makes a lead 1 and held to -1 to 1,
+        the idle fighters' turned round; 0 for the rest.  Zero-sum over the live alliances where none is held, and at two
+        always."""
+        teams = np.maximum(self._by_alliance((self.ally >= 0).astype(np.float64)), 1.0)
+        counted = self._counted()
+        n = np.maximum(self.alive.sum(1) - 1, 1)[:, None]
+        out = np.zeros((self.count, self.slots, len(LEAD_TERMS)))
+        for i, scale in enumerate((EXTRACTOR_LEAD, -IDLE_LEAD, CONSTRUCTORS)):
+            v = np.where(self.alive, self._by_alliance(counted[:, :, i]) / teams, 0)
+            out[:, :, i] = np.where(self.alive, np.clip((v - self._others(v, self.alive) / n) / scale, -1.0, 1.0), 0)
+        return out
 
     def _rebase(self, g: int | slice = slice(None)) -> None:
         """The balances whose changes are rewards, as they are now: at a game's start, and in a game that goes on when an
@@ -1173,9 +1281,11 @@ class SimEnv:
         """Pluto's diversity bonus, for the units the policy chooses to make: each unit a factory could make that a team finishes
         this decision is worth `diversity` x its type's `rarity`.  Rarity is counted over the policy's teams only; every team earns
         the bonus, and `reward` takes it zero-sum over the alliances.  A team's units at its first decision of a game, the
-        commander's among them, count as made already."""
+        commander's among them, count as made already.  With `count_made`, every unit a team finishes is counted for the
+        exploratory terms too (`_count_made`), a factory's or not."""
         self.bonus[:] = 0.0
-        if not self.diversity:
+        self.made_delta[:] = 0.0
+        if not self.diversity and not self.count_made:
             return
         window = self.act_every if self.align else 1
         if self.slot % window:
@@ -1194,6 +1304,8 @@ class SimEnv:
                     continue
                 fresh = np.isin(u["uid"], done[~np.isin(done, known)]) & (u["player"] == side)
                 rows = self.table.rows(u["def_id"][fresh])
+                if self.count_made and len(rows):
+                    self._count_made(g, side, rows)
                 rows = rows[self.makeable[rows]]
                 if not len(rows):
                     continue
@@ -1221,6 +1333,8 @@ class SimEnv:
         self.income_delta = income - self.last_income
         self.last_income = income
         self.income_now = income
+        if self.count_leads:
+            self.lead_now = self._leads()
         combat = self._combat()
         self.combat_delta = combat - self.last_combat
         self.last_combat = combat
@@ -1360,9 +1474,11 @@ class SimEnv:
         """The reward's terms (TERMS) at the step just taken, by name, each zero-sum over the alliances as `reward` is:
         "blend", `reward` itself; "result", the result and the speed term; "score", the value balance's change and the diversity
         bonus, as `reward` shapes but for income; "economy", the income balance (`_income`) x (1 - its gamma) each step, a discounted average
-        of it, and at the alliance's end the whole level, as if it lasted; "combat", the damage balance's change (`_combat`);
-        "extractors", "map" and "experience", their balances' changes (`_balances`); "income", the income balance itself, for
-        GRPO's mean of it over a branch."""
+        of it, and at the alliance's end the whole level, as if it lasted; LEAD_TERMS the same of their leads (`_leads`);
+        "combat", the damage balance's change (`_combat`); "map" and "experience", their balances' changes
+        (`_balances`); "income" and LEAD_LEVELS, those levels themselves (LEVEL_TERMS), for GRPO's mean of one over a branch
+        and for what it was when a decision was taken.  MADE_TERMS are the seat's team's own, of what it finished this
+        decision (`_count_made`): no balance, so not zero-sum."""
         out = np.zeros(len(names))
         view = self._view(seat)
         if view is None:
@@ -1376,19 +1492,30 @@ class SimEnv:
                 v = self.paid[g, a] + self.speed_weight * self.speed_paid[g, a]
             elif name == "score":
                 v = self._shaped(g, a, income=False)
-            elif name == "economy":
+            elif name in LEVEL_TERMS:
                 ended = g in self._replace or not self.alive[g, a]
-                v = self.income_now[g, a] * (1.0 if ended else 1.0 - self.term_gamma(name))
+                v = self._level(LEVEL_TERMS[name], g, a) * (1.0 if ended else 1.0 - self.term_gamma(name))
             elif name == "combat":
                 v = self.combat_delta[g, a]
             elif name in BALANCE_TERMS:
                 v = self.balance_delta[g, a, BALANCE_TERMS.index(name)]
-            elif name == "income":
-                v = self.income_now[g, a]
+            elif name in MADE_TERMS:
+                out[i] = self.made_delta[g, self.team_of(seat), MADE_TERMS.index(name)]
+                continue
+            elif name == "income" or name in LEAD_LEVELS:
+                v = self._level(name, g, a)
             else:
                 raise ValueError(f"no reward term {name!r}: {TERMS}")
             out[i] = sign * v
         return out
+
+    def _level(self, name: str, g: int, a: int) -> float:
+        """A level term's level (LEVEL_TERMS' values) for game g's alliance a at the step just taken."""
+        if name == "income":
+            return self.income_now[g, a]
+        if not self.count_leads:
+            raise ValueError("the leads aren't counted: set count_leads before the games begin")
+        return self.lead_now[g, a, LEAD_LEVELS.index(name)]
 
     def term_gamma(self, name: str) -> float:
         """A term's discount a step of this env (TERM_HORIZONS), 1 for those not discounted."""

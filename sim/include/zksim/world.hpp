@@ -436,7 +436,7 @@ struct World {
     std::vector<int> mem_kind, mem_frame, mem_target;
     std::vector<float> mem_x, mem_z, last_damage;
     SideView views[ZK_MAX_TEAMS];         // per allyteam
-    std::vector<int> radar_units;
+    std::vector<int> radar_units, sonar_units;
     // Economy, only for worlds that turn it on.
     bool economy_on = false;
     Purse purses[ZK_MAX_TEAMS];           // per team

@@ -96,12 +96,6 @@ def test_playing_in_pieces_decides_the_same_as_in_one(learner, monkeypatch):
         assert t.kind_mask[cut["anchor"][k][picked], cut["kind"][k][picked]].all()
 
 
-def test_a_graphs_pass_takes_at_most_the_rows_it_is_given():
-    """Against itself the policy has every seat of a game: a collector's passes stay a seat a game wide, as its memory is sized."""
-    assert pt._act_slices([None] * 5, graphed=True) == [slice(0, 5)]
-    assert pt._act_slices([None] * 5, graphed=True, rows=2) == [slice(0, 2), slice(2, 4), slice(4, 6)]
-
-
 def test_training_games_are_against_itself_by_a_fixed_share_and_of_other_kinds_than_1v1s_by_the_iteration(learner):
     held = learner.cfg, learner.iteration
     try:
@@ -248,13 +242,17 @@ def test_a_frozen_player_copies_the_actor_and_its_encoder(tmp_path, encoder_path
     assert torch.equal(player.actor.latent_in.weight, learner.actor.latent_in.weight)
 
 
-def test_segments_score_in_training_as_their_decisions_did_in_play(tmp_path, encoder_path):
+@pytest.mark.parametrize("size", ("default", "gru"))
+def test_segments_score_in_training_as_their_decisions_did_in_play(tmp_path, encoder_path, size):
     """All of it: played through the trainer's own path and cut into segments, mid-game ones starting from the frames the seat had kept, then
-    featurized again and read, every segment in one forward pass."""
-    cfg = _config(encoder_path)
-    actor = pl.make(VOCABULARY, encoder_path)
-    frames, bundle = sim_frames(actor.reach + 12)
+    featurized again and read, every segment in one forward pass.  With a GRU for memory too, whose seat keeps its state alone."""
+    cfg = _config(encoder_path, size=size)
+    past = pl.SIZE.layers * (pl.window_frames(cfg.decide_every) - 1)       # the windowed actor's reach
+    frames, bundle = sim_frames(past + 12)
     learner = pt.Learner(cfg, tmp_path, pt.DataWorkers(0, [bundle], cfg.enabled_kinds), "cpu")
+    assert learner.actor.reach == (1 if size == "gru" else past)
+    with torch.no_grad():
+        learner.actor.head_done.bias[0] = -3.0      # so that it acts, and later decisions read what it did
     names = np.arange(VOCABULARY, dtype=np.int32)
     seats = pt.Seats(1, "cpu", learner.actor)
     tr = pt.Trajectory(bundle, names)
@@ -264,10 +262,10 @@ def test_segments_score_in_training_as_their_decisions_did_in_play(tmp_path, enc
         items, acts, value, seats.history, seats.seen = learner.act([(frame, bundle, names)], seats.history, seats.seen)
         c = items[0].controllable
         tr.steps.append(pt.Step(frame, *(acts[h][0] for h in pt.act.SLOT_FIELDS + ("logp",)), value[0].copy(), latents=acts["latents"][0]))
-        if t in (6, learner.actor.reach + 4):
+        if t in (6, past + 4):
             pt._cut(tr, segments, seats.history[0], seats.seen[0])
     pt._close(tr, segments)
-    assert [len(s.steps) for s in segments] == [7, learner.actor.reach - 2, 7]
+    assert [len(s.steps) for s in segments] == [7, past - 2, 7] and sum(int((s.anchor >= 0).sum()) for seg in segments for s in seg.steps) > 0
     assert float(segments[2].seen.sum()) == learner.actor.reach and float(segments[0].seen.sum()) == 0.0
     batch = segments[::-1]
     steps = [s for seg in batch for s in seg.steps]
@@ -301,7 +299,8 @@ def test_grpo_judges_each_branch_of_a_copied_game_against_the_other_and_trains_w
     """A group of two games: each stretch's two branches start from the same frame and what the actor kept.  A decision is judged
     on what its branch scored from it on, against the other branch's from the same moment, its economy on the change from it;
     an optimizer step takes whole groups; and the advantages aren't normalized again by the learner, so all of them above 0 push every action up."""
-    cfg = _config(encoder_path, games=2, group=2, horizon=(5.0, 10.0), terms=(("result", 1.0), ("score", 0.5), ("economy", 0.3), ("combat", 0.3)))
+    cfg = _config(encoder_path, games=2, group=2, horizon=(5.0, 10.0),
+                  terms=(("result", 1.0), ("score", 0.5), ("economy", 0.3), ("combat", 0.3), ("extractor_lead", 0.3)))
     env = pt.make_sim(cfg.games, cfg.seed)
     learner = pt.Learner(cfg, tmp_path, pt.DataWorkers(0, env.bundles(), cfg.enabled_kinds), "cpu")
     assert learner.critic is None
@@ -315,8 +314,8 @@ def test_grpo_judges_each_branch_of_a_copied_game_against_the_other_and_trains_w
     monkeypatch.setattr(pt.GroupCollector, "_open", spy)
     real_terms = env.reward_terms
 
-    def terms(seat, names, b):      # each branch's income balance steady, at a level of its own
-        return np.where(np.array(names) == "income", float(seat), real_terms(seat, names, b))
+    def terms(seat, names, b):      # each branch's income balance and lead in extractors steady, at levels of its own
+        return np.where(np.isin(names, ("income", "extractor_level")), float(seat), real_terms(seat, names, b))
 
     monkeypatch.setattr(env, "reward_terms", terms)
     segments, tally = pt.GroupCollector(learner, env, np.random.default_rng(1)).collect_tally(40)
@@ -328,8 +327,9 @@ def test_grpo_judges_each_branch_of_a_copied_game_against_the_other_and_trains_w
     both = [v for v in moments.values() if len(v) == 2]
     assert len(both) >= 10 and all(np.allclose(a + b, 0.0) for a, b in both)
     assert any(len({tuple(s.advantages) for s in seg.steps}) > 1 for seg in segments)     # from each decision on, not the stretch
-    # The economy is judged on the income balance's change from each decision on (Config.economy_change): a steady one is nothing.
-    assert all(np.allclose(s.advantages[2], 0.0) for seg in segments for s in seg.steps)
+    # The economy is judged on the income balance's change from each decision on (Config.economy_change): a steady one is
+    # nothing.  The lead in extractors likewise, as every term that is a level's average.
+    assert all(np.allclose(s.advantages[[2, 4]], 0.0) for seg in segments for s in seg.steps)
     stretches = sorted(opened)
     assert len(stretches) >= 2 and all(len(opened[k]) == 2 for k in stretches)
     for (units_a, kept_a), (units_b, kept_b) in (opened[k] for k in stretches):
@@ -440,7 +440,7 @@ def test_bootstrapped_grpo_adds_the_critics_value_of_where_each_branch_ended_and
     raised = next(seg for seg in segments if seg.end is not None)
     assert len({seg.group for seg in segments}) >= 2
     real = learner.values_of
-    monkeypatch.setattr(learner, "values_of", lambda frames: [v + (f is raised.end) for (f, _, _), v in zip(frames, real(frames))])
+    monkeypatch.setattr(learner, "values_of", lambda frames, kept=None: [v + (f is raised.end) for (f, _, _), v in zip(frames, real(frames, kept))])
     learner.prepare(segments)
     at = {s.slot: s.discount for seg in segments if seg.branch == raised.branch for s in seg.steps}
     for seg in segments:
@@ -455,6 +455,90 @@ def test_bootstrapped_grpo_adds_the_critics_value_of_where_each_branch_ended_and
     critic = learner.critic.value.weight.detach().clone()
     metrics = learner.train(segments, np.random.default_rng(0))
     assert metrics["loss_value"] > 0.0 and "explained_variance_economy" in metrics and not torch.equal(critic, learner.critic.value.weight)
+
+
+def test_a_critic_of_the_actors_memory_is_a_small_one_a_term_and_values_a_branchs_end_from_what_its_seat_kept(tmp_path, encoder_path):
+    """With a GRU for memory the critic can read what the actor reads, the frame's latents and the GRU's state after it
+    (policy_model.MemoryCritic): where a branch ended, from the state its seat kept there."""
+    terms = (("result", 1.0), ("score", 0.5), ("economy", 0.3))
+    cfg = _config(encoder_path, games=4, group=2, horizon=(5.0, 10.0), bootstrap=True, size="gru", critic_size="memory", critic_bins=51,
+                  critic_span=2.0, terms=terms)
+    env = pt.make_sim(cfg.games, cfg.seed)
+    learner = pt.Learner(cfg, tmp_path, pt.DataWorkers(0, env.bundles(), cfg.enabled_kinds), "cpu")
+    critic = learner.critic
+    assert isinstance(critic, pm.MemoryCritic) and learner.player.critic is None
+    assert len(critic.first) == len(critic.value) == 3 and critic.first[0].in_features == learner.actor.encoder.tokens * learner.actor.encoder.latent + learner.actor.gru
+    with torch.no_grad():
+        learner.actor.head_done.bias[0] = -3.0      # so that it acts, and its state holds what it did
+        for head in critic.value:
+            head.weight.normal_(std=0.1)
+    segments, _ = pt.GroupCollector(learner, env, np.random.default_rng(1)).collect_tally(40)
+    ends = [seg for seg in segments if seg.end is not None]
+    assert ends and all(seg.end_history.shape == (1, learner.actor.record) for seg in ends)
+    frames, kept = [(seg.end, seg.bundle, seg.names) for seg in ends], [seg.end_history for seg in ends]
+    values = learner.values_of(frames, kept)
+    assert values[0].shape == (3,)
+    assert not np.allclose(values[0], learner.values_of(frames, [np.zeros_like(k) for k in kept])[0], atol=1e-6)
+    learner.prepare(segments)
+    before = [head.weight.detach().clone() for head in critic.value]
+    metrics = learner.train(segments, np.random.default_rng(0))
+    assert metrics["loss_value"] > 0.0 and "explained_variance_economy" in metrics
+    assert all(not torch.equal(b, head.weight) for b, head in zip(before, critic.value))
+    with pytest.raises(ValueError, match="GRU"):
+        pt.Learner(replace(cfg, size="default"), tmp_path, learner.workers, "cpu")
+
+
+def test_a_seats_own_objective_is_drawn_a_game_told_to_its_actor_and_weighs_its_branches(tmp_path, encoder_path):
+    """Config.z "objective": each team of a group's game has its own weights of the reward's terms, the same in every copy, some
+    with an exploratory term on; its actor is told the draws, and its branches are weighed by them.  A run carried on with
+    such terms added keeps the critics it had, a net a term, and starts the new ones."""
+    names, weights = ("result", "score", "made_builders", "made_roles"), np.array([1.0, 0.5, 0.0, 0.0])
+    own, z = pt.draw_objective(np.random.default_rng(0), names, weights, 0.0, 0.0, 0.7)
+    assert np.array_equal(own, weights) and not z.any()         # no draws: the run's weights, and nothing to tell
+    own, z = pt.draw_objective(np.random.default_rng(0), names, weights, 0.3, 1.0, 0.7)
+    on = 2 + int(np.argmax(own[2:]))
+    assert z[:2].all() and own[:2] == pytest.approx(weights[:2] * np.exp(0.3 * z[:2])) and not z[len(names):].any()
+    assert own[on] == 0.7 and z[on] == 1.0 and own[2:].sum() == 0.7 and z[2:4].sum() == 1.0
+
+    terms = (("result", 1.0), ("score", 0.5), ("made_builders", 0.0))
+    cfg = _config(encoder_path, games=4, group=2, horizon=(5.0, 10.0), bootstrap=True, size="gru", critic_size="memory", critic_bins=51,
+                  critic_span=2.0, terms=(terms[1], terms[0]))
+    env = pt.make_sim(cfg.games, cfg.seed)
+    workers = pt.DataWorkers(0, env.bundles(), cfg.enabled_kinds)
+    old = pt.Learner(cfg, tmp_path, workers, "cpu")
+    with torch.no_grad():
+        for head in old.critic.value:
+            head.weight.normal_(std=0.1)
+    sum(p.sum() for p in old.trained).backward()        # a step, so that the checkpoint has Adam's moments of every parameter
+    old.optimizer.step()
+    old.save()
+    cfg = replace(cfg, terms=terms, z="objective", objective_sigma=0.3, explore_share=1.0, explore_weight=0.7)
+    learner = pt.Learner(cfg, tmp_path, workers, "cpu")
+    assert learner.resume() and learner.warm_until == cfg.critic_rewarm
+    for mine, theirs in ((0, 1), (1, 0)):       # result and score were the other way round
+        for part in ("first", "second", "value"):
+            assert torch.equal(getattr(learner.critic, part)[mine].weight, getattr(old.critic, part)[theirs].weight)
+    assert not learner.critic.value[2].weight.any() and learner.critic.first[2].weight.any()
+
+    with torch.no_grad():
+        learner.actor.head_done.bias[0] = -3.0      # so that it acts
+    collector = pt.GroupCollector(learner, env, np.random.default_rng(1))
+    assert env.count_made
+    segments, tally = collector.collect_tally(40)
+    assert segments and tally.metrics()["explore_branches"] == 1.0
+    by_group: dict[int, list] = {}
+    for seg in segments:
+        by_group.setdefault(seg.group, []).append(seg)
+        told = seg.steps[0].z
+        assert seg.objective[2] == 0.7 and told[2] == 1.0 and seg.objective[:2] == pytest.approx([1.0, 0.5] * np.exp(0.3 * told[:2]))
+    assert all(np.array_equal(seg.objective, segs[0].objective) and np.array_equal(seg.steps[0].z, segs[0].steps[0].z)
+               for segs in by_group.values() for seg in segs)                       # a team's is the same in every copy of its game
+    assert len({seg.objective.tobytes() for seg in segments}) > 1                  # and another's is its own
+    scales = learner.prepare(segments)
+    seg = segments[0]
+    assert seg.steps[0].advantage == pytest.approx(float(seg.steps[0].advantages @ (seg.objective / scales)))
+    metrics = learner.train(segments, np.random.default_rng(0))        # the optimizer the checkpoint's moments went into steps
+    assert "explained_variance_made_builders" in metrics and learner.critic.value[2].weight.any()
 
 
 def test_resignation_plays_games_out_to_measure_then_gives_up_those_under_the_threshold(tmp_path, encoder_path, monkeypatch):

@@ -5,6 +5,7 @@ import json
 import pathlib
 import subprocess
 import sys
+import types
 
 import numpy as np
 import pytest
@@ -50,18 +51,31 @@ def test_the_ladder_holds_each_width_and_pads_the_small_capped_groups_to_their_c
     assert [pg.bucket(n) for n in (1, 3, 13, 33, 600, 2048)] == [1, 4, 16, 48, 768, 2048]
     assert pg.bucket(3000) == 3072
     rows, sizes = pg.padded({"u": 20, "r": 40, "s": 3, "f": 1, "c": 30, "e": 5, "h": 2, "p": 9}, 5)
-    assert rows == 8 and sizes == {"u": 32, "r": 48, "s": fz.CAP_SITES, "f": 1, "c": 32, "e": 8, "h": fz.CAP_HIDDEN, "p": 12}
+    assert rows == 16 and sizes == {"u": 64, "r": 48, "s": fz.CAP_SITES, "f": 1, "c": 32, "e": 8, "h": fz.CAP_HIDDEN, "p": 12}
+    assert pg.padded({"u": 1292, "r": 1, "s": 1, "f": 1, "c": 1, "e": 1, "h": 1, "p": 1}, 70) == (96, pg.padded({"u": 1536, "r": 1, "s": 1, "f": 1, "c": 1, "e": 1, "h": 1, "p": 1}, 1)[1])
     # Feature tokens take the ladder, up to their cap: padded to it always, a frame of none would cost 512 of them.
     assert pg.padded({"u": 1, "r": 1, "s": 1, "f": 33, "c": 1, "e": 1, "h": 1, "p": 1}, 1)[1]["f"] == 48
     assert pg.padded({"u": 1, "r": 1, "s": 1, "f": fz.CAP_FEATURES, "c": 1, "e": 1, "h": 1, "p": 1}, 1)[1]["f"] == fz.CAP_FEATURES
+
+
+def test_a_pass_is_of_one_level_of_frame_size_and_at_most_the_rows_it_is_given():
+    """Frames go to the card by level of unit tokens, so a small one isn't padded to the widest a collector has; and against
+    itself the policy has every seat of a game, so a pass stays the rows a collector's memory is sized for."""
+    small, big = types.SimpleNamespace(unit_x=np.zeros((10, 1)), controllable=4), types.SimpleNamespace(unit_x=np.zeros((300, 1)), controllable=40)
+    assert pg.Graphs.passes([small, big, small, small, big], 2) == [[0, 2], [3], [1, 4]]
+    assert pg.Graphs.passes([small] * 5) == [[0, 1, 2, 3, 4]]
+    # A wide pass costs by its rows and holds memory by them: it has fewer.
+    assert [pg.rows_at(u) for u in (64, 256, 512, 1024, 1536)] == [64, 64, 32, 16, 16]
+    assert [len(p) for p in pg.Graphs.passes([small] * 70 + [big] * 70, 64)] == [64, 6, 32, 32, 6]
+    assert [pg.level(n) for n in (1, 64, 65, 1024, 1025, 1292)] == [64, 64, 128, 1024, 1536, 1536]
 
 
 def test_a_padded_batch_decides_as_the_plain_one(actor, encoder_path):
     """Every reader masks the padding: the frame, the critic's value and the logits of every real unit are as they were, and
     actions sampled at the padded shape score the same in the plain batch."""
     items = _items(3)
-    plain, wide = pm.collate(items).to("cpu"), _padded(items, rows=8, more=5).to("cpu")
-    assert wide.unit_x.shape[0] == 8 and all(getattr(wide, f).shape[1] > getattr(plain, f).shape[1]
+    plain, wide = pm.collate(items).to("cpu"), _padded(items, more=5).to("cpu")
+    assert wide.unit_x.shape[0] == pg.ROWS[0] > len(items) and all(getattr(wide, f).shape[1] > getattr(plain, f).shape[1]
                                              for f in ("unit_x", "reg_x", "site_x", "feat_x", "ctrl_mask", "enemy_tokens", "hidden_x", "places"))
     critic = pm.Critic(VOCABULARY, d=32, layers=1, heads=2, bins=5, span=1.5)
     torch.nn.init.normal_(critic.value.weight, std=0.1)
@@ -197,6 +211,33 @@ def test_a_graph_decides_as_the_plain_forward_pass_and_follows_the_weights(encod
         assert graphs.steps - before == min(c for c in graphs.cuts if c >= need), need
     assert need > graphs.cuts[0]
     check(many, *actor.initial_state(12, 0, "cuda"))
+
+
+@pytest.mark.skipif(not CUDA, reason="CUDA graphs need CUDA")
+def test_as_graphs_frames_go_by_level_and_come_back_in_their_seats_order(encoder_path, monkeypatch):
+    """A round's frames go in a pass a level, each padded to its own level's widths, and what comes back is in the seats' order
+    whatever passes they went in."""
+    torch.manual_seed(2)
+    actor = pl.make(VOCABULARY, encoder_path, size=pl.SMALL).cuda()
+    frames, bundle = sim_frames(40)
+    names = np.arange(VOCABULARY, dtype=np.int32)
+    picked = [(frames[k], bundle, names) for k in (39, 0, 30, 10, 20)]
+    workers = pt.DataWorkers(0, [bundle], fz.STAGE2_KINDS)
+    graphed, eager = pt.Player(actor, None, workers, "cuda", graphs=True), pt.Player(actor, None, workers, "cuda")
+    units = [len(t.unit_x) for t in graphed._features(picked)]
+    low = pg.bucket(min(units))
+    assert pg.bucket(max(units)) > low
+    monkeypatch.setattr(pg, "LEVELS", (low,))
+    history, seen = actor.initial_state(len(picked), 0, "cuda")
+    items, out, _, _, _ = graphed.act(picked, history, seen, rows=2)
+    passes = pg.Graphs.passes(items, 2)
+    assert len(passes) >= 3 and passes[0][0] == int(np.argmin(units)) and [i for p in passes for i in p] != list(range(5))
+    for k, t in enumerate(items):
+        alone = eager._forward([t], history[k:k + 1], seen[k:k + 1])[0]["latents"][0]
+        assert np.allclose(out["latents"][k], alone, atol=2e-2)
+    assert not np.allclose(out["latents"][0], out["latents"][1], atol=2e-2)
+    played = {shape.sizes["u"] for shape in graphed.graphs.shapes.values()}
+    assert min(played) == low and max(played) == pg.bucket(max(units))
 
 
 @pytest.mark.skipif(not CUDA, reason="needs CUDA")

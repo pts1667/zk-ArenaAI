@@ -33,6 +33,14 @@ tools/policy_train.py (PPO):
 
 What a seat keeps between decisions (`initial_state`, `decide`) is B x reach x RECORD per frame, newest first: the frame's latents, then its action tokens, flat, so the
 trainer's state handling doesn't change.  `decide` leaves the newest frame's action tokens empty; once actions are chosen, `acted` fills them in.
+
+**Or its memory is a GRU** (`Size.gru`, the user, 2026-11-17, as Pluto's: for RL from nothing, not for cloning).  Then there is no sequence of frames:
+
+* a decision's latents, flat, and what the decision before did (`action_summary`: its actions' vectors averaged, and how many) go into a GRU, whose state is all a seat
+  keeps (`reach` 1, a record of the state and then that summary, which `acted` fills in);
+* a decision's frame is its own latent tokens and `MEMORY_TOKENS` read off the state, after `Size.layers` blocks of them attending to each other;
+* the time transformer, the frames kept, and the action tokens with their reader are not made.  The plan, the units' reading and the heads are as they were;
+* training runs the GRU through a segment from the state kept at its start, a step a decision, and everything else for all its decisions at once (`segments`).
 """
 from __future__ import annotations
 
@@ -65,7 +73,8 @@ SITE_PLACE = (0, 2)         # a site's x, z, as -1..1 of the map (featurize)
 FEAT_PLACE = (0, 2)         # a feature token's x, z, the same
 WINDOW_SECONDS = 8.0        # how far back a frame's tokens attend, in each layer
 ACTION_TOKENS = 4           # what the policy did at a frame, as tokens after that frame's
-Z_DIM = 32                  # a side's strategy (`LatentActor.z_in`, policy_clone_data.side_z): known, then the knobs and counts
+MEMORY_TOKENS = 4           # with a GRU for memory (Size.gru): what a decision's frame reads of its state, as tokens after its latents
+Z_DIM = 32                 # a side's strategy (`LatentActor.z_in`, policy_clone_data.side_z): known, then the knobs and counts
 DECISIONS_A_SECOND = 2.0    # at decide_every 1
 
 
@@ -73,17 +82,22 @@ DECISIONS_A_SECOND = 2.0    # at decide_every 1
 class Size:
     """How big the actor is: its width, attention heads, layers of the time transformer, of the decoder that chooses a
     decision's actions one after another, and of self-attention among the controllable units before they read the frame
-    (`LatentActor.among`).  Kept in each checkpoint (`asdict`), to build the same again."""
+    (`LatentActor.among`).  Kept in each checkpoint (`asdict`), to build the same again.
+    gru: the width of a GRU's state, its memory in place of the time transformer (the module's notes); `layers` is then the blocks
+    in which a decision's own tokens attend to each other."""
     d: int = 256
     heads: int = 8
     layers: int = 4
     plan_layers: int = 4
     unit_layers: int = 0        # none in any actor before 2026-11-14, whose checkpoints load as they were
+    gru: int = 0                # none in any actor before 2026-11-17, the same
 
 
 SIZE = Size()               # the user's, 2026-11-09: about 10M trained parameters (it was d 128, 4 heads, 2 and 2: 1.9M)
 SMALL = Size(128, 4, 2, 2)
 WIDE = Size(384, 12, 4, 4, 2)   # the user's, 2026-11-14: 1.5x as wide, and two layers of the controllable units reading each other
+GRU = Size(256, 8, 1, 2, 0, 1024)   # the user's, 2026-11-17: a GRU for memory and a plan of half the depth, for RL from nothing
+SIZES = {"default": SIZE, "small": SMALL, "wide": WIDE, "gru": GRU}
 
 
 def window_frames(decide_every: int = 1) -> int:
@@ -274,11 +288,14 @@ class LatentActor(nn.Module):
         self.encoder, self.window, self.size = encoder, window, size
         self.d, self.key = size.d, size.d + CODE
         self.flex = False       # the time transformer's attention by flex attention (`compile_for_cloning`), CUDA only
-        self.reach = size.layers * (window - 1)
+        # With a GRU for memory (the module's notes) a seat keeps its state alone, and what's only the time transformer's isn't made.
+        self.gru = size.gru
+        self.reach = 1 if size.gru else size.layers * (window - 1)
         self.register_buffer("bands", math.pi * 2.0 ** torch.arange(BANDS, dtype=torch.float32), persistent=False)
         self.latent_in = nn.Linear(encoder.latent, self.d)
         self.slots = nn.Parameter(torch.randn(encoder.tokens, self.d) / math.sqrt(self.d))     # which latent token this is
-        self.before = nn.Parameter(torch.randn(encoder.tokens, self.d) / math.sqrt(self.d))    # a frame from before the game began
+        # A frame from before the game began.
+        self.before = None if size.gru else nn.Parameter(torch.randn(encoder.tokens, self.d) / math.sqrt(self.d))
         # The strategy the side plays (04-literature.md P8, C5; `policy_clone_data.side_z`), added to every frame's latent tokens.
         # Zero at first, and an unknown z is all zeros: so an actor trained without it plays as it did.
         # Made without drawing from the generator, so that every other weight is drawn as before it was added.
@@ -286,9 +303,10 @@ class LatentActor(nn.Module):
             self.z_in = nn.Linear(Z_DIM, self.d)
         nn.init.zeros_(self.z_in.weight)
         nn.init.zeros_(self.z_in.bias)
-        self.blocks = nn.ModuleList(TimeBlock(self.d, size.heads, window) for _ in range(size.layers))
-        self.act_slots = nn.Parameter(torch.randn(ACTION_TOKENS, self.d) / math.sqrt(self.d))      # which action token this is
-        self.act_before = nn.Parameter(torch.randn(ACTION_TOKENS, self.d) / math.sqrt(self.d))     # what was done before the game began: nothing
+        self.blocks = nn.ModuleList(TimeBlock(self.d, size.heads, window) for _ in range(0 if size.gru else size.layers))
+        # Which action token this is, and what was done before the game began: nothing.
+        self.act_slots = None if size.gru else nn.Parameter(torch.randn(ACTION_TOKENS, self.d) / math.sqrt(self.d))
+        self.act_before = None if size.gru else nn.Parameter(torch.randn(ACTION_TOKENS, self.d) / math.sqrt(self.d))
         self.lnf = nn.LayerNorm(self.d)
         self.name_embed = nn.Embedding(vocabulary, pm.NAME_DIM)
         self.ally_embed = nn.Embedding(fz.MAX_ALLY_TEAMS + 1, pm.ID_DIM)
@@ -358,10 +376,10 @@ class LatentActor(nn.Module):
         self.act_group = nn.Embedding(len(gr.GROUP_RADII) + 1, self.d)
         self.act_roles = nn.Linear(roles, self.d)
         self.act_out = nn.Linear(self.d, self.d)
-        self.act_nothing = nn.Parameter(torch.randn(1, self.d) / math.sqrt(self.d))
-        self.act_queries = nn.Parameter(torch.randn(ACTION_TOKENS, self.d) / math.sqrt(self.d))
+        self.act_nothing = None if size.gru else nn.Parameter(torch.randn(1, self.d) / math.sqrt(self.d))
+        self.act_queries = None if size.gru else nn.Parameter(torch.randn(ACTION_TOKENS, self.d) / math.sqrt(self.d))
         self.act_count = nn.Linear(1, self.d)
-        self.act_read = CrossBlock(self.d, size.heads)
+        self.act_read = None if size.gru else CrossBlock(self.d, size.heads)
         self.route_scale = nn.Parameter(torch.tensor(pm.ROUTE_SCALE_START))
         for head in (self.head_kind, self.group1, self.head_done):
             nn.init.normal_(head.weight, std=pm.HEAD_GAIN / math.sqrt(self.d))
@@ -371,6 +389,16 @@ class LatentActor(nn.Module):
             self.head_done.bias[0] = pm.DONE_START
         # The controllable units reading each other (Size.unit_layers): made last, so that every weight before is drawn as it was.
         self.unit_blocks = nn.ModuleList(pm.Block(self.d, size.heads) for _ in range(size.unit_layers))
+        # Memory as a GRU (Size.gru), after everything else for the same reason.  Its input is half its state's width.
+        self.frame_blocks = nn.ModuleList(pm.Block(self.d, size.heads) for _ in range(size.layers if size.gru else 0))
+        if size.gru:
+            wide = size.gru // 2
+            self.mem_frame = nn.Linear(encoder.tokens * encoder.latent, wide)
+            self.mem_acts = nn.Linear(self.d, wide)
+            self.mem_ln = nn.LayerNorm(wide)
+            self.memory = nn.GRUCell(wide, size.gru)
+            self.mem_out = nn.Linear(size.gru, MEMORY_TOKENS * self.d)
+            self.mem_slots = nn.Parameter(torch.randn(MEMORY_TOKENS, self.d) / math.sqrt(self.d))     # which memory token this is
 
     def code(self, place: torch.Tensor) -> torch.Tensor:
         """... x 2 to ... x CODE: every sine, then every cosine."""
@@ -385,6 +413,8 @@ class LatentActor(nn.Module):
         ACTION_TOKENS x D, what was done at each frame (`action_tokens`); the newest's isn't read with newest_only.  z: B x Z_DIM,
         the side's strategy, or None for unknown.
         Returns B x F x tokens x D, what each frame's latent tokens hold after reading those before; with newest_only, B x 1 x tokens x D."""
+        if self.gru:
+            raise ValueError("an actor whose memory is a GRU has no sequence of frames: it isn't cloned (policy_latent, Size.gru)")
         count, tokens, acts = frames.shape[1], frames.shape[2], acted.shape[2]
         state = torch.where(present[..., None, None], self.latent_in(frames) + self.slots, self.before.to(frames.dtype))
         # None is an unknown z, which cloning shows as all zeros: z_in's bias, learnt with the rest, still reaches every token.
@@ -417,7 +447,9 @@ class LatentActor(nn.Module):
 
     @property
     def record(self) -> int:
-        """What's kept of a frame: its latents, then its action tokens, flat."""
+        """What's kept of a frame: its latents, then its action tokens, flat.  With a GRU, its state and then what the decision did."""
+        if self.gru:
+            return self.gru + self.d
         return self.encoder.tokens * self.encoder.latent + ACTION_TOKENS * self.d
 
     def _unpack(self, history: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -433,6 +465,11 @@ class LatentActor(nn.Module):
         """A decision while playing.  Returns what its actions read (`Context`), what to keep for next time, and what training will need
         of this decision.  The newest frame's action tokens in what's kept are empty until `acted`.  z: B x Z_DIM, or None (unknown)."""
         now = self.encoder(b).float()
+        if self.gru:
+            state = self._step(self._memory_in(now, history[:, 0, self.gru:]), history[:, 0, :self.gru])
+            ctx = self.context(b, self._frame(now, state, z))
+            kept = torch.cat((state, torch.zeros(len(state), self.d, device=state.device)), 1)[:, None]
+            return ctx, kept, torch.ones_like(seen), {"latents": now}
         latents, acted = self._unpack(history)
         frames = torch.cat((latents.flip(1), now[:, None]), 1)
         acts = torch.cat((acted.flip(1), torch.zeros_like(acted[:, :1])), 1)
@@ -445,15 +482,76 @@ class LatentActor(nn.Module):
     def acted(self, b, a: pm.Actions, history: torch.Tensor) -> torch.Tensor:
         """What `decide` kept, with what was just done filled in as the newest frame's action tokens."""
         out = history.clone()
+        if self.gru:
+            out[:, 0, self.gru:] = self.action_summary(b, a).float()
+            return out
         out[:, 0, self.encoder.tokens * self.encoder.latent:] = self.action_tokens(b, a).float().flatten(1)
         return out
 
+    # Memory as a GRU (Size.gru) ------------------------------------------------------------------------------------------------------------------
+
+    def _memory_in(self, latents: torch.Tensor, did: torch.Tensor) -> torch.Tensor:
+        """What the GRU takes at a decision: latents, ... x tokens x latent, its own; did, ... x D, what the decision before did
+        (`action_summary`; zeros before the first)."""
+        return self.mem_ln(self.mem_frame(latents.flatten(-2)) + self.mem_acts(did.to(latents.dtype)))
+
+    def _step(self, taken: torch.Tensor, state: torch.Tensor) -> torch.Tensor:
+        """The GRU's state after a decision, B x gru, in float32 whatever the precision around it: a state goes through every
+        decision of a game, and what half precision rounds off each time would add up."""
+        with torch.autocast(taken.device.type, enabled=False):
+            return self.memory(taken.float(), state.float())
+
+    def _frame(self, latents: torch.Tensor, state: torch.Tensor, z: torch.Tensor | None) -> torch.Tensor:
+        """N x (tokens + MEMORY_TOKENS) x D: what each decision's frame holds, its own latent tokens (N x tokens x latent) and
+        then its memory's (state: N x gru), after `Size.layers` blocks of them attending to each other."""
+        added = self.z_in.bias[None] if z is None else self.z_in(z.to(self.z_in.weight.dtype))
+        own = self.latent_in(latents) + self.slots + added[:, None]
+        memory = self.mem_out(state).view(len(state), MEMORY_TOKENS, self.d) + self.mem_slots
+        x = torch.cat((own, memory.to(own.dtype)), 1)
+        everyone = torch.ones(x.shape[:2], dtype=torch.bool, device=x.device)
+        for block in self.frame_blocks:
+            x = block(x, None, everyone)
+        return self.lnf(x)
+
+    def memory_at(self, b, history: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """A frame's latents and the GRU's state after it, from what its seat kept (`decide`'s history): what a critic of the memory
+        (policy_model.MemoryCritic) reads where no decision is taken, as where a branch ended."""
+        now = self.encoder(b).float()
+        return now, self._step(self._memory_in(now, history[:, 0, self.gru:]), history[:, 0, :self.gru])
+
+    def action_summary(self, b, a: pm.Actions, ctx: Context | None = None) -> torch.Tensor:
+        """B x D: what each decision's actions were, for the GRU at the decision after: their vectors averaged, and how many
+        there were.  Any number of them, in any order; none is the count alone."""
+        e = self.action_vectors(b, ctx, a)
+        acting = a.anchor >= 0
+        count = acting.sum(-1, keepdim=True)
+        mean = (e * acting[..., None]).sum(1) / count.clamp_min(1)
+        return mean + self.act_count(torch.log1p(count.float())).to(e.dtype)
+
     def segments(self, history: torch.Tensor, seen: torch.Tensor, latents: torch.Tensor, lengths: list[int], acted: torch.Tensor,
-                 z: torch.Tensor | None = None) -> torch.Tensor:
+                 z: torch.Tensor | None = None, keep: dict | None = None) -> torch.Tensor:
         """Training's: segments of decisions, each from the state kept at its start, in one forward pass.
         history, seen: B x reach (x ...), as `decide` keeps them.  latents: B x T x tokens x latent, each decision's own, padded at the end.
         acted: B x T x ACTION_TOKENS x D, what was done at each (`action_tokens`, from the actions taken).
-        Returns sum(lengths) x tokens x D: what each decision's frame holds, segment by segment."""
+        Returns sum(lengths) x tokens x D: what each decision's frame holds, segment by segment.
+        With a GRU, acted is B x T x D (`action_summary`), and the state goes through a segment a decision at a time, from the one
+        kept at its start as the weights then made it; the rest is done for every decision at once.  keep, if given, then gets
+        "memory": each decision's latents and the state after it, as a critic of the memory reads them."""
+        if self.gru:
+            count = latents.shape[1]
+            did = torch.cat((history[:, :1, self.gru:].to(acted.dtype), acted[:, :-1]), 1)     # each decision's: what the one before did
+            taken = self._memory_in(latents, did)
+            state, states = history[:, 0, :self.gru], []
+            for t in range(count):
+                state = self._step(taken[:, t], state)
+                states.append(state)
+            # Row by row, so segment by segment, and no padding goes further.
+            real = torch.arange(count, device=latents.device)[None, :] < torch.as_tensor(lengths, device=latents.device)[:, None]
+            told = None if z is None else z[:, None].expand(-1, count, -1)[real]
+            own, after = latents[real], torch.stack(states, 1)[real]
+            if keep is not None:
+                keep["memory"] = (own, after)
+            return self._frame(own, after, told)
         before, before_acted = self._unpack(history)
         frames = torch.cat((before.flip(1), latents), 1)
         acts = torch.cat((before_acted.flip(1).to(acted.dtype), acted), 1)
@@ -462,9 +560,10 @@ class LatentActor(nn.Module):
         return torch.cat([out[i, :n] for i, n in enumerate(lengths)])
 
     def segment_actions(self, b, a: pm.Actions, lengths: list[int]) -> torch.Tensor:
-        """`action_tokens` for decisions in segment order, laid out as `segments` takes them: B x T x ACTION_TOKENS x D."""
-        flat = self.action_tokens(b, a)
-        out = flat.new_zeros(len(lengths), max(lengths), ACTION_TOKENS, self.d)
+        """`action_tokens` for decisions in segment order, laid out as `segments` takes them: B x T x ACTION_TOKENS x D.  With a GRU,
+        `action_summary`: B x T x D."""
+        flat = self.action_summary(b, a) if self.gru else self.action_tokens(b, a)
+        out = flat.new_zeros(len(lengths), max(lengths), *flat.shape[1:])
         at = 0
         for i, n in enumerate(lengths):
             out[i, :n] = flat[at:at + n]
@@ -503,6 +602,8 @@ class LatentActor(nn.Module):
     def action_tokens(self, b, a: pm.Actions, ctx: Context | None = None) -> torch.Tensor:
         """B x ACTION_TOKENS x D: what each decision's actions were, as `sequence` reads it.  Done is nothing.  Any number of actions,
         in any order: the tokens read them as a set."""
+        if self.gru:
+            raise ValueError("an actor whose memory is a GRU has no action tokens: `action_summary` (policy_latent, Size.gru)")
         e = self.action_vectors(b, ctx, a)
         acting = a.anchor >= 0
         tokens = torch.cat((self.act_nothing.to(e.dtype).expand(len(e), 1, self.d), e), 1)

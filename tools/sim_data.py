@@ -63,6 +63,7 @@ ROCKET_TYPES = {"MissileLauncher", "TorpedoLauncher"}       # fly under their ow
 COMMANDER_ECON = (4.0, 6.0)
 U_MOBILE, U_AIR, U_ARMED, U_FIREPROOF, U_FACTORY, U_PLOPPABLE, U_COMMANDER = 1, 2, 4, 8, 16, 32, 64
 U_FLOATS, U_MISSILE, U_NEUTRAL, U_PLANE, U_LANDS, U_STRAFES = 8192, 16384, 32768, 65536, 131072, 262144
+U_SONAR_TOGGLES = 2097152
 # Planes: frames a half turn takes, and the share of top speed held through it.  `tools/sim_engine.py air`, a move order
 # straight behind (01-simulator.md, "Aircraft").  The engine's flight model is 3D with rudder, elevator and bank; the sim's is a
 # turn at a fixed rate, so these are what it's fitted to.  A plane not here turns as the median one.
@@ -501,6 +502,8 @@ def _unit_record(u: dict, weapon_index: dict[str, int], weapons_by_id: dict[int,
         flags |= U_FLOATS
     if u.get("leavesGhost"):
         flags |= U_LEAVES_GHOST
+    if str(custom.get("sonar_can_be_disabled") or "0").lower() not in ("0", "false"):
+        flags |= U_SONAR_TOGGLES      # unit_attributes_generic.lua: its sonar goes off with its upkeep unpaid
     kamikaze = float(u.get("kamikazeDist") or 0.0) if u.get("canKamikaze") else 0.0
     if kamikaze > 0.0 and not u.get("kamikazeUseLOS"):
         flags |= U_KAMIKAZE_BLIND
@@ -547,7 +550,7 @@ def _unit_record(u: dict, weapon_index: dict[str, int], weapons_by_id: dict[int,
         "armored_mult": u.get("armoredMultiple", 1.0), "idle_regen": float(custom.get("idle_regen") or 0.0) / FRAMES, "idle_time": u.get("idleTime") or 0.0,
         "max_range": max_range, "armor_class": int(u["armorType"]), "move_class": _move_class(u),
         "def_id": int(u["id"]), "los_radius": u.get("losRadius", 0.0), "air_los_radius": u.get("airLosRadius", 0.0),
-        "radar_radius": u.get("radarRadius", 0.0), "los_height": u.get("losHeight", 0.0),
+        "radar_radius": u.get("radarRadius", 0.0), "sonar_radius": u.get("sonarRadius", 0.0), "los_height": u.get("losHeight", 0.0),
         # unit_stockpile.lua: seconds, then frames.
         "stockpile_frames": float(custom.get("stockpiletime") or 0.0) * FRAMES,
         "reload_move_penalty": float(custom.get("reload_move_penalty") or 1.0),

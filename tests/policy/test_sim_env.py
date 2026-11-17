@@ -19,9 +19,9 @@ except OSError:
     pytest.skip("needs the built sim library", allow_module_level=True)
 
 
-def _env_with_values(a: float, b: float, decide_every: int = 1, lead_share: float = 1.0) -> se.SimEnv:
+def _env_with_values(a: float, b: float, decide_every: int = 1, lead_share: float = 1.0, units: int = 2) -> se.SimEnv:
     """Both sides stay alive at these metal values, whatever the sim does."""
-    env = se.SimEnv(1, 3, ["mirror"], units=2, threads=1, decide_every=decide_every)
+    env = se.SimEnv(1, 3, ["mirror"], units=units, threads=1, decide_every=decide_every)
     env.lead_share = lead_share
     env.begin()
     real = env.batch.step
@@ -130,17 +130,38 @@ def test_a_win_pays_a_share_of_the_time_left_on_top_unfaded_and_the_loser_pays_i
 
 def test_the_rewards_terms_are_zero_sum_and_the_economy_a_discounted_average_whose_last_level_lasts():
     """reward_terms: "blend" is `reward`; each term is alliance 0's turned round for alliance 1; the economy pays (1 - gamma) x
-    the income balance a step and its whole level at the end; the result pays the win and the speed term."""
-    env = _env_with_values(16000.0, 6000.0)
-    env.speed_weight = 0.1
+    the income balance a step and its whole level at the end; the result pays the win and the speed term.  The leads are
+    paid as the economy is, of what each team has: 6 extractors and one half built, worth a tenth of one, against 2; one
+    idle raider against none, a penalty; a constructor and one half built against 6, of which one a team counts in the
+    first 2 minutes, 2 in the next 2 and 5 from 8."""
+    env = _env_with_values(16000.0, 6000.0, units=8)
+    env.speed_weight, env.count_leads = 0.1, True
     held = env.batch.step
+    def_of = {u["name"]: u["def_id"] for u in se.catalog().units}
+
+    def put(team: int, units: list[tuple[str, int, float]]) -> None:     # the team's own units as these: type, flags, built
+        view = env.batch.records[0, team, :int(env.batch.counts[0, team])]
+        own = np.flatnonzero(view["player"] == team)
+        assert len(own) >= len(units)
+        view["flags"][own], view["build_frac"][own] = rf.BEING_BUILT, 0.0        # the rest count for nothing
+        for i, (name, flags, built) in zip(own, units):
+            view["def_id"][i], view["flags"][i], view["build_frac"][i] = def_of[name], flags, built
 
     def step(*args, **kwargs):
         held(*args, **kwargs)
         env.batch.globs[0, :2, rf.G["metal_income"]] = (15.0, 5.0)
+        env.batch.stats[0, :2, se.EXTRACTORS_STAT] = (6.0, 2.0)
+        put(0, [("staticmex", rf.BEING_BUILT, 0.5), ("cloakraid", rf.IDLE, 1.0), ("cloakraid", 0, 1.0), ("cloakraid", rf.BEING_BUILT | rf.IDLE, 0.9),
+                ("cloakcon", rf.IDLE, 1.0), ("cloakcon", rf.BEING_BUILT, 0.5)])
+        put(1, [("cloakcon", 0, 1.0)] * 6)
     env.batch.step = step
     names = se.TERMS
     level, gamma = 10.0 / (20.0 + se.INCOME_CONSTANT), env.term_gamma("economy")
+    part = se.BUILD_RAMP * 0.5
+
+    def leads(most: float) -> np.ndarray:        # with `most` constructors a team counting
+        return np.array([(6.0 + part - 2.0) / se.EXTRACTOR_LEAD, -1.0 / se.IDLE_LEAD, (min(1.0 + part, most) - min(6.0, most)) / se.CONSTRUCTORS])
+    at = [names.index(name) for name in se.LEAD_TERMS]
     assert gamma == pytest.approx(math.exp(-0.5 / se.TERM_HORIZONS["economy"]))     # a decision is 15 frames
     for _ in range(se.EARLY_END_DECISIONS):
         env.step(0.0)
@@ -149,7 +170,13 @@ def test_the_rewards_terms_are_zero_sum_and_the_economy_a_discounted_average_who
         if env.done:
             break
         assert mine[names.index("economy")] == pytest.approx((1.0 - gamma) * level) and mine[names.index("result")] == 0.0
-    assert env.done and mine[names.index("economy")] == pytest.approx(level)
+        assert mine[at] == pytest.approx((1.0 - gamma) * leads(1.0))
+        assert env.reward_terms(0, ("income",) + se.LEAD_LEVELS, 0.3) == pytest.approx([level, *leads(1.0)])
+    # It ends at 2 minutes, when a second constructor counts.
+    assert env.done and mine[names.index("economy")] == pytest.approx(level) and mine[at] == pytest.approx(leads(2.0))
+    for minutes, most in ((3.9, 2.0), (4.0, 3.0), (8.0, 5.0), (30.0, 5.0)):
+        env.decisions[0] = round(minutes * 60.0 / env.seconds_a_step)
+        assert env._counted()[0, :2, 2] == pytest.approx([min(1.0 + part, most), min(6.0, most)])
     assert mine[names.index("result")] == pytest.approx(1.0 + 0.1 * (1.0 - se.EARLY_END_DECISIONS / se.TIME_LIMIT_DECISIONS))
 
 
@@ -172,9 +199,9 @@ def test_a_copied_game_plays_on_as_its_original_given_the_same_orders():
     """SimEnv.copy_game two minutes in, the policy's seat building its own economy on the scripts' advice: given the same orders,
     the copy's frames, stats and rewards are its original's to the bit, step after step."""
     env = se.SimEnv(2, 5, ["fight"], threads=1)
-    env.policy_economy_share, env.advise, env.diversity = 1.0, True, 0.05
+    env.policy_economy_share, env.advise, env.diversity, env.count_made, env.count_leads = 1.0, True, 0.05, True, True
     env.begin()
-    terms = ("result", "score", "economy", "combat", "extractors", "map", "experience")
+    terms = ("result", "score", "economy", "combat", "map", "experience") + se.MADE_TERMS + se.LEAD_TERMS
 
     def play(steps: int, compare: bool) -> None:
         for _ in range(steps):
@@ -197,6 +224,20 @@ def test_a_copied_game_plays_on_as_its_original_given_the_same_orders():
     assert env.game_rng[1] is not env.game_rng[0] and env.game_rng[1].bit_generator.state == env.game_rng[0].bit_generator.state
     play(360, compare=True)
     assert env.batch.stats[0, 0, 5] > 0 and (env.batch.records[0, 0]["def_id"] >= 0).sum() > 10, "it fought and built"
+    assert env.made_counts[0, 0, 1] > 0 and np.array_equal(env.made_counts[0], env.made_counts[1]), "and what it built was counted"
+
+
+def test_the_exploratory_terms_pay_each_unit_of_a_class_up_to_its_cap_and_each_combat_role_once():
+    """MADE_TERMS are a team's own, of what it finishes: a constructor, an extractor or a solar, a turret and a factory each a
+    share of its class's cap and nothing past the cap, and a combat role once however many of it are made."""
+    env = se.SimEnv(1, 3, ["mirror"], units=2, threads=1)
+    env.begin()
+    rows = lambda *names: np.array([env.table.names.index(name) for name in names])  # noqa: E731
+    env._count_made(0, 0, rows(*["cloakcon"] * 12, "staticmex", "energysolar", "turretlaser", "factorycloak", "cloakraid", "cloakraid", "cloakriot"))
+    assert env.made_delta[0, 0] == pytest.approx([1.0, 2 / 30, 0.1, 0.25, 2 / 8])
+    assert env.reward_terms(0, se.MADE_TERMS, 0.0) == pytest.approx(env.made_delta[0, 0]) and not env.reward_terms(1, se.MADE_TERMS, 0.0).any()
+    env._count_made(0, 0, rows("cloakcon", "cloakraid", "cloakskirm"))
+    assert env.made_delta[0, 0] == pytest.approx([0.0, 0.0, 0.0, 0.0, 1 / 8])
 
 
 def test_two_minutes_stay_two_minutes_at_a_slower_decision_rate():

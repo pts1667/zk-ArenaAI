@@ -447,6 +447,44 @@ class Critic(nn.Module):
         return out if logits else (out.softmax(-1) * self.centres).sum(-1)
 
 
+class MemoryCritic(nn.Module):
+    """A small critic for each of the reward's terms (the user, 2026-11-17, as Pluto's), each reading what the actor with a GRU
+    for memory reads (policy_latent, Size.gru): the decision's latents, flat, which are the fogged frame as the frozen encoder
+    made it, and the GRU's state after that frame.  Nothing privileged, and no weight shared between terms, so one term's
+    values don't move another's.  The trainer hands it the state detached: its loss teaches the actor's memory nothing."""
+
+    def __init__(self, inputs: int, d: int = 256, bins: int = 0, span: float = 3.0, terms: int = 1):
+        """inputs: the latents' numbers and the state's together.  bins, span, terms: as Critic's."""
+        super().__init__()
+        self.size = {"inputs": inputs, "d": d, "terms": terms, **({"bins": bins, "span": span} if bins else {})}
+        self.bins, self.terms = bins, terms
+        self.first = nn.ModuleList(nn.Linear(inputs, d) for _ in range(terms))
+        self.second = nn.ModuleList(nn.Linear(d, d) for _ in range(terms))
+        self.value = nn.ModuleList(nn.Linear(d, bins or 1) for _ in range(terms))
+        for head in self.value:
+            nn.init.zeros_(head.weight)
+            nn.init.zeros_(head.bias)
+        if bins:
+            self.register_buffer("centres", torch.linspace(-span, span, bins), persistent=False)
+
+    hl_gauss = Critic.hl_gauss
+
+    def forward(self, latents: torch.Tensor, state: torch.Tensor, logits: bool = False) -> torch.Tensor:
+        """latents: B x tokens x latent; state: B x gru.  B x terms values; with logits (and bins), B x terms x bins."""
+        x = torch.cat((latents.flatten(1), state.to(latents.dtype)), -1)
+        out = torch.stack([value(F.gelu(second(F.gelu(first(x), approximate="tanh")), approximate="tanh"))
+                           for first, second, value in zip(self.first, self.second, self.value)], 1).float()
+        if not self.bins:
+            return out[..., 0]
+        return out if logits else (out.softmax(-1) * self.centres).sum(-1)
+
+
+# The critic's sizes by name (policy_train.Config.critic_size).  "small" is what it was to 2026-11-09, a twelfth of the
+# parameters: beside the actor with a GRU for memory (policy_latent.GRU), which decides eight times as fast as the wide one, the
+# default would be most of a training step.  "memory" isn't a size of it but MemoryCritic, which only bootstrapped GRPO has.
+CRITIC_SIZES = {"default": {}, "small": {"d": 128, "layers": 2, "heads": 4, "queries": 8}, "memory": None}
+
+
 @dataclass
 class Actions:
     """A decision's actions, B x K: each picks a controllable unit, its anchor (-1 for done, and for every slot after it), and

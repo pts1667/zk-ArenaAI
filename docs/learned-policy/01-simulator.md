@@ -16,7 +16,7 @@ This builds three libraries in `~/zksim/build` (`ZKSIM_LIB` overrides where they
 
 | Library | What | Python side |
 |---|---|---|
-| `libzksim.so` | the sim (`sim/src`, `sim/include/zksim`, C ABI in `capi.h`, ABI 29) | `sim/py/zksim.py` (`Batch`), `sim/py/zknav.py` (routes) |
+| `libzksim.so` | the sim (`sim/src`, `sim/include/zksim`, C ABI in `capi.h`, ABI 30) | `sim/py/zksim.py` (`Batch`), `sim/py/zknav.py` (routes) |
 | `libzkscripts.so` | the army and economy scripts (`sim/scripts`, `zkscripts.h`, ABI 17) | `tools/policy_scripts_cpp.py` |
 | `libzkrecord.so` | the game recorder (`sim/record`, `zkrecord.h`, ABI 2), needs `libzstd-dev` | `sim/py/zkrecord.py` |
 
@@ -70,7 +70,8 @@ one there, and the unit AI as a whole 8.3%, beside movement's 56%.
   `zsize` in elmos) and `max_height_dif`, for "Where a building can go".  For "Water", it has its middle's height and its
   radius, where it rides on water, and each weapon's aim-from point, from the engine's own numbers for every type that doesn't
   fly (`python tools/sim_engine.py muzzles --map ThreeReefs16`, into the dump's `muzzles.json`: each made alone, on land or in
-  deep water for what rides it, and read 2.5 s later, as a Cutter's script raises its missile 20 elmos over 1.25 s).
+  deep water for what rides it, and read 2.5 s later, as a Cutter's script raises its missile 20 elmos over 1.25 s).  For
+  "Sensing", its sonar radius (`sonarDistance`; 392 of 615 types have one, most as far as they see).
 * **The game's rules** (`sim/data/rules.json`, from `python tools/sim_rules.py`, which needs a Python with `lupa`): the 42
   units that don't keep a team in the game, the reveal rule's numbers, the six chicken difficulties and the 21 egg features,
   and the 7 amphibious units that float up to fire ("Water").
@@ -366,6 +367,18 @@ told, for tests that measure one mechanic.
 ### Sensing
 
 * **Line of sight** is a height-map ray per pair, within each unit's sight radius.  **Radar** is a plain circle.
+* **Sonar** (the user, 2026-11-16; libzksim ABI 30), a plain circle too, as the engine's (`LosHandler.cpp`, `InLos` and
+  `InRadar`, with Zero-K's `requireSonarUnderWater`), from the code and not checked in a game:
+  * what's in water, at or below the surface, is on radar where any sonar of the allyteam's reaches it, as well as where a
+    radar does;
+  * what's under water ("Water") is found by sonar alone: not on radar without it, and not in sight without it either, however
+    near an eye.  So an LLT, which has no sonar, doesn't see a Duck on the sea bed 400 elmos off, and does once anyone's sonar
+    reaches the Duck; an Athena's sonar (600, beyond its sight of 380) shows it as a radar dot;
+  * a cloaked unit is sonar-stealthy too (`unit_stealth.lua`), and what the reveal rule shows is seen under water or not;
+  * a sonar goes off while its upkeep goes unpaid only for the three whose def says it can (`sonar_can_be_disabled`: the
+    sonar station, Owl and Athena; `unit_attributes_generic.lua`); every other sonar is always on;
+  * no unit has a sonar jammer or sonar stealth of its own.  The shares of the map in sight and radar (`ZK_STATS` `[7]`, `[8]`)
+    don't count sonar.
 * A blip's type is known only while it's in sight, or if it was seen and has stayed on radar since (the engine's rule).
 * Enemy structures once seen stay as memories until seen gone.
 * **Cloak**: a unit can cloak itself, or be inside an area cloak.  Cloaked, it's hidden from sight and from radar
@@ -627,15 +640,16 @@ Further rules:
     or slow heavies, every extractor, and every third light turret is a Picket.  One light turret for each 3 extractors, 2
     to 12;
   * by a spot or extractor in water, an Urchin in place of an LLT or Picket once an enemy has been seen under water (the
-    user, 2026-11-16; libzkscripts ABI 17): in our sight or radar, a submarine, or anything that walks the sea bed in water
-    deeper than its middle and its radius, as the engine has it ("Water").  Neither an LLT nor a Picket fires at what's under
-    water.  From then on only an Urchin or a Gauss covers a place in water, and an Urchin never covers one on land, its
-    torpedoes keeping to the water.
+    user, 2026-11-16; libzkscripts ABI 17): in our sight or radar, which under water means within our sonar ("Sensing"), a
+    submarine, or anything that walks the sea bed in water deeper than its middle and its radius, as the engine has it
+    ("Water").  Neither an LLT nor a Picket fires at what's under water.  From then on only an Urchin or a Gauss covers a
+    place in water, and an Urchin never covers one on land, its torpedoes keeping to the water.
 
-  In 32 script 1v1s over 15 minutes on the 16 pool maps with the most water (79-97% of the map), 23 games ordered Urchins.
-  At 15 minutes 161 Urchins stood, and 166 LLTs and Pickets, 132 of them in water: built before an enemy was seen under
-  water.  Before the sim had the weapons' limits in water ("Water"), and with the scripts' old depth (twice a hit radius),
-  it was 23 games, 159 Urchins and 159 LLTs and Pickets, 120 in water.
+  In 32 script 1v1s over 15 minutes on the 16 pool maps with the most water (79-97% of the map), 22 games ordered Urchins.
+  At 15 minutes 148 Urchins stood, and 161 LLTs and Pickets, 127 of them in water: built before an enemy was seen under
+  water.  Before sonar it was 23 games, 161 Urchins and 166 LLTs and Pickets, 132 in water; before the weapons' limits in
+  water ("Water"), with the scripts' old depth (twice a hit radius), 23 games, 159 Urchins, and 159 LLTs and Pickets, 120 in
+  water.
 
   In 16 script 1v1s over 15 minutes, the first of each ordered: an LLT on all 32 sides, at a median of 3 minutes, and about
   4.5 a side standing at 10; AA on 24 sides (a median of 9.5 minutes); a Gauss on 11 and a Stinger on 4 (10-11).  700 metal
@@ -860,8 +874,7 @@ What's left out on purpose, so it isn't mistaken for modelled:
   * friends on a piercing shot's line (the game holds fire);
   * the first-shot timing of some heavy guns;
   * shots at a jumper in the air use its map position only;
-  * in water ("Water"): sonar.  The engine sees what's under water only by sonar, which most units have as far as they see;
-    the sim's sight sees it.  A shot's path tests what it passes through at no depth, so a torpedo at a Duck on the sea bed
+  * in water ("Water"): a shot's path tests what it passes through at no depth, so a torpedo at a Duck on the sea bed
     can stop in a ship over it.  A floating unit isn't pushed, and has no float state but the default (it floats to attack),
     which a player can set to always or never.  A transport doesn't pick up a floating unit, and one set down in deep water
     walks the sea bed.  The Angler floats on its reload alone, not its four guns' turns.

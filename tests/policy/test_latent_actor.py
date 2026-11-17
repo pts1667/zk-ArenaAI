@@ -480,3 +480,81 @@ def test_z_reads_as_nothing_until_it_is_learned_and_then_as_the_strategy(actor):
         actor.z_in.weight.normal_()
     assert not torch.allclose(actor.sequence(frames, present, acts), actor.sequence(frames, present, acts, z=z), atol=1e-3)
     assert pl.answers("z_in", actor.z_in)        # AdamW's, not Muon's, which would move a zero matrix by a whole step at once
+
+
+# Memory as a GRU -----------------------------------------------------------------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def gru(encoder_path) -> pl.LatentActor:
+    torch.manual_seed(4)
+    actor = pl.make(VOCABULARY, encoder_path, size=pl.Size(64, 4, 1, 1, 0, 32))
+    with torch.no_grad():
+        actor.head_done.bias[0] = -3.0      # so that it acts, and what it did is something
+    return actor
+
+
+def test_with_a_gru_a_seat_keeps_its_state_alone_and_nothing_of_the_time_transformer_is_made(gru, encoder_path):
+    assert gru.reach == 1 and gru.record == 32 + 64 and not len(gru.blocks) and gru.act_read is None
+    assert gru.initial_state(3, 0, "cpu")[0].shape == (3, 1, 96)
+    windowed = pl.make(VOCABULARY, encoder_path, size=pl.Size(64, 4, 1, 1))
+    assert not any(k.startswith(("blocks.", "act_read.", "before", "act_queries")) for k in gru.state_dict())
+    assert any(k.startswith("blocks.") for k in windowed.state_dict()) and not any(k.startswith(("mem", "frame_blocks")) for k in windowed.state_dict())
+    with pytest.raises(ValueError, match="GRU"):
+        gru.sequence(torch.zeros(1, 2, gru.encoder.tokens, gru.encoder.latent), torch.ones(1, 2, dtype=torch.bool), torch.zeros(1, 2, 4, 64))
+
+
+def test_with_a_gru_training_reads_a_segment_as_play_did_from_the_state_kept_at_its_start(gru):
+    """Played a decision at a time, each from what the one before kept; then read as training does, two segments of the game in
+    one pass, the second from the middle."""
+    items = _items(5)
+    fields = pt.act.SLOT_FIELDS + ("logp",)
+    history, seen = _state(gru, 1)
+    kept, nows, latents, did = [], [], [], []
+    with torch.no_grad():
+        for item in items:
+            b = _batch([item])
+            kept.append(history)
+            ctx, history, seen, keep = gru.decide(b, history, seen)
+            a = pm.sample_actions(gru, b, ctx)
+            history = gru.acted(b, a, history)
+            nows.append(ctx.now[0])
+            latents.append(keep["latents"][0])
+            did.append({f: getattr(a, f).numpy() for f in fields})
+        assert sum(int((d["anchor"] >= 0).sum()) for d in did[:4]) > 0
+        assert float(seen.sum()) == 1.0 and float(kept[3][0, 0, 32:].abs().sum()) > 0.0
+        whole = _batch(items)
+        a = pm.actions_from({f: np.concatenate([d[f] for d in did]) for f in fields}, "cpu")
+        lengths = [3, 2]
+        frames = torch.zeros(2, 3, *latents[0].shape)
+        frames[0], frames[1, :2] = torch.stack(latents[:3]), torch.stack(latents[3:])
+        starts = torch.cat((kept[0], kept[3]))
+        acted = gru.segment_actions(whole, a, lengths)
+        now = gru.segments(starts, torch.ones(2, 1), frames, lengths, acted)
+        assert now.shape == (5, gru.encoder.tokens + pl.MEMORY_TOKENS, 64)
+        assert torch.allclose(now, torch.stack(nows), atol=1e-5)
+        # Its state and what the decision before did are both read: without either, the second segment's first frame is another.
+        blank, undone = starts.clone(), starts.clone()
+        blank[1, 0, :32], undone[1, 0, 32:] = 0.0, 0.0
+        for other in (blank, undone):
+            again = gru.segments(other, torch.ones(2, 1), frames, lengths, acted)
+            assert torch.allclose(again[:3], now[:3], atol=1e-6) and not torch.allclose(again[3], now[3], atol=1e-4)
+
+
+def test_with_a_gru_what_was_done_is_summed_up_in_any_order_and_nothing_done_reads_alike(gru):
+    b = _batch(_items(3))
+    nothing = gru.action_summary(b, _nothing(3))
+    assert nothing.shape == (3, 64) and torch.allclose(nothing[0], nothing[1], atol=1e-6) and torch.allclose(nothing[0], nothing[2], atol=1e-6)
+    movers = torch.nonzero(b.ctrl_mask[0] & b.kind_mask[0, :, rf.MOVE]).flatten()
+    u, v = int(movers[0]), int(movers[1])
+    region = int(torch.nonzero(b.ptr_region[0, u]).flatten()[0])
+
+    def told(*units) -> pm.Actions:
+        a = _nothing(3)
+        for k, unit in enumerate(units):
+            a.anchor[0, k], a.kind[0, k], a.region[0, k], a.fine[0, k] = unit, rf.MOVE, region, 0
+        return a
+
+    one, both = gru.action_summary(b, told(u)), gru.action_summary(b, told(u, v))
+    assert not torch.allclose(one[0], nothing[0], atol=1e-4) and not torch.allclose(one[0], both[0], atol=1e-5)
+    assert torch.allclose(both, gru.action_summary(b, told(v, u)), atol=1e-6)

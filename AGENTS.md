@@ -1,6 +1,7 @@
 # zk-ArenaAI, the learned policy: where it stands
 
-Updated 2026-11-16.  Branch `learned-policy-plan`.  Repo: `C:/Users/Thoma/Documents/sources/zk-ArenaAI`.  This file was
+Updated 2026-11-17.  Branch `gru-memory`, committed and pushed 2026-11-17 at about 20:00 with its run still going (the
+user; what the run's hourly checks have written here since isn't).  `main` and `learned-policy-plan` are both at `1d80deb`.  Repo: `C:/Users/Thoma/Documents/sources/zk-ArenaAI`.  This file was
 `HANDOFF.md`.
 
 The current state only.  How things got here is in git history.  How everything works, with its numbers, is in
@@ -54,7 +55,10 @@ simulator (`sim/`): first by cloning scripted players, then DAgger, then PPO.
   surface to fire, in 1-3 s, by `unit_impulsefloat_toggle.lua`'s arithmetic and the engine's drag in water, and sink when
   they've nothing to aim at.  Checked against the engine's cases and float traces.  A frame's `y` is now a unit's base, so a
   ship's or submarine's is below the surface.  On a map with no ground below 0 the sim plays as before.  01-simulator.md,
-  "Water"; "Known gaps" for sonar, which isn't modelled.
+  "Water".
+* **Sonar** (the user, 2026-11-16; libzksim ABI 30), as the engine has it with Zero-K's `requireSonarUnderWater`: what's under
+  water is found only by sonar, in sight or on radar, and what's in water is on radar within sonar too.  Each type's sonar
+  radius is in `catalog.json` (392 of 615).  01-simulator.md, "Sensing".
 * **Two damage stats a team** (2026-11-12, the user; libzksim ABI 24, `ZK_STATS` 6): `[4]` the damage its units have done
   to enemies' units, in metal, and `[5]` what enemies' have done to its own, for a combat-efficiency head.  01-simulator.md,
   "Teams and alliances".
@@ -93,6 +97,188 @@ simulator (`sim/`): first by cloning scripted players, then DAgger, then PPO.
     being built in their reach, as Zero-K's default widget has them patrol).  01-simulator.md, "Economy" and "The economy script".
   * Plates are factories in the policy's type table (masks only, and no new feature version for it, since no data held one).
   * `clone/army-6` was recorded by the old scripts, so a clone of it learns factory copies: new recordings are needed first.
+
+## RL from nothing with a GRU for memory (2026-11-17): a run of 24 hours, going
+
+The user, after the self-play run below didn't learn: an RL-only run again (no clone, no DAgger), with a GRU for memory as
+Pluto has; then, as it was being built: the parts the GRU makes needless out, the layers that grow with the square of the
+controllable units out, and a small critic for each of the reward's terms, as Pluto's, each reading the encoded fogged frame
+and the GRU's memory.  docs/model.md, "A GRU for memory"; 03-training.md, "Bootstrapped" and "Playing".
+
+* **The actor** (`policy_latent.GRU`, `policy_train.py --size gru`; not for cloning): a GRU of 1,024 over each decision's
+  latents and a summary of what the last decision did; the state is all a seat keeps.  A frame is its latent tokens and 4
+  memory tokens read off the state, 1 block; the plan at 2 layers.  No time transformer, kept frames, action tokens or unit
+  layers.  On `full-4`'s frozen encoder.
+* **The critics** (`--critic-size memory`, `policy_model.MemoryCritic`, with `--bootstrap`): a net of 0.87M parameters a term,
+  on the frame's latents, flat, and the GRU's state, detached (my choice: the value loss teaches the memory nothing).  They
+  value where each branch ended, from what its seat kept there (`Segment.end_history`).  Not with `--resign`.
+* **Throughput** (the user asked for it checked before the run): about 870 decisions a second as first built (3 collectors
+  of 16 games, a side a pass, 100,000 tokens a minibatch; the wide actor made 119), 1,250 with 3 of 32, both sides of a game
+  in one pass (`--pass-seats 2`, new) and `--token-budget 250000`.  py-spy: the learner one thread at 97% over minibatches of
+  250 decisions, the collectors waiting on the card 44% of their time over passes of 16 rows, the CPUs 70% idle.  Apart,
+  collecting makes 1,500 and training 2,000; together 0.7 of each, on a card four processes share.  What's left is the
+  learner's one thread, nothing in it above a tenth but the backward pass.
+* **The run**: `results/launch-gru.sh` with `HOURS=24 EVAL_EVERY=250`, started 2026-11-17 07:53 from nothing, so `gru-1/ppo`,
+  `gru-1/logs/ppo.out`, `gru-1/memguard.log` (`mem-guard.sh`, 3 GB), the dashboard at `http://localhost:8765`
+  (`policy_dashboard.py --root /mnt/d/zk-learned/runs/gru-1`, started by hand).  Self-play only (`--self-play 1`), the lead
+  rule in every game (`--lead-fade 0:1`), the policy's own economy (`--economy-start 1 --economy-end 1`, the user),
+  bootstrapped GRPO in groups of 8 with the seven terms, the trainer's own rates (3e-4 to 1e-4, the KL guard at 0.01), the
+  actor waiting 10 iterations for the critics, a test of 128 1v1s against the script every 250 iterations.  A stop:
+  `gru-1/ppo/stop`; the same command carries on (its `--hours` count from then).
+  * **The other kinds ramped in** (the user, 2026-11-17, as the self-play run below had them): `--kinds 1v1:0.5 teams:0.2
+    ffa:0.2 chicken:0.1 --kinds-ramp 500:0 2500:0.5`, so 1v1s alone till iteration 500 (about 2 hours in at this rate) and
+    half the new games of the other kinds from 2,500.  That needs the map pool (`--maps /mnt/d/zk-learned/maps`): the five
+    training maps have two start boxes each, so hold no free-for-all.  The 1v1s and the tests are on the pool's maps too.
+  * 96 games, 3 collectors at `--collector-gb 2.0` (a pass of 64 rows at the frame caps peaks at 1.63 GB:
+    `results/collector_caps.py`), `--token-budget 160000` (the learner's 3.0 GB).  Should the run still end in an error the
+    launch file carries on once, from the last checkpoint, with a side a pass (half the rows).
+  * **Stopped at iteration 36 and carried on at 08:39 with a pass a level of frame size** (the user: address the fall in
+    throughput, then resume).  On the pool it had fallen from 800 decisions a second to about 610 in 25 iterations: a
+    collector's graph padded every pass to the widest frame it had ever played.  Now a round's seats go in a pass for each
+    level of unit tokens (`policy_graphs.LEVELS`), each level with its own widths, a wide pass with fewer rows
+    (03-training.md, "Playing").  A copy of the run carried on 30 iterations (`gru-1/time-levels`): 753 a second against
+    609 at the same age, still capturing graphs.  The rest of the fall from the five maps' 1,150 is work: more actions a
+    decision, bigger frames.  Carried on with `HOURS=23.7`, so it ends at about 2026-11-18 08:20.
+  * `gru-1/check-kinds`: 7 iterations with the other kinds as half the games from the start: free-for-alls, team games and
+    1v1s ended and were judged (no chicken game ended in that time), about 900 decisions a second, no error.
+  * `gru-1/ppo-1v1-31` is the same run's first start, 1v1s only on the five training maps (07:38 to 07:47, 31 iterations,
+    930-1,300 decisions a second; its test at iteration 0: no wins of 128, extractors at 6 minutes 2.0 against the script's
+    13.8), stopped for the ramp.
+  * To watch: `explained_variance_TERM` (the critics; `full-4`'s privileged one took 60 iterations to reach 0.7), and the
+    tests' `eval_fight_score` and extractors.  In `full-4` the bootstrapped advantages checked as noise where the
+    unbootstrapped seven terms didn't (03-training.md, "Signal or noise"): if the critics don't learn, `--no-bootstrap`
+    from this run's actor (`--init`) is the same run without them.
+* **Stopped at iteration 386 and carried on at 11:24 with a seat's own objective** (the user, 2026-11-17: "it's clear
+  this training run isn't improving. Apply the changes sooner then restart the run"; they had first said at iteration
+  500).  The test at 250: no wins of 128, the score's change +0.003 +- 0.004, every measure within 1 SE of iteration 0
+  (own value +155 +- 286, damage dealt +59 +- 158, income +227 +- 444, extractors at 6 minutes 2.2 for 2.3, the script's
+  11.7); the hourly replays at 323 no better than at 182 (`results/replay_summary.py`, in `gru-status.sh` now).
+  * **What changed** (03-training.md, "A seat's own objective" and "Reward"): `--z objective --objective-sigma 0.3
+    --explore-share 0.25 --explore-weight 1`, and five exploratory terms at weight 0 (`made_builders`, `made_economy`,
+    `made_defences`, `made_factories`, `made_roles`: what a team has itself made, each unit paid up to a cap).  In each
+    new game each seat's weights of the seven terms are the run's times exp(0.3 x a normal draw), and in a quarter of its
+    games one exploratory term is on at weight 1; its actor is told the draws as z, and in tests nothing, so it plays the
+    run's weights there.  `results/launch-gru.sh` has it by default (`OBJECTIVE=0` for the run as it was).
+  * **Carried on, not started again**: from `ppo/ckpt/it-000386.pt`, the seven critics kept (a net a term), the five new
+    ones from nothing, the actor waiting 10 iterations for them; `results/resume-gru.sh` (`HOURS` what was left, 20.93,
+    so it still ends at about 2026-11-18 08:20).  `gru-1/check-objective` is its 3-iteration check.
+  * **Seen when it was stopped, and not looked into**: the KL an iteration, 0.0005-0.001 from iteration 230, rose from
+    348 to 0.02-0.03 at 360-364 (the guard slowed the rate for five iterations), then held at 0.002-0.003 to 386.  The
+    policy had begun to move more; whether for the better no test says (the next was to be at 500).  To carry the run
+    on as it was instead: `OBJECTIVE=0` from a copy of that checkpoint.
+  * **My choices** (put to the user at 10:31, not changed by them): sigma 0.3, the share a quarter, the weight 1, the
+    five classes and their caps (10, 30, 10, 4, 8); the critics not told the draws; carrying on from the checkpoint
+    where the user said "restart".
+  * To watch: the tests at 500 and on against iteration 0's (the same 128 games); `explore_branches` (about 0.25);
+    `explained_variance_made_*`; the replays' extractors and floated metal.
+  * **The test at 500 is the first above iteration 0** (12:57, `results/paired_tests.py`, in `gru-status.sh` now: each
+    test's games against iteration 0's, by seed and slot).  No wins of 128, the score +0.010 +- 0.004 (2.7 SE), own
+    value at the end 4,701 to 5,626 (+3.9 SE), value at 6 minutes 4,401 to 5,064 (+4.6), income over the game +4.1,
+    extractors at 3 minutes 2.5 to 2.9 (+3.0) and at 6 2.3 to 2.6 (+2.2, the script's 11.7), damage dealt +1.9, games
+    36 s longer (+3.3).  So learning by the rule below, slowly, and nothing changed.  Which of the two it comes from no
+    test says: iteration 500's actor has the KL's burst at 348-366, before the change, and 104 iterations of moving
+    after it.  The KL since is 0.0004-0.0008 an iteration, as low as in the flat stretch.  The new critics learnt in
+    180 iterations where a team makes the thing (builders 0.78, economy 0.82, roles 0.73) and not where few do
+    (defences 0.02, factories -0.01).
+  * **The test at 750 is above 500's** (14:57): the run's first win (1 of 128), the score +0.019 +- 0.006 on iteration
+    0 (3.1 SE), own value at the end 5,927 (+5.1), income over the game +4.4, damage dealt 2,008 to 2,852 (+3.0; at 500
+    +1.9), the damage share 0.40 to 0.45 (+2.5), extractors at 6 minutes 2.6 (+2.4, the script's 12.0), games 51 s
+    longer.  Still far from the script.  Nothing changed.  The KL an iteration 0.0003-0.0006, the other kinds 6% of new
+    games, 546 decisions a second (644 at iteration 569: smaller minibatches as frames grow).
+  * **The test at 1000 a little above 750's** (17:57): 1 win of 128 again, the score +0.021 +- 0.006 on iteration 0
+    (3.5 SE; 0.148, 0.158, 0.167, 0.169 at 0, 500, 750, 1000), own value at the end 6,052 (+5.9), income over the game
+    +5.8, damage dealt 3,178 (+3.3), extractors at 3 minutes 3.2 (+5.0) and at 6 2.9 (+4.5, the script's 11.7), games
+    63 s longer.  Nothing changed: the rule acts only on tests within noise.  The KL an iteration 0.0003-0.0004, the
+    other kinds 13% of new games (free-for-alls ending in 19 iterations of 50), 475-640 decisions a second.
+  * **It stopped moving at 18:38, the card full; killed and carried on at 19:04 from iteration 1100 with two collectors
+    of 48 games** (the hourly check at 18:57; the checkpoint at 1100 was the last thing it wrote, so nothing was lost
+    but the 26 minutes).  What was seen: no report for 19 minutes; the learner in a backward pass and one collector in
+    a forward pass, both waiting on the card (`cudaStreamSynchronize`; `results/gru-dump.sh`, py-spy as root, the
+    stacks the same a minute apart), the other two collectors waiting to send; the card at 100% and 56 W.  On Windows
+    (`Get-Counter '\GPU Process Memory(*)\Dedicated Usage'`) the run's four processes held 3.1, 2.65, 2.57 and 2.54 GB
+    of the card and 0.4 GB of shared memory, the desktop 0.4: 11.3 GB of 12.3, which is where Windows stops giving a
+    process the card's own memory.  A collector holds about 1.25 GB beside what its allocator reserves (1.35 GB then),
+    where the learner's limit allows each `--collector-gb` and 0.4.  From iteration 1061 an iteration trained 2 to 4
+    times slower (160-320 decisions a second for 600) whenever the learner reserved its 3.0 GB; at 12:57, the learner
+    at 3.0 too and the collectors at 1.15, it didn't.  So my reading: the card's memory, not a fault in the code, and
+    the kill and the stacks are all I have for it.
+    * **Changed**: `--collectors 2` (48 games each; a pass is still 64 rows at most) and `--gpu-share 0.65` (new flag
+      for `Config.gpu_share`, 0.85: with two collectors that keeps the learner's limit at 3.0 GB), both
+      `results/launch-gru.sh`'s defaults now (`COLLECTORS=3 GPU_SHARE=0.85` for the run as it was).  840 tests pass.
+    * `results/kill-gru.sh` kills a run that doesn't report (the launch file first, or it carries the dead trainer on
+      with a side a pass); `gru-alive.sh` says whether it moves; `gru-status.sh` now gives the seconds since the last
+      report and the card's memory; `gru_tail.py` the last iterations' rates and memory.
+    * **A watchdog** (`results/gru-watchdog.sh`, started by `start-gru-watchdog.sh`, till 08:20; mine, for the night):
+      a trainer 25 minutes without a report is killed and carried on from its last checkpoint, 3 times at most, each
+      said in `gru-1/watchdog.log`.  The hourly check (cron job `8c1ebb1f` in the session that started the run) reads it.
+    * **My rule from here** (the first was for tests within noise of iteration 0, which they weren't): two tests in a
+      row within noise of the one before, with the KL an iteration under 0.001, and the policy is made to move more
+      (`--group-step 1024` first).
+  * **Stopped at iteration 1149 and carried on at 19:40 with three leads as terms** (the user, 19:20-19:40: the lead in
+    extractors with a ramp while one is built, then "an idle mobile units lead penalty" and "a constructor lead", its
+    cap from 1 up to 5 by 2 minutes, "You may pause the run then resume with the new term").  03-training.md, "Reward"
+    ("The leads"): `extractor_lead`, `idle_lead`, `constructor_lead` (`policy_sim_env.LEAD_TERMS`), each an average
+    over 10 minutes of a lead a player, as `economy` is of the income balance.
+    * In the run: `extractor_lead:0.3` where `extractors:0.3` was (the same place in the terms, so what a seat is told
+      of it by z stays put), `idle_lead:0.3 constructor_lead:0.3` after the exploratory terms; 14 terms.  The critics of
+      the 11 kept terms carried over, the three new from nothing, the actor waiting 10 iterations (1150-1159).
+      `results/launch-gru.sh` has them by default (`LEADS=` for the run without the last two, from a copy of
+      `ppo/ckpt/it-001149.pt`).  840 tests pass.
+    * **`extractors` is gone** (the user, 20:00: "`extractors` can be removed/replaced with the `extractor_lead` term
+      now"): out of `policy_sim_env.TERMS` and `BALANCE_TERMS`, and `extractor_lead` in its place in
+      `launch-full4.sh` and `launch-selfplay-test.sh`.  The run doesn't use it.  Then (the user: "resume the run with
+      our scoring changes then commit+push") stopped at iteration 1170 at 19:52 for the whole suite on the code as
+      committed (840 pass) and carried on at 19:56, the same terms, its games anew.
+    * **The user also asked for `score`, `combat`, `map` and `experience` to be made zero-sum: they were.**  Every term
+      but the `made_*` is one alliance's against the others' (`_balance`, `_shaped`, `_view`); in 48 of the scripts' 1v1s
+      over 8 minutes each was side 0's turned round for side 1 at every step, to the bit (scratch `zero_sum.py`).  Put
+      to the user; nothing changed.
+    * My choices, listed for the user after the fact: terms of their own and not parts of `score`; all three averaged
+      over time; the scales (20 extractors or idle fighters a player, 5 constructors); the weights 0.3.
+    * To watch: the test at 1250 has 90 iterations of it and the one at 1500 the first whole stretch;
+      `explained_variance_extractor_lead` and the other two, their `group_spread_`s (`results/gru_terms.py`); the
+      replays' extractors and constructors.  The first iteration's spreads in a group: extractor lead 0.002, idle 0.017,
+      constructors 0.006.
+  * **WSL's memory in use rises about 1 GB an hour** (14.3 GB at 12:00, 17.2 at 14:57; 22.9 GB available, the guard's
+    floor 3): at that rate the run ends with about 5 GB available, and the other kinds' share is still growing.  A
+    process's own at 14:58: the learner 3.9 GB, the collectors 3.8, 3.5 and 3.3, the featurizing workers 0.4 each.
+    `results/gru-pss-log.sh` (started by `start-gru-pss-log.sh`) writes each process's every 10 minutes to
+    `gru-1/pss.log`, and `gru-status.sh` prints the last hour's.  My rule: under about 8 GB available, stop and resume
+    (`stop-gru.sh`, `resume-gru.sh`), which starts the games anew; and say which process grew.  From 15:00 to 16:00
+    it held at 17.5-18.0 GB with every process's own flat (the learner 4.1 GB, the collectors 3.5-4.0), the other
+    kinds 9% of new games.
+  * **The hourly check may adjust and resume** (the user, 11:35: "check the health of the run every hour or so (e.g. is
+    it still running? does it appear to be learning?), adjusting and resuming as necessary"; they chose to leave the KL
+    guard as it is).  Learning, as I put it to them: wins, or the score up by more than 2 SE on iteration 0's, or two of
+    own value, income, damage dealt and extractors at 6 minutes up by more than 2 SE.  My rule for a change: only on
+    evidence, one at a time, a test (250 iterations) before judging it; if the tests at 750 and 1000 are both within
+    noise, more optimizer steps (`--group-step 1024`) or a looser guard (`--kl-target 0.03`) where the KL is under 0.001,
+    and a look at the terms' spreads, `adv_clipped` (a fifth of decisions' advantages are past the clip at 3) and the
+    critics where it moves without direction.  Each change goes here.
+* **If the policy stops moving** (the user, 2026-11-17 10:05, when the KL an iteration had fallen from 0.008 to 0.0007 by
+  iteration 230 and the policy gradient's norm from 2.0 to 0.5, the rate unslowed and the heads' entropies steady: anchor
+  2.7 to 3.0, kind 1.1): consider small random variation of the terms' weights, rarely-activated exploratory terms (the
+  number of certain unit types or roles made), or MARA (arXiv 2510.20817, "KL-regularized RL is designed to mode collapse":
+  every sample above a reward threshold given the anchor's reward plus beta times the difference of their reference
+  log-probabilities).  My reading, put to the user: the first two help only if the actor is told its game's weights (the
+  strategy input z, unused in this run), else they average back to the mean weights; told, they are one mechanism, a
+  per-seat objective drawn each game, off in tests.  MARA needs a KL penalty to a reference policy, which this run hasn't,
+  and treats entropy collapse, which isn't seen.  The first two are built and in the run from iteration 386 (above);
+  MARA isn't, and the gradient check I'd proposed first (03-training.md, "Signal or noise") wasn't run.
+* `gru-1/ppo-unboot-13` is the very first start (13 iterations, unbootstrapped, 48 games; stopped to add the critics);
+  `smoke*`, `time-*` and `prof-*` there are the checks and timings: scratch.  `results/time-gru.sh NAME N` times a
+  configuration (a copy of a run's directory under NAME carries on from its checkpoint), `results/profile-run.sh` (as
+  root) profiles a running one, `results/collector_caps.py` and `collector_levels.py` measure a collector's passes at
+  given widths, `results/gru-status.sh` says where the run stands (no torch: safe beside it), `results/stop-gru.sh`
+  stops it and waits, `results/resume-gru.sh` carries it on to its 24 hours' end, `results/check-objective.sh NAME N`
+  carries a copy of its last checkpoint on for N iterations with the launch file as it is, and `results/run-tests.sh` is
+  the test suite (it refuses beside a trainer).  A copy carried on needs `--decisions` past the checkpoint's: an iteration
+  collects a little over its 16,384, so `ITERATIONS` times that falls behind and the copy ends at once.
+* **My choices, not put to the user before the run**: the GRU's sizes (1,024, 4 memory tokens, 1 block, 2 plan layers);
+  the critics two layers of 256 and detached from the GRU; no script games in training (`--self-play 1`, where the run
+  below had a tenth) and the lead rule on throughout; 96 games (12 groups in flight, about two stretches of each an
+  iteration) and the bigger minibatches; the ramp's iterations as the user gave them for the run below, which was nine
+  times slower.
 
 ## Self-play (2026-11-16): a run of 16 hours, stopped at iteration 275
 
@@ -512,7 +698,7 @@ report, and the same command resumes it.
 `--encoder` is needed by every tool that loads an actor until `policy_latent.ENCODER` names a new encoder: its default is
 `encoder-big`, which no longer loads.
 
-**The tests** (831 pass, 3 of them need CUDA and are skipped without it): `pytest.ini` runs them on 8 processes, a file's tests in
+**The tests** (840 pass, 3 of them need CUDA and are skipped without it): `pytest.ini` runs them on 8 processes, a file's tests in
 one process so that what they share is made once, and `tests/policy/conftest.py` keeps each process's maths to one thread.
 That took the suite from 211 s to about 60 (2026-11-11), with the slowest learning runs cut down and those of paths the
 pipeline doesn't use removed: the variational encoder's fits, checkpoints from before feature version 7, the trainer's
@@ -525,9 +711,12 @@ README.md has the rules for engine games: headless at max speed, windowed only w
 
 ## Next
 
-0. **After the self-play run** ("Self-play" above; stopped 2026-11-17, nothing is running).  The user's idea then: an
-   RL-only run again (no clone), with GRU memory, as Pluto has; not built, and not agreed how.  Mine, put to the user and
-   not answered: before more RL, find why the clone stops expanding.  Held out, `full-4`'s clone gets the kind right for
+0. **The run from nothing with a GRU** ("RL from nothing" above) is going till about 2026-11-18 08:20 (a check of it
+   every hour is scheduled in the session that started it: `results/gru-status.sh`), from iteration 386 with a seat's
+   own objective and the exploratory terms: read its tests (500 and on, against iteration 0's) and its critics' explained
+   variance, and report to the user.  Committed and pushed on `gru-memory` at about 20:00 on 2026-11-17 (the user says
+   when); what's written since isn't.  Still open
+   from the self-play run, mine, put to the user and not answered: find why the clone stops expanding.  Held out, `full-4`'s clone gets the kind right for
    83% of the script's builds (97-100% for fight, move, produce, assist) and a whole build (type, place, offset) costs 7.5
    nats against 0.3-2.4 for the rest (`clone/log.jsonl`); split that by type, place and offset, and by what's built
    (extractors and energy against defences, whose rules look back 3-5 minutes, past the actor's 36 s).  If it's what the
@@ -578,7 +767,7 @@ README.md has the rules for engine games: headless at max speed, windowed only w
 
 ## Traps
 
-* **Leftover build directories**: `~/zksim/build` is the one in use (libzksim ABI 29 since water and libzkscripts ABI 17
+* **Leftover build directories**: `~/zksim/build` is the one in use (libzksim ABI 30 since sonar and libzkscripts ABI 17
   since the Urchin, both 2026-11-16; libzkrecord ABI 2).  One built before that needs rebuilding.  The `build-*` and `agent*` directories beside it are leftovers of comparisons and of agents' tree
   copies, safe to delete, except `agent-maps-lupa` (above).
 * **The map cache** (`~/zksim/map-cache`, 6.1 GB; `ZKSIM_MAP_CACHE` moves it, empty turns it off): `load_pool` makes a
@@ -602,6 +791,10 @@ README.md has the rules for engine games: headless at max speed, windowed only w
   reads stdin, and a `$(...)` runs once, before the loop it's in.  Put it in a script file (`results/wait-lines.sh`).
 * **`NAME` in WSL** is the PC's name, set for every shell: a launch script that reads `${NAME:-...}` gets it (a run started
   in `full-4/DESKTOP-DS1JCNE`, 2026-11-16).  `results/launch-selfplay-test.sh` reads `RUN_NAME`.
+* **A launch file that's running**: bash reads a script as it goes, so an edit to `results/launch-*.sh` while its run is
+  going is run from wherever bash had got to when the trainer ends.  Stop the run (`results/stop-gru.sh` waits for the
+  launch file too), then edit.  The Python is safe to edit beside a run only in that its modules are loaded already; a
+  change is better made and tested in a copy (`~/zksim/agent-objectives` was one, its sim tests run without torch).
 * **The dashboard's port**: a standalone `policy_dashboard.py` left on 8765 makes the pipeline run without its own (it says so
   and carries on).  Stop it before a launch, or give the pipeline another `--port`.
 * **Engine games**: never start one, or kill engine processes, while the user is playing.  Check

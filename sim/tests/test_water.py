@@ -81,3 +81,27 @@ def test_a_buoy_floats_up_to_fire_and_sinks_back_once_its_target_is_gone():
     assert np.max(np.abs(np.array(sim) - engine)) < 8.0, [round(y) for y in sim]
     assert 45 <= (first - start) * 5 <= 75
     assert back is not None and abs((back - 60) * 5 / 30 - 6.1) < 1.0
+
+
+def test_what_is_under_water_is_found_only_by_sonar():
+    """With Zero-K's requireSonarUnderWater (LosHandler.cpp InLos, InRadar): an LLT, which has no sonar, sees a ship on the water 360
+    off but not a Duck on the sea bed 400 off, well inside its sight.  An Athena's sonar reaching the Duck, from beyond the Athena's
+    own sight, lets the LLT see it; with the LLT gone, the Duck is a radar dot of the Athena's sonar."""
+    know = zksim.rawframe
+    w = zksim.World(CAT, MAP, seed=3, behaviour=zksim.ORDERS)
+    llt = w.add("turretlaser", 0, 3000.0, Z)
+    duck, ship = w.add("amphraid", 1, 3400.0, Z, hp=TOUGH), w.add("shipscout", 1, 3300.0, Z + 200.0, hp=TOUGH)
+    for u in (duck, ship):
+        w.set_fire_state(u, 0)
+        w.set_move_state(u, 0)
+
+    def known(u: int) -> int:
+        w.step(1)
+        units = w.view(0).units
+        return int(units["knowledge"][units["uid"] == u][0])
+
+    assert known(ship) == know.KNOW_LOS and known(duck) == know.KNOW_HIDDEN
+    w.add("athena", 0, 3900.0, Z)
+    assert known(duck) == know.KNOW_LOS
+    w.kill(llt)
+    assert known(duck) == know.KNOW_RADAR

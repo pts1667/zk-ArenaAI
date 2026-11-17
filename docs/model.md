@@ -50,7 +50,7 @@ flowchart LR
 
 | | |
 |---|---|
-| Size | `policy_latent.SIZE`, kept in each checkpoint: width `d` 256, 8 heads, 4 time layers, 4 plan layers, no unit layers.  `SMALL` is 128, 4 heads, 2 and 2.  `WIDE` (the user, 2026-11-14; `full-4`, `policy_clone_train.py --size wide`) is 384, 12 heads, 4 and 4, and 2 unit layers |
+| Size | `policy_latent.SIZE`, kept in each checkpoint: width `d` 256, 8 heads, 4 time layers, 4 plan layers, no unit layers.  `SMALL` is 128, 4 heads, 2 and 2.  `WIDE` (the user, 2026-11-14; `full-4`, `policy_clone_train.py --size wide`) is 384, 12 heads, 4 and 4, and 2 unit layers.  `GRU` (the user, 2026-11-17; `policy_train.py --size gru`) is 256, 8 heads, a GRU of 1,024 in place of the time layers, 1 block within the frame and 2 plan layers: "A GRU for memory" below |
 | Parameters | 10,546,864 trained (`SMALL`: 1,929,088; `WIDE`: 27,053,667, 3,548,928 of them in the unit layers), and 1,650,816 frozen in the encoder at `encoder-big`'s recipe (2,893,776 at `full-4`'s, 192 wide with 64 queries) |
 | Latent tokens a frame | 40, of 32 numbers each, LayerNormed without weights |
 | Action tokens a frame | 4 (`ACTION_TOKENS`) |
@@ -60,6 +60,7 @@ flowchart LR
 | Actions a decision | up to 16 (`actions.SLOTS`), then done |
 | Who owns a unit | an allyteam and a player numbered from the viewer, in tables of 8 and 64 (`featurize.MAX_ALLY_TEAMS`, `MAX_PLAYERS`), 8 numbers each |
 | Critic (PPO) | width 256, 8 heads, 32 learnt queries and the global token reading every token in 4 rounds: 6,655,081 parameters (6,667,931 with 51 bins); with `--critic-bins`, its value is a distribution trained by HL-Gauss |
+| Critic of the memory (bootstrapped GRPO, `--critic-size memory`) | for the actor with a GRU: a net for each of the reward's terms, two layers of 256 on the frame's latents, flat, and the GRU's state: 0.87M parameters a term with 51 bins |
 | Strategy z | 32 numbers a side, optional (`--z` in cloning; `Z_DIM`): see "Frames in time" |
 
 ## What it reads: the featurizer
@@ -467,6 +468,51 @@ flowchart LR
 
 `tools/policy_pipeline.py` runs all of it in order, one stage at a time, and carries on where it left off (03-training.md, "The
 pipeline").
+
+## A GRU for memory (`Size.gru`)
+
+The user's, 2026-11-17, as Pluto has it (a GRU and what was done before, not a window of frames): for RL from nothing
+(`policy_train.py --size gru`, `policy_latent.GRU`), not for cloning, whose stretches the actor's `sequence` reads.  Of the
+wide actor's 27M trained parameters the time transformer was 7.1M, and in play its first three layers ran again over 13
+frames of 68 tokens at every decision.
+
+```mermaid
+flowchart LR
+    LAT["latent tokens<br/>of the frame"]
+    DID["what the last decision did<br/>(its actions' vectors averaged,<br/>and how many)"]
+    GRUC["GRU, 1,024<br/>(the state: all a seat keeps)"]
+    MEM["4 memory tokens<br/>read off the state"]
+    FRAME["the frame: latents + memory tokens<br/>1 block among themselves"]
+    PLAN["plan, anchor, heads<br/>(as before, 2 plan layers)"]
+    CRIT["a critic a term<br/>(latents, flat, + state)"]
+
+    LAT --> GRUC
+    DID --> GRUC
+    GRUC --> MEM --> FRAME
+    LAT --> FRAME --> PLAN
+    PLAN -- "acted" --> DID
+    LAT -.-> CRIT
+    GRUC -. "detached" .-> CRIT
+```
+
+* **The state is all a seat keeps** (`reach` 1): the GRU's 1,024 numbers, then a summary of what its last decision did
+  (`action_summary`: the action vectors of its actions averaged, and their count; `acted` fills it in).  A decision's
+  latents, flat, and that summary go into the GRU (`_memory_in`, `_step`, in float32).
+* **A decision's frame** is its own latent tokens and 4 memory tokens read off the new state (`MEMORY_TOKENS`, `_frame`),
+  after `Size.layers` blocks of them attending to each other.  The plan, the anchor's reading and the heads are as they
+  were, the plan at half the depth.
+* **Not made**: the time transformer, the frames kept and their slots, the action tokens and their reader.  The layers of
+  controllable units reading each other, whose cost grows with the square of the units, are `WIDE`'s alone (the user asked
+  for them out, 2026-11-17: `GRU` has none; the code stays for `full-4`'s checkpoints).
+* **Training** runs the GRU through a segment of 16 decisions from the state kept at its start, a step a decision, and
+  everything else for all its decisions at once (`segments`): each decision reads what it read in play
+  (`test_with_a_gru_training_reads_a_segment_as_play_did_from_the_state_kept_at_its_start`).  Nothing reaches back past the
+  segment's start but through that kept state, which the weights of its time made.
+* **Its critic** (`--critic-size memory`, `policy_model.MemoryCritic`; the user, 2026-11-17, as Pluto's): a small net for
+  each of the reward's terms, each reading the frame's latents, flat, and the GRU's state after it, so what the actor has
+  seen and nothing privileged.  03-training.md, "GRPO from branched games" ("Bootstrapped").
+* **Speed**: about 870 decisions a second where the wide actor made 119, and 1,250 with bigger passes and minibatches
+  (03-training.md, "Playing").
 
 ## Open questions (the user's)
 

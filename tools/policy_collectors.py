@@ -124,7 +124,8 @@ class _Serving:
             torch.cuda.set_per_process_memory_fraction(min(1.0, gb * 2**30 / torch.cuda.mem_get_info()[1]))
         torch.manual_seed(seed)
         actor = policy_latent.make(vocabulary, cfg.latent_encoder, cfg.decide_every, policy_latent.Size(**size)).to(device)
-        critic = pm.Critic(vocabulary, bins=cfg.critic_bins, span=cfg.critic_span, terms=len(cfg.terms)).to(device) if not cfg.group or cfg.resign else None
+        critic = (pm.Critic(vocabulary, bins=cfg.critic_bins, span=cfg.critic_span, terms=len(cfg.terms), **pm.CRITIC_SIZES[cfg.critic_size]).to(device)
+                  if not cfg.group or cfg.resign else None)
         self.nets = nets(actor, critic)
         for m in self.nets.values():
             for p in m.parameters():

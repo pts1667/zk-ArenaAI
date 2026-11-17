@@ -335,11 +335,56 @@ In a 1v1, for side A against side B at decision t:
   * Closer to the decisions (the user, 2026-11-15, after GRPO's gradient was found to be noise: "Signal or noise"), each
     the change of a balance a step as `combat` is, -1 to 1, zero-sum over the alliances (`SimEnv._balances`; libzksim ABI 27,
     01-simulator.md, "Teams and alliances"):
-    * `extractors`: finished extractors, at two (A - B) / (A + B + 4);
     * `map`: the shares of the map in sight and in radar, summed, at two (A - B) / (A + B + 0.2);
     * `experience`: the army's trades, x / (1 + x) for x the metal its damage cost the others over the metal put into it
       and 1000, less the others' mean.  The user's idea was each combat unit's damage over its cost, averaged; an average
       falls with every unit built and rises with every fresh one lost, so it's the army's whole.
+  * The leads (the user, 2026-11-17, for a policy that doesn't expand and leaves its army standing;
+    `policy_sim_env.LEAD_TERMS`, `SimEnv._counted`, `_leads`), each an average over time as `economy` is (`LEVEL_TERMS`:
+    a step pays the level x (1 - gamma), the horizon 10 minutes, and the alliance's end the whole level).  The level is
+    an alliance's count a player less the mean of the other live alliances', over what makes a lead 1, held to -1 to 1:
+    * `extractor_lead`: extractors, a finished one 1 and one being built 0.2 x its build progress, over 20;
+    * `idle_lead`: finished fighters that move (no builder among them) and stand idle (the sim's flag: the order done),
+      over 20 and turned round, so a penalty for more of them than the others have;
+    * `constructor_lead`: constructors that move, the commander not among them, counted as the extractors (one being
+      built 0.2 x its progress), and no more a team than 1 in a game's first 2 minutes, 2 in the next 2 and so on to 5
+      from 8 minutes, over 5.
+
+    Counted from each team's own units every step, only where a run's terms hold one (`SimEnv.count_leads`: about 2 ms
+    a step of 48 games).  Under GRPO each is judged as the economy is, on its change from the level when the decision
+    was taken (`Config.economy_change`, `Step.level` by term).
+    * **Which terms are averages over time**: `economy` and the three leads.  `score`, `combat`, `map` and `experience`
+      are each a balance's change a step, so their sum is where the balance ended, however long it had stood there;
+      `result` is paid once, at the end; the `made_*` as each unit is finished.
+    * **Which are zero-sum**: all but the `made_*`, which are a team's own.  In 48 of the scripts' 1v1s over 8 minutes
+      each of the others was one side's turned round for the other at every step, to the bit (the user asked for
+      `score`, `combat`, `map` and `experience` to be made so, 2026-11-17: they were).
+    * `extractors`, the first of the terms closer to the decisions (2026-11-15: the finished extractors' balance's
+      change, at two (A - B) / (A + B + 4)), is gone (the user, 2026-11-17): `extractor_lead` replaces it.  A run's
+      checkpoint that had it loads without its critic, and old launch files name `extractor_lead` in its place.
+    * My choices, the user's words being "(avg. built metal extractors owned - avg. built metal extractors owned by
+      enemy)" with "a ramp up of up to 20% of a metal extractor point as a metal extractor is built", "(# of built idle
+      mobile combat units on side - # of built idle mobile combat units on enemy side)" and "(# of built constructors,
+      up to 5 ...)", the cap "start at 1 and increasing by 1 every 2 minutes up to 5": terms of their own, not parts of
+      `score` (in `gru-1`, `extractor_lead` took `extractors`' place and weight); the average over 10 minutes for all
+      three; a player's count in a team game; 20 as the lead that is 1, and the hold at 1; fighters as what moves, is
+      armed and doesn't build; the constructors' cap applied to finished and part-built together; 0.3 as each one's
+      weight.
+    * `test_the_rewards_terms_are_zero_sum_and_the_economy_a_discounted_average_whose_last_level_lasts` has their
+      values, the parts built and the constructors' cap by the game's time; GRPO's test, a steady lead judged as nothing.
+  * Exploratory (the user, 2026-11-17; `policy_sim_env.MADE_TERMS`, `SimEnv._count_made`): what a team has itself made of
+    a class of unit, each unit paid as it's finished up to the class's cap, so 0 to 1 over a game.  A team's own, not a
+    balance against the others', so not zero-sum.  Counted with the diversity bonus's new units, only when a run's terms
+    hold one (`SimEnv.count_made`); a team's units at its first decision count as made already.
+    * `made_builders`: constructors that move, the commander not among them (cap 10);
+    * `made_economy`: extractors and buildings that make energy (30);
+    * `made_defences`: what the engine calls a defence (10);
+    * `made_factories`: factories, plates among them (4);
+    * `made_roles`: the combat roles it has made a unit of (raid, scout, riot, skirm, assault, arty, snipe, aa, antiheavy,
+      bomb, by the catalog's role), each once (8).
+
+    They're meant for weight 0, where they pay no one and their critics learn them all the same, and to be turned on for a
+    seat in few of its games ("A seat's own objective", under GRPO).
   
   A decision's advantage is each term's weighed over its returns' spread that iteration (5th to 95th percentile) where
   that's over 1, as DreamerV3 scales returns: a wide-spread term doesn't drown the rest, and a near-constant one isn't
@@ -350,7 +395,9 @@ In a 1v1, for side A against side B at decision t:
   outcome and the advantages were mostly noise.  Income and trades say more about a decision's worth than a game it was
   always going to lose.
   * **Resuming with other terms** than the checkpoint's keeps all of the critic but its value heads, which start at zero
-    with Adam's moments of them, and the actor stays as it is for `--critic-rewarm` iterations (10) while they learn.
+    with Adam's moments of them, and the actor stays as it is for `--critic-rewarm` iterations (10) while they learn.  A
+    critic of the actor's memory has a net a term (`--critic-size memory`): the terms it had keep theirs whole, by name
+    whatever their order, the new ones' start as new, and Adam keeps the actor's moments and starts on the critic's anew.
 
 ### The update
 
@@ -494,8 +541,10 @@ level is the most that playing it can teach.  Until then self-play was to start 
 run came near.
 
 * **A pass is a seat a game at most** (`Player.act`'s `rows`): against itself the policy has 2 seats of a 1v1 and up to 8 of
-  a team game or a free-for-all, and a graph's rows only grow, its memory with them.  A collector's round of more seats than
-  it has games goes in passes of that many, so its part of the card is what it was with one seat a game.
+  a team game or a free-for-all, and a graph's memory grows with its rows.  A collector's round of more seats than
+  it has games goes in passes of that many, so its part of the card is what it was with one seat a game.  `--pass-seats 2`
+  (2026-11-17) takes two seats a game, both sides of a 1v1 in one pass of twice the rows: for the actor with a GRU, whose
+  passes are small ("Playing").
 
 **Kinds of game** (`--kinds`, `--slots`, `--test-kinds`, `--chicken-difficulties`; the flag for action kinds is now
 `--action-kinds`).  Against the scripts the policy plays team 0, and scripts play every other team, its allies too; in
@@ -565,6 +614,70 @@ every seat that decides.
     frames don't pad to the widest frame of the run (2 to 6 times their tokens), with fewer rows a pass the wider the
     class (the same time a pass and more passes a round: 98 decisions a second collecting against 147); and no stops among
     the action steps.  More rows a pass is what's left, and a collector's memory limits it.
+* **With the actor with a GRU** (`--size gru`, docs/model.md; the user asked for its throughput checked, 2026-11-17; RL from
+  nothing in self-play 1v1s on the five training maps, bootstrapped with `--critic-size memory`, its first iterations, where
+  frames are small).  Decisions a second overall, the mean of iterations 4 to 12:
+
+  | Collectors x games, seats a pass, `--token-budget` | Overall | Collecting | Training |
+  |---|---|---|---|
+  | 3 x 16, 1, 100,000 (as the wide actor's runs) | about 870 | 900-950 | 970-1,040 |
+  | 3 x 32, 1, 250,000 | 1,048 | 1,143 | 1,266 |
+  | the same, one after the other (`--no-concurrent`) | 810 | 1,495 | 2,001 |
+  | 3 x 32, 2, 250,000 | 1,244 | 1,404 | 1,414 |
+
+  * The wide actor made 119 a second: this one's passes are an eighth of its work, so what was a pass's fixed cost is most
+    of it.  py-spy at 3 x 16: the learner on one core at 97%, in a minibatch of about 250 decisions (the budget of 100,000
+    tokens, 2 GB of the card), a third of it in the backward pass; a collector waiting on the card 44% of its time
+    (`Graphs.forward`, where it asks whether any row goes on), featurizing 11%, the sim 11%, sending its segments 9%; the
+    CPUs 70% idle and the card 80% busy.
+  * So: more rows a pass (32 games a collector, then both sides at once: a collector's wait on the card fell to 24%) and
+    more decisions a minibatch (550 at 250,000 tokens, 4.0-4.7 GB).  Apart, collecting makes 1,500 and training 2,000:
+    together each has about 0.7 of that, the card shared by four processes, and training is then the slower by a little
+    (the collectors wait on the learner 11% of their time).
+  * What's left is the learner's one thread, its work spread over the whole forward and backward pass with nothing above a
+    tenth but the backward pass; a bigger budget is what speeds it, and the card what limits that.
+  * **A collector's memory at the caps** (`results/collector_caps.py`: a pass padded to given widths, alone on the card).
+    A graph pads to the widest frame its collector has yet played, so one late team game sets the cost of every pass after:
+
+    | Rows, widths | Peak reserved | A pass |
+    |---|---|---|
+    | 64, small (96 units) | 0.23 GB | 16 ms |
+    | 64, 512 units, 256 controllable, 256 wrecks | 0.70 GB | 48 ms |
+    | 32, the same | 0.40 GB | 24 ms |
+    | 64, the caps (1,536 unit tokens padded, 512 controllable, 512 wrecks) | 1.63 GB | 103 ms |
+    | 32, the caps | 0.83 GB | 58 ms |
+
+    So `results/launch-gru.sh` gives each collector 2.0 GB, which leaves the learner 3.0 GB and a budget of 160,000
+    tokens, and carries on once with a side a pass should the run still end in an error.  With the other kinds as half
+    the games from the start, on the map pool (whose maps have more regions: 290 decisions a minibatch), that made 900 a
+    second overall, training 970 and collecting 1,090, in its first 7 iterations; wide frames will slow collecting more.
+  * 96 games are 12 groups in flight, not 6: about two stretches of each an iteration of 16,384.
+* **A pass is of one level of frame size** (`policy_graphs.LEVELS`, `Graphs.passes`; the user asked for the run's fall in
+  throughput addressed, 2026-11-17).  On the map pool the run above went from 800 decisions a second to about 610 in 25
+  iterations, the policy still playing 1v1s: a collector's graph padded every pass to the widest frame it had ever played,
+  its memory went from 0.32 to 0.80 GB, and py-spy had it waiting on the card for two thirds of its time (a quarter on
+  the five training maps' small frames).
+  * What a width costs a pass of 64 rows (`results/collector_caps.py`, each alone from 16 ms): 512 features 2 ms more;
+    1,536 unit tokens 22; 512 controllable (of 512 units) 22; 1,024 of the unit tokens enemies' 10; 768 places 19.  A wide
+    pass costs by its rows (the caps: 28 ms at 16 rows, 103 at 64), a narrow one much less than that (8 and 16).
+  * So a frame's level is its unit tokens on a ladder of 64, 128, 256, 512, 1,024 and past it; a round's seats go in a
+    pass a level, each level with its own widths that only grow (the unit tokens the level's), and its rows a bucket of
+    16, 32 or 64, as many as it has.  A collector's 32 games are 4 lineages of 8 copies, each lineage's frames of a size,
+    so a round is a pass or two a level.  What comes back is put in the seats' order (`Player.act`).
+  * A wide pass has fewer rows (`rows_at`: 16,384 unit tokens a pass, so 64 rows to level 256, 32 at 512, 16 past it):
+    it costs the same cut up, and a shape's memory, held as long as the shape, is its rows times its widths.  With a
+    shape held at every level and every row bucket, each as wide as its level allows, a collector reserved 1.31 GB and
+    peaked at 1.49 (`results/collector_levels.py`, the heads alone); with 64 rows at every level, 3.09 GB.  So the 2.0 GB
+    a collector may hold is enough at worst, and `KEEP` (16) is more shapes than there can be: none goes while in use.
+  * From the run's iteration 36 (`gru-1/time-levels`, a copy carried on for 30 iterations; a run carried on starts new
+    games, so its iterations 20 to 30 after are what compares with the run's 20 to 36): 753 decisions a second against
+    609, collecting 801 against 647 and training 829 against 731 (the card freer), a collector 0.60 GB against 0.80,
+    with graphs still being captured as each level's widths grew (5 s an iteration over the 3 collectors, which ends).
+    What's left of the fall from the five maps' 1,150 is work: 9 action steps a round where there were 5.5 (a round
+    goes on till its longest decision is done), and the pool's bigger frames, 290 decisions a minibatch for 550.
+  * `test_a_pass_is_of_one_level_of_frame_size_and_at_most_the_rows_it_is_given` and, on CUDA,
+    `test_as_graphs_frames_go_by_level_and_come_back_in_their_seats_order`: frames of two levels in passes of 2 come back
+    in the seats' order, each as its own forward pass gives it (without the reordering it fails).
 
 ### GRPO from branched games (`--group`)
 
@@ -631,9 +744,49 @@ the sim copies games (01-simulator.md, "The batch").
     waits `--critic-warmup` iterations (10 in the pipeline) while it learns.  `explained_variance` and
     `explained_variance_TERM` are of its values in training against those returns.
   * A seat whose branches all scored alike over the stretch isn't dropped: their ends may still differ.
+  * **A critic of the actor's memory** (`--critic-size memory`, the user, 2026-11-17, as Pluto's; `policy_model.MemoryCritic`),
+    for the actor with a GRU (`--size gru`): a small net for each term (two layers of 256, 0.87M parameters, nothing shared
+    between terms), each reading the decision's latents, flat (the fogged frame as the frozen encoder made it), and the
+    GRU's state after that frame.  Nothing privileged.  In training the latents and states are the actor's own pass's
+    (`LatentActor.segments`' `keep`), detached, so the value loss teaches the memory nothing (my choice: the actor's and the
+    critic's gradients stay apart, as their optimizer groups and the warm-up have them).  Where a branch ended, the collector
+    keeps what the seat kept there (`Segment.end_history`: the state after its last decision and what that decision did),
+    and the learner steps the GRU once more over the end frame (`LatentActor.memory_at`).  Not with `--resign`, which reads
+    the critic in the collectors.  `--critic-size small` is the privileged critic at half its width and depth, with 8
+    queries: a twelfth of its parameters.
+  * `test_a_critic_of_the_actors_memory_is_a_small_one_a_term_and_values_a_branchs_end_from_what_its_seat_kept`: a net a
+    term; an end's values change when the kept state is blanked; training moves every term's head.
   * `test_bootstrapped_grpo_adds_the_critics_value_of_where_each_branch_ended_and_trains_the_critic`: with the critic's value
     of one branch's end 1 higher, each of its decisions gains its discount x (1 - 1 / branches), the other branch's lose the
     same moment's discount / branches, other groups none; the critic learns.  Leaving the discount out fails it.
+* **A seat's own objective** (`--z objective`; the user, 2026-11-17, for a policy that had stopped moving: small random
+  variation of the terms' weights, and rarely-activated exploratory terms).  In each new game of a group each team has its
+  own weights of the terms, the same in every copy of the game, so a seat's branches are judged by one objective
+  (`draw_objective`, `Segment.objective`, `Learner.weigh_groups`):
+  * each of the run's weights times exp(`--objective-sigma` x a standard normal draw);
+  * with probability `--explore-share`, one of the exploratory terms among `--terms` (the `made_*` above, given at weight
+    0), drawn evenly, at `--explore-weight`.
+
+  Its actor is told the draws as z (`LatentActor.z_in`, zero at first, so a run carried on plays as it did until it has
+  learnt to read them): a number a term in the terms' order, the draw in sigmas for a term the run weighs, 1 for the
+  exploratory term that is on, 0 for the rest.  All zeros is the run's own weights, which is what a test and a replay
+  tell it.  My reading, put to the user before it was built: untold, the draws would average out to the run's weights and
+  add noise, so the two ideas are one mechanism, a goal a game that the actor knows.  The critics aren't told (they read
+  the latents and the GRU's state): each values its term under whatever the seats were told, and the group's mean, of
+  branches told the same, is what a decision is judged against.  A term's scale is still its mean spread over all the
+  iteration's groups where it varied, whoever weighed it.  `explore_branches` in `metrics.jsonl` is the share of branches
+  judged with an exploratory term on.  Not built: MARA (arXiv 2510.20817), which rewrites the reward under a KL penalty to a
+  reference policy; a run from nothing has none.
+  * `test_a_seats_own_objective_is_drawn_a_game_told_to_its_actor_and_weighs_its_branches`: the draws; a run with two terms
+    carried on with a third, exploratory one keeps the two critics it had, in the new order; every copy of a game tells a
+    team the same and weighs its branches by it; the new term's critic learns.
+  * `test_the_exploratory_terms_pay_each_unit_of_a_class_up_to_its_cap_and_each_combat_role_once`, and
+    `test_a_copied_game_plays_on_as_its_original_given_the_same_orders` now counts what's made.
+  * In `gru-1` from iteration 386 (below, "With the actor with a GRU"): sigma 0.3, share 0.25, weight 1, the five terms.
+    Three iterations of a copy carried on (`gru-1/check-objective`): 26-32% of branches with an exploratory term on, the
+    seven critics' explained variance as before at once (result 0.5-0.66 on all-new games), the terms' spreads in a group
+    0.07-0.09 for `made_builders`, 0.04-0.05 for `made_roles`, 0.01-0.03 for `made_factories` and `made_economy`, 0.001-0.006
+    for `made_defences`; 710-740 decisions a second, as without.
 * **Hopeless play** (with `--bootstrap` and the result term): `hopeless80` and `hopeless90`, the share of an iteration's
   decisions whose branch ended where the critic gave the policy's side a result under -0.8 or -0.9, and `end_value_result`,
   the critic's mean result at the ends: how much play goes where the game is already lost.

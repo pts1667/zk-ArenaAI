@@ -10,8 +10,16 @@ replay launches the lot at once.
   changes no decision's own outputs, as every reader masks it (policy_model.collate); only the random draws fall differently.
 * **Each width only grows**: a batch pads to the widest of each group yet seen, so the shape changes only when a batch outgrows
   it.  Padded to its own buckets, a batch of 64 games' frames came to a new shape one round in five, as each group's widest
-  game came and went: 95 captures in 494 rounds, at 0.7 s each, and 32 graphs' inputs kept (2026-11-10).  A wider shape costs
-  the GPU a little more and launches the same.
+  game came and went: 95 captures in 494 rounds, at 0.7 s each, and 32 graphs' inputs kept (2026-11-10).
+* **But by level** (`LEVELS`; the user asked for the fall in throughput on the map pool addressed, 2026-11-17): a frame's level
+  is its unit tokens on a short ladder, a pass is of frames of one level (`passes`), and the widths that only grow are each
+  level's own, its unit tokens the level's.  Its rows are a bucket of `ROWS`, as many as it has, not the most yet.  With one
+  shape for all, a collector's every pass paid for the widest frame it had ever played: for the actor with a GRU a pass of
+  64 rows is 16 ms at 96 unit tokens and 103 ms at the caps (results/collector_caps.py), the unit tokens, the controllable
+  ones and the places most of that and the features little, and after 25 iterations on the map pool a collector waited on
+  the card two thirds of its time.  A collector's games are few lineages of copies (policy_train.GroupCollector), each
+  lineage's frames of a size, so a round is a pass or two a level.  (For the wide actor, whose pass cost the same at any
+  width, classes of frame size had made a round only more passes: tried and taken out, 2026-11-16.)
 * **The action steps stop at the first of `CUTS` where every decision is done.**  A graph can't stop of itself, so a shape has
   several: the decision with the steps up to the first cut (`head`), the steps from each cut to the next (`chunks`), and what
   ends the round (`tail`: `acted`, and the outputs gathered).  At each cut the host asks whether any decision is still going.
@@ -28,8 +36,9 @@ replay launches the lot at once.
 * **Random numbers** are new at each replay: PyTorch's generator is graph-safe.
 * **Memory**: every graph of a `Graphs` shares one pool, and a replay's outputs are copied out before the next.  What one graph
   leaves for the next (the decision's context, the steps' state, the tail's outputs) is held, so that no later capture puts
-  anything there; the rest of a graph's memory is its own only while it plays, and a round plays one shape's graphs.  A shape
-  narrower than the widest goes before the next capture, and the oldest past `keep` of them.  At the caps one shape held
+  anything there; the rest of a graph's memory is its own only while it plays, and a round plays one shape's graphs at a
+  time.  A shape narrower than its level's widest goes before the next capture, and the one played longest ago past `keep`
+  of them.  At the caps one shape held
   648 MB of the pool, and two 830, so a collector's 0.75 GB ran out while it kept the one before.  A collector of 16 games held 460 MB with 6 graphs kept: 185 MB of pool, and the
   rest its nets, the kept graphs' inputs and outputs, and its seats' state.
 """
@@ -52,6 +61,11 @@ from zkbot.policy import actions as act, featurize as fz  # noqa: E402
 LADDER = (1, 2, 4, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024, 1536, 2048)
 FIXED = {"s": fz.CAP_SITES, "h": fz.CAP_HIDDEN}    # featurize's caps: small, so always padded to
 CUTS = (4, 6, 8, 10, 12, 14)    # where the action steps may stop: the head runs to the first, each chunk to the next
+LEVELS = (64, 128, 256, 512, 1024)      # unit tokens: frames of up to each are a level, played together; past the last, `bucket`
+ROWS = (16, 32, 64)             # the rows a pass is padded to; past the last, `bucket`.  Few: every level has a shape for each
+LEVEL_TOKENS = 16384            # the unit tokens a pass has at most, rows times its level (but ROWS[0] rows at least): `rows_at`
+KEEP = 16                       # shapes held: more than the levels have at the rows `rows_at` allows, so none goes while it's in use
+assert set(LEVELS) <= set(LADDER)       # so that a level holds the bucket of whatever is no more than its unit tokens
 
 
 def bucket(n: int) -> int:
@@ -63,11 +77,23 @@ def bucket(n: int) -> int:
     return -(-n // step) * step
 
 
+def level(units: int) -> int:
+    """The unit tokens a frame of this many is played at: its level."""
+    return next((w for w in LEVELS if w >= units), bucket(units))
+
+
+def rows_at(units: int) -> int:
+    """The most rows a pass of this level has.  A wide pass costs by its rows (at the caps 34 ms for 16 and 122 for 64, where
+    a narrow one is 8 and 14), so cutting it into several costs no time, and a shape's memory, held as long as the shape, is
+    its rows times its widths: 64 rows at 1,024 unit tokens held 0.84 GB, 16 held 0.06 (results/collector_levels.py)."""
+    return max(ROWS[0], min(ROWS[-1], LEVEL_TOKENS // units))
+
+
 def padded(widths: dict[str, int], rows: int) -> tuple[int, dict[str, int]]:
-    """The rows and widths a batch of these widths (policy_model.widths) is played at."""
+    """The rows and widths a batch of these widths (policy_model.widths) is played at, before its level's widest (Graphs)."""
     out = {k: max(v, FIXED[k]) if k in FIXED else bucket(v) for k, v in widths.items()}
-    out["u"] = max(out["u"], out["c"])
-    return bucket(rows), out
+    out["u"] = max(level(max(widths["u"], widths["c"])), out["c"])
+    return next((w for w in ROWS if w >= rows), bucket(rows)), out
 
 
 class _Shape:
@@ -97,6 +123,7 @@ class _Shape:
         self.chunks: dict[int, torch.cuda.CUDAGraph] = {}     # by the cut it starts at
         self.tail: torch.cuda.CUDAGraph | None = None
         self.ctx = self.sampling = None
+        self.sizes: dict[str, int] = {}                 # the widths it was made at: its level's widest then
         self.decided: tuple[torch.Tensor, ...] = ()     # the head's: new history, new seen, latents, value
         self.outputs: tuple[torch.Tensor, ...] = ()     # the tail's
 
@@ -114,15 +141,16 @@ class _Shape:
 class Graphs:
     """`policy_train.Player._forward` as CUDA graphs, for a CUDA actor and critic (or no critic)."""
 
-    def __init__(self, actor, critic, slots: int = act.SLOTS, keep: int = 2, cuts: tuple[int, ...] = CUTS):
-        """keep: the most shapes held.  As the widths only grow, a shape narrower than the widest is never played again and
-        goes as soon as a wider one is needed: what's kept is the widest with z and without (a bootstrap or a test without it)."""
+    def __init__(self, actor, critic, slots: int = act.SLOTS, keep: int = KEEP, cuts: tuple[int, ...] = CUTS):
+        """keep: the most shapes held.  As a level's widths only grow, a shape narrower than its level's widest is never played
+        again and goes as soon as a wider one is needed: what's kept is each level's widest at the rows it has had, with z and
+        without (a bootstrap or a test without it), the ones played longest ago going first."""
         self.actor, self.critic, self.slots, self.keep = actor, critic, slots, keep
         self.cuts = tuple(c for c in cuts if 0 < c < slots) + (slots,)
         self.device = next(actor.parameters()).device
         self.pool = torch.cuda.graph_pool_handle()
         self.shapes: OrderedDict[tuple, _Shape] = OrderedDict()
-        self.widest: dict[str, int] = {}        # each group's widest padded width yet, and "rows"
+        self.widest: dict[int, dict[str, int]] = {}     # by level: each group's widest padded width yet
         self.captured = 0
         self.capture_s = 0.0
         self.replays = 0
@@ -185,21 +213,31 @@ class Graphs:
         shape.chunks[i] = graph
         return graph
 
+    @staticmethod
+    def passes(items: list[fz.Tensors], rows: int = 0) -> list[list[int]]:
+        """Which of these go in which pass: those of one level together, lowest first, `rows` at most a pass (0: however many)
+        and no more than the level's (`rows_at`)."""
+        levels: dict[int, list[int]] = {}
+        for i, t in enumerate(items):
+            levels.setdefault(level(max(len(t.unit_x), t.controllable, 1)), []).append(i)
+        return [found[at:at + step] for units, found in sorted(levels.items())
+                for step in [min(rows or len(found), rows_at(units))] for at in range(0, len(found), step)]
+
     @torch.no_grad()
     def forward(self, items: list[fz.Tensors], history: torch.Tensor, seen: torch.Tensor, z: torch.Tensor | None = None):
-        """As Player._forward: numpy actions and latents, numpy values, and the new state (on the device)."""
+        """As Player._forward: numpy actions and latents, numpy values, and the new state (on the device).  The pass is played at
+        the level of its widest frame: `passes` puts those of a level together."""
         n = len(items)
         rows, sizes = padded(pm.widths(items), n)
-        sizes["rows"] = rows
-        self.widest = {k: max(v, self.widest.get(k, 0)) for k, v in sizes.items()}
-        rows = self.widest["rows"]
-        nb = pm.collate(items, sizes=self.widest, rows=rows)
+        mine = self.widest.setdefault(sizes["u"], {})
+        mine.update({k: max(v, mine.get(k, 0)) for k, v in sizes.items()})
+        nb = pm.collate(items, sizes=mine, rows=rows)
         key = (z is None, *(None if v is None else v.shape for v in vars(nb).values()))
         shape = self.shapes.get(key)
         if shape is None:
-            # Every call pads to the widest yet, so a shape of other widths never plays again: it goes before the capture, which
-            # can then reuse its memory.
-            stale = [k for k in self.shapes if k[1:] != key[1:]]
+            # A pass pads to its level's widest yet, so a shape of the level at other widths never plays again: it goes before
+            # the capture, which can then reuse its memory.
+            stale = [k for k, old in self.shapes.items() if old.sizes["u"] == mine["u"] and old.sizes != mine]
             for old in stale:
                 del self.shapes[old]
             if stale and not self.shapes:
@@ -207,6 +245,7 @@ class Graphs:
                 torch.cuda.empty_cache()
                 self.pool = torch.cuda.graph_pool_handle()
             shape = self.shapes[key] = self._new_shape(nb, history, seen, z)
+            shape.sizes = dict(mine)
         else:
             self.shapes.move_to_end(key)
             shape.load(nb, history, seen, z)

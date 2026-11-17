@@ -110,6 +110,7 @@ class Config:
                                     # 03-training.md, "Reward"): about a 300-metal unit's loss mid-game
     # PPO from a cloned actor (04-literature.md P7, C6, C7).
     init: str = ""                  # a cloning checkpoint (policy_clone_train's actor.pt): the actor starts as it, at its size
+    size: str = "default"           # without one, a new actor's (policy_latent.SIZES): "gru" has a GRU for memory
     maps: str = ""                  # a map pool (tools/map_gen.py), its held-out maps left out; "" for the five training maps
     variants: bool = False          # each side's army script draws its knobs (policy_variants.py)
     critic_bins: int = 0            # above 0, the critic's value is a distribution over this many, trained by HL-Gauss
@@ -121,6 +122,7 @@ class Config:
     entropy_floor: float = 0.3      # ENTROPY_FLOOR: a head below this share of its maximum entropy gets more bonus.  A clone's heads
                                     # all are, so from a clone it's 0, and the KL to the clone keeps its spread instead
     critic_warmup: int = 0          # iterations at the start where only the critic learns: the actor stays as it was
+    critic_size: str = "default"    # policy_model.CRITIC_SIZES: "small" beside a small actor
     kl_start: float = 0.0           # the weight of the KL to the frozen clone (`init`), at iteration 0
     # Its share of that by iteration, linear between and the last after: from 100% to 20% by iteration 100 and gone by 500.  Linear
     # in the run's decisions to a kept 0.2 of it, as before (2026-11-10), it was still 0.48 at iteration 88 of 1.85M decisions:
@@ -153,7 +155,16 @@ class Config:
     fine_sim: bool = False          # the sim steps every slot and the policy decides every decide_every of them, as the cloning
                                     # data was recorded: a clone played so had 6 extractors at 10 minutes, and 1 at decide_every 6
     z: str = "none"                 # "variant": the actor is told its side's army-script knobs as z (the counts unknown), as
-                                    # policy_clone_eval --z variant; "none": z unknown
+                                    # policy_clone_eval --z variant; "none": z unknown; "objective": its own weights of the
+                                    # reward's terms this game (below)
+    # A seat's own objective (the user, 2026-11-17, should the policy stop moving; z "objective", GRPO): in each new game each
+    # seat's weights of the terms are the run's, each times exp(objective_sigma x a standard normal draw), and with
+    # probability explore_share one of the exploratory terms among `terms` (policy_sim_env.MADE_TERMS, there at weight 0) is
+    # weighed explore_weight for it (`draw_objective`).  Its actor is told the draws as z; told nothing, as in a test, it
+    # plays the run's own weights.  Untold, the draws would average out to the run's weights and noise.
+    objective_sigma: float = 0.0
+    explore_share: float = 0.0
+    explore_weight: float = 0.5
     replay_hours: float = 0.0       # every this many hours, replay_games games against the script, kept for the dashboard's viewer
     replay_games: int = 4           # (policy_replay.py) in `replays`, or the run's replays/; 0 hours for none
     replays: str = ""
@@ -165,6 +176,9 @@ class Config:
                                     # 4.5 GB of the rest (at 4 x 1.5 it had 2.6 GB, and ran out); a collector of 16 games ran out at
                                     # 0.5 (2026-11-10), and at 0.75 in full-2's first iterations of mixed games, as its frames grew
                                     # (2026-11-12).  At the caps, 16 games' two kept shapes (policy_graphs) reserve 0.83 GB.
+    pass_seats: int = 1             # how many seats a game a collector's pass takes: its rows are its games times this.  Against
+                                    # itself the policy has 2 seats a 1v1, so at 1 a round is two passes; at 2 it's one, of twice
+                                    # the rows and so about twice the memory (the actor with a GRU has room for it)
     # GRPO from branched games in place of the critic (03-training.md, "GRPO"; the user, 2026-11-13): above 0, the games go in
     # groups of this many, each group's games copies of one game played on apart, for a stretch of game time drawn evenly from
     # `horizon` (GroupCollector).  Then each seat's stretch is scored by its terms (`terms`) against the same seat's in the
@@ -186,7 +200,8 @@ class Config:
     group_step: int = 1024
     # With reward_to_go, the economy term judges a decision on the income balance's change from it on, (1/span) x the sum over
     # the steps after it of (income - income when it was taken), not on the level, which a branch ahead when the decision was
-    # taken would otherwise credit it with (the user, 2026-11-14, after a review of arXiv 2508.08221 here).
+    # taken would otherwise credit it with (the user, 2026-11-14, after a review of arXiv 2508.08221 here).  And so every
+    # term that is a level's average over time (policy_sim_env.LEVEL_TERMS: the leads too).
     economy_change: bool = True
     # A decision's weighed advantage is clipped to +- adv_clip (0: not), and SPO's pull back on a ratio grows no more past
     # spo_bound x eps from 1, as Huber's loss (0: SPO's square throughout), so that no one action moves the policy far (the
@@ -321,7 +336,7 @@ class Step:
     slot: int = -1                      # GRPO: the env's slot it was taken at
     mark: np.ndarray | None = None      # GRPO: its branch's terms summed up to it, by term (GroupCollector)
     counted: int = 0                    # GRPO: and the steps they were summed over
-    level: float = 0.0                  # GRPO: the income balance when it was taken (Config.economy_change)
+    level: float | np.ndarray = 0.0     # GRPO: by term, each level term's level when it was taken (Config.economy_change)
     rest: np.ndarray | None = None      # bootstrapped GRPO: its branch's terms from it to its stretch's end, discounted to it
     discount: np.ndarray | None = None  # and each term's discount from it to that end
 
@@ -338,6 +353,8 @@ class Segment:
     branch: int = -1                    # bootstrapped GRPO: its branch's id
     members: int = 0                    # and how many branches its group's seat had
     end: rf.Frame | None = None         # where its branch ended, on the branch's last segment; None if its game or alliance did
+    end_history: np.ndarray | None = None   # and what its seat kept there, as `history`: a critic of the actor's memory reads it
+    objective: np.ndarray | None = None     # GRPO, z "objective": its seat's own weights of the terms this game; None: the run's
 
 
 @dataclass
@@ -423,14 +440,9 @@ class DataWorkers:
             self.pool.join()
 
 
-def _act_slices(items: list[fz.Tensors], graphed: bool = False, rows: int = 0) -> list[slice]:
-    """Seats in order, cut where the next would take a forward pass's padded pairs over the limit.  graphed: all at once, as a
-    graph pads every batch to the widest yet (policy_graphs.py), and this actor's attention keeps no table of pairs: 64 seats of
-    up to 1,000 tokens each are a few hundred MB; or `rows` at a time, if not 0, as a graph's rows only grow too and its memory
-    with them."""
-    if graphed:
-        step = rows or max(len(items), 1)
-        return [slice(at, at + step) for at in range(0, max(len(items), 1), step)]
+def _act_slices(items: list[fz.Tensors]) -> list[slice]:
+    """Seats in order, cut where the next would take a forward pass's padded pairs over the limit.  (As graphs the seats go by
+    level, not in order: policy_graphs.Graphs.passes.)"""
     out, start, most = [], 0, 0
     for i, t in enumerate(items):
         tokens = len(t.unit_x) + len(t.reg_x) + len(t.site_x) + len(t.feat_x) + 2
@@ -486,13 +498,24 @@ class Player:
     def act(self, frames: list[tuple[rf.Frame, bd.Bundle, np.ndarray]], history: torch.Tensor, seen: torch.Tensor, z: torch.Tensor | None = None,
             rows: int = 0):
         """Forward passes for many games, as few as fit the memory.  Returns tensors, numpy actions, values and the new state.
-        z: each seat's strategy (policy_latent.Z_DIM), or None.  rows: the most seats a graph's pass takes (0: all of them)."""
+        z: each seat's strategy (policy_latent.Z_DIM), or None.  rows: the most seats a graph's pass takes (0: all of them).
+        As graphs, the seats of a level of frame size go together (policy_graphs.Graphs.passes), so small frames don't pad to
+        the widest; what comes back is in the seats' order all the same."""
         items = self._features(frames)
-        parts = [self._forward(items[s], history[s], seen[s], None if z is None else z[s]) for s in _act_slices(items, self.graphs is not None, rows)]
+        if self.graphs is None:
+            passes = [list(range(len(items))[s]) for s in _act_slices(items)]
+        else:
+            passes = self.graphs.passes(items, rows) or [[]]
+        parts = []
+        for seats in passes:
+            at = slice(seats[0], seats[-1] + 1) if seats and seats[-1] - seats[0] + 1 == len(seats) else torch.as_tensor(seats, dtype=torch.long, device=history.device)
+            parts.append(self._forward([items[i] for i in seats], history[at], seen[at], None if z is None else z[at]))
         if len(parts) == 1:
             return (items, *parts[0])
-        out = {k: _stack_padded([p[0][k] for p in parts]) for k in parts[0][0]}
-        return items, out, np.concatenate([p[1] for p in parts]), torch.cat([p[2] for p in parts]), torch.cat([p[3] for p in parts])
+        back = np.argsort(np.concatenate(passes), kind="stable")        # each seat's place among the passes' rows
+        there = torch.as_tensor(back, device=history.device)
+        out = {k: _stack_padded([p[0][k] for p in parts])[back] for k in parts[0][0]}
+        return items, out, np.concatenate([p[1] for p in parts])[back], torch.cat([p[2] for p in parts])[there], torch.cat([p[3] for p in parts])[there]
 
 
 class Learner:
@@ -501,7 +524,7 @@ class Learner:
         torch.manual_seed(cfg.seed)
         self.table = tables.table()
         self.vocabulary = len(self.table.names) + 1
-        size, state = policy_latent.SIZE, None
+        size, state = policy_latent.SIZES[cfg.size], None
         if cfg.init:
             state = torch.load(cfg.init, map_location="cpu", weights_only=False)
             size = policy_latent.Size(**state["size"])
@@ -515,7 +538,15 @@ class Learner:
                 for p in self.reference.parameters():
                     p.requires_grad_(False)
         # GRPO has none, a branch's group standing in for it (GroupCollector), but bootstrapped (Config.bootstrap).
-        self.critic = None if cfg.group and not cfg.bootstrap else pm.Critic(self.vocabulary, bins=cfg.critic_bins, span=cfg.critic_span, terms=len(cfg.terms)).to(device)
+        if cfg.critic_size == "memory":
+            # A small critic a term, reading the actor's own latents and its GRU's state (policy_model.MemoryCritic).
+            if not (self.actor.gru and cfg.group and cfg.bootstrap) or cfg.resign:
+                raise ValueError("--critic-size memory reads the actor's GRU (--size gru), in bootstrapped GRPO (--group, --bootstrap), without --resign")
+            self.critic = pm.MemoryCritic(self.actor.encoder.tokens * self.actor.encoder.latent + self.actor.gru, bins=cfg.critic_bins,
+                                          span=cfg.critic_span, terms=len(cfg.terms)).to(device)
+        else:
+            self.critic = None if cfg.group and not cfg.bootstrap else pm.Critic(self.vocabulary, bins=cfg.critic_bins, span=cfg.critic_span, terms=len(cfg.terms),
+                                                                                 **pm.CRITIC_SIZES[cfg.critic_size]).to(device)
         self.term_names = tuple(name for name, _ in cfg.terms)
         self.term_weights = np.array([w for _, w in cfg.terms])
         if cfg.resign and not (cfg.group and cfg.bootstrap and "result" in self.term_names):
@@ -534,7 +565,7 @@ class Learner:
         actor_hidden = ({id(m.weight) for name, m in self.actor.named_modules()
                          if isinstance(m, torch.nn.Linear) and m.weight.requires_grad and not policy_latent.answers(name, m)}
                         if cfg.actor_muon_lr > 0.0 else set())
-        critic_hidden = ({id(m.weight) for name, m in self.critic.named_modules() if isinstance(m, torch.nn.Linear) and name != "value"}
+        critic_hidden = ({id(m.weight) for name, m in self.critic.named_modules() if isinstance(m, torch.nn.Linear) and name.split(".")[0] != "value"}
                          if cfg.critic_muon_lr > 0.0 and self.critic is not None else set())
         hidden = actor_hidden | critic_hidden
         # Two groups each, so that the critic can learn alone at first (critic_warmup).
@@ -663,10 +694,14 @@ class Learner:
         with self.autocast:
             a = _stored_actions(steps, device)
             acted = self.actor.segment_actions(whole, a, lengths)
-            now = self.actor.segments(history, seen, latents, lengths, acted, z)
+            kept: dict = {}
+            now = self.actor.segments(history, seen, latents, lengths, acted, z, keep=kept)
             ctx = self.actor.context(whole, now)
             logp, entropy = pm.evaluate_actions(self.actor, whole, ctx, a)
-            value = self.critic(whole, logits=True) if self.critic is not None else None
+            if isinstance(self.critic, pm.MemoryCritic):
+                value = self.critic(*(t.detach() for t in kept["memory"]), logits=True)
+            else:
+                value = self.critic(whole, logits=True) if self.critic is not None else None
             extra = torch.zeros((), device=device)
             coef = self.kl_weight
             if self.reference is not None and coef > 0.0:
@@ -935,8 +970,8 @@ class Learner:
         Its advantages are that, the economy less the income balance when it was taken (Config.economy_change), less the
         group's mean of the same from the same moment, a branch with no decision then counting 0, as the collector judges them
         unbootstrapped; each group's spreads (weigh_groups) are of the same at its stretch's start."""
-        ends = {seg.branch: (seg.end, seg.bundle, seg.names) for seg in segments if seg.end is not None}
-        values = dict(zip(ends, self.values_of(list(ends.values()))))
+        ends = {seg.branch: (seg.end, seg.bundle, seg.names, seg.end_history) for seg in segments if seg.end is not None}
+        values = dict(zip(ends, self.values_of([e[:3] for e in ends.values()], [e[3] for e in ends.values()])))
         self.end_stats = {}
         if values and "result" in self.term_names:
             # How much play is spent where the critic already calls the game lost: each valued end, by its branch's decisions.
@@ -950,7 +985,8 @@ class Learner:
             self.end_stats["end_value_result"] = float(result.mean())
             for line in HOPELESS:
                 self.end_stats[f"hopeless{round(-100 * line)}"] = float(weight[result < line].sum() / weight.sum())
-        change = np.array([self.cfg.economy_change and name == "economy" for name in self.term_names])
+        from policy_sim_env import LEVEL_TERMS
+        change = np.array([self.cfg.economy_change and name in LEVEL_TERMS for name in self.term_names])
         means: dict[tuple[int, int], np.ndarray] = {}
         starts: dict[int, dict[int, tuple[int, np.ndarray]]] = {}       # group: branch: its first decision's slot and its terms
         for seg in segments:
@@ -993,15 +1029,23 @@ class Learner:
         return out
 
     @torch.no_grad()
-    def values_of(self, frames: list[tuple[rf.Frame, bd.Bundle, np.ndarray]]) -> list[np.ndarray]:
-        """The critic's value of each (frame, bundle, names), by term."""
+    def values_of(self, frames: list[tuple[rf.Frame, bd.Bundle, np.ndarray]], kept: list[np.ndarray | None] | None = None) -> list[np.ndarray]:
+        """The critic's value of each (frame, bundle, names), by term.  kept: what each frame's seat kept before it
+        (Segment.end_history), which a critic of the actor's memory reads the frame from."""
         if not frames:
             return []
         out = []
         regions = max(b.regions for _, b, _ in frames)
-        for batch in self.workers.batches([frames[i:i + FLAT_CHUNK] for i in range(0, len(frames), FLAT_CHUNK)], regions):
+        starts = range(0, len(frames), FLAT_CHUNK)
+        for i, batch in zip(starts, self.workers.batches([frames[i:i + FLAT_CHUNK] for i in starts], regions)):
+            batch = batch.to(self.device)
             with self.autocast:
-                out.extend(self.critic(batch.to(self.device)).float().cpu().numpy())
+                if isinstance(self.critic, pm.MemoryCritic):
+                    history = torch.as_tensor(np.stack(kept[i:i + FLAT_CHUNK]), device=self.device)
+                    values = self.critic(*self.actor.memory_at(batch, history))
+                else:
+                    values = self.critic(batch)
+            out.extend(values.float().cpu().numpy())
         return out
 
     def gradient(self, segments: list[Segment], rng: np.random.Generator) -> torch.Tensor:
@@ -1046,13 +1090,14 @@ class Learner:
 
     def weigh_groups(self, segments: list[Segment]) -> np.ndarray:
         """GRPO's advantages with Config.group_scale "terms": each decision's terms less its group's (GroupCollector._judge), each
-        over that term's mean spread in this iteration's groups where it varied, weighed (Config.terms).  Returns the scales."""
+        over that term's mean spread in this iteration's groups where it varied, weighed (Config.terms; or as its seat's own
+        objective weighs them, `Segment.objective`).  Returns the scales."""
         spreads = {seg.group: seg.spreads for seg in segments}
         s = np.stack(list(spreads.values())) if spreads else np.zeros((0, len(self.term_weights)))
         varied = s > 1e-9
         scales = np.where(varied.any(0), (s * varied).sum(0) / np.maximum(varied.sum(0), 1), 1.0)
-        weights = self.term_weights / scales
         for seg in segments:
+            weights = (self.term_weights if seg.objective is None else seg.objective) / scales
             for step in seg.steps:
                 step.advantage = float(np.dot(step.advantages, weights))
         return scales
@@ -1126,11 +1171,19 @@ class Learner:
                              "or bootstrapped GRPO (--bootstrap) and GRPO without, but another can start from its actor (--init)")
         # Other terms than the checkpoint's: the critic keeps what it reads, and its value heads start afresh, Adam's moments of
         # them too, while it learns them alone for a while (Config.critic_rewarm).
-        fresh = self.critic is not None and list(state.get("terms", ["blend"])) != list(self.term_names)
+        was = list(state.get("terms", ["blend"]))
+        fresh = self.critic is not None and was != list(self.term_names)
         self.actor.load_state_dict(state["actor"])
         if self.critic is not None:
-            _load_critic(self.critic, state["critic"], fresh)
-        self.optimizer.load_state_dict(state["optimizer"])
+            _load_critic(self.critic, state["critic"], fresh, was, self.term_names)
+        moments = state["optimizer"]
+        if fresh and isinstance(self.critic, pm.MemoryCritic):
+            # A net a term: the critic's parameters aren't those the moments were kept for.  Adam keeps the actor's, its first
+            # group's, and starts on the critic's anew.
+            kept = len(moments["param_groups"][0]["params"])
+            mine = {**moments["param_groups"][1], "params": list(range(kept, kept + len(self.optimizer.param_groups[1]["params"])))}
+            moments = {"state": {k: v for k, v in moments["state"].items() if k < kept}, "param_groups": [moments["param_groups"][0], mine]}
+        self.optimizer.load_state_dict(moments)
         if fresh:
             for p in self.critic.value.parameters():
                 self.optimizer.state.pop(p, None)
@@ -1139,7 +1192,7 @@ class Learner:
         if self.ema is not None:
             self.ema.actor.load_state_dict(state.get("ema_actor", state["actor"]))
             if self.ema.critic is not None:
-                _load_critic(self.ema.critic, state.get("ema_critic", state["critic"]), fresh)
+                _load_critic(self.ema.critic, state.get("ema_critic", state["critic"]), fresh, was, self.term_names)
         self.iteration, self.decisions = state["iteration"], state["decisions"]
         self.warm_until = self.iteration + self.cfg.critic_rewarm if fresh else state.get("warm_until", self.cfg.critic_warmup)
         # With no floor (Config.entropy_floor 0) no bonus rises above the base, which may have changed since.
@@ -1160,10 +1213,20 @@ def parse_terms(given: list[str]) -> tuple[tuple[str, float], ...]:
     return out
 
 
-def _load_critic(critic: pm.Critic, state: dict, fresh: bool) -> None:
-    """A critic's weights; with fresh, all but its value heads', which stay as a new critic's (zero)."""
+def _load_critic(critic: pm.Critic, state: dict, fresh: bool, was: tuple[str, ...] = (), now: tuple[str, ...] = ()) -> None:
+    """A critic's weights; with fresh (other terms than it had, `was`, in `now`'s order), all but its value heads', which stay
+    as a new critic's (zero).  A critic of the actor's memory has a net a term: the terms it had keep theirs whole, and the
+    rest stay as new."""
     if not fresh:
         critic.load_state_dict(state)
+        return
+    if isinstance(critic, pm.MemoryCritic):
+        own = critic.state_dict()
+        for i, name in enumerate(now):
+            if name in was:
+                for key in [k for k in own if k.split(".")[1] == str(i)]:
+                    own[key] = state[key.replace(f".{i}.", f".{list(was).index(name)}.", 1)]
+        critic.load_state_dict(own)
         return
     with torch.no_grad():
         for p in critic.value.parameters():
@@ -1213,9 +1276,30 @@ def seat_z(env, seats: list[int], how: str) -> np.ndarray | None:
     """seats x Z_DIM, what each seat's actor is told of its strategy (Config.z), or None for nothing."""
     if how == "none" or not seats:
         return None
+    if how == "objective":      # the run's own weights, till a collector says a seat's own (GroupCollector._told)
+        return np.zeros((len(seats), policy_latent.Z_DIM), np.float32)
     import policy_clone_data as cd
     styles = [env.styles[env.game_of(s)] for s in seats]
     return np.stack([cd.variant_z(None if st is None else st[env.team_of(s)]) for s, st in zip(seats, styles)])
+
+
+def draw_objective(rng: np.random.Generator, names: tuple[str, ...], weights: np.ndarray, sigma: float, share: float,
+                   bonus: float) -> tuple[np.ndarray, np.ndarray]:
+    """A seat's own weights of the reward's terms for a game, and what its actor is told of them (Config.objective_sigma): each
+    of the run's weights times exp(sigma x a standard normal draw), and with probability `share` one exploratory term
+    (policy_sim_env.MADE_TERMS) among `names` at `bonus`.  z has a number a term, in the terms' order: the draw (so in sigmas)
+    for a term the run weighs, 1 for the exploratory term that is on, 0 for the rest: all zeros is the run's own weights."""
+    import policy_sim_env
+    assert len(names) <= policy_latent.Z_DIM, "a number of z a term"
+    draws = rng.standard_normal(len(names)) * (np.asarray(weights) > 0) * (sigma > 0)
+    own = np.asarray(weights, np.float64) * np.exp(sigma * draws)
+    z = np.zeros(policy_latent.Z_DIM, np.float32)
+    z[:len(names)] = draws
+    made = [i for i, name in enumerate(names) if name in policy_sim_env.MADE_TERMS]
+    if made and rng.random() < share:
+        i = made[int(rng.integers(len(made)))]
+        own[i], z[i] = bonus, 1.0
+    return own, z
 
 
 def _z_tensor(z: np.ndarray | None, device: str) -> torch.Tensor | None:
@@ -1267,6 +1351,8 @@ class Collector:
         self.player = learner.player
         self.won: dict[int, float] = {}     # each seat that ended: 1 won, 0.5 drew, 0 lost
         env.diversity = learner.cfg.diversity
+        from policy_sim_env import LEAD_TERMS
+        env.count_leads = any(name in LEAD_TERMS for name in learner.term_names)
         env.begin()
         self.seats = Seats(env.seat_count, learner.device, learner.actor)
         self.current: dict[int, Trajectory] = {}
@@ -1281,6 +1367,10 @@ class Collector:
         tr = Trajectory(self.env.bundle_of(seat), name_map(self.rng, self.learner.vocabulary))
         tr.history, tr.seen = _kept(self.seats.history[seat], self.seats.seen[seat])
         self.current[seat] = tr
+
+    def _told(self, seats: list[int], told: np.ndarray | None) -> np.ndarray | None:
+        """What each of these seats' actors is told (z), from what the env says of them (`seat_z`)."""
+        return told
 
     def _carry_on(self, seat: int) -> None:
         old = self.current[seat]
@@ -1307,11 +1397,11 @@ class Collector:
                 self._open(seat)
         frames = [(env.frame(seat), env.bundle_of(seat), current[seat].names) for seat in acting]
         index = torch.as_tensor(acting, device=learner.device)
-        told = seat_z(env, acting, cfg.z)
-        # A pass of a seat a game at most, which a collector's part of the card is sized for: against itself the policy has every
-        # player's seat of a game, 2 to 8 of them.
+        told = self._told(acting, seat_z(env, acting, cfg.z))
+        # A pass of a seat a game at most (Config.pass_seats: or more), which a collector's part of the card is sized for: against
+        # itself the policy has every player's seat of a game, 2 to 8 of them.
         items, out, value, new_history, new_seen = self.player.act(frames, seats.history[index], seats.seen[index], _z_tensor(told, learner.device),
-                                                                   rows=env.count)
+                                                                   rows=env.count * cfg.pass_seats)
         for k, seat in enumerate(acting):
             t = items[k]
             raw = frames[k][0]
@@ -1393,7 +1483,7 @@ class Collector:
             frames = [(env.frame(seat), env.bundle_of(seat), current[seat].names) for seat in acting]
             index = torch.as_tensor(acting, device=learner.device)
             _, _, value, _, _ = self.player.act(frames, seats.history[index], seats.seen[index], _z_tensor(seat_z(env, acting, cfg.z), learner.device),
-                                                rows=env.count)
+                                                rows=env.count * cfg.pass_seats)
             for k, seat in enumerate(acting):
                 tr = current[seat]
                 tr.bootstrap = value[k].copy()
@@ -1425,6 +1515,9 @@ class GroupCollector(Collector):
         self.learner, self.env, self.rng = learner, env, rng
         self.player = learner.player
         env.diversity = cfg.diversity
+        import policy_sim_env
+        env.count_made = any(name in policy_sim_env.MADE_TERMS for name in learner.term_names)
+        env.count_leads = any(name in policy_sim_env.LEAD_TERMS for name in learner.term_names)
         env.hold_ended = True       # a copy that ends waits for the rest of its group
         env.begin()
         self.seats = Seats(env.seat_count, learner.device, learner.actor)
@@ -1433,6 +1526,9 @@ class GroupCollector(Collector):
         self.pending: dict[int, list[Segment]] = {}     # its segments, cut as they're played, till it's judged
         self.score: dict[int, np.ndarray] = {}          # its terms' sums so far
         self.names: list[list[np.ndarray]] = [[] for _ in range(groups)]     # each group's game's name maps, by team
+        # Each group's game's objectives, by team: its own weights of the terms and what its actor is told (draw_objective),
+        # the same in every copy of the game, so a seat's branches are judged by one objective.  None: the run's weights.
+        self.objectives: list[list[tuple[np.ndarray, np.ndarray]]] | None = [[] for _ in range(groups)] if cfg.z == "objective" else None
         self.left = np.zeros(groups, np.int64)          # the steps each group's stretch has left: from 0, one starts now
         self.span = np.ones(groups, np.int64)           # and its steps in all
         self.terms = learner.term_names
@@ -1440,10 +1536,14 @@ class GroupCollector(Collector):
         # Bootstrapped (Config.bootstrap), each term is as the critic values it, the economy a discounted average of the
         # balance, and each is summed discounted (policy_sim_env.term_gamma), so that the critic's value of the end adds on.
         self.boot = cfg.bootstrap
-        self.asked = self.terms if self.boot else tuple("income" if name == "economy" else name for name in self.terms)
-        self.means = np.array([name == "economy" and not self.boot for name in self.terms])
+        # What's said of the economy there goes for each term that is a level's average (policy_sim_env.LEVEL_TERMS).
+        levels = policy_sim_env.LEVEL_TERMS
+        self.asked = self.terms if self.boot else tuple(levels.get(name, name) for name in self.terms)
+        self.means = np.array([name in levels and not self.boot for name in self.terms])
         self.gammas = np.array([env.term_gamma(name) if self.boot else 1.0 for name in self.terms])
-        self.change = cfg.economy_change and "economy" in self.terms and (cfg.reward_to_go or self.boot)
+        self.level_at = [i for i, name in enumerate(self.terms) if name in levels]       # where Step.level has a level
+        self.level_names = tuple(levels[self.terms[i]] for i in self.level_at)
+        self.change = cfg.economy_change and bool(self.level_at) and (cfg.reward_to_go or self.boot)
         self.counted: dict[int, int] = {}               # each seat's steps summed in its score
         self.won: dict[int, float] = {}
         # Resignation (Config.resign): the critic (the learner's, or the collector's copy of it), whether to measure, the
@@ -1468,6 +1568,13 @@ class GroupCollector(Collector):
     def _segments_of(self, seat: int) -> list[Segment]:
         return self.pending[seat]
 
+    def _told(self, seats: list[int], told: np.ndarray | None) -> np.ndarray | None:
+        if self.objectives is not None:
+            for i, seat in enumerate(seats):
+                g, team = divmod(seat, self.env.slots)
+                told[i] = self.objectives[g // self.size][team][1]
+        return told
+
     def collect_tally(self, want: int) -> tuple[list[Segment], "Tally"]:
         """Until `want` decisions of judged branches are stored."""
         learner, env = self.learner, self.env
@@ -1485,7 +1592,8 @@ class GroupCollector(Collector):
                 step = self.current[seat].steps[-1]
                 step.slot, step.mark, step.counted = env.slot, self.score[seat].copy(), self.counted[seat]
                 if self.change:
-                    step.level = float(env.reward_terms(seat, ("income",), b)[0])
+                    step.level = np.zeros(len(self.terms))
+                    step.level[self.level_at] = env.reward_terms(seat, self.level_names, b)
             env.step(progress)
             self.left -= 1
             self._advise(acting, items)
@@ -1528,6 +1636,10 @@ class GroupCollector(Collector):
             for t in range(slots):
                 self.seats.clear(src * slots + t)
             self.names[k] = [name_map(self.rng, self.learner.vocabulary) for _ in range(slots)]
+            if self.objectives is not None:
+                cfg = self.learner.cfg
+                self.objectives[k] = [draw_objective(self.rng, self.terms, self.learner.term_weights, cfg.objective_sigma, cfg.explore_share,
+                                                     cfg.explore_weight) for _ in range(slots)]
             self.tally.add("new_games", 1)
         mine = slice(src * slots, (src + 1) * slots)
         for dst in games:
@@ -1561,18 +1673,23 @@ class GroupCollector(Collector):
         each decision's terms to the stretch's end and their discount to it are kept, and where each branch ended, for the
         learner to add the critic's value of that and judge them (Learner.bootstrap); only a seat with one branch is dropped."""
         tally, slots, cfg = self.tally, self.env.slots, self.learner.cfg
-        weights = self.learner.term_weights
         per = np.where(self.means, 1.0 / max(int(self.span[k]), 1), 1.0)
         teams: dict[int, list[int]] = {}
         ends: dict[int, rf.Frame] = {}
+        kept: dict[int, np.ndarray] = {}
         for seat in [s for s in self.current if s // slots // self.size == k]:
             tr = self.current.pop(seat)
             if self.boot and not tr.done:
                 raw = self.env.frame(seat)
                 ends[seat] = rf.Frame(raw.units.copy(), raw.sites.copy(), raw.glob.copy(), raw.features.copy())
+                if cfg.critic_size == "memory":
+                    kept[seat] = self.seats.history[seat].cpu().numpy()
             _close(tr, self.pending[seat])
             teams.setdefault(seat % slots, []).append(seat)
         for members in teams.values():
+            # The team's own objective this game (draw_objective), the same in each copy: its branches are judged by it.
+            own = None if self.objectives is None else self.objectives[k][members[0] % slots][0]
+            weights = self.learner.term_weights if own is None else own
             finals = np.stack([self.score.pop(s) for s in members]) * per       # branches x terms
             counts = [self.counted.pop(s) for s in members]
             segments = [self.pending.pop(s) for s in members]
@@ -1590,7 +1707,7 @@ class GroupCollector(Collector):
                     for seg in segs:
                         seg.branch, seg.members = mark, len(members)
                     if segs:
-                        segs[-1].end = ends.get(seat)
+                        segs[-1].end, segs[-1].end_history = ends.get(seat), kept.get(seat)
             elif cfg.reward_to_go:
                 ahead = [[final - (step.mark + self.means * step.level * (count - step.counted)) * per for step in branch]
                          for final, count, branch in zip(finals, counts, steps)]
@@ -1607,11 +1724,13 @@ class GroupCollector(Collector):
                         step.advantages = final - finals.mean(0)
             scale = spread if cfg.group_scale == "group" else 1.0
             group = int(self.rng.integers(1 << 62))
+            if own is not None:     # the branches judged with an exploratory term on (Config.explore_share)
+                tally.add("explore_branches", len(members) * float((own[self.learner.term_weights == 0] > 0).any()))
             for segs, branch in zip(segments, steps):
                 for step in branch if not self.boot else ():
                     step.advantage = float(step.advantages @ weights) / scale      # "terms": the learner weighs them again
                 for seg in segs:
-                    seg.group, seg.spreads = group, spreads
+                    seg.group, seg.spreads, seg.objective = group, spreads, own
                     self.out.append(seg)
                     tally.stored += len(seg.steps)
             tally.add("groups", 1)
@@ -1679,6 +1798,8 @@ class Tally:
         if g:
             metrics.update(branches=g.get("branches", 0), branches_dropped=g.get("dropped", 0), new_games=g.get("new_games", 0),
                            resigned=g.get("resigned", 0))
+            if "explore_branches" in g:     # the share of them judged with an exploratory term on (Config.z "objective")
+                metrics["explore_branches"] = g["explore_branches"] / max(g.get("branches", 0), 1)
             if g.get("groups"):
                 metrics["group_spread"] = g["spread"] / g["groups"]
                 metrics["branch_decisions"] = g["branch_decisions"] / g["branches"]
@@ -2161,8 +2282,12 @@ def main() -> None:
     ap.add_argument("--chicken-difficulties", nargs="+", metavar="NAME:WEIGHT",
                     help="how likely each chicken difficulty is, as very-easy:1 easy:1 normal:1 (default policy_sim_env.CHICKEN_DIFFICULTY_WEIGHTS)")
     ap.add_argument("--gpu-runs", type=int, default=Config.gpu_runs, help="how many trainings share the card, this one included")
+    ap.add_argument("--gpu-share", type=float, default=Config.gpu_share,
+                    help="of the card the run may hold, its collectors' part included: the learner's limit is what they leave of it")
     ap.add_argument("--empty-cache", action=argparse.BooleanOptionalAction, default=Config.empty_cache, help="hand back what the allocator holds after each iteration")
     ap.add_argument("--init", default="", help="a cloning checkpoint to start the actor from (P7)")
+    ap.add_argument("--size", choices=tuple(policy_latent.SIZES), default=Config.size,
+                    help="a new actor's size, without --init: gru has a GRU for memory in place of the time transformer")
     ap.add_argument("--maps", default="", help="a map pool, its held-out maps left out; without it, the five training maps")
     ap.add_argument("--variants", action="store_true", help="each side's army script draws its knobs (policy_variants.py)")
     ap.add_argument("--lr-start", type=float, default=Config.lr_start)
@@ -2177,6 +2302,7 @@ def main() -> None:
     ap.add_argument("--critic-span", type=float, default=Config.critic_span)
     ap.add_argument("--entropy-floor", type=float, default=Config.entropy_floor, help="0 from a clone: no head's bonus rises")
     ap.add_argument("--critic-warmup", type=int, default=0, help="iterations where only the critic learns")
+    ap.add_argument("--critic-size", choices=tuple(pm.CRITIC_SIZES), default=Config.critic_size, help="small: beside a small actor (--size gru)")
     ap.add_argument("--terms", nargs="+", default=[f"{k}:{w:g}" for k, w in Config.terms], metavar="TERM:WEIGHT",
                     help="the reward's terms, each a head of the critic, and their advantages' weights, among blend (the one reward, "
                          "faded by beta), result, score, economy and combat, as result:1 score:0.5 economy:0.3 combat:0.3 (default: %(default)s)")
@@ -2229,7 +2355,12 @@ def main() -> None:
                          "(default: %(default)s)")
     ap.add_argument("--diversity", type=float, default=Config.diversity)
     ap.add_argument("--fine-sim", action="store_true", help="the sim steps every slot, the policy decides every --decide-every")
-    ap.add_argument("--z", choices=("none", "variant"), default=Config.z,
+    ap.add_argument("--objective-sigma", type=float, default=Config.objective_sigma,
+                    help="with --z objective: each seat's weights of the terms are the run's times exp(this x a standard normal draw), new each game")
+    ap.add_argument("--explore-share", type=float, default=Config.explore_share,
+                    help="with --z objective: the share of a seat's games where one of --terms' exploratory terms (made_*, given at weight 0) is on")
+    ap.add_argument("--explore-weight", type=float, default=Config.explore_weight, help="the weight of an exploratory term that is on")
+    ap.add_argument("--z", choices=("none", "variant", "objective"), default=Config.z,
                     help="what the actor is told of its strategy: nothing, or its side's army-script knobs (needs --variants)")
     ap.add_argument("--replay-hours", type=float, default=Config.replay_hours,
                     help="every this many hours, --replay-games games against the script kept for the dashboard; 0 for none")
@@ -2238,12 +2369,16 @@ def main() -> None:
     ap.add_argument("--graphs", action=argparse.BooleanOptionalAction, default=Config.graphs, help="play each forward pass as a CUDA graph")
     ap.add_argument("--collectors", type=int, default=Config.collectors, help="processes that play the games and the tests; 0: this one")
     ap.add_argument("--collector-gb", type=float, default=Config.collector_gb, help="the GPU memory each collector may hold")
+    ap.add_argument("--pass-seats", type=int, default=Config.pass_seats,
+                    help="how many seats a game a collector's forward pass takes: 2 decides both sides of a 1v1 against itself at once, in twice the memory")
     ap.add_argument("--check-repro", action="store_true")
     ap.add_argument("--check-kill", action="store_true")
     ap.add_argument("--save-forever", action="store_true", help=argparse.SUPPRESS)
     args = ap.parse_args()
     if args.z == "variant" and not args.variants:
         ap.error("--z variant needs --variants: without them there are no knobs to tell")
+    if args.z == "objective" and not args.group:
+        ap.error("--z objective draws each seat's weights of the terms for each game of a group: it needs --group")
     if args.group and (args.group < 2 or args.games % (args.group * max(args.collectors, 1))):
         ap.error(f"--group: {args.games} games don't make groups of {args.group} in each of {max(args.collectors, 1)} collectors")
     if not 0.0 <= args.self_play <= 1.0:
@@ -2269,14 +2404,15 @@ def main() -> None:
 
     cfg = Config(terms=terms, critic_rewarm=args.critic_rewarm, seed=args.seed, decisions=args.decisions, games=args.games, iteration=args.iteration, passes=args.passes, ema=args.ema,
                  segment=args.segment, token_budget=args.token_budget, data_workers=args.workers, concurrent=args.concurrent,
-                 decide_every=args.decide_every, hours=args.hours, eval_every=args.eval_every, gpu_runs=args.gpu_runs, empty_cache=args.empty_cache,
+                 decide_every=args.decide_every, hours=args.hours, eval_every=args.eval_every, gpu_runs=args.gpu_runs, gpu_share=args.gpu_share, empty_cache=args.empty_cache,
                  latent_encoder=args.latent_encoder, enabled_kinds=policy_sim_env.KINDS,     # what the sim obeys
-                 init=args.init, maps=args.maps, variants=args.variants, lr_start=args.lr_start, lr_end=args.lr_end, kl_target=args.kl_target, critic_lr=args.critic_lr, critic_muon_lr=args.critic_muon_lr, actor_muon_lr=args.actor_muon_lr,
-                 critic_bins=args.critic_bins, critic_span=args.critic_span, entropy_floor=args.entropy_floor, critic_warmup=args.critic_warmup, kl_start=args.kl_start, **fades,
+                 init=args.init, size=args.size, maps=args.maps, variants=args.variants, lr_start=args.lr_start, lr_end=args.lr_end, kl_target=args.kl_target, critic_lr=args.critic_lr, critic_muon_lr=args.critic_muon_lr, actor_muon_lr=args.actor_muon_lr,
+                 critic_bins=args.critic_bins, critic_span=args.critic_span, entropy_floor=args.entropy_floor, critic_warmup=args.critic_warmup, critic_size=args.critic_size, kl_start=args.kl_start, **fades,
                  clone_weight=args.clone_weight, economy_start=args.economy_start, economy_end=args.economy_end,
                  income_weight=args.income_weight, speed_weight=args.speed_weight, diversity=args.diversity, fine_sim=args.fine_sim, z=args.z,
+                 objective_sigma=args.objective_sigma, explore_share=args.explore_share, explore_weight=args.explore_weight,
                  replay_hours=args.replay_hours, replay_games=args.replay_games, replays=args.replays, graphs=args.graphs,
-                 collectors=args.collectors, collector_gb=args.collector_gb, kinds=tuple(kinds.items()), slots=args.slots,
+                 collectors=args.collectors, collector_gb=args.collector_gb, pass_seats=args.pass_seats, kinds=tuple(kinds.items()), slots=args.slots,
                  test_kinds=tuple(args.test_kinds), chicken_difficulties=tuple(difficulties.items()),
                  group=args.group, horizon=tuple(args.horizon), group_scale=args.group_scale, reward_to_go=args.reward_to_go,
                  group_step=args.group_step, economy_change=args.economy_change, adv_clip=args.adv_clip, spo_bound=args.spo_bound,
