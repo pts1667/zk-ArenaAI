@@ -496,9 +496,10 @@ class Actions:
     region: torch.Tensor
     fine: torch.Tensor
     produce: torch.Tensor
-    group: torch.Tensor     # index into groups.GROUP_RADII, -1 alone or unused
+    group: torch.Tensor     # index into groups.GROUP_RADII, -1 alone or unused; an AREA_MEX's radius, of the same
     roles: torch.Tensor     # the group's roles as bits, 0 if none
-    place: torch.Tensor     # a BUILD's: what it's beside (Batch.places); a RECLAIM's: which feature token; -1 unused
+    place: torch.Tensor     # a BUILD's: what it's beside (Batch.places); an AREA_MEX's: its middle, of the same; a RECLAIM's:
+                            # which feature token; -1 unused
     offset: torch.Tensor    # a BUILD's: where beside it, of fz.PLACE_OFFSETS; -1 unused
     logp: torch.Tensor
 
@@ -610,11 +611,12 @@ def _choices(actor: nn.Module, v: Batch, me: torch.Tensor, ctx, given: Actions |
     uses_produce = ((kind == rf.PRODUCE) | (kind == rf.BUILD)) & on      # what a factory makes, or a constructor starts
     logp = logp + uses_produce * _pick(produce_l, produce)
     ent["produce"] = (_masked_entropy(produce_l), uses_produce)
-    # A BUILD's place: beside which of our units or sites, then where beside it.
-    builds = (kind == rf.BUILD) & on
-    place = choose_where(place_l, "place", builds)
-    logp = logp + builds * _pick(place_l, place)
-    ent["place"] = (_masked_entropy(place_l), builds)
+    # A BUILD's place: beside which of our units or sites, then where beside it.  An AREA_MEX's middle is such a place, on it.
+    builds, areas = (kind == rf.BUILD) & on, (kind == rf.AREA_MEX) & on
+    placed = builds | areas
+    place = choose_where(place_l, "place", placed)
+    logp = logp + placed * _pick(place_l, place)
+    ent["place"] = (_masked_entropy(place_l), placed)
     offset_l = actor.offset(me, torch.gather(place_h, 1, place[:, :, None].expand(-1, -1, place_h.shape[-1])))
     offset = choose_where(offset_l, "offset", builds)
     logp = logp + builds * _pick(offset_l, offset)
@@ -624,26 +626,30 @@ def _choices(actor: nn.Module, v: Batch, me: torch.Tensor, ctx, given: Actions |
     wreck = choose_where(wreck_l, "place", reclaims)
     logp = logp + reclaims * _pick(wreck_l, wreck)
     ent["wreck"] = (_masked_entropy(wreck_l), reclaims)
-    # Alone or as a group order, and then the group's roles.
+    # Alone or as a group order, and then the group's roles.  An AREA_MEX's radius is one of the same, from the same head: it
+    # has one always (alone is illegal for it), and it's its unit's alone, so no roles.
     groupable = _groupable(kind, on)
     group_l = actor.group(me, kind)
+    alone = torch.arange(group_l.shape[-1], device=group_l.device) == 0
+    group_l = group_l.masked_fill(areas[..., None] & alone, ILLEGAL)
+    radial = groupable | areas
     radius = _sample(group_l) if given is None else (given.group + 1).clamp_min(0)
-    logp = logp + groupable * _pick(group_l, radius)
-    ent["group"] = (_masked_entropy(group_l), groupable)
-    group = torch.where(groupable, radius - 1, -1)
+    logp = logp + radial * _pick(group_l, radius)
+    ent["group"] = (_masked_entropy(group_l), radial)
+    group = torch.where(radial, radius - 1, -1)
     roles_l = actor.roles(me, kind, group)
     legal = actor.choosable_roles
     if given is None:
         bits = (torch.rand_like(roles_l) < torch.sigmoid(roles_l)) & legal
     else:
         bits = role_bits(given.roles, roles_l.shape[-1])
-    in_group = group >= 0
+    in_group = (group >= 0) & groupable
     logp = logp + in_group * _bits_logp(roles_l, bits, legal)
     ent["roles"] = (_bits_entropy(roles_l, legal), in_group)
     roles = torch.where(in_group, (bits.long() << torch.arange(bits.shape[-1], device=bits.device)).sum(-1), 0)
     out = {"kind": torch.where(on, kind, rf.KEEP), "enemy": enemy, "region": region.masked_fill(~uses_region, -1),
            "fine": fine.masked_fill(~uses_fine, -1), "produce": produce.masked_fill(~uses_produce, -1), "group": group, "roles": roles,
-           "place": torch.where(builds, place, torch.where(reclaims, wreck, -1)), "offset": offset.masked_fill(~builds, -1)}
+           "place": torch.where(placed, place, torch.where(reclaims, wreck, -1)), "offset": offset.masked_fill(~builds, -1)}
     return out, logp.masked_fill(~on, 0.0), ent
 
 

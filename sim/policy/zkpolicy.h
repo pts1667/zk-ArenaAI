@@ -24,7 +24,7 @@
 extern "C" {
 #endif
 
-#define ZKP_ABI_VERSION 2
+#define ZKP_ABI_VERSION 4
 
 int zkp_abi_version(void);
 

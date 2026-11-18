@@ -99,6 +99,7 @@ constexpr double HOME_REACH = 300.0;          // one sent home is home within th
 //     unfinished, for GIVE_UP_FOR.
 // One defence is started a pass at most, after the second factory and before energy.
 constexpr double LIGHT_FROM = 150.0;
+constexpr float GOING_ON = 1.0f;                 // elmos: a build told this near a metal spot is the spot's extractor
 constexpr double LIGHT_COVER = 300.0;            // a spot or extractor with an LLT, Picket, Stinger or Gauss this near is covered
 constexpr double LIGHT_AHEAD = 70.0;             // the turret goes this far from it towards the enemy
 constexpr double LIGHT_SPREAD = 40.0;
@@ -178,6 +179,7 @@ struct Pass {
     bool radar = false, factory = false, second = false;
     int expanding = 0;
     std::vector<double> claimed;    // n x 2
+    std::vector<float> going;       // n x 2: the spots our constructors are on their way to build on, told before this pass
     std::vector<int64_t> reclaimed; // features someone of ours is reclaiming or was sent to this pass
     int reclaimers = 0, reclaimers_wanted = 0;
     std::vector<int64_t> helping;   // what each ASSIST of this pass helps: every constructor helping is idle, so asked again
@@ -677,8 +679,9 @@ Job Seat::spot_job(const Ctx& c, int i, Pass& pass) {
     }
     if (spots.empty()) return {};
     // holders: float32 while nothing's been claimed this pass, float64 after (np.concatenate with a list of Python floats).
-    // Anyone's extractor holds its spot, an ally's too.
-    std::vector<float> hf;
+    // Anyone's extractor holds its spot, an ally's too; and so does a constructor of ours on its way to build on it
+    // (Pass::going).
+    std::vector<float> hf(pass.going);
     for (size_t j = 0; j < own.size(); j++)
         if (d.has(own_rows[j], ZKS_EXTRACTOR)) hf.push_back(own[j]->x), hf.push_back(own[j]->z);
     for (size_t e = 0; e < enemies.size(); e++)
@@ -1216,14 +1219,22 @@ void Seat::eco(const Ctx& c) {
     const Ground& g = *ground;
     for (int s = 0; s < g.n_spots; s++)
         pass.taken.insert(pass.taken.end(), {g.spots[3 * s], g.spots[3 * s + 1], d.spot_half, d.spot_half});
-    // _expanding
+    // _expanding, and the spots they're going to.  A spot is its constructor's from the order, not from the extractor's
+    // first frame: till 2026-11-18 one whose constructor was still walking was free to the next idle one (`claimed` is this
+    // pass's alone), and the sim, which builds wherever it's told, stood two extractors on it, each paying: a seventh of the
+    // script's extractors in the tests' games.  Only what's told onto the spot itself is an extractor (GOING_ON): an LLT
+    // beside it leaves it free.
     if (g.n_spots) {
         for (size_t i = 0; i < n; i++) {
             if (!builders[i] || own[i]->ord_kind != K_BUILD || is_idle[i]) continue;
             float best = INFINITY;
-            for (int s = 0; s < g.n_spots; s++)
-                best = std::min(best, hypotf(own[i]->ord_x - g.spots[3 * s], own[i]->ord_z - g.spots[3 * s + 1]));
+            int at = -1;
+            for (int s = 0; s < g.n_spots; s++) {
+                const float away = hypotf(own[i]->ord_x - g.spots[3 * s], own[i]->ord_z - g.spots[3 * s + 1]);
+                if (away < best) best = away, at = s;
+            }
             pass.expanding += best < 64.0f;
+            if (best < GOING_ON) pass.going.insert(pass.going.end(), {g.spots[3 * at], g.spots[3 * at + 1]});
         }
     }
     defences_of(c, pass, income);

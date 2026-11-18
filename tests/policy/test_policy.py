@@ -123,15 +123,15 @@ def test_tensor_shapes_and_token_order(small_map, table):
                        {"name": "staticmex", "side": MEMORY, "uid": 6, "x": 1000.0, "ord_age": 300.0})
     t = run(units, small_map, table)
     assert t.controllable == 2
-    assert sorted(t.uids.tolist()) == [1, 2, 3, 4, 5, 6]
-    assert t.unit_x.shape == (6, fz.UNIT_DIM) and t.unit_name.shape == (6,)
-    assert t.reg_x.shape == (small_map.regions, fz.REGION_DIM)
-    n = 6 + small_map.regions + 0 + 1
+    assert sorted(t.uids.tolist()) == [1, 2, 3, 4, 5]          # not the building it only remembers
+    assert t.unit_x.shape == (5, fz.UNIT_DIM) and t.unit_name.shape == (5,)
+    assert t.reg_x.shape == (small_map.regions, fz.REGION_DIM) and not t.reg_x[:, 32].any()
+    n = 5 + small_map.regions + 0 + 1
     assert t.tok_kind.shape == (n,)
     assert sorted(t.uids[:2].tolist()) == [1, 2]
     kinds = {int(uid): int(k) for uid, k in zip(t.uids, t.tok_kind)}
-    assert kinds == {1: fz.TK_SEEN, 2: fz.TK_SEEN, 3: fz.TK_SEEN, 4: fz.TK_SEEN, 5: fz.TK_BLIP, 6: fz.TK_MEMORY}
-    assert t.unit_ally.shape == t.unit_player.shape == (6,)
+    assert kinds == {1: fz.TK_SEEN, 2: fz.TK_SEEN, 3: fz.TK_SEEN, 4: fz.TK_SEEN, 5: fz.TK_BLIP}
+    assert t.unit_ally.shape == t.unit_player.shape == (5,)
     assert t.tok_kind[-1] == fz.TK_GLOBAL
     assert t.kind_mask.shape == (2, rf.KIND_COUNT) and t.ptr_region.shape == (2, small_map.regions)
     assert t.ptr_enemy.shape == (len(fz.ENEMY_POINTER_KINDS), 2, 2)
@@ -366,12 +366,15 @@ def test_every_unit_of_every_type_has_a_legal_kind_and_target(small_map, table):
 
 
 def test_hidden_units_only_ever_reach_the_critic(small_map, table):
-    units = make_units({"uid": 1}, {"uid": 2, "side": HIDDEN, "x": 2000.0, "z": 2000.0})
+    """Nor does a building the player saw once and sees no longer: the actor's memory is its own."""
+    units = make_units({"uid": 1}, {"uid": 2, "side": HIDDEN, "x": 2000.0, "z": 2000.0},
+                       {"uid": 3, "name": "staticmex", "side": MEMORY, "x": 2000.0, "z": 1000.0, "ord_age": 300.0})
     actor = run(units, small_map, table)
-    assert 2 not in actor.uids.tolist() and not len(actor.hidden_x)
+    assert actor.uids.tolist() == [1] and not len(actor.hidden_x)
     critic = run(units, small_map, table, privileged=True)
-    assert 2 not in critic.uids.tolist()
-    assert len(critic.hidden_x) == 1 and critic.hidden_x[0, fz._I + 0] > 0.5
+    assert critic.uids.tolist() == [1]
+    assert len(critic.hidden_x) == 2 and (critic.hidden_x[:, fz._I + 0] > 0.5).all()
+    assert (critic.hidden_x[:, fz._I + 17] > 0.0).tolist() == [False, True]       # how long ago the remembered one was seen
     assert np.array_equal(actor.unit_x, critic.unit_x)
 
 

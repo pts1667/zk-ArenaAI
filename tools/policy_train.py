@@ -36,9 +36,11 @@ import torch  # noqa: E402
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT / "bots"))
+sys.path.insert(0, str(ROOT / "sim" / "py"))
 import policy_graphs  # noqa: E402
 import policy_latent  # noqa: E402
 import policy_model as pm  # noqa: E402
+import zkpolicy  # noqa: E402  (the library itself is loaded when first used)
 from zkbot.policy import actions as act, bundle as bd, featurize as fz, rawframe as rf, tables  # noqa: E402
 
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -75,6 +77,16 @@ class Config:
     # iteration past twice this, back toward the schedule (never past it) after one under half of it; 0: the schedule alone.
     # In full-2, as the KL to the clone faded from 0.48 to 0.094, PPO's KL an iteration rose from 0.009 to 0.052.
     kl_target: float = 0.01
+    # The share of its schedule the actor's rate starts at, for that guard to raise or lower: under 1 where the schedule
+    # starts above what a new actor stands (rdnn-1: at the whole of 2e-3 the KL was 1.2 to 10.6 an iteration).
+    lr_scale_start: float = 1.0
+    # The rate of an RDNN's recurrent weights, in their own Adam (Learner.recurrent), at the schedule's start, falling as it
+    # does and whatever the KL guard leaves the actor of it; 0: the schedule's own.  The paper's best was 5e-3.
+    recurrent_lr: float = 0.0
+    # An RDNN's steps through a segment, in training, through torch.compile (policy_latent.compile_memory): a sixth of the
+    # loop's time at segments of 60, for about 20 s of compiling when the learner starts.  Not the collectors', which step
+    # the memory once a decision inside their graphs.
+    compile_memory: bool = False
     # The critic's rate at the start, falling as the actor's does; 0: the actor's.  A clone's actor wants a small rate, and a new
     # critic at it learns nothing: at 1e-5 its explained variance stayed at 0.0000 for 19 iterations (full-1, 2026-11-10).
     critic_lr: float = 0.0
@@ -99,6 +111,10 @@ class Config:
     eval_games: int = 128
     enabled_kinds: tuple[int, ...] = fz.STAGE2_KINDS
     data_workers: int = 6
+    # Featurizing in C++ (sim/py/zkpolicy.py: libzkpolicy, bit for bit with featurize's Python, tools/policy_parity.py), on
+    # this many threads in each collector, which featurizes a round's frames in its own process, and on one in each data
+    # worker; 0: featurize's Python (numba), a frame at a time.
+    featurize_threads: int = 0
     concurrent: bool = True         # collect the next iteration during this one's training
     decide_every: int = 1           # in 15-frame slots: 1 is 2 Hz, 2 is 1 Hz.  Scripted opponents keep their own rate.
     hours: float = 0.0              # stop after this long as well as at `decisions`, if not 0
@@ -110,7 +126,7 @@ class Config:
                                     # 03-training.md, "Reward"): about a 300-metal unit's loss mid-game
     # PPO from a cloned actor (04-literature.md P7, C6, C7).
     init: str = ""                  # a cloning checkpoint (policy_clone_train's actor.pt): the actor starts as it, at its size
-    size: str = "default"           # without one, a new actor's (policy_latent.SIZES): "gru" has a GRU for memory
+    size: str = "default"           # without one, a new actor's (policy_latent.SIZES): "gru" has a GRU for memory, "rdnn" an RDNN in its place
     maps: str = ""                  # a map pool (tools/map_gen.py), its held-out maps left out; "" for the five training maps
     variants: bool = False          # each side's army script draws its knobs (policy_variants.py)
     critic_bins: int = 0            # above 0, the critic's value is a distribution over this many, trained by HL-Gauss
@@ -245,6 +261,7 @@ DECISION_TOKENS = 200
 # peaked under GROW_BELOW of the learner's limit, in what its tensors held: what the allocator reserves stays near the limit.
 SPLIT_SHRINK = 0.9
 KL_SLOW = 1.5               # Config.kl_target's step
+RECURRENT_EPS = 1e-8        # Adam's eps for an RDNN's recurrent weights (Learner.recurrent): their gradient is far under the policy's
 BUDGET_GROW = 1.05
 GROW_BELOW = 0.85
 ACT_PAIRS = 24_000_000      # batch x tokens^2 of one forward pass while playing: its pair table is about 20 bytes a pair
@@ -379,13 +396,13 @@ def name_map(rng: np.random.Generator, vocabulary: int) -> np.ndarray:
 _WORKER: dict = {}
 
 
-def _worker_state(bundles: dict, kinds: tuple[int, ...]) -> dict:
-    return {"bundles": bundles, "kinds": kinds, "table": tables.table()}
+def _worker_state(bundles: dict, kinds: tuple[int, ...], threads: int = 0) -> dict:
+    return {"bundles": bundles, "kinds": kinds, "table": tables.table(), "threads": threads}
 
 
-def _worker_setup(bundles: dict, kinds: tuple[int, ...]) -> None:
+def _worker_setup(bundles: dict, kinds: tuple[int, ...], threads: int = 0) -> None:
     signal.signal(signal.SIGINT, signal.SIG_IGN)
-    _WORKER.update(_worker_state(bundles, kinds))
+    _WORKER.update(_worker_state(bundles, kinds, threads))
 
 
 def _drop_names(t: fz.Tensors, names: np.ndarray) -> None:
@@ -393,8 +410,12 @@ def _drop_names(t: fz.Tensors, names: np.ndarray) -> None:
 
 
 def _worker_chunk(chunk: list[tuple[rf.Frame, int]], state: dict | None = None) -> list[fz.Tensors]:
-    """In a worker process, `state` is the process's own; in this one, each DataWorkers passes its own."""
+    """In a worker process, `state` is the process's own; in this one, each DataWorkers passes its own.  With threads, in C++
+    on that many (Config.featurize_threads): the same tensors, each frame's as views of a buffer of its own."""
     w = _WORKER if state is None else state
+    if w["threads"]:
+        return zkpolicy.featurize_many([(f, w["bundles"][key]) for f, key in chunk], w["table"], w["threads"], enabled_kinds=w["kinds"],
+                                       privileged=True, economy=True)
     return [fz.featurize(f, w["bundles"][key], w["table"], enabled_kinds=w["kinds"], privileged=True, economy=True) for f, key in chunk]
 
 
@@ -411,13 +432,14 @@ class DataWorkers:
     """Featurizing in processes: it is the one part of a decision the GIL would otherwise hold to a single thread.  They are
     forked with every bundle in memory, so a frame only sends a key; fork before the GPU is touched."""
 
-    def __init__(self, count: int, bundles: list[bd.Bundle], kinds: tuple[int, ...]):
+    def __init__(self, count: int, bundles: list[bd.Bundle], kinds: tuple[int, ...], threads: int = 0):
+        """threads: the C++ featurizer's, in each process that featurizes (`_worker_chunk`); 0: featurize's Python."""
         self.count = count
         self.keys = {id(b) for b in bundles}
         by_key = {id(b): b for b in bundles}
-        self.pool = multiprocessing.get_context("fork").Pool(count, _worker_setup, (by_key, kinds)) if count else None
+        self.pool = multiprocessing.get_context("fork").Pool(count, _worker_setup, (by_key, kinds, threads)) if count else None
         # Without processes, its own: two learners in one process (as in the tests) would otherwise share a module's.
-        self.state = _worker_state(by_key, kinds) if self.pool is None else None
+        self.state = _worker_state(by_key, kinds, threads) if self.pool is None else None
 
     def map(self, items: list[tuple[rf.Frame, bd.Bundle]]) -> list[fz.Tensors]:
         pairs = [(f, id(b)) for f, b in items]
@@ -541,7 +563,7 @@ class Learner:
         if cfg.critic_size == "memory":
             # A small critic a term, reading the actor's own latents and its GRU's state (policy_model.MemoryCritic).
             if not (self.actor.gru and cfg.group and cfg.bootstrap) or cfg.resign:
-                raise ValueError("--critic-size memory reads the actor's GRU (--size gru), in bootstrapped GRPO (--group, --bootstrap), without --resign")
+                raise ValueError("--critic-size memory reads the actor's GRU (--size gru, or rdnn), in bootstrapped GRPO (--group, --bootstrap), without --resign")
             self.critic = pm.MemoryCritic(self.actor.encoder.tokens * self.actor.encoder.latent + self.actor.gru, bins=cfg.critic_bins,
                                           span=cfg.critic_span, terms=len(cfg.terms)).to(device)
         else:
@@ -567,7 +589,14 @@ class Learner:
                         if cfg.actor_muon_lr > 0.0 else set())
         critic_hidden = ({id(m.weight) for name, m in self.critic.named_modules() if isinstance(m, torch.nn.Linear) and name.split(".")[0] != "value"}
                          if cfg.critic_muon_lr > 0.0 and self.critic is not None else set())
-        hidden = actor_hidden | critic_hidden
+        # An RDNN's recurrent weights (policy_latent.RDNNCell.recurrent) have an Adam of their own, with a small eps: their
+        # gradient is far under this one's.  At the schedule's rate, whatever the KL guard leaves the actor of it.
+        memory = getattr(self.actor, "memory", None)
+        recurrent = memory.recurrent() if isinstance(memory, policy_latent.RDNNCell) else []
+        self.recurrent = torch.optim.Adam(recurrent, lr=cfg.recurrent_lr or cfg.lr_start, eps=RECURRENT_EPS) if recurrent else None
+        if cfg.compile_memory and recurrent:
+            policy_latent.compile_memory()
+        hidden = actor_hidden | critic_hidden | {id(p) for p in recurrent}
         # Two groups each, so that the critic can learn alone at first (critic_warmup).
         self.optimizer = torch.optim.Adam([{"params": [p for p in actor_params if id(p) not in hidden]},
                                            {"params": [p for p in critic_params if id(p) not in hidden], "lr": cfg.critic_lr or cfg.lr_start}],
@@ -581,7 +610,7 @@ class Learner:
         self.iteration = 0
         self.entropy_coef = {h: self.entropy_base for h in HEADS}
         self.token_budget = cfg.token_budget        # SPLIT_SHRINK, BUDGET_GROW
-        self.lr_scale = 1.0                         # the actor's rate's share of its schedule's (Config.kl_target)
+        self.lr_scale = cfg.lr_scale_start          # the actor's rate's share of its schedule's (Config.kl_target)
         self.actions_scale = 1.0                    # GRPO: the iteration's mean actions a decision, done included (_update_loss)
         self.splits = 0
         self.shrunk = False                         # this iteration
@@ -698,6 +727,11 @@ class Learner:
             now = self.actor.segments(history, seen, latents, lengths, acted, z, keep=kept)
             ctx = self.actor.context(whole, now)
             logp, entropy = pm.evaluate_actions(self.actor, whole, ctx, a)
+            if "memory" in kept:
+                # The memory's state after each decision: one that grows without end, or goes to nothing, shows here first.
+                state = kept["memory"][1].detach().abs()
+                note("state_abs", float(state.mean()))
+                note("state_max", float(state.max()))
             if isinstance(self.critic, pm.MemoryCritic):
                 value = self.critic(*(t.detach() for t in kept["memory"]), logits=True)
             else:
@@ -829,11 +863,21 @@ class Learner:
         self.optimizer.param_groups[1]["lr"] = cfg.critic_lr * lr / cfg.lr_start if cfg.critic_lr else lr
         for group in self.muon.param_groups if self.muon is not None else ():
             group["lr"] = (cfg.actor_muon_lr * actor if group["role"] == "actor" else cfg.critic_muon_lr * lr) / cfg.lr_start
+        if self.recurrent is not None:
+            own = cfg.recurrent_lr * lr / cfg.lr_start if cfg.recurrent_lr else lr
+            self.recurrent.param_groups[0]["lr"] = 0.0 if self.iteration < self.warm_until else own
+
+    def _memory_weights(self) -> torch.Tensor | None:
+        """An RDNN's recurrent weights as they are now (`RDNNCell.weights`' J), or None with another memory."""
+        memory = getattr(self.actor, "memory", None)
+        return memory.weights()[0].detach() if isinstance(memory, policy_latent.RDNNCell) else None
 
     def _clear_grads(self) -> None:
         self.optimizer.zero_grad(set_to_none=True)
         if self.muon is not None:
             self.muon.zero_grad(set_to_none=True)
+        if self.recurrent is not None:
+            self.recurrent.zero_grad(set_to_none=True)
 
     def _backward(self, batch: list[Segment], eps: float, note, share: float = 1.0) -> None:
         """The minibatch's gradient, `share` of it, added to what the parameters hold (`train` clears them at each step).  It's
@@ -922,10 +966,16 @@ class Learner:
                 grad = torch.nn.utils.clip_grad_norm_(self.actor_trained, cfg.grad_clip)
                 if self.critic_trained:
                     note("grad_norm_critic", float(torch.nn.utils.clip_grad_norm_(self.critic_trained, cfg.grad_clip)))
+                before = self._memory_weights()
                 self.optimizer.step()
                 if self.muon is not None:
                     self.muon.step()
+                if self.recurrent is not None:
+                    self.recurrent.step()
                 self.ema_step()
+                if before is not None:
+                    # Whether an RDNN's recurrent weights learn: their gradient is small beside Adam's eps (RDNNCell's notes).
+                    note("memory_step", float((self._memory_weights() - before).abs().mean() / before.mean()))
                 note("grad_norm", float(grad))
                 note("step_decisions", total)
                 if between is not None:
@@ -1151,6 +1201,8 @@ class Learner:
         if self.ema is not None:
             ema = {"ema_actor": self.ema.actor.state_dict(), **({"ema_critic": self.ema.critic.state_dict()} if self.ema.critic is not None else {})}
         muon = {"muon": self.muon.state_dict()} if self.muon is not None else {}
+        if self.recurrent is not None:
+            muon["recurrent"] = self.recurrent.state_dict()
         torch.save({"actor": self.actor.state_dict(), **critic, "optimizer": self.optimizer.state_dict(), **ema, **muon,
                     "size": asdict(self.actor.size),
                     "iteration": self.iteration, "decisions": self.decisions, "entropy_coef": self.entropy_coef, "lr_scale": self.lr_scale,
@@ -1189,6 +1241,8 @@ class Learner:
                 self.optimizer.state.pop(p, None)
         if self.muon is not None:
             self.muon.load_state_dict(state["muon"])
+        if self.recurrent is not None and "recurrent" in state:
+            self.recurrent.load_state_dict(state["recurrent"])
         if self.ema is not None:
             self.ema.actor.load_state_dict(state.get("ema_actor", state["actor"]))
             if self.ema.critic is not None:
@@ -2026,8 +2080,10 @@ def train(cfg: Config, run: pathlib.Path, make_env, device: str = "cuda") -> Non
     # its own it has none running when they fork.
     env = make_env(1, cfg.seed, threads=1) if cfg.collectors else make_env(cfg.games, cfg.seed)
     # Separate pools: training queues a minibatch's chunks at once, and collection mustn't wait behind them.  Both before the GPU.
-    workers = DataWorkers(cfg.data_workers, env.bundles(), cfg.enabled_kinds)
-    act_workers = DataWorkers(cfg.data_workers, env.bundles(), cfg.enabled_kinds) if cfg.concurrent and not cfg.collectors else None
+    # A thread each where there are processes: a minibatch's chunks are spread over them already.
+    threads = min(cfg.featurize_threads, 1) if cfg.data_workers else cfg.featurize_threads
+    workers = DataWorkers(cfg.data_workers, env.bundles(), cfg.enabled_kinds, threads)
+    act_workers = DataWorkers(cfg.data_workers, env.bundles(), cfg.enabled_kinds, threads) if cfg.concurrent and not cfg.collectors else None
     remote = None
     if cfg.collectors:
         import policy_collectors
@@ -2262,6 +2318,8 @@ def main() -> None:
     ap.add_argument("--concurrent", action=argparse.BooleanOptionalAction, default=Config.concurrent, help="collect the next iteration during this one's training")
     ap.add_argument("--decide-every", type=int, default=Config.decide_every, help="in 15-frame slots: 1 is 2 Hz, 2 is 1 Hz")
     ap.add_argument("--workers", type=int, default=Config.data_workers)
+    ap.add_argument("--featurize-threads", type=int, default=Config.featurize_threads,
+                    help="featurize in C++ (libzkpolicy) on this many threads in each collector and one in each data worker; 0: in Python")
     ap.add_argument("--hours", type=float, default=Config.hours, help="stop after this long as well as at --decisions")
     ap.add_argument("--eval-every", type=int, default=Config.eval_every, help="iterations between tests against the script")
     ap.add_argument("--latent-encoder", default=Config.latent_encoder, help="the trained frame encoder whose latents the actor reads")
@@ -2287,12 +2345,19 @@ def main() -> None:
     ap.add_argument("--empty-cache", action=argparse.BooleanOptionalAction, default=Config.empty_cache, help="hand back what the allocator holds after each iteration")
     ap.add_argument("--init", default="", help="a cloning checkpoint to start the actor from (P7)")
     ap.add_argument("--size", choices=tuple(policy_latent.SIZES), default=Config.size,
-                    help="a new actor's size, without --init: gru has a GRU for memory in place of the time transformer")
+                    help="a new actor's size, without --init: gru has a GRU for memory in place of the time transformer, "
+                         "rdnn a Recurrent Divisive Normalization Network (arXiv 2608.01947) in the GRU's place")
     ap.add_argument("--maps", default="", help="a map pool, its held-out maps left out; without it, the five training maps")
     ap.add_argument("--variants", action="store_true", help="each side's army script draws its knobs (policy_variants.py)")
     ap.add_argument("--lr-start", type=float, default=Config.lr_start)
     ap.add_argument("--lr-end", type=float, default=Config.lr_end)
     ap.add_argument("--kl-target", type=float, default=Config.kl_target, help="the actor's rate slows when an iteration's KL passes twice this; 0: off")
+    ap.add_argument("--compile-memory", action="store_true",
+                    help="an RDNN's steps through a segment, in training, through torch.compile")
+    ap.add_argument("--recurrent-lr", type=float, default=Config.recurrent_lr,
+                    help="the rate of an RDNN's recurrent weights, in their own Adam; 0: the schedule's (--lr-start)")
+    ap.add_argument("--lr-scale-start", type=float, default=Config.lr_scale_start,
+                    help="the share of its schedule the actor's rate starts at, for the KL guard to raise or lower (a new run's; a resumed one keeps its own)")
     ap.add_argument("--critic-lr", type=float, default=Config.critic_lr, help="the critic's rate at the start, scaled as the actor's falls; 0: the actor's")
     ap.add_argument("--critic-muon-lr", type=float, default=Config.critic_muon_lr,
                     help="above 0, Muon trains the critic's hidden matrices at this rate at the start, scaled as the actor's falls")
@@ -2403,10 +2468,10 @@ def main() -> None:
         ap.error(str(e))
 
     cfg = Config(terms=terms, critic_rewarm=args.critic_rewarm, seed=args.seed, decisions=args.decisions, games=args.games, iteration=args.iteration, passes=args.passes, ema=args.ema,
-                 segment=args.segment, token_budget=args.token_budget, data_workers=args.workers, concurrent=args.concurrent,
+                 segment=args.segment, token_budget=args.token_budget, data_workers=args.workers, featurize_threads=args.featurize_threads, concurrent=args.concurrent,
                  decide_every=args.decide_every, hours=args.hours, eval_every=args.eval_every, gpu_runs=args.gpu_runs, gpu_share=args.gpu_share, empty_cache=args.empty_cache,
                  latent_encoder=args.latent_encoder, enabled_kinds=policy_sim_env.KINDS,     # what the sim obeys
-                 init=args.init, size=args.size, maps=args.maps, variants=args.variants, lr_start=args.lr_start, lr_end=args.lr_end, kl_target=args.kl_target, critic_lr=args.critic_lr, critic_muon_lr=args.critic_muon_lr, actor_muon_lr=args.actor_muon_lr,
+                 init=args.init, size=args.size, maps=args.maps, variants=args.variants, lr_start=args.lr_start, lr_end=args.lr_end, kl_target=args.kl_target, lr_scale_start=args.lr_scale_start, recurrent_lr=args.recurrent_lr, compile_memory=args.compile_memory, critic_lr=args.critic_lr, critic_muon_lr=args.critic_muon_lr, actor_muon_lr=args.actor_muon_lr,
                  critic_bins=args.critic_bins, critic_span=args.critic_span, entropy_floor=args.entropy_floor, critic_warmup=args.critic_warmup, critic_size=args.critic_size, kl_start=args.kl_start, **fades,
                  clone_weight=args.clone_weight, economy_start=args.economy_start, economy_end=args.economy_end,
                  income_weight=args.income_weight, speed_weight=args.speed_weight, diversity=args.diversity, fine_sim=args.fine_sim, z=args.z,

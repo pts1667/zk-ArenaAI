@@ -121,6 +121,28 @@ def test_the_damage_a_team_does_is_what_the_other_takes_in_metal_and_a_kill_is_i
     assert list(batch.stats[0, :, 10]) == pytest.approx([scorcher["cost"], glaive["cost"]])
 
 
+def test_the_metal_paid_into_units_is_the_factorys_and_its_helpers_and_none_of_a_buildings():
+    """ZK_STATS [11], for the reward's production lead: what a factory and a commander helping it pay for raiders, by who pays,
+    and nothing for an extractor a constructor builds."""
+    batch = zksim.Batch(CAT, 1, threads=1)
+    names = ("factorycloak", "dyntrainer_strike_base", "cloakcon")
+    batch.reset(0, FLAT, 1, np.array([CAT.index[n] for n in names]), np.array([0, 0, 1]), np.array([1000.0, 1000.0, 3000.0]),
+                np.array([1000.0, 1120.0, 3000.0]))
+    batch.economy(0, np.array([[3050.0, 3000.0, 2.0]], np.float32), metal=50000.0, energy=50000.0, storage=100000.0)
+    orders = np.zeros(3, zksim.ORDER_DTYPE)
+    orders[0] = (0, zksim.ORDER_PRODUCE, 0.0, 0.0, CAT.index["cloakraid"])
+    orders[1] = (1, zksim.ORDER_ASSIST, 0.0, 0.0, 0)
+    orders[2] = (2, zksim.ORDER_BUILD, 3050.0, 3000.0, CAT.index["staticmex"])
+    batch.step(orders, np.array([0, 3], np.int32), ticks=60)
+    raider = CAT.units[CAT.index["cloakraid"]]
+    made = batch.frame(0, 0).units
+    made = made[made["def_id"] == raider["def_id"]]
+    done = int((made["build_frac"] >= 1.0).sum())       # 10 s: 3 at build speed 10 and the commander's 10, 6.5 s each alone
+    assert done == 3 and batch.stats[0, 0, 11] == pytest.approx(done * raider["metal_cost"])      # the metal, not its energy
+    theirs = batch.frame(0, 1).units
+    assert theirs["build_frac"][theirs["def_id"] == CAT.units[CAT.index["staticmex"]]["def_id"]].max() > 0.2 and batch.stats[0, 1, 11] == 0.0
+
+
 def test_a_team_has_its_finished_extractors_its_share_of_its_allyteams_sight_and_radar_and_the_metal_put_into_its_army():
     """ZK_STATS [6] to [8] and [10], for the reward's extractors, map and experience: a frame is no extractor and has no eyes,
     allies split their allyteam's share of the map evenly, and a constructor is no army while a raider's frame is part of one."""

@@ -36,7 +36,10 @@ _SITE_STATUS = {"free": SITE_FREE, "ours": SITE_OURS, "enemy": SITE_ENEMY, "buil
 
 # Order kinds: 02-policy.md, "Kinds".
 KEEP, MOVE, FIGHT, ATTACK_UNIT, ATTACK_GROUND, STOP, MANUAL_FIRE, JUMP, CLOAK_ON, CLOAK_OFF = range(10)
-BUILD, ASSIST, REPAIR, RECLAIM, PRODUCE, RESERVED_KIND = range(10, 16)
+BUILD, ASSIST, REPAIR, RECLAIM, PRODUCE, AREA_MEX = range(10, 16)
+# AREA_MEX (the user, 2026-11-18; the kind kept in reserve till then) is an action's alone: extractors on the free metal spots
+# within a radius of a place, the nearest to the unit first.  No unit's `ord_kind` is it: one on an area mex shows the BUILD it's
+# on, and a token's order memory uses that slot for something else (featurize_kernels: whether it's pulling).
 ORDER_SLOTS = 16        # of a token's order memory, in which an order's kind is one of those above: the frames and encoders made so far have these
 THROW, PUSH, PULL, PLACE_BEACON, WAIT_AT_BEACON = range(16, 21)
 LOAD, UNLOAD, DROP = range(21, 24)       # an air transport's: pick a unit up, set its load down at a place, let it fall

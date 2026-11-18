@@ -116,6 +116,8 @@ def random_decision(t: fz.Tensors, rng: np.random.Generator) -> act.Decision:
             d.produce[i] = int(rng.choice(np.flatnonzero(t.ptr_produce[i])))
             if k == rf.BUILD:
                 d.place[i], d.offset[i] = int(rng.integers(places)), int(rng.integers(fz.PLACE_OFFSETS))
+        elif k == rf.AREA_MEX:
+            d.place[i], d.group[i] = int(rng.integers(places)), int(rng.integers(len(gr.GROUP_RADII)))
         elif k == rf.RECLAIM:
             d.place[i] = int(rng.integers(len(t.feat_ids)))
         if k in gr.GROUP_KINDS and rng.random() < 0.5:

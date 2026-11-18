@@ -247,3 +247,9 @@ def test_collector_processes_play_as_graphs_on_cuda(tmp_path, encoder_path):
     _, *rows = [json.loads(line) for line in (tmp_path / "metrics.jsonl").read_text().splitlines()]     # the first, iteration 0's test
     assert len(rows) == 3 and all(r["masked_out"] == 0 and r["graphs_captured"] >= 2 and r["collector_reserved_gb"] > 0 for r in rows)
     assert all("eval_fight" in r for r in rows)
+
+
+def test_collectors_share_a_collection_by_their_speed_and_none_gets_under_half_an_even_share():
+    assert pc.shares(16384, [0.0, 0.0]) == [8192, 8192]             # no rates yet: evenly
+    assert pc.shares(16384, [300.0, 400.0]) == [7021, 9363]
+    assert pc.shares(16384, [100.0, 900.0, 900.0]) == [2730, 6828, 6826]

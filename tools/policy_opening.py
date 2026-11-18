@@ -31,6 +31,7 @@ NEAR_SPOTS = 1300.0        # elmos from the start: past this is expansion, not t
 MOST_SPOTS = 6             # and no more than this many, the nearest: Agalta's start has 10 in that reach
 STEP_SECONDS = 120.0        # a step that takes longer than this is given up on, so a site out of reach can't end the opening
 SITE_GAP = 8.0              # elmos between footprints
+EXTRACTOR_REACH = 64.0      # an extractor this near a metal spot holds it (sim/src/economy.cpp)
 LINK_REACH = 150.0          # a solar this near an extractor still links to it: pylon ranges 100 and 50
 FACTORY_NEAREST, FACTORY_FARTHEST, RING = 64.0, 800.0, 32.0
 RALLY_AHEAD = 200.0         # elmos past the factory's edge, clear of where its units come out
@@ -175,9 +176,23 @@ class Seat:
     factory_uid: int = -1
     deadline: int = 0
     done: bool = False
+    mex_type: int = -1          # the extractor's type and def id: a planned one is left out once its spot is taken (`_taken`)
+    mex_def: int = -1
+
+    def _taken(self, units: np.ndarray, b: Build) -> bool:
+        """Whether a spot the plan has an extractor for has one by now, anyone's the team knows of, or another of the team's has
+        been told to build on it: the economy script's constructors don't know the plan, and take the nearest free spot.  The
+        sim builds wherever it's told and pays every extractor on a spot, so till 2026-11-18 the commander stood a second one
+        there."""
+        known = units["knowledge"] != rf.KNOW_HIDDEN
+        there = known & (units["def_id"] == self.mex_def) & (np.hypot(units["x"] - b.x, units["z"] - b.z) <= EXTRACTOR_REACH)
+        going = ((units["player"] == self.team) & (units["uid"] != self.team) & (units["ord_kind"] == rf.BUILD)
+                 & (np.hypot(units["ord_x"] - b.x, units["ord_z"] - b.z) < 1.0))
+        return bool((there | going).any())
 
     def advance(self, units: np.ndarray, decision: int) -> list[tuple[int, int, float, float, int]]:
-        """The orders to give now.  Call when the commander has nothing to do, or when its step ran out of time."""
+        """The orders to give now.  Call when the commander has nothing to do, or when its step ran out of time.  units: the
+        team's frame's, its own first."""
         commander = self.team
         self.deadline = decision + self.step_decisions
         if self.next_build == -1:
@@ -189,9 +204,11 @@ class Seat:
             if len(built):
                 self.factory_uid = int(built["uid"][0])
                 out.append((self.factory_uid, rf.PRODUCE, 0.0, 0.0, self.raider_type))
-        if self.next_build < len(self.plan.builds):
+        while self.next_build < len(self.plan.builds):
             b = self.plan.builds[self.next_build]
             self.next_build += 1
+            if b.type == self.mex_type and self._taken(units, b):
+                continue        # its solar still goes beside it
             out.append((commander, rf.BUILD, b.x, b.z, b.type))
             return out
         self.done = True
@@ -511,4 +528,5 @@ class Opening:
             place = ground.site(rng, footing, start[0], start[1], np.zeros((0, 4), np.float32))
             if place is not None:
                 plan = replace(plan, factory=place)
-        return Seat(team, plan, factory, int(self.cat.units[factory]["def_id"]), raider, int(STEP_SECONDS * 2) // self.decide_every)
+        return Seat(team, plan, factory, int(self.cat.units[factory]["def_id"]), raider, int(STEP_SECONDS * 2) // self.decide_every,
+                    mex_type=self.mex, mex_def=int(self.cat.units[self.mex]["def_id"]))

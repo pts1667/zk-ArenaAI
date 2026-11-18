@@ -50,7 +50,7 @@ flowchart LR
 
 | | |
 |---|---|
-| Size | `policy_latent.SIZE`, kept in each checkpoint: width `d` 256, 8 heads, 4 time layers, 4 plan layers, no unit layers.  `SMALL` is 128, 4 heads, 2 and 2.  `WIDE` (the user, 2026-11-14; `full-4`, `policy_clone_train.py --size wide`) is 384, 12 heads, 4 and 4, and 2 unit layers.  `GRU` (the user, 2026-11-17; `policy_train.py --size gru`) is 256, 8 heads, a GRU of 1,024 in place of the time layers, 1 block within the frame and 2 plan layers: "A GRU for memory" below |
+| Size | `policy_latent.SIZE`, kept in each checkpoint: width `d` 256, 8 heads, 4 time layers, 4 plan layers, no unit layers.  `SMALL` is 128, 4 heads, 2 and 2.  `WIDE` (the user, 2026-11-14; `full-4`, `policy_clone_train.py --size wide`) is 384, 12 heads, 4 and 4, and 2 unit layers.  `GRU` (the user, 2026-11-17; `policy_train.py --size gru`) is 256, 8 heads, a GRU of 1,024 in place of the time layers, 1 block within the frame and 2 plan layers: "A GRU for memory" below.  `RDNN` (the user, 2026-11-17; `--size rdnn`) is `GRU` with a Recurrent Divisive Normalization Network of 1,024 units where the GRU is, its state told to what reads the frame as a vector, not as tokens: "An RDNN in the GRU's place" |
 | Parameters | 10,546,864 trained (`SMALL`: 1,929,088; `WIDE`: 27,053,667, 3,548,928 of them in the unit layers), and 1,650,816 frozen in the encoder at `encoder-big`'s recipe (2,893,776 at `full-4`'s, 192 wide with 64 queries) |
 | Latent tokens a frame | 40, of 32 numbers each, LayerNormed without weights |
 | Action tokens a frame | 4 (`ACTION_TOKENS`) |
@@ -78,7 +78,8 @@ featurizer").  Tokens come in a fixed order:
   * summary counts.
   
   Each unit also has a type name, an allyteam and a player, numbered from the viewer.  Its token kind says what is known of it:
-  seen, blip, memory or summary.
+  seen, blip or summary.  A building seen once and now out of sight was a token too, of kind "memory", till 2026-11-18
+  (the user): the actor's own memory keeps what it saw (docs/learned-policy/02-policy.md, "Nothing remembered").
 * **Regions** (about 120 at most): 34 numbers each.  The first 27 are static (place, terrain, spots).  The rest say what is there
   now: own value, seen and radar enemy value, DPS, wreck metal, and so on.
 * **Sites** (metal spots, up to 24): 9 numbers.
@@ -513,6 +514,72 @@ flowchart LR
   seen and nothing privileged.  03-training.md, "GRPO from branched games" ("Bootstrapped").
 * **Speed**: about 870 decisions a second where the wide actor made 119, and 1,250 with bigger passes and minibatches
   (03-training.md, "Playing").
+
+## An RDNN in the GRU's place (`Size.memory` "rdnn")
+
+The user's, 2026-11-17, after arXiv 2608.01947 ("Divisive Normalization Shapes Low-Rank Slow Manifolds for Continuous
+Working Memory"): a Recurrent Divisive Normalization Network where the GRU was, everything around it the same
+(`policy_train.py --size rdnn`, `policy_latent.RDNN`, `RDNNCell`).  The paper shows it on two toy tasks of continuous
+working memory (an angle integrated from its turns, or held through a delay; 1 to 3 numbers in, 64 to 256 units,
+supervised, the gradient through all 256 to 512 steps), where it keeps a ring that a GRU breaks into points.  It has no
+RL and nothing of this size, and that's what the run `rdnn-1` is for.
+
+* **The step** (its appendix B), for units' rates R and their inhibitory pools G, with I the memory's input through a
+  linear layer:
+
+      R' = R + aR ((J relu(R) + I) / (eta + G) - R)
+      G' = G + aG (W relu(R) - G)
+
+  J, W (units x units) and eta are positive, the softplus of what's learnt; aR and aG are each unit's own, a sigmoid.
+  A pool that starts at 0 never goes below it, so nothing is divided by less than eta.
+* **The state** a seat keeps is the rates and then the pools: 2,048 numbers for `RDNN`'s 1,024 units (`Size.gru` is the
+  state's width, so twice the units).  What the rest of the actor is told of it is read off the rates, as the paper
+  reads its output; the critics read the whole state.  2.6M parameters where the GRU had 4.7M.
+* **Told as a vector** (`Size.memory_as` "vector", `RDNN`'s; the user, 2026-11-17: "pass in memory input as a vector"):
+  one vector of the actor's width off the rates (`mem_out`), added to what reads the frame: each controllable unit as it
+  reads it for its key and again as an action's anchor (`context`, `reading`), and each of the plan's slots (`plan`).
+  The frame is then its 64 latent tokens alone, which stay tokens: each reader picks among them.  As 4 tokens among the
+  frame's 68 (`GRU`, "tokens") the memory is what a reader's attention gives it, a sixteenth at first; how much the GRU
+  run's readers came to give it wasn't measured.  In the code the vector rides as a last row of what `_frame` and
+  `segments` return, which `context` takes off, so nothing that calls them changed.  It isn't LayerNormed: at first it's
+  about a tenth in each place, the size of the plan's own slots.
+* **At first**, as the paper has it: each weight of J and W about 1 / units (the softplus of -ln(units) and a spread of
+  1 / sqrt(units)), so a unit's drive is the units' mean rate and what it takes in, over eta and that mean; the rates a
+  tenth of the way a decision (a sigmoid of -2.2).  In numpy at 1,024 units with random frames the state stays where it
+  starts over 1,700 decisions (rates' spread 0.14, pools 0.08 to 0.13), and of one decision's difference it keeps 9%
+  after 16 decisions and 1.2% after 64, where a GRU at PyTorch's first weights keeps 0.03% and nothing.
+* **Mine, where the paper is silent or doesn't fit**:
+  * relu and not tanh, with which a pool could go negative and the division blow up;
+  * no noise on the state (the paper trains with 0.1): play and training must step a state alike here;
+  * eta 1 at first, and a spread of 1 in the rates before their sigmoid (a twentieth of units keep a fiftieth of the way
+    a decision, another twentieth a third): the paper gives neither;
+  * an Adam of their own for what's learnt of J and W (`RDNNCell.recurrent`, `Learner.recurrent`), with eps 1e-8 and
+    the schedule's rate, or `--recurrent-lr` (the user, 2026-11-17: 5e-3, the paper's best, in `rdnn-1` from iteration
+    146), whatever the KL guard leaves the rest of the actor.  The gradient on them is the weight's
+    times about 1 / units, far under the policy's Adam eps of 1e-5: in `rdnn-1`'s first smoke run, in the actor's own
+    Adam at 2e-3 and scaled up by sqrt(units), a step moved J by 0.013% of its mean and after three iterations by
+    nothing.  With a small eps a step moves a weight by about the rate, as a share of the weight.  `memory_step` in
+    the trainer's metrics is how far a step moved J, as a share of its mean.
+* **Training** cuts the gradient at a segment's start.  That was 16 decisions, as with the GRU; from iteration 146 of
+  `rdnn-1` it's a whole stretch (`--segment 128`; the user, 2026-11-17, after the paper's task showed the RDNN learning
+  nothing with the gradient cut at 16).  A segment ends with its stretch, 60 to 180 s of a game, so that's 20 to 60
+  decisions and the most `--segment` can give: for more, the memory's inputs would have to be kept from the game's
+  start and its steps run again from there (not built).
+* **The loop over a segment's steps** (`RDNNCell.run`, `LatentActor._steps`) makes what doesn't change from step to
+  step once (the weights, J over W as one matrix, the rates, the input layer for every step), and with
+  `--compile-memory` goes through torch.compile (`policy_latent.compile_memory`; the user: "I'd keep the loop compiled",
+  "Consider using dynamic shapes").  A loop in Python is unrolled when it's compiled, so its length can't be a shape
+  left open: what's compiled is 16 steps (`RDNN_CHUNK`), called as often as a segment needs, the last chunk filled out
+  with steps that take in nothing and are dropped; the number of segments is open.  Forward and back at 1,024 units
+  (`results/bench_memory_loop.py`): 5 segments of 60 took 109 ms a step at a time, 72 as `run` and 24 compiled; 18 of
+  16 took 34, 25 and 7.  The states are the same and the gradients within 5e-7 of their largest.  It compiles three
+  times as the learner starts, 30 to 60 s each: a first chunk, a later one (whose state carries a gradient), and one
+  segment alone.  The collectors don't use it: they step the memory once a decision inside their graphs.
+* **Tests**: `test_an_rdnn_steps_as_the_paper_has_it_and_never_divides_by_less_than_its_semi_saturation`,
+  `test_a_memory_told_as_a_vector_is_no_token_of_the_frame_and_reaches_the_units_and_the_plan`, the GRU's
+  play-against-training test run for all three (GRU, RDNN, RDNN told as a vector), and the trainer's for `--size rdnn`.
+  The first checks `run` against its steps, whole and a chunk at a time.  `results/rdnn_check.py` trains it and a GRU
+  on the paper's first task with the gradient cut at 16.
 
 ## Open questions (the user's)
 

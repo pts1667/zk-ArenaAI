@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define ZK_ABI_VERSION 30
+#define ZK_ABI_VERSION 31
 #define ZK_WARD_TARGETS 4
 #define ZK_MAX_MOUNTS 8
 #define ZK_MAX_TEAMS 8     /* players in a game, and so allyteams too */
@@ -497,8 +497,11 @@ int zk_world_order_group(void* world, const zk_group_rec* group);
    upkeep wasn't paid) on a grid of ZK_COVER_CELL elmos, a cell counting when its centre is in one, terrain not looked at.
    [9] the part of [4] its army did: a mobile, armed unit that isn't a commander, a builder or a missile, by its own shot or blast
    (a fire or a death's blast has no unit to say).  [10] the metal put into its army, dead units' too: cost x build progress, a
-   chicken's build time for its cost as in [0].  Zero-K's experience is a unit's [9] over its cost; this is the army's. */
-#define ZK_STATS 11
+   chicken's build time for its cost as in [0].  Zero-K's experience is a unit's [9] over its cost; this is the army's.
+   [11] since the game began: the metal the team's builders have paid into units that move, which is what factories make: a
+   factory's own work and what helps it (a constructor's or a caretaker's, an ally's factory too), counted for whoever paid.
+   Not what's put into buildings, and not what a free unit cost nobody. */
+#define ZK_STATS 12
 #define ZK_COVER_CELL 64.0f
 
 int zk_sizeof_unit_record(void);

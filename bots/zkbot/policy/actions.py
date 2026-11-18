@@ -34,10 +34,12 @@ class Decision:
     region: np.ndarray            # C: region index, or -1
     fine: np.ndarray              # C: fine option, or -1
     produce: np.ndarray           # C: place in table.producible, or -1
-    group: np.ndarray | None = None     # C: for a kind of groups.GROUP_KINDS, index into GROUP_RADII if it goes as a group order, else -1
+    group: np.ndarray | None = None     # C: for a kind of groups.GROUP_KINDS, index into GROUP_RADII if it goes as a group order, else -1;
+                                        # for an AREA_MEX, its area's radius, of the same
     roles: np.ndarray | None = None     # C: that group's roles, as bits (groups.roles), else 0
-    place: np.ndarray | None = None     # C: for a BUILD, what it's beside: index into place_tokens, then past them the sites; for a
-                                        # RECLAIM, which feature token (index into feat_ids); else -1
+    place: np.ndarray | None = None     # C: for a BUILD, what it's beside: index into place_tokens, then past them the sites; for an
+                                        # AREA_MEX, its area's middle, of the same; for a RECLAIM, which feature token (index into
+                                        # feat_ids); else -1
     offset: np.ndarray | None = None    # C: for a BUILD, where beside it (fz.PLACE_OFFSETS: on it, then 8 a ring), else -1
 
     def __post_init__(self):
@@ -96,7 +98,8 @@ def to_slots(d: Decision, order: np.ndarray | None = None, slots: int | None = S
 @dataclass(frozen=True)
 class Order:
     """In the policy's terms: target is a uid, or for PRODUCE a row of the type table.  A radius makes it a group order
-    (groups.py): the unit's, and every unit of its side of `roles` within the radius of it."""
+    (groups.py): the unit's, and every unit of its side of `roles` within the radius of it.  But an AREA_MEX's radius is its
+    area's, round x, z: extractors on the free spots in it, the nearest to the unit first, and the unit's alone."""
     uid: int
     kind: int
     x: float = 0.0
@@ -143,6 +146,10 @@ def decode(decision: Decision, t: fz.Tensors, bundle: Bundle, unit_x: np.ndarray
             # The point it chose; whoever obeys it finds the nearest place there the type fits.
             x, z = place_points(t, unit_x, unit_z)[int(decision.place[i]), int(decision.offset[i])]
             order = Order(uid, kind, float(x), float(z), int(table().producible[decision.produce[i]]))
+        elif kind == rf.AREA_MEX:
+            # The middle it chose and how far round it; whoever obeys it finds the free spots there.
+            x, z = place_points(t, unit_x, unit_z)[int(decision.place[i]), 0]
+            order = Order(uid, kind, float(x), float(z), radius=gr.GROUP_RADII[int(decision.group[i])])
         elif kind == rf.PRODUCE:
             order = Order(uid, kind, target=int(table().producible[decision.produce[i]]))
         elif kind == rf.RECLAIM:
@@ -207,7 +214,8 @@ def _nearest(points: np.ndarray, legal: np.ndarray, x: float, z: float) -> tuple
 def encode(orders: list[Order], t: fz.Tensors, bundle: Bundle, unit_x: np.ndarray, unit_z: np.ndarray) -> tuple[Decision, int]:
     """`decode` the other way: orders someone else gave, such as a script, as the choices that would have given them.  A unit with no
     order keeps what it has.  A place becomes the nearest region and option the unit could have chosen, and a BUILD's the nearest
-    place and offset (`place_points`).  Returns the choices, and how
+    place and offset (`place_points`), an AREA_MEX's the nearest place and the smallest radius at least its own (the widest, past
+    them all).  Returns the choices, and how
     many orders couldn't be put in the policy's terms at all (a unit it doesn't control, a kind its masks rule out now, a target that
     isn't a token), which stay KEEP.  A group order is its unit's choice with its radius and roles, the roles it can't choose
     dropped (groups.choosable); the units it gives the order to keep what they have.  A unit given several orders takes the last
@@ -270,6 +278,12 @@ def encode(orders: list[Order], t: fz.Tensors, bundle: Bundle, unit_x: np.ndarra
                     places = place_points(t, unit_x, unit_z)
                 away = np.hypot(places[..., 0] - o.x, places[..., 1] - o.z)
                 pl, of = (int(v) for v in np.unravel_index(int(np.argmin(away)), away.shape))
+        elif k == rf.AREA_MEX:
+            if places is None:
+                places = place_points(t, unit_x, unit_z)
+            pl = int(np.argmin(np.hypot(places[:, 0, 0] - o.x, places[:, 0, 1] - o.z)))
+            g = gr.bucket(o.radius)
+            g = len(gr.GROUP_RADII) - 1 if g < 0 else g
         elif k == rf.RECLAIM:
             found = np.flatnonzero(t.feat_ids == int(o.target))
             if not len(found):

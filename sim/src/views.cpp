@@ -469,6 +469,7 @@ void World::team_stats(int t, float* out) const {
     out[8] = scan * share;
     out[9] = float(army_dealt[t]);
     out[10] = float(army_value);
+    out[11] = float(unit_spent[t]);
 }
 
 bool World::army(int u) const {

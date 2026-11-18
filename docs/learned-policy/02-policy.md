@@ -18,8 +18,8 @@ reads).  It holds only what a player can know and the live bot can supply: no fa
 
 | Record | Fields | Notes |
 |---|---|---|
-| UNIT (array) | `uid`, `player`, `ally_team` (the game's numbers, -1 unknown; `player` is the engine's team), `knowledge` (0 in sight, 1 radar, 2 remembered, 3 hidden: the critic's only), `def_id` (-1 unknown), `x y z`, `vx vz`, `hp_frac` (NaN for a blip), `build_frac`, `experience`, `blip_top_speed`, `flags`, order memory (`ord_kind`, `ord_age` in frames, `ord_x`, `ord_z`, `ord_target`) | Flags: BEING_BUILT, CLOAKED, PARALYZED, IN_LOS, IDLE, TYPE_KNOWN, DAMAGED, RESERVED, JUMP_READY, PULLING, CARRIED (an air transport holds it), LOADED (a transport holding something).  Order memory is what the controller last told its own units, as a player remembers it, not the engine's queue.  For a PRODUCE, `ord_target` is the def id made.  On a remembered structure, `ord_age` is how long ago it was seen |
-| SITE (array) | `site_id`, `x z`, `income`, `status` (free, ours, enemy, building), `region_id` | metal spots; the viewer's status from the extractors it knows of |
+| UNIT (array) | `uid`, `player`, `ally_team` (the game's numbers, -1 unknown; `player` is the engine's team), `knowledge` (0 in sight, 1 radar, 2 remembered, 3 hidden: the critic's only), `def_id` (-1 unknown), `x y z`, `vx vz`, `hp_frac` (NaN for a blip), `build_frac`, `experience`, `blip_top_speed`, `flags`, order memory (`ord_kind`, `ord_age` in frames, `ord_x`, `ord_z`, `ord_target`) | Flags: BEING_BUILT, CLOAKED, PARALYZED, IN_LOS, IDLE, TYPE_KNOWN, DAMAGED, RESERVED, JUMP_READY, PULLING, CARRIED (an air transport holds it), LOADED (a transport holding something).  Order memory is what the controller last told its own units, as a player remembers it, not the engine's queue.  For a PRODUCE, `ord_target` is the def id made.  On a remembered structure, `ord_age` is how long ago it was seen; the featurizer makes no token of one ("Nothing remembered", below) |
+| SITE (array) | `site_id`, `x z`, `income`, `status` (free, ours, enemy, building), `region_id` | metal spots; the viewer's status from the extractors it knows of.  The sim's records leave it free, and `SimEnv.frame` fills it (`site_status`; the user, 2026-11-18): no RL run's actor had seen a spot held before `rdnn-1`'s iteration 364.  A recording keeps a game's spots once, so a recorded game's frames still read free |
 | FEATURE (array) | `feat_id`, `x z`, `metal` left, `def_id` | wrecks in sight with at least 1 metal |
 | GLOBAL | frame, metal and energy (current, income, storage), commander health and uid, base x z, map size, frames since enemy contact, unfinished own structures, idle own builders, the viewer's `player` and `ally_team` | the last two say whose frame it is, and aren't inputs |
 | Static bundle (once a game) | regions (centre, area, height, domain, tags, access per move class, spots), gates per edge, spots, passability, heights | built by the same `terrain.py` code from the same heights in both paths |
@@ -49,17 +49,36 @@ numba, giving the same tensors to the bit as the numpy it replaced.  Without num
 
 | Group | Numbers each | Cap, and what happens past it |
 |---|---|---|
-| Units | 129: type stats, instance state, order memory, 24 terrain rays (free distance, enemy and own DPS in 8 sectors), summary counts | 1,280, controllable first (up to 512, by cost, then distance to the army).  After those come other alliances' units in sight, then on radar, then the rest, each by max(cost, 100) / (distance to our army + 200) |
+| Units | 129: type stats, instance state, order memory, 24 terrain rays (free distance, enemy and own DPS in 8 sectors), summary counts | 1,280, controllable first (up to 512, by cost, then distance to the army).  After those come other alliances' units in sight, then on radar, then the rest, each by max(cost, 100) / (distance to our army + 200).  A building a seat only remembers is none of them |
 | Summaries | as units | 12 tokens, one per (whose, what's known, coarse role), for what the unit cap left out |
-| Regions | 34: 27 static, then what's there now (own value, seen and radar enemy value, DPS, wreck metal, ...) | all of them (120 at most on the maps seen) |
+| Regions | 34: 27 static, then what's there now (own value, seen and radar enemy value, DPS, wreck metal, ...; column 32, the remembered structures there, is 0 since 2026-11-18) | all of them (120 at most on the maps seen) |
 | Sites | 9 | 24, nearest the base first |
 | Features | 5 | 512, by metal / (distance + 200); a region's wreck metal still counts every one |
 | Global | 16 | |
 
 * **Who owns a unit** is two ids numbered from the viewer: own is 0, and the others count from 1, skipping its own.  An unknown
   id, or one past the table, shares the last row.  The tables have 64 players and 8 allyteams (`MAX_PLAYERS`,
-  `MAX_ALLY_TEAMS`).  Both seats of a 1v1 see the same numbers.  The token kind says what's known (seen, blip, memory, summary),
-  not whose.
+  `MAX_ALLY_TEAMS`).  Both seats of a 1v1 see the same numbers.  The token kind says what's known (seen, blip, summary; "memory"
+  keeps its number, and no token has it), not whose.
+* **Nothing remembered** (the user, 2026-11-18: with a recurrent memory the actor keeps what it saw itself).  A building
+  seen once and now out of sight stays a record of the raw frame (`knowledge` 2, standing or dead, till its place is seen
+  empty), and the featurizer gives the nets none of it: no token, no count in its region, and so none of its firepower in
+  the eight sectors a token near it reads.  A privileged critic has it among its hidden units, with how long ago it was
+  seen.  In Python and libzkpolicy alike (ABI 4).
+  * **What's still remembered is who holds a metal spot**: a site's status goes by the extractors a seat knows of, a
+    remembered one too, till the spot is seen free (`SimEnv.site_status`).  The policy's extractors are placed by it, and
+    the sim would stand one on a spot the enemy holds out of sight, and pay it.
+  * **`FEATURE_VERSION` stays 10**: no column moved.  The frozen encoder was trained on frames with those tokens, and
+    reads frames without them as it read every frame before a first sighting.
+  * **Checked** on 600 frames of the scripts' games, 199 of them with remembered buildings: before, 1,247 of them were
+    tokens; after, none, and every other token's row, every mask, pointer, site and global number the same, in Python
+    and in C++.  In the five golden live frames 156 tokens went and 21 rows of the rest moved, in their sectors'
+    firepower alone.  `tools/policy_parity.py`: 49,451 frames to the bit (`/mnt/d/zk-learned/parity/check-noghost.json`).
+  * **No order was ever pointed at a remembered building**: none of the legal pointers in those 600 frames, an
+    ATTACK_UNIT being at a foe in sight (a missile's at one in sight or on radar).  What looks like it in a replay: an
+    attack on a building stands once the building is out of sight, as the engine's does (`World::target_lost`: only a
+    target that moves is given up), a unit's record keeps the last order it was told until the next, and the viewer
+    draws that order to wherever its target really is.  None of that is changed.
 * **Names**: an exact vocabulary of catalog names plus an unknown row.  For the actor, 30% of the vocabulary reads as unknown
   in each game, so it learns to go by stats too.  The frozen encoder always gets the true names.
 * **Normalisation is fixed**: positions over map size, velocities over the unit's catalog speed, log1p for costs, and constants
@@ -107,7 +126,7 @@ Sumo), constructors, and the commander once the opening is over (`featurize._sel
 
 ### Kinds
 
-24 kinds (`rawframe.KIND_COUNT`).  The sim obeys the 20 in `policy_sim_env.KINDS`, keep among them.  The engine commands are
+24 kinds (`rawframe.KIND_COUNT`).  The sim obeys the 21 in `policy_sim_env.KINDS`, keep among them.  The engine commands are
 where each would go once the bot sends commands: none is sent yet, and those marked "unverified" haven't been tried in a game.
 
 | Kind | Chooses | Engine command | Legal when |
@@ -126,6 +145,7 @@ where each would go once the bot sends commands: none is sent yet, and those mar
 | 12 REPAIR | | `repair` | not in the sim |
 | 13 RECLAIM | a wreck | `reclaim` | a constructor with a wreck in sight |
 | 14 PRODUCE | type | `build` on the factory or silo | it makes something other than what it's making now |
+| 15 AREA_MEX | place, radius | a `build` of an extractor on each spot, queued (Zero-K's area mex is a widget's) | a constructor or the commander with an extractor among what it builds |
 | 16 THROW | region, fine | custom 105 (unverified) | a thrower, ready, with someone beside it to throw |
 | 17, 18 PUSH / PULL | | custom 35666, state 1 / 0 | a switch; the one it isn't doing |
 | 19 PLACE_BEACON | region, fine | custom 35170 (unverified) | a teleporter |
@@ -155,6 +175,20 @@ target was lost, or it's idle.  This keeps orders steady.
   enough for it (`SimEnv.place_build`; 01-simulator.md, "Where a building can go"), and an extractor at the free spot
   nearest the point.  On the economy script's builds, that comes out p50 19 elmos from the script's
   place, with 99% within 150.
+* **AREA_MEX** (the user, 2026-11-18: "builds metal extractors within a radius from a specified centre, starting with
+  the mex closest to the unit"; the kind kept in reserve till then, so no tensor or head changed shape and a saved
+  actor loads): a place, as a BUILD's but on it (no offset), then a radius, one of the group head's 10 with "alone"
+  taken out.  It's its unit's alone: no roles.
+  * In the sim the env carries it out (`SimEnv._take_areas`, `_area_builds`; the sim has no queue of orders): the unit
+    is sent to the free spot in the area nearest it, then, once it stands idle, to the one nearest it then, till none
+    is left.  A spot is free if no extractor the seat knows of holds it (`site_status`) and no other unit of its
+    alliance on an area mex is going to it.  One whose spot is taken while it's still 300 elmos away goes to the next.
+    Any other order to the unit ends its area (not a cloak's), as does one the sim gives it for a group.
+  * A unit on an area mex shows the BUILD it's on: no frame has an order of kind 15, whose slot in a token's order
+    memory says whether the unit is pulling.
+  * Between two extractors the unit stands for up to one step of the env (3 s in training), where a game's queue would
+    send it on at once.  And "the centre of selected units that can build", the user's alternative for where to start,
+    isn't there: an action tells one unit.
 * **RECLAIM**: a pointer over the wreck tokens.
 * **Group orders** (MOVE, FIGHT and ATTACK_UNIT only): alone, or one of 10 radii from 60 to 2,250 elmos (each 1.5x the one
   before), then each of 15 roles in or out.  The sim gives the order as well to every unit of the anchor's team of those roles
@@ -164,6 +198,10 @@ target was lost, or it's idle.  This keeps orders steady.
 
 * `actions.decode` turns choices into orders, for the sim (`policy_sim_env.sim_orders`) or the engine.  `actions.to_slots` and
   `to_decision` convert between the list of actions and what each unit was told.
+* An AREA_MEX decodes to an order with its place as `x`, `z` and its radius as `radius`, which for every other kind makes
+  a group order; `policy_sim_env.sim_orders` gives the sim none of it.  Encoded, it's the nearest place and the smallest
+  radius at least its own.  libzkpolicy does both the same (since ABI 3, with the type table's column for who can be told
+  one: `TypeTable.area_mex`).
 * `actions.encode` is the inverse.  It turns the scripts' orders into the policy's choices (the cloning labels), taking the
   nearest legal region, fine option or place, and counting what can't be said: 0.35% of orders in `army-6`'s check.  A group
   order is recorded as its anchor's order followed by a `GROUP_MARK` record holding the radius and roles.
@@ -250,10 +288,18 @@ them yet.
   * From C or C++: `zkp_table_new` on the file's bytes and `zkp_bundle_new` on a bundle's arrays, then `zkp_bounds` and
     `zkp_featurize` into the caller's buffers, which hands back each field's offset and shape.  `zkp_decode` and
     `zkp_encode` take a `zkp_tensors` of those arrays.
-* **Switching training over** (not done):
-  * `policy_train`'s `_worker_chunk` and `_worker_batch`, `policy_clone_train._samples`, `policy_clone_data` and
-    `frame_data` call `zp.featurize_many` or `zp.featurize`, with a worker's buffers kept.  `Player._features` applies
-    `_drop_names` after, as now;
+* **Switching training over** (the RL trainer's featurizing done, 2026-11-18; the rest not):
+  * **Done**: `policy_train.py --featurize-threads N` (`Config.featurize_threads`; 0, the default, is featurize's
+    Python).  `_worker_chunk`, and so `_worker_batch`, call `zp.featurize_many`: on N threads in each collector, which
+    featurizes a round's frames in its own process, and on one in each of the learner's data workers, whose chunks are
+    spread over processes already.  `Player._features` applies `_drop_names` after, as before.  Each frame's tensors
+    are views of a buffer made for it (not kept from round to round).  Before `rdnn-1` used it: 601 frames of the sim
+    as it was then, of 1v1, team and chicken games, the same to the bit; a collector's round of 96 frames (a median of
+    146 units) in 36 ms in numba, 19 in C++ on one thread, 10 on 4 and 8 on 8, the rest being Python around the call;
+    and collecting went from 680-870 decisions a second to 880-1,070 at the same game ages.
+    `test_the_data_workers_featurize_in_cpp_as_in_python` is the trainer's own call against Python.
+  * `policy_clone_train._samples`, `policy_clone_data` and `frame_data` call `zp.featurize_many` or `zp.featurize`, with
+    a worker's buffers kept;
   * the encoding of the scripts' orders calls `zp.encode`, and rollouts and the clone eval `zp.decode`;
   * the bundles' handles (`zp._bundle`) are made before workers fork, and `libzkpolicy` is built in `~/zksim/build`;
   * encoding the scripts' orders from their records, without `se.policy_orders`' Python loop, needs a map from the sim's

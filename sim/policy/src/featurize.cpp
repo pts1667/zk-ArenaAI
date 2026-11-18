@@ -235,9 +235,10 @@ int64_t select(const Table& T, const UnitRecord* units, int64_t n, int64_t playe
     }
 
     // The rest: what can be aimed at first, in sight before on radar; within each, value over distance from our army; uid.
+    // Only what's in sight or on radar: a remembered building is no token (featurize_kernels.select).
     s.rest.clear();
     for (int64_t i = 0; i < n; ++i)
-        if (units[i].knowledge != zk::KNOW_HIDDEN && !s.taken[i]) s.rest.push_back(i);
+        if (units[i].knowledge < zk::KNOW_MEMORY && !s.taken[i]) s.rest.push_back(i);
     const int64_t m = int64_t(s.rest.size());
     s.rank.resize(m);
     s.neg_score.resize(m);
@@ -459,7 +460,7 @@ void unit_block(const Table& T, const Bundle& B, const UnitRecord* all, int64_t 
         o[o_at + 20] = has_target ? 1.0f : 0.0f;
         o[o_at + 21] = (has_target && alive) ? 1.0f : 0.0f;
         const bool fresh = has && age < commit_frames;
-        o[o_at + RESERVED_KIND] = (own && (flags & zk::UF_PULLING) != 0) ? 1.0f : 0.0f;
+        o[o_at + AREA_MEX] = (own && (flags & zk::UF_PULLING) != 0) ? 1.0f : 0.0f;     // no unit's order has this kind
         const bool released = (flags & (zk::UF_DAMAGED | zk::UF_IDLE)) != 0 || (has_target && !alive);
         s.locked[i] = fresh && !released;
         o[o_at + 22] = s.locked[i] ? 1.0f : 0.0f;
@@ -560,7 +561,7 @@ void region_block(const Table& T, const Bundle& B, const UnitRecord* units, int6
         for (int64_t k = 0; k < R; ++k) out[k * REGION_DIM + 33] = float(std::log1p(s.metal[k]) / 10.0);
     }
     if (!n) return;
-    s.sums.assign(6 * R, 0.0);
+    s.sums.assign(5 * R, 0.0);
     double* sums = s.sums.data();
     for (int64_t i = 0; i < n; ++i) {
         const UnitRecord& u = units[i];
@@ -580,8 +581,6 @@ void region_block(const Table& T, const Bundle& B, const UnitRecord* units, int6
             sums[4 * R + at] += double(T.fv(row, T_DPS_GROUND));
         } else if (know == zk::KNOW_RADAR) {
             sums[2 * R + at] += value;
-        } else if (know == zk::KNOW_MEMORY) {
-            sums[5 * R + at] += 1.0;
         }
     }
     for (int64_t k = 0; k < R; ++k) {
@@ -589,7 +588,7 @@ void region_block(const Table& T, const Bundle& B, const UnitRecord* units, int6
         for (int j = 0; j < 3; ++j) o[27 + j] = float(std::log1p(sums[j * R + k]) / 10.0);
         o[30] = float(std::log1p(sums[3 * R + k]) / 8.0);
         o[31] = float(std::log1p(sums[4 * R + k]) / 8.0);
-        o[32] = float(std::log1p(sums[5 * R + k]) / 3.0);
+        o[32] = 0.0f;       // the remembered structures there, till 2026-11-18
     }
 }
 
@@ -766,6 +765,7 @@ void masks(const Table& T, const Bundle& B, int64_t c, int64_t n_features, const
         for (int64_t k = 0; k < Tn; ++k) makes = makes || pp[k];
         km[PRODUCE] = free && T.bv(me, B_PRODUCES) && makes;
         km[BUILD] = free && T.bv(me, B_BUILDS);
+        km[AREA_MEX] = free && T.bv(me, B_AREA_MEX);
         km[ASSIST] = free && any3;
         km[RECLAIM] = free && T.bv(me, B_CONSTRUCTOR) && n_features > 0;
         for (int k = 0; k < KIND_COUNT; ++k)
@@ -999,11 +999,11 @@ int featurize(const Table& T, const Frame& fr, const Options& opt, uint8_t* aren
     float* region_radius = arena.take<float>(F_REGION_RADIUS, R);
     if (R) std::memcpy(region_radius, B.region_radius.data(), sizeof(float) * size_t(R));
 
-    // Enemies the player can't see, for the critic alone: featurize._hidden.
+    // Enemies the player can't see, and the buildings it remembers, for the critic alone: featurize._hidden.
     s.hidden.clear();
     if (opt.privileged) {
         for (int64_t i = 0; i < n_all; ++i)
-            if (all[i].knowledge == zk::KNOW_HIDDEN) s.hidden.push_back(i);
+            if (all[i].knowledge >= zk::KNOW_MEMORY) s.hidden.push_back(i);
         const int64_t nh = int64_t(s.hidden.size());
         if (nh > CAP_HIDDEN) {
             std::vector<float> d(nh);

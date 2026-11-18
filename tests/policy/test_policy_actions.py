@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 from zkbot import catalog, units
-from zkbot.policy import actions, bundle as bd, featurize as fz, rawframe as rf
+from zkbot.policy import actions, bundle as bd, featurize as fz, groups as gr, rawframe as rf
 
 from conftest import BLIP, ENEMY, MEMORY, make_frame, make_units
 
@@ -120,8 +120,8 @@ def test_push_and_pull_go_by_which_it_is_doing_and_the_policy_can_see_that(small
     x, z = (float(v) for v in small_map.centre[0])
     pushing = run(make_units({"uid": 1, "name": "jumpsumo", "x": x, "z": z}), small_map, table)
     pulling = run(make_units({"uid": 1, "name": "jumpsumo", "x": x, "z": z, "flags": PLAIN | rf.PULLING}), small_map, table)
-    assert rf.PULL in legal(pushing) and rf.PUSH not in legal(pushing) and pushing.unit_x[0, fz._O + rf.RESERVED_KIND] == 0.0
-    assert rf.PUSH in legal(pulling) and rf.PULL not in legal(pulling) and pulling.unit_x[0, fz._O + rf.RESERVED_KIND] == 1.0
+    assert rf.PULL in legal(pushing) and rf.PUSH not in legal(pushing) and pushing.unit_x[0, fz._O + rf.AREA_MEX] == 0.0
+    assert rf.PUSH in legal(pulling) and rf.PULL not in legal(pulling) and pulling.unit_x[0, fz._O + rf.AREA_MEX] == 1.0
     assert not ({rf.PUSH, rf.PULL} & legal(run(make_units({"uid": 1, "x": x, "z": z}), small_map, table)))
 
 
@@ -563,8 +563,8 @@ def test_the_sim_builds_what_the_policy_chose_and_the_frame_says_so(sim, land, t
 
 def test_the_sim_builds_what_an_untrained_actor_tells_its_constructors(sim, land, table, encoder_path):
     """Constructors told by sampled decisions, through collate, the actor's heads, decode and the sim's placing: what they're told
-    to build goes up, and nothing else does; those told to assist are given someone of ours to help, and those told to reclaim a
-    wreck in sight."""
+    to build goes up, and nothing else does (an area mex's extractors too); those told to assist are given someone of ours to
+    help, and those told to reclaim a wreck in sight."""
     torch = pytest.importorskip("torch")
     import policy_model as pm
 
@@ -588,6 +588,8 @@ def test_the_sim_builds_what_an_untrained_actor_tells_its_constructors(sim, land
             kinds.add(o.kind)
             if o.kind == rf.BUILD:
                 told.add(table.names[o.target])
+            elif o.kind == rf.AREA_MEX:
+                told.add("staticmex")
             elif o.kind == rf.ASSIST:
                 assert o.target in ours
             elif o.kind == rf.RECLAIM:
@@ -602,6 +604,35 @@ def test_the_sim_builds_what_an_untrained_actor_tells_its_constructors(sim, land
     # Structures only: a factory that went up was told to produce, too.
     made = {table.names[r] for r in table.rows(new["def_id"]) if not table.mobile[r]}
     assert made and made <= told, (made, told)
+
+
+def test_an_area_mex_is_sampled_with_a_place_and_a_radius_and_scores_as_it_was_sampled(sim, table, encoder_path):
+    """rf.AREA_MEX through the actor's heads: with nothing else to tell them, constructors are told area mexes, each with one of
+    its frame's places and a radius (never alone), and no offset, type or roles; scored, the actions have the log-probability
+    they were sampled with; and decoded, each is an order round its place of its radius."""
+    torch = pytest.importorskip("torch")
+    import policy_model as pm
+    from conftest import sim_frames
+
+    (frame,), bundle = sim_frames(1, start=400)
+    t = fz.featurize(frame, bundle, table, enabled_kinds=(rf.KEEP, rf.AREA_MEX), economy=True)
+    assert t.kind_mask[:, rf.AREA_MEX].any()
+    actor = _actor(table, encoder_path)
+    b = pm.collate([t] * 4).to("cpu")
+    with torch.no_grad():
+        ctx, *_ = actor.decide(b, *actor.initial_state(4, 0, "cpu"))
+        a = pm.sample_actions(actor, b, ctx)
+        logp, entropy = pm.evaluate_actions(actor, b, ctx, a)
+    told = a.anchor >= 0
+    assert told.any() and (a.kind[told] == rf.AREA_MEX).all() and torch.allclose(a.logp, logp, atol=1e-3)
+    places = len(t.place_tokens) + len(t.site_pos)
+    assert ((a.place[told] >= 0) & (a.place[told] < places)).all() and ((a.group[told] >= 0) & (a.group[told] < len(gr.GROUP_RADII))).all()
+    assert (a.offset == -1).all() and (a.produce == -1).all() and (a.roles == 0).all() and len(set(a.group[told].tolist())) > 1
+    d = actions.to_decision(actions.Slots(*(getattr(a, f)[0].numpy() for f in actions.SLOT_FIELDS)), t.controllable)
+    x, z = actions.world_positions(t, bundle)
+    points = actions.place_points(t, x, z)[:, 0]
+    for o, i in zip(actions.decode(d, t, bundle, x, z), np.flatnonzero(d.kind != rf.KEEP)):
+        assert o.kind == rf.AREA_MEX and o.radius == gr.GROUP_RADII[d.group[i]] and (o.x, o.z) == tuple(points[d.place[i]]) and o.roles == 0
 
 
 def test_a_build_place_means_the_same_in_any_batch(sim, table, encoder_path):

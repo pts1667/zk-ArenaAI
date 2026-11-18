@@ -35,7 +35,7 @@ if str(ROOT / "bots") not in sys.path:
 from zkbot import units as bot_units  # noqa: E402
 from zkbot.policy import actions as act, bundle as bd, featurize as fz, groups as gr, rawframe as rf, tables  # noqa: E402
 
-ABI_VERSION = 2
+ABI_VERSION = 4
 TABLE_MAGIC = b"ZKPTABLE"
 TABLE_VERSION = 1
 TABLE_FILE = ROOT / "bots" / "zkbot" / "data" / "policy_table.bin"

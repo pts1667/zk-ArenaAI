@@ -16,7 +16,7 @@ from zkbot.policy import actions as act, bundle as bd, featurize as fz, groups a
 
 DATA = ROOT / "tests" / "policy" / "data"
 # As training featurizes (the sim's kinds, the economy, the critic's units), and featurize's defaults.
-SIM_KINDS = tuple(k for k in range(rf.KIND_COUNT) if k not in (rf.ATTACK_GROUND, rf.STOP, rf.REPAIR, rf.RESERVED_KIND))
+SIM_KINDS = tuple(k for k in range(rf.KIND_COUNT) if k not in (rf.ATTACK_GROUND, rf.STOP, rf.REPAIR))
 CONFIGS = (dict(enabled_kinds=SIM_KINDS, economy=True, privileged=True), {})
 
 

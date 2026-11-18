@@ -485,13 +485,17 @@ def test_z_reads_as_nothing_until_it_is_learned_and_then_as_the_strategy(actor):
 # Memory as a GRU -----------------------------------------------------------------------------------------------------------------------------------
 
 
-@pytest.fixture()
-def gru(encoder_path) -> pl.LatentActor:
+def _remembering(encoder_path, memory: str = "gru", told: str = "tokens") -> pl.LatentActor:
     torch.manual_seed(4)
-    actor = pl.make(VOCABULARY, encoder_path, size=pl.Size(64, 4, 1, 1, 0, 32))
+    actor = pl.make(VOCABULARY, encoder_path, size=pl.Size(64, 4, 1, 1, 0, 32, memory, told))
     with torch.no_grad():
         actor.head_done.bias[0] = -3.0      # so that it acts, and what it did is something
     return actor
+
+
+@pytest.fixture()
+def gru(encoder_path) -> pl.LatentActor:
+    return _remembering(encoder_path)
 
 
 def test_with_a_gru_a_seat_keeps_its_state_alone_and_nothing_of_the_time_transformer_is_made(gru, encoder_path):
@@ -504,9 +508,12 @@ def test_with_a_gru_a_seat_keeps_its_state_alone_and_nothing_of_the_time_transfo
         gru.sequence(torch.zeros(1, 2, gru.encoder.tokens, gru.encoder.latent), torch.ones(1, 2, dtype=torch.bool), torch.zeros(1, 2, 4, 64))
 
 
-def test_with_a_gru_training_reads_a_segment_as_play_did_from_the_state_kept_at_its_start(gru):
+@pytest.mark.parametrize("memory, told", (("gru", "tokens"), ("rdnn", "tokens"), ("rdnn", "vector")))
+def test_with_a_gru_training_reads_a_segment_as_play_did_from_the_state_kept_at_its_start(memory, told, encoder_path):
     """Played a decision at a time, each from what the one before kept; then read as training does, two segments of the game in
-    one pass, the second from the middle."""
+    one pass, the second from the middle.  With an RDNN in the GRU's place too, whose state is its rates and then its pools,
+    and with the memory told as a vector, which is the last row of what training reads."""
+    gru = _remembering(encoder_path, memory, told)
     items = _items(5)
     fields = pt.act.SLOT_FIELDS + ("logp",)
     history, seen = _state(gru, 1)
@@ -518,7 +525,7 @@ def test_with_a_gru_training_reads_a_segment_as_play_did_from_the_state_kept_at_
             ctx, history, seen, keep = gru.decide(b, history, seen)
             a = pm.sample_actions(gru, b, ctx)
             history = gru.acted(b, a, history)
-            nows.append(ctx.now[0])
+            nows.append(ctx.now[0] if ctx.memory is None else torch.cat((ctx.now[0], ctx.memory[0][None])))
             latents.append(keep["latents"][0])
             did.append({f: getattr(a, f).numpy() for f in fields})
         assert sum(int((d["anchor"] >= 0).sum()) for d in did[:4]) > 0
@@ -531,7 +538,7 @@ def test_with_a_gru_training_reads_a_segment_as_play_did_from_the_state_kept_at_
         starts = torch.cat((kept[0], kept[3]))
         acted = gru.segment_actions(whole, a, lengths)
         now = gru.segments(starts, torch.ones(2, 1), frames, lengths, acted)
-        assert now.shape == (5, gru.encoder.tokens + pl.MEMORY_TOKENS, 64)
+        assert now.shape == (5, gru.encoder.tokens + (1 if told == "vector" else pl.MEMORY_TOKENS), 64)
         assert torch.allclose(now, torch.stack(nows), atol=1e-5)
         # Its state and what the decision before did are both read: without either, the second segment's first frame is another.
         blank, undone = starts.clone(), starts.clone()
@@ -539,6 +546,50 @@ def test_with_a_gru_training_reads_a_segment_as_play_did_from_the_state_kept_at_
         for other in (blank, undone):
             again = gru.segments(other, torch.ones(2, 1), frames, lengths, acted)
             assert torch.allclose(again[:3], now[:3], atol=1e-6) and not torch.allclose(again[3], now[3], atol=1e-4)
+
+
+def test_a_memory_told_as_a_vector_is_no_token_of_the_frame_and_reaches_the_units_and_the_plan(encoder_path):
+    """Size.memory_as "vector": the frame is its latent tokens alone, and the memory's vector is added to what reads it, each
+    controllable unit and each of the plan's slots."""
+    actor = _remembering(encoder_path, "rdnn", "vector")
+    b = _batch(_items(1))
+    with torch.no_grad():
+        now = torch.randn(1, actor.encoder.tokens + 1, 64)
+        other, more = now.clone(), torch.randn(64)      # not the same in every place, which a LayerNorm takes out
+        other[:, -1] += more
+        one, two = actor.context(b, now), actor.context(b, other)
+        none = one.hu.new_zeros(1, 0, 64)
+        assert one.now.shape[1] == actor.encoder.tokens and torch.equal(one.now, two.now) and "mem_slots" not in actor.state_dict()
+        assert torch.allclose(two.mine - one.mine, more.expand_as(one.mine), atol=1e-5)
+        assert not torch.allclose(one.anchor_keys, two.anchor_keys, atol=1e-4)
+        assert not torch.allclose(actor.plan(one, none), actor.plan(two, none), atol=1e-4)
+
+
+def test_an_rdnn_steps_as_the_paper_has_it_and_never_divides_by_less_than_its_semi_saturation(monkeypatch):
+    """arXiv 2608.01947, appendix B: each unit's rate goes towards (J relu(R) + I) / (eta + G) and its pool towards W relu(R),
+    at its own rates, with J, W and eta positive.  Whatever it's given, its pools stay at 0 or above."""
+    torch.manual_seed(5)
+    cell = pl.RDNNCell(6, 8)
+    with torch.no_grad():
+        j, w, eta = cell.weights()
+        a_r, a_g = torch.sigmoid(cell.rate_r), torch.sigmoid(cell.rate_g)
+        assert float(j.min()) > 0.0 and float(w.min()) > 0.0 and torch.allclose(eta, torch.ones(8), atol=1e-4)
+        assert 0.7 < float(j.sum(1).mean()) < 1.3       # at first a unit's weights from the others sum to about 1
+        state, every, steps = torch.zeros(3, 16), 5.0 * torch.randn(3, 40, 6), []
+        for t in range(40):
+            taken = every[:, t]
+            r, g = state[:, :8], state[:, 8:]
+            fired = r.clamp_min(0.0)
+            want = torch.cat((r + a_r * ((fired @ j.T + cell.input(taken)) / (eta + g) - r), g + a_g * (fired @ w.T - g)), 1)
+            state = cell(taken, state)
+            steps.append(state)
+            assert torch.allclose(state, want, atol=1e-4) and bool(torch.isfinite(state).all()) and float(state[:, 8:].min()) >= 0.0
+        assert float(state[:, 8:].max()) > 0.0
+        # Training's pass over a segment (`run`) is those steps, and so it is a chunk at a time, as it goes when compiled:
+        # 40 steps are two chunks and half of a third.
+        assert torch.allclose(cell.run(every, torch.zeros(3, 16)), torch.stack(steps, 1), atol=1e-4)
+        monkeypatch.setattr(pl, "_chunk", pl._rdnn_steps)
+        assert torch.allclose(cell.run(every, torch.zeros(3, 16)), torch.stack(steps, 1), atol=1e-4)
 
 
 def test_with_a_gru_what_was_done_is_summed_up_in_any_order_and_nothing_done_reads_alike(gru):

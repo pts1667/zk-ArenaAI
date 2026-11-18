@@ -93,7 +93,9 @@ A Perceiver-style reader (`docs/model.md`, "The frame encoder") trained on its o
 
 * **Autoencoder**: no noise and no KL.  Each latent token gets a LayerNorm with no weights.
 * **What the latent must give back**:
-  * for each region, what's in it now: value by side and class, DPS, wreck metal, remembered structures;
+  * for each region, what's in it now: value by side and class, DPS, wreck metal, remembered structures (that last one
+    0 in every frame since 2026-11-18, when the featurizer stopped telling the nets what a seat remembers: 02-policy.md,
+    "Nothing remembered"; the encoders so far were trained with it);
   * the global numbers;
   * 64 sampled questions a frame.  Twenty ask "where is a unit like this?" (8 places with weights, since identical units make
     it ambiguous).  Forty-four ask "what's at this exact place?": whether a unit or wreck is there, and its type, side and state.
@@ -348,12 +350,17 @@ In a 1v1, for side A against side B at decision t:
       over 20 and turned round, so a penalty for more of them than the others have;
     * `constructor_lead`: constructors that move, the commander not among them, counted as the extractors (one being
       built 0.2 x its progress), and no more a team than 1 in a game's first 2 minutes, 2 in the next 2 and so on to 5
-      from 8 minutes, over 5.
+      from 8 minutes, over 5;
+    * `production_lead` (the user, 2026-11-18: "the lead of average metal spent in factories (i.e. on units), capping
+      at 30 - e.g. (metal spent in factories/units assisting factories on our side minus enemy side)"): the metal a
+      second a team's builders put into units that move over the step just taken (`ZK_STATS` `[11]`: a factory's work
+      and what helps it), no more a team than 30, over 30.  Mine: the cap on each team's rate a step, not on the lead
+      or on an average; a player's rate in a team game; the 10 minutes' average and the weight 0.3, as the others'.
 
     Counted from each team's own units every step, only where a run's terms hold one (`SimEnv.count_leads`: about 2 ms
     a step of 48 games).  Under GRPO each is judged as the economy is, on its change from the level when the decision
     was taken (`Config.economy_change`, `Step.level` by term).
-    * **Which terms are averages over time**: `economy` and the three leads.  `score`, `combat`, `map` and `experience`
+    * **Which terms are averages over time**: `economy` and the four leads.  `score`, `combat`, `map` and `experience`
       are each a balance's change a step, so their sum is where the balance ended, however long it had stood there;
       `result` is paid once, at the end; the `made_*` as each unit is finished.
     * **Which are zero-sum**: all but the `made_*`, which are a team's own.  In 48 of the scripts' 1v1s over 8 minutes

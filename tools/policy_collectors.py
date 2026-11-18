@@ -40,6 +40,27 @@ def split(total: int, parts: int) -> list[int]:
     return [total // parts + (k < total % parts) for k in range(parts)]
 
 
+def shares(total: int, rates: list[float]) -> list[int]:
+    """total among collectors by how fast each collected of late (decisions a second), so that they end together: with
+    even shares the one that ended first waited, sending, till the slowest was read (a tenth of its time, and more when
+    their games differ: py-spy and collector_seconds_min against _max, 2026-11-17).  None gets under half an even share,
+    so that a slow collection doesn't starve a collector's games; with no rates yet, `split`."""
+    n = len(rates)
+    if not rates or min(rates) <= 0.0:
+        return split(total, n or 1)
+    least, held = 0.5 / n, set()
+    while True:
+        rest = sum(r for k, r in enumerate(rates) if k not in held)
+        part = [least if k in held else r / rest * (1.0 - least * len(held)) for k, r in enumerate(rates)]
+        low = {k for k, p in enumerate(part) if p < least - 1e-12}
+        if not low:
+            break
+        held |= low
+    out = [int(total * p) for p in part]
+    out[int(np.argmax(part))] += total - sum(out)
+    return out
+
+
 def seed_of(seed: int, k: int) -> int:
     """Collector k's own seed from a run's."""
     return int(np.random.SeedSequence((seed, k)).generate_state(1)[0])
@@ -92,12 +113,12 @@ class Shell:
     """What a collector holds in place of the learner, for policy_train.Collector and policy_train.evaluate: its nets, as last
     sent, and where the run had got to then."""
 
-    def __init__(self, cfg: pt.Config, actor, critic, device: str, vocabulary: int, bundles: list, graphs: bool):
+    def __init__(self, cfg: pt.Config, actor, critic, device: str, vocabulary: int, bundles: list, graphs: bool, threads: int = 0):
         self.cfg, self.actor, self.critic, self.device, self.vocabulary = cfg, actor, critic, device, vocabulary
         self.term_names = tuple(name for name, _ in cfg.terms)
         self.term_weights = np.array([w for _, w in cfg.terms])
         # Under GRPO a critic only judges resignation (GroupCollector._value): the player plays none.
-        self.player = pt.Player(actor, None if cfg.group else critic, pt.DataWorkers(0, bundles, cfg.enabled_kinds), device, graphs)
+        self.player = pt.Player(actor, None if cfg.group else critic, pt.DataWorkers(0, bundles, cfg.enabled_kinds, threads), device, graphs)
         self.evaluator = self.player        # with the tests' weights loaded
         self.progress = 0.0
         self.economy_share = 0.0
@@ -136,7 +157,7 @@ class _Serving:
         env = self.make_env(games, seed)
         pt.set_games(env, games_now)        # from the first games, which the collector starts
         self.index = {id(b): i for i, b in enumerate(env.bundles())}
-        self.shell = Shell(cfg, actor, critic, device, vocabulary, env.bundles(), cfg.graphs)
+        self.shell = Shell(cfg, actor, critic, device, vocabulary, env.bundles(), cfg.graphs, cfg.featurize_threads)
         self.collector = (pt.GroupCollector if cfg.group else pt.Collector)(self.shell, env, np.random.default_rng((cfg.seed, iteration, self.k)))
         self.conn.send(("started", None))
 
@@ -196,6 +217,7 @@ class Collectors:
         self.stash: list[list[tuple[str, object]]] = [[] for _ in range(self.count)]
         self.collecting = False
         self.sent = 0.0
+        self.rates: list[float] = [0.0] * self.count        # each collector's decisions a second, of late (`shares`)
 
     def _send(self, k: int, message: tuple) -> None:
         """To collector k; one that has died says why, if it could."""
@@ -245,7 +267,7 @@ class Collectors:
         nets = self._nets(learner, learner.player)
         self.play.write(nets)
         self.sent_weights = fingerprint(nets)
-        for k, part in enumerate(split(want, self.count)):
+        for k, part in enumerate(shares(want, self.rates)):
             self._send(k, ("collect", {"want": part, "progress": learner.progress, "games_now": learner.games, "advising": learner.advising,
                                        "resign": learner.resign_state}))
         self.collecting, self.sent = True, time.perf_counter()
@@ -261,6 +283,9 @@ class Collectors:
         metrics = pt.Tally.merge([part["tally"] for part in parts]).metrics()
         seconds = [part["seconds"] for part in parts]
         metrics["collector_seconds_min"], metrics["collector_seconds_max"] = min(seconds), max(seconds)
+        # Half of the last and half of before: which games a collector has changes over several collections, not one.
+        now = [sum(len(s.steps) for s in part["segments"]) / max(part["seconds"], 1e-6) for part in parts]
+        self.rates = [r if not old else 0.5 * (r + old) for r, old in zip(now, self.rates)]
         if any("collector_reserved_gb" in part for part in parts):
             metrics["collector_reserved_gb"] = max(part.get("collector_reserved_gb", 0.0) for part in parts)
         return segments, metrics, max(seconds)

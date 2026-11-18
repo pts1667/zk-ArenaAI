@@ -21,7 +21,7 @@ sys.path.insert(0, str(ROOT / "py"))
 sys.path.insert(0, str(ROOT.parent / "bots"))
 import zknav  # noqa: E402
 from zkbot.policy import rawframe  # noqa: E402
-ABI_VERSION = 30
+ABI_VERSION = 31
 WARD_TARGETS = 4
 MAX_MOUNTS = 8
 MAX_TEAMS = 8                       # players in a game, and so allyteams too
@@ -796,9 +796,9 @@ ORDER_DTYPE = np.dtype([("unit", "i4"), ("kind", "i4"), ("x", "f4"), ("z", "f4")
 GROUP_DTYPE = np.dtype([("anchor", "i4"), ("roles", "u4"), ("radius", "f4"), ("kind", "i4"), ("x", "f4"), ("z", "f4"), ("target", "i4")], align=True)
 # Per team: tracked value, live units, metal a second from reclaim, live units that keep the team in the game, and since the game began
 # the damage its units have done to enemies' and had done to them by enemies', in metal; then its finished extractors, its share of
-# its allyteam's share of the map in sight and in radar, the part of its damage its army did, and the metal put into its army
-# (capi.h ZK_STATS).
-STATS = 11
+# its allyteam's share of the map in sight and in radar, the part of its damage its army did, the metal put into its army, and
+# the metal its builders have paid into units that move, a factory's and its helpers' (capi.h ZK_STATS).
+STATS = 12
 
 
 class Batch:

@@ -511,6 +511,7 @@ struct World {
     // The damage each team's units have done to enemies' units and had done to them, in metal (team_stats, capi.h ZK_STATS).
     double metal_dealt[ZK_MAX_TEAMS] = {}, metal_taken[ZK_MAX_TEAMS] = {};
     double army_dealt[ZK_MAX_TEAMS] = {};  // the part of metal_dealt its army did (army)
+    double unit_spent[ZK_MAX_TEAMS] = {};  // the metal its builders have paid into mobile units' frames (advance_frame)
     std::vector<float> damage_mult;        // of what it's dealt: 1, but for a chicken queen, whose health the gadget stretches
     // The reveal rule (game_over.lua): on unless turned off, never in a chicken game.  revealed: the allyteams always in sight, by bit.
     bool reveal_on = true;

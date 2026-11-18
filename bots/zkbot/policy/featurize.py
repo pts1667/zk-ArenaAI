@@ -52,6 +52,8 @@ MAX_ALLY_TEAMS, MAX_PLAYERS = 8, 64
 # Token kinds.
 # TK_MEMORY_STATE is the last token of a collated batch (tools/policy_model.py), which the actors read as nothing in particular;
 # the embeddings keep its row so saved encoders and actors load.
+# TK_MEMORY was a remembered structure's: no token has it since 2026-11-18 (kernels.select), and it keeps its number so that the
+# others keep theirs.
 TK_SEEN, TK_BLIP, TK_MEMORY, TK_SUMMARY, TK_REGION, TK_SITE, TK_GLOBAL, TK_FEATURE, TK_HIDDEN, TK_MEMORY_STATE = range(10)
 TOKEN_KINDS = 10
 _KIND_OF_KNOWLEDGE = np.array((TK_SEEN, TK_BLIP, TK_MEMORY, TK_HIDDEN), np.int8)      # by rf.KNOW_*
@@ -60,7 +62,7 @@ COMMIT_DECISIONS = 6
 DECISION_FRAMES = 15
 STAGE2_KINDS = (*range(10), rf.PRODUCE, rf.THROW, rf.PUSH, rf.PULL, rf.PLACE_BEACON, rf.WAIT_AT_BEACON, rf.LOAD, rf.UNLOAD, rf.DROP)
 
-ECONOMY_KINDS = (rf.BUILD, rf.ASSIST, rf.RECLAIM)      # a constructor's (02-policy.md, "Kinds")
+ECONOMY_KINDS = (rf.BUILD, rf.ASSIST, rf.RECLAIM, rf.AREA_MEX)      # a constructor's (02-policy.md, "Kinds")
 # A RECLAIM points at one of the feature tokens (wrecks and the like in sight, `feat_ids`), with the same field a BUILD's place has.
 
 # The kinds that point at a target token, in the order of `ptr_enemy`: the first three at an enemy's, ASSIST at one of our own,
@@ -77,6 +79,10 @@ REACH_KINDS = (rf.JUMP, rf.THROW, rf.UNLOAD)       # those whose regions are ptr
 # place there the type fits.  On the economy script's builds this lands p50 19 elmos from its place, 99% within 150 (02-policy.md).
 PLACE_RINGS = (64.0, 128.0, 256.0)
 PLACE_OFFSETS = 1 + 8 * len(PLACE_RINGS)
+# An AREA_MEX (the user, 2026-11-18) is an extractor on every free metal spot within a radius of a place: the place one of a
+# BUILD's (a unit of ours or a site, on it: no offset), the radius one of groups.GROUP_RADII, in the field a group order's has
+# (it goes to its unit alone).  Whoever obeys it builds on the free spot nearest the unit, then on the next nearest it.
+PLACE_KINDS = (rf.BUILD, rf.AREA_MEX)       # those that choose a place
 
 # unit_x layout: type stats, instance, order memory, rays, summary.  The kernels fill all but the last.
 _INSTANCE = kernels.INSTANCE_COLS
@@ -156,7 +162,7 @@ _TABLE_SOURCES = attrgetter("row_of_def", "cost", "speed", "range", "dps_ground"
                             "throw_radius", "throw_reach", "lift", "lift_size", "load_class", "load_size", "transport",
                             "mobile", "air", "armed", "can_hit_ground", "can_hit_air", "builder", "factory",
                             "combat", "manualfire", "jump", "cloak", "switches", "teleports", "beacon", "missile", "launcher",
-                            "acts_in_place", "move_class", "stats", "produces", "builds", "producible")
+                            "acts_in_place", "move_class", "stats", "produces", "builds", "producible", "area_mex")
 _BUNDLE_SOURCES = attrgetter("cell", "map_w", "map_h", "passable", "centre", "area", "region_height", "sea", "tags", "access", "shares",
                              "spots", "gate_counts", "gate_x")
 
@@ -187,7 +193,7 @@ def _table_pack(table: TypeTable) -> _TablePack:
                       t.throw_reach, t.lift[:, 0], t.lift[:, 1], t.lift[:, 2], t.lift_size, t.load_class, t.load_size), 1).astype(np.float32)
         b = np.stack((t.mobile, t.air, t.armed, t.can_hit_ground, t.can_hit_air, t.builder, t.factory, t.combat, t.manualfire, t.jump,
                       t.cloak, t.switches, t.teleports, t.beacon, t.missile, t.launcher, t.acts_in_place, t.constructor,
-                      t.produces.any(axis=1), t.builds.any(axis=1), t.transport), 1)
+                      t.produces.any(axis=1), t.builds.any(axis=1), t.transport, t.area_mex), 1)
         c = np.ascontiguousarray
         pack = _TablePack(c(t.row_of_def), c(f), c(b), c(t.move_class), c(t.stats, np.float32), c(t.produces), c(t.builds),
                           c(t.producible, np.int64), _TABLE_SOURCES(t))
@@ -410,8 +416,10 @@ def _global(frame: rf.Frame, bundle: Bundle, economy: bool) -> np.ndarray:
 
 def _hidden(units: np.ndarray, rows: np.ndarray, army: np.ndarray, bundle: Bundle, table: TypeTable, player: int,
             ally: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Enemies the player can't see, for the critic alone.  The actor's tensors never hold these."""
-    idx = np.flatnonzero(units["knowledge"] == rf.KNOW_HIDDEN)
+    """Enemies the player can't see, for the critic alone.  The actor's tensors never hold these.  With them, the buildings the
+    player has seen and no longer sees (KNOW_MEMORY, with how long ago in the instance columns): the frame doesn't say which
+    of those have died since, so a critic reads them as the actor did till 2026-11-18."""
+    idx = np.flatnonzero(units["knowledge"] >= rf.KNOW_MEMORY)
     if len(idx) > CAP_HIDDEN:
         d = np.hypot(units["x"][idx] - army[0], units["z"][idx] - army[1])
         idx = idx[np.lexsort((units["uid"][idx], d))[:CAP_HIDDEN]]

@@ -16,7 +16,7 @@ This builds three libraries in `~/zksim/build` (`ZKSIM_LIB` overrides where they
 
 | Library | What | Python side |
 |---|---|---|
-| `libzksim.so` | the sim (`sim/src`, `sim/include/zksim`, C ABI in `capi.h`, ABI 30) | `sim/py/zksim.py` (`Batch`), `sim/py/zknav.py` (routes) |
+| `libzksim.so` | the sim (`sim/src`, `sim/include/zksim`, C ABI in `capi.h`, ABI 31) | `sim/py/zksim.py` (`Batch`), `sim/py/zknav.py` (routes) |
 | `libzkscripts.so` | the army and economy scripts (`sim/scripts`, `zkscripts.h`, ABI 17) | `tools/policy_scripts_cpp.py` |
 | `libzkrecord.so` | the game recorder (`sim/record`, `zkrecord.h`, ABI 2), needs `libzstd-dev` | `sim/py/zkrecord.py` |
 
@@ -428,10 +428,13 @@ order: never an ally's.  Roles are the bot catalog's (`zkbot.policy.groups`).  G
   A raw frame's `player` is the team and its `ally_team` the allyteam.  A frame lists the viewer's own units first, then its
   allies' (seen whole), then what it sees, radar blips, memories, and what's hidden (the critic's).
 * **What keeps a team in the game** is any finished unit not on Zero-K's don't-count list (`game_over.lua`: the Flea, the
-  bombs, terraform units and the like; 42 in `rules.json`).  The batch's eleven stats a team (`ZK_STATS`) are its tracked
+  bombs, terraform units and the like; 42 in `rules.json`).  The batch's twelve stats a team (`ZK_STATS`) are its tracked
   value, its live units, its reclaim income, its finished units that keep it in, two for the trainer's combat efficiency
-  (ABI 24, 2026-11-12), and five for its terms closer to the decisions (ABI 27, the user, 2026-11-15; libzkscripts ABI 15,
-  which reads the stats by their width):
+  (ABI 24, 2026-11-12), five for its terms closer to the decisions (ABI 27, the user, 2026-11-15; libzkscripts ABI 15,
+  which reads the stats by their width), and one for its production lead (ABI 31, the user, 2026-11-18):
+  * `[11]` the metal the team's builders have paid into units that move, since the game began: a factory's own work and
+    whatever helps it (a constructor's or a caretaker's, at an ally's factory too), counted for whoever paid
+    (`World::advance_frame`).  Nothing for a building, and nothing for the energy.
   * `[4]` the damage its units have done to enemies' units since the game began, in metal, and `[5]` the damage enemies'
     units have done to its own.  Each hit counts the health it takes off, no more than the victim had, times the victim's
     cost over its full health (a chicken's build time for its cost, as the value stat has it).  What one team deals another
@@ -535,7 +538,10 @@ free-for-alls (the padding costs about 90 MB at 64 games, and no speed).  A seat
 The engine's test (`CGameHelper::TestUnitBuildSquare`), in place of a circle round the building (the user, 2026-11-10).  The
 sim itself builds wherever it's told, so the rule lives with whoever picks the place: `policy_opening.Ground.fits` and `site`
 for the opening, the Python scripts and scenarios, `policy_sim_env.place_build` for the policy's orders, and `Ground::fits`
-and `Seat::site` in the C++ economy script.  A test plays the C++ script's builds through the Python rule.
+and `Seat::site` in the C++ economy script.  A test plays the C++ script's builds through the Python rule.  The policy's
+extractor goes on the spot nearest its point that no extractor the seat knows of holds (`SimEnv.site_status`: one within
+64 elmos of the spot) and none of its other units is on its way to, and an area mex's the same way ("Known gaps",
+"Extractors on one spot").
 
 * **The footprint** is the def's `xsize` x `zsize` rectangle of 8-elmo squares (the catalog's `foot_x`, `foot_z` are its
   halves: a cloak factory 56 x 80, a solar 40 x 40, an extractor 24 x 24).  Two buildings' rectangles may touch and not
@@ -616,7 +622,8 @@ It runs every `ECO_EVERY` 6 slots, as the actor decides.  A free constructor (id
    stalled; the Trinity from 18 minutes and 60, by a 30% chance;
 3. a defence, one a pass (below);
 4. energy, while energy made is under 1.5x metal income;
-5. expand to the nearest free metal spot on our half with no enemy near, a contested one's LLT first (below);
+5. expand to the nearest free metal spot on our half with no enemy near, a contested one's LLT first (below); a spot
+   another constructor is on its way to isn't free (2026-11-18: "Known gaps", "Extractors on one spot");
 6. spend while metal floats over 50% of storage (the user, 2026-11-10): energy if short; else help a factory or plate that
    fewer than 2 are helping; else more production beside the first factory, one per 12 metal a second and 8 at most counting
    the factory, one started a minute: its plate, within 300 elmos, then caretakers within 380 of both, which help them; else
@@ -905,6 +912,23 @@ What's left out on purpose, so it isn't mistaken for modelled:
 * **Who goes first, what's left** ("Unit AI", "No one goes first"): planes fly, and units are pushed apart, in the order
   they were made.  The order within a tick of building, reclaim and the economy wasn't looked at.  Two units that kill each
   other in one tick both die, which is neither side's win.
+* **Extractors on one spot:** the sim builds wherever it's told and pays every extractor that stands on a spot, where
+  the game refuses a second and has a second constructor help with the first's.  So each of those that place one keeps
+  off a held spot itself (the user, 2026-11-18):
+  * the economy script (`Seat::spot_job`): a spot is its constructor's from the order (`Pass::going`), not from the
+    extractor's first frame.  Till then a spot whose constructor was still walking was free to the next idle one, and to
+    the one after;
+  * the opening (`policy_opening.Seat._taken`): the commander leaves out a planned extractor whose spot a constructor
+    has taken or is on its way to;
+  * the policy's builds and area mexes (`SimEnv.place_build`, `_area_builds`): by the frame's site status
+    (`SimEnv.frame`, `site_status`; the sim's records leave every spot free), and off the spots another of the team's
+    units is on its way to (`_going`) or was told to in the same decision.
+
+  Before, in 16 of the scripts' own games a seat had 9.6 extractors on 8.7 spots at 6 minutes and 23.8 on 16.0 at 12,
+  for 30.6 and 75.6 metal a second; after, 8.5 on 8.5 and 12.6 on 12.6, for 27.0 and 43.8.  In the 36 replays of `gru-1`
+  and `rdnn-1`, 113 of the script's 790 extractors stood on a spot another of its own held; the policy's none.  So every
+  game played or recorded before had a script with more income than a game would give it.  What's left: two allies'
+  constructors on their way to one spot, an ally's orders not being in a frame.
 * **Economy:** repair, Duck's faster healing under water, nanoframe rate limits, commander morph, capture, resurrect.  Reclaim is
   costed in metal alone.
 * **Air:** no crashing, fighter pull-up or vertical swarm, and no drones are made.

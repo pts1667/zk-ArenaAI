@@ -134,6 +134,9 @@ class TypeTable:
         self.builds = np.zeros((n, len(self.producible)), bool)
         for maker, options in builders.items():
             self.builds[maker, np.searchsorted(self.producible, options)] = True
+        # Who can be told an area mex (rawframe.AREA_MEX): whoever has an extractor among what it builds.
+        self.extractor = np.array([units.is_mex(units.BY_NAME[name]) for name in names] + [False])
+        self.area_mex = self.builds[:, self.extractor[self.producible]].any(axis=1)
         # What a silo makes, and what fires a manual weapon from where it stands (the Trinity): neither moves, and neither counts as
         # armed in the type stats, but the policy aims them (2026-11-08), at what's in sight or on radar.
         self.missile = np.zeros(n, bool)

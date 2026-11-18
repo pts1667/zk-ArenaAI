@@ -42,7 +42,12 @@ import policy_variants as pv  # noqa: E402
 
 KINDS = (rf.KEEP, rf.MOVE, rf.FIGHT, rf.ATTACK_UNIT, rf.MANUAL_FIRE, rf.JUMP, rf.CLOAK_ON, rf.CLOAK_OFF,
          rf.PRODUCE, rf.THROW, rf.PUSH, rf.PULL, rf.PLACE_BEACON, rf.WAIT_AT_BEACON, rf.BUILD, rf.ASSIST, rf.RECLAIM,
-         rf.LOAD, rf.UNLOAD, rf.DROP)
+         rf.LOAD, rf.UNLOAD, rf.DROP, rf.AREA_MEX)
+# An area mex (rf.AREA_MEX; the user, 2026-11-18) is the env's to carry out, a BUILD at a time (SimEnv._area_builds): a unit
+# still this far from the spot it's going to when someone else takes the spot is sent to the next.
+AREA_RETARGET = 300.0               # elmos: past any constructor's reach, so not one that has begun the extractor itself
+SPOT_REACH = 64.0                   # elmos: an extractor this near a metal spot holds it (frame_world.EXTRACTOR_REACH)
+_NO_ORDERS = np.zeros(0, zksim.ORDER_DTYPE)
 BUILD_SPREADS = (16.0, 32.0, 64.0, 128.0)     # elmos: how far round a BUILD's point a place is looked for, nearest first
 BUILD_TRIES = 8
 TICKS_PER_DECISION = 3
@@ -98,13 +103,17 @@ MADE_ROLES = ("raid", "scout", "riot", "skirm", "assault", "arty", "snipe", "aa"
 # * "extractor_lead": extractors, a finished one 1 and one being built BUILD_RAMP x its build progress, over EXTRACTOR_LEAD;
 # * "idle_lead": finished fighters that move and stand idle, over IDLE_LEAD and turned round: a penalty for more than theirs;
 # * "constructor_lead": constructors (those that move, the commander not among them), counted as extractors are, and no
-#   more a team than 1 at the game's start and 1 more every CONSTRUCTOR_EVERY seconds up to CONSTRUCTORS, over CONSTRUCTORS.
-LEAD_TERMS = ("extractor_lead", "idle_lead", "constructor_lead")
+#   more a team than 1 at the game's start and 1 more every CONSTRUCTOR_EVERY seconds up to CONSTRUCTORS, over CONSTRUCTORS;
+# * "production_lead" (the user, 2026-11-18): the metal a second a team's builders put into units, which is what its
+#   factories and whatever helps them spend (zksim's SPENT_STAT), over the step just taken and no more a team than
+#   PRODUCTION_LEAD, over PRODUCTION_LEAD.  Its average over time is the term, as every lead's is (LEVEL_TERMS).
+LEAD_TERMS = ("extractor_lead", "idle_lead", "constructor_lead", "production_lead")
 BUILD_RAMP = 0.2                    # of an extractor or a constructor: what one being built counts, times its build progress
 EXTRACTOR_LEAD = 20.0               # extractors a player: the lead that is 1
 IDLE_LEAD = 20.0                    # idle fighters a player: the lead that is -1
 CONSTRUCTORS = 5.0                  # constructors a team: no more count from 8 minutes, and the lead that is 1
 CONSTRUCTOR_EVERY = 120.0           # seconds of game: how often one more constructor counts, from 1
+PRODUCTION_LEAD = 30.0              # metal a second a team puts into units: no more counts, and the lead that is 1
 TERMS = ("blend", "result", "score", "economy", "combat", "map", "experience") + MADE_TERMS + LEAD_TERMS
 # The terms that are a balance's change a step as "combat" is, closer to the decisions (the user, 2026-11-15): `_balances`.
 # "extractors", the finished extractors' balance, was one of them till "extractor_lead" took its place (the user, 2026-11-17).
@@ -114,13 +123,15 @@ BALANCE_TERMS = ("map", "experience")
 # game), and the alliance's end pays the whole level, as if it lasted.  The rest aren't discounted (`term_gamma`), and but
 # for the result and MADE_TERMS are a balance's change a step: their sum over a game is where the balance ended, however
 # long it had stood there.
-LEVEL_TERMS = {"economy": "income", "extractor_lead": "extractor_level", "idle_lead": "idle_level", "constructor_lead": "constructor_level"}
+LEVEL_TERMS = {"economy": "income", "extractor_lead": "extractor_level", "idle_lead": "idle_level", "constructor_lead": "constructor_level",
+               "production_lead": "production_level"}
 LEAD_LEVELS = tuple(LEVEL_TERMS[name] for name in LEAD_TERMS)
 TERM_HORIZONS = {name: 600.0 for name in LEVEL_TERMS}
 COMBAT_CONSTANT = 1000.0            # metal: the damage balance's (`_combat`), as VALUE_CONSTANT is the value balance's
 # zksim's stats (capi.h ZK_STATS): the metal a team's damage has cost the others; its finished extractors; its share of the map in
-# sight and in radar; the part of its damage its army did, and the metal put into its army.
-DEALT_STAT, EXTRACTORS_STAT, SIGHT_STAT, RADAR_STAT, ARMY_DEALT_STAT, ARMY_STAT = 4, 6, 7, 8, 9, 10
+# sight and in radar; the part of its damage its army did, and the metal put into its army; the metal its builders have paid
+# into units that move, since the game began.
+DEALT_STAT, EXTRACTORS_STAT, SIGHT_STAT, RADAR_STAT, ARMY_DEALT_STAT, ARMY_STAT, SPENT_STAT = 4, 6, 7, 8, 9, 10, 11
 MAP_CONSTANT = 0.2                  # shares of the map, sight's and radar's summed: the map balance's
 ARMY_CONSTANT = 1000.0              # metal: what the army's trades are over besides its own, so that a small army's aren't large
 
@@ -308,8 +319,10 @@ _TRANSPORT_KINDS = {order: kind for kind, order in _TRANSPORT_ORDERS.items()}
 def sim_orders(orders: list) -> np.ndarray:
     """The policy's orders as the sim's.  Its kinds up to PRODUCE have the same numbers; a thrower's fire at the ground, and a switch's target, are the sim's own.
     A group order is its unit's, followed by a groups.GROUP_MARK record with the radius as x and the roles as target, as the scripts record theirs:
-    `split_groups` makes the sim's group orders of them."""
+    `split_groups` makes the sim's group orders of them.  An AREA_MEX is no order of the sim's: SimEnv takes those first
+    (`_take_areas`), and one left here is dropped."""
     table, cat = tables.table(), catalog()
+    orders = [o for o in orders if o.kind != rf.AREA_MEX]
     out = np.zeros(len(orders) + sum(o.radius > 0.0 for o in orders), zksim.ORDER_DTYPE)
     i = 0
     for o in orders:
@@ -488,14 +501,14 @@ class SimEnv:
     # What a game is, apart from the sim's and the scripts' state: what `copy_game` copies, and what a test checks is all of it.
     # Arrays whose first axis is the game; lists by game, shared (read-only, or replaced whole) or copied deep; dicts by game and
     # by seat.  Everything else is the env's own, shared by its games.
-    GAME_ARRAYS = ("waiting", "policy_economy", "last_income", "income_delta", "income_now", "lead_now", "last_combat", "combat_delta", "last_balances", "balance_delta",
+    GAME_ARRAYS = ("waiting", "policy_economy", "last_income", "income_delta", "income_now", "lead_now", "last_spent", "spent_rate", "last_combat", "combat_delta", "last_balances", "balance_delta",
                    "lead_rule", "starts", "decisions", "n_teams", "ally", "n_allies", "chickens", "difficulty", "alive", "paying",
                    "facing", "outcome", "result", "last_raw", "delta", "paid", "speed_paid", "speed_pot", "bonus",
                    "made_counts", "made_bits", "made_delta")
     GAME_LISTS_SHARED = ("mode", "bundle", "kind", "script_kinds", "styles")
     GAME_LISTS_OWN = ("seats", "scripts", "known", "game_rng")
-    GAME_DICTS = ("chicken_states", "_units_of")
-    SEAT_DICTS = ("pending", "script_record", "ended")
+    GAME_DICTS = ("chicken_states", "_units_of", "areas")
+    SEAT_DICTS = ("pending", "script_record", "ended", "_sites_of")
 
     def __init__(self, games: int, seed: int, modes: list[str], units: int | None = None, threads: int = 16, decide_every: int = 1, maps: list | None = None,
                  weights: np.ndarray | None = None, economy: bool = True, script_threads: int | None = None, variants: bool = False,
@@ -560,6 +573,9 @@ class SimEnv:
         # (`count_leads`), since reading every team's units is 2 ms a step of 48 games.
         self.count_leads = False
         self.lead_now = np.zeros((games, self.slots, len(LEAD_TERMS)))
+        # By team: zksim's SPENT_STAT as it stood a step ago, and the metal a second put into units over the step just taken.
+        self.last_spent = np.zeros((games, self.slots))
+        self.spent_rate = np.zeros((games, self.slots))
         self.last_combat = np.zeros((games, self.slots))       # the damage balance (`_combat`), as `last_raw`
         self.combat_delta = np.zeros((games, self.slots))
         self.last_balances = np.zeros((games, self.slots, len(BALANCE_TERMS)))     # `_balances`, as `last_raw`
@@ -593,6 +609,7 @@ class SimEnv:
         self.seats: list[tuple[Seat, ...] | None] = [None] * games       # each team's opening
         self.scripts: list[tuple | None] = [None] * games     # a subclass's own scripts, one a team: `own_scripts`
         self._units_of: dict[int, tuple[int, list]] = {}     # `_team_units`, by game, with the step it was made at
+        self._sites_of: dict[int, tuple[int, np.ndarray]] = {}      # `frame`'s sites, by seat, with the step they were made at
         # In slots of TICKS_PER_DECISION.  Game time stays what it was: the time limit, and how often the script re-orders.
         self.ticks = TICKS_PER_DECISION * decide_every
         self.time_limit = TIME_LIMIT_DECISIONS // decide_every
@@ -669,6 +686,12 @@ class SimEnv:
         # By type-table row, for the leads: extractors, fighters that move (no builder among them), and constructors.
         n, t = len(self.makeable), self.table
         self.extractor_row = np.asarray(self.eco_data.extractor[:n], bool)
+        self.extractor_known = np.append(self.extractor_row, False)       # by `table.rows`, the unknown type's row too
+        # The units on an area mex, by game and then uid: [team, x, z, radius, spot x, spot z], the spot that of the extractor
+        # it's on (NaN before its first), and the sim's type an area mex builds.
+        self.areas: dict[int, dict[int, list]] = {}
+        built = np.flatnonzero(self.extractor_row & (self.eco_data.catalog_row[:n] >= 0))
+        self.extractor_type = int(self.eco_data.catalog_row[built[0]]) if len(built) else -1
         self.fighter_row = np.asarray(t.mobile, bool)[:n] & np.asarray(t.combat, bool)[:n] & ~np.asarray(t.builder, bool)[:n]
         self.constructor_row = self.made_class == 0
         self.pending: dict[int, list] = {}
@@ -882,6 +905,9 @@ class SimEnv:
         self.decisions[g] = 0
         self.known[g] = [None] * self.slots
         self.made_counts[g], self.made_bits[g], self.made_delta[g] = 0.0, 0, 0.0
+        self.areas.pop(g, None)
+        for seat in range(g * self.slots, (g + 1) * self.slots):
+            self._sites_of.pop(seat, None)
 
     def _draw_styles(self, g: int) -> tuple[pv.Variant, ...] | None:
         """Each team's army script knobs for game `g`: drawn from the environment's generator when variants are on, else None.  The
@@ -987,13 +1013,52 @@ class SimEnv:
         return self.bundle[seat // self.slots]
 
     def frame(self, seat: int) -> rf.Frame:
-        return self.batch.frame(seat // self.slots, seat % self.slots)
+        """The seat's raw frame as the sim's last step left it: views into the batch's buffers, but for the sites, which are
+        the seat's own, with who holds each spot as far as it knows (`site_status`), made once a step.  The sim's records
+        leave every spot free, and till 2026-11-18 so did this: no RL run's actor had seen a spot held."""
+        f = self.batch.frame(seat // self.slots, seat % self.slots)
+        if not len(f.sites):
+            return f
+        kept = self._sites_of.get(seat)
+        if kept is None or kept[0] != self.slot:
+            sites = f.sites.copy()
+            sites["status"] = self.site_status(seat)
+            kept = self._sites_of[seat] = (self.slot, sites)
+        return rf.Frame(f.units, kept[1], f.glob, f.features)
 
     def give_orders(self, seat: int, orders: list) -> None:
         self.pending[seat] = orders
 
-    def place_build(self, seat: int, row: int, x: float, z: float) -> tuple[float, float] | None:
-        """Where a BUILD of this type-table row, told to (x, z), goes: an extractor on the free spot nearest the point; anything else
+    def site_status(self, seat: int) -> np.ndarray:
+        """Who holds each of the map's metal spots as far as the seat knows (rf.SITE_*, by the frame's sites), from the
+        extractors its frame shows: the nearest one within SPOT_REACH of a spot, ours or not, being built or done, as the
+        live bot's Brain says it and frame_data.with_site_status for the encoder's frames.  `frame` gives it as the sites'
+        status.  The sim pays every extractor that stands on a spot, so whoever places one for the policy reads it."""
+        f = self.batch.frame(seat // self.slots, seat % self.slots)
+        u, sites = f.units, f.sites
+        known = u[(u["knowledge"] != rf.KNOW_HIDDEN) & self.extractor_known[self.table.rows(u["def_id"])]]
+        if not len(known) or not len(sites):
+            return np.full(len(sites), rf.SITE_FREE, np.uint8)
+        d = np.hypot(sites["x"][:, None] - known["x"][None], sites["z"][:, None] - known["z"][None])
+        nearest = d.argmin(axis=1)
+        who = known[nearest]
+        g, team = divmod(seat, self.slots)
+        status = np.where(who["ally_team"] != self.ally[g, team], rf.SITE_ENEMY, np.where(who["flags"] & rf.BEING_BUILT, rf.SITE_BUILDING, rf.SITE_OURS))
+        return np.where(d[np.arange(len(sites)), nearest] <= SPOT_REACH, status, rf.SITE_FREE).astype(np.uint8)
+
+    def _going(self, f: rf.Frame, team: int, but: int) -> np.ndarray:
+        """By the frame's sites: whether a unit of the team's other than `but` is on its way to build on the spot (its order a
+        BUILD on it, not yet done).  Such a spot is still free by its status, which is the extractors'."""
+        u, sites = f.units, f.sites
+        told = u[(u["player"] == team) & (u["ord_kind"] == rf.BUILD) & (u["uid"] != but) & ((u["flags"] & rf.IDLE) == 0)]
+        if not len(told):
+            return np.zeros(len(sites), bool)
+        return ((np.abs(sites["x"][:, None] - told["ord_x"][None]) < 1.0) & (np.abs(sites["z"][:, None] - told["ord_z"][None]) < 1.0)).any(axis=1)
+
+    def place_build(self, seat: int, row: int, x: float, z: float, uid: int = -1, claimed: tuple = ()) -> tuple[float, float] | None:
+        """Where a BUILD of this type-table row, told to (x, z), goes: an extractor on the free spot nearest the point that no
+        other of the team's units than `uid` is going to (`_going`) and that isn't among `claimed` (those given in the same
+        decision); anything else
         at the nearest place to it the game would let it be built (`Ground.fits`: its footprint's rectangle, on level ground),
         clear of our structures' footprints and our allies' and of every metal spot (as the economy script keeps clear, eco.cpp
         `_taken`).  None if the sim can't build the type (no catalog record, a geothermal
@@ -1003,7 +1068,10 @@ class SimEnv:
             return None
         f = self.frame(seat)
         if ed.extractor[row]:
-            free = f.sites[f.sites["status"] == rf.SITE_FREE]
+            open_ = (f.sites["status"] == rf.SITE_FREE) & ~self._going(f, seat % self.slots, uid)
+            for cx, cz in claimed:
+                open_ &= (f.sites["x"] != cx) | (f.sites["z"] != cz)
+            free = f.sites[open_]
             if not len(free):
                 return None
             k = int(np.argmin(np.hypot(free["x"] - x, free["z"] - z)))
@@ -1038,14 +1106,76 @@ class SimEnv:
             return rows
         keep = np.ones(len(rows), bool)
         names = catalog().units
+        spots: list[tuple[float, float]] = []       # this decision's extractors: one a spot
         for i in build:
             target = int(rows["target"][i])
-            at = None if target < 0 else self.place_build(seat, self.table.names.index(names[target]["name"]), float(rows["x"][i]), float(rows["z"][i]))
+            row = -1 if target < 0 else self.table.names.index(names[target]["name"])
+            at = None if row < 0 else self.place_build(seat, row, float(rows["x"][i]), float(rows["z"][i]), int(rows["unit"][i]), tuple(spots))
             if at is None:
                 keep[i] = False
             else:
                 rows["x"][i], rows["z"][i] = at
+                if self.eco_data.extractor[row]:
+                    spots.append(at)
         return rows[keep]
+
+    def _take_areas(self, g: int, team: int, orders: list) -> list:
+        """The policy's orders without its AREA_MEX ones, which are kept (`areas`) for `_area_builds` to carry out.  Any other
+        order to a unit on an area mex ends it, but for a cloak's, which leaves what a unit is doing as it is."""
+        if g not in self.areas and not any(o.kind == rf.AREA_MEX for o in orders):
+            return orders
+        areas, rest = self.areas.setdefault(g, {}), []
+        for o in orders:
+            if o.kind == rf.AREA_MEX:
+                areas[int(o.uid)] = [team, float(o.x), float(o.z), float(o.radius), math.nan, math.nan]
+                continue
+            if o.kind not in (rf.CLOAK_ON, rf.CLOAK_OFF):
+                areas.pop(int(o.uid), None)
+            rest.append(o)
+        return rest
+
+    def _area_builds(self, g: int, team: int) -> np.ndarray:
+        """This step's BUILDs for the team's units on an area mex (`areas`), as the sim takes them.  One just told, or standing
+        idle (its extractor done, or lost), is sent to the free spot within the area that's nearest it and that no other of
+        its alliance on an area mex is going to: so the nearest to the unit first, and from each the nearest to it.  So is one
+        whose spot was taken while it was still AREA_RETARGET away.  A unit's area ends when no such spot is left, when the
+        unit is gone, and when it has been told something else (a group's order, a script's).  Who holds a spot is as the
+        team knows (`site_status`)."""
+        areas = self.areas[g]
+        mine = [uid for uid, a in areas.items() if a[0] == team]
+        rows = []
+        if mine:
+            f = self.frame(g * self.slots + team)
+            units, sites = f.units, f.sites
+            free = sites["status"] == rf.SITE_FREE
+        for uid in mine:
+            a = areas[uid]
+            at = np.flatnonzero((units["uid"] == uid) & (units["player"] == team))
+            if not len(at):
+                del areas[uid]
+                continue
+            u = units[at[0]]
+            if not math.isnan(a[4]):
+                on = (sites["x"] == a[4]) & (sites["z"] == a[5])
+                taken = not free[on].all() and math.hypot(float(u["x"]) - a[4], float(u["z"]) - a[5]) > AREA_RETARGET
+                if not u["flags"] & rf.IDLE and not taken:
+                    if u["ord_kind"] != rf.BUILD or abs(float(u["ord_x"]) - a[4]) > 1.0 or abs(float(u["ord_z"]) - a[5]) > 1.0:
+                        del areas[uid]
+                    continue
+            ok = free & (np.hypot(sites["x"] - a[1], sites["z"] - a[2]) <= a[3]) & ~self._going(f, team, uid)
+            for other, b in areas.items():
+                if other != uid and self.ally[g, b[0]] == self.ally[g, team] and not math.isnan(b[4]):
+                    ok &= (sites["x"] != b[4]) | (sites["z"] != b[5])
+            if not ok.any():
+                del areas[uid]
+                continue
+            k = np.flatnonzero(ok)
+            k = int(k[np.argmin(np.hypot(sites["x"][k] - u["x"], sites["z"][k] - u["z"]))])
+            a[4], a[5] = float(sites["x"][k]), float(sites["z"][k])
+            rows.append((uid, zksim.ORDER_BUILD, a[4], a[5], self.extractor_type))
+        if not areas:
+            del self.areas[g]
+        return np.array(rows, zksim.ORDER_DTYPE) if rows else _NO_ORDERS
 
     def _team_units(self, g: int) -> list[tuple[np.ndarray, np.ndarray]]:
         """Each team of game g's own units, as its own frame has them, and the features it sees: for a subclass's scripts, which
@@ -1135,23 +1265,29 @@ class SimEnv:
         """games x slots x LEAD_TERMS, by team, of its own units: its extractors, a finished one 1 and one being built
         BUILD_RAMP x its build progress, so that starting one and building it on are worth something before it's done; its
         finished fighters that stand idle (the sim's flag: one that moves, its order done); and its constructors, counted as
-        the extractors, up to what counts at the game's time (CONSTRUCTOR_EVERY).  Nothing for the chickens."""
+        the extractors, up to what counts at the game's time (CONSTRUCTOR_EVERY); and the metal a second it put into units
+        over the step just taken (`spent_rate`), up to PRODUCTION_LEAD.  Nothing for the chickens.
+        Every team's records at once, as wide as the longest: it's after every step of the sim, and a loop over the teams
+        was 6% of a collector's time (py-spy, 2026-11-17)."""
         out = np.zeros((self.count, self.slots, len(LEAD_TERMS)))
         out[:, :, 0] = self.batch.stats[:, :, EXTRACTORS_STAT]
-        records, counts = self.batch.records, self.batch.counts
+        teams = int(self.n_teams.max())
+        sides, counts = np.arange(teams), self.batch.counts[:, :teams]
+        u = self.batch.records[:, :teams, :max(int(counts.max()), 1)]
+        playing = (sides < self.n_teams[:, None]) & (sides != self.chickens[:, None])
+        g, side, k = np.nonzero((np.arange(u.shape[2]) < counts[:, :, None]) & (u["player"] == sides[:, None]) & playing[:, :, None])
+        rows, flags, built = self.table.rows(u["def_id"][g, side, k]), u["flags"][g, side, k], u["build_frac"][g, side, k].astype(np.float64)
+        building = (flags & rf.BEING_BUILT) != 0
+        constructors = self.constructor_row[rows]
+        seat = g * teams + side
+
+        def summed(each: np.ndarray) -> np.ndarray:      # games x teams: each unit's number, summed over its team's
+            return np.bincount(seat, each, self.count * teams).reshape(self.count, teams)
+        out[:, :teams, 0] += BUILD_RAMP * summed(np.where(building & self.extractor_row[rows], built, 0.0))
+        out[:, :teams, 1] = summed(((flags & rf.IDLE) != 0) & ~building & self.fighter_row[rows])
         most = np.minimum(1.0 + np.floor(self.decisions * self.seconds_a_step / CONSTRUCTOR_EVERY), CONSTRUCTORS)
-        for g in range(self.count):
-            for side in range(int(self.n_teams[g])):
-                if side == self.chickens[g]:
-                    continue
-                u = records[g, side, :int(counts[g, side])]
-                own = u["player"] == side
-                rows, flags, built = self.table.rows(u["def_id"][own]), u["flags"][own], u["build_frac"][own]
-                building = (flags & rf.BEING_BUILT) != 0
-                constructors = self.constructor_row[rows]
-                out[g, side, 0] += BUILD_RAMP * float(built[building & self.extractor_row[rows]].sum())
-                out[g, side, 1] = np.count_nonzero(((flags & rf.IDLE) != 0) & ~building & self.fighter_row[rows])
-                out[g, side, 2] = min(np.count_nonzero(~building & constructors) + BUILD_RAMP * float(built[building & constructors].sum()), most[g])
+        out[:, :teams, 2] = np.minimum(summed(np.where(constructors, np.where(building, BUILD_RAMP * built, 1.0), 0.0)), most[:, None])
+        out[:, :teams, 3] = np.where(playing, np.minimum(self.spent_rate[:, :teams], PRODUCTION_LEAD), 0.0)
         return out
 
     def _leads(self) -> np.ndarray:
@@ -1163,7 +1299,7 @@ class SimEnv:
         counted = self._counted()
         n = np.maximum(self.alive.sum(1) - 1, 1)[:, None]
         out = np.zeros((self.count, self.slots, len(LEAD_TERMS)))
-        for i, scale in enumerate((EXTRACTOR_LEAD, -IDLE_LEAD, CONSTRUCTORS)):
+        for i, scale in enumerate((EXTRACTOR_LEAD, -IDLE_LEAD, CONSTRUCTORS, PRODUCTION_LEAD)):
             v = np.where(self.alive, self._by_alliance(counted[:, :, i]) / teams, 0)
             out[:, :, i] = np.where(self.alive, np.clip((v - self._others(v, self.alive) / n) / scale, -1.0, 1.0), 0)
         return out
@@ -1175,6 +1311,7 @@ class SimEnv:
         self.last_income[g] = self._income()[g]
         self.last_combat[g] = self._combat()[g]
         self.last_balances[g] = self._balances()[g]
+        self.last_spent[g] = self.batch.stats[g, :, SPENT_STAT]
 
     def script_production(self, seat: int) -> list[tuple[int, str]]:
         """This decision's production choices by a script-controlled seat: (factory uid, unit name) for each PRODUCE it gave."""
@@ -1199,13 +1336,19 @@ class SimEnv:
                 seat = g * self.slots + team
                 orders = self.pending.pop(seat, None)
                 policy = self._is_policy(seat)
+                part = None
                 if orders is not None:
-                    part, grouped = split_groups(self._placed(seat, sim_orders(orders)))
-                    pre.append(part)
-                    pre_counts[seat] = len(part)
+                    part, grouped = split_groups(self._placed(seat, sim_orders(self._take_areas(g, team, orders))))
                     policy_groups[g].append(grouped)
                 elif not policy:
                     flags[seat] = 1         # policy_scripts_cpp.SEAT_ARMY
+                if g in self.areas:         # after the seat's own orders: the next extractor of each of its units on an area mex
+                    more = self._area_builds(g, team)
+                    if len(more):
+                        part = more if part is None else np.concatenate((part, more))
+                if part is not None:
+                    pre.append(part)
+                    pre_counts[seat] = len(part)
                 if policy:
                     flags[seat] |= (2 if self.advise else 0) | (4 if self.policy_economy[g] else 0)    # SEAT_ARMY_LABEL, SEAT_ECO_LABEL
                 opening = self._opening_orders(g, team)
@@ -1333,6 +1476,9 @@ class SimEnv:
         self.income_delta = income - self.last_income
         self.last_income = income
         self.income_now = income
+        spent = self.batch.stats[:, :, SPENT_STAT].astype(np.float64)
+        self.spent_rate = (spent - self.last_spent) / self.seconds_a_step
+        self.last_spent = spent
         if self.count_leads:
             self.lead_now = self._leads()
         combat = self._combat()

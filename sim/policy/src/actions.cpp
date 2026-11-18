@@ -157,6 +157,13 @@ int64_t decode(const Table& T, const Bundle& B, const TensorsView& t, const int6
             compass(t, c);
             place_point(t, c, place[i], offset[i], o.x, o.z);
             o.target = T.producible[produce[i]];
+        } else if (kind == AREA_MEX) {
+            // Its area's middle, a BUILD's place with no offset, and its radius, in the field a group order's has.
+            if (place[i] < 0 || place[i] >= t.places + t.sites || group[i] < 0 || group[i] >= GROUP_COUNT) return -1 - i;
+            double c[8][2];
+            compass(t, c);
+            place_point(t, c, place[i], 0, o.x, o.z);
+            o.radius = GROUP_RADII[group[i]];
         } else if (kind == PRODUCE) {
             if (produce[i] < 0 || produce[i] >= t.producible) return -1 - i;
             o.target = T.producible[produce[i]];
@@ -339,6 +346,16 @@ int64_t encode(const Table& T, const TensorsView& t, const Bundle& B, const Orde
                 c_place = at / PLACE_OFFSETS;
                 c_offset = at % PLACE_OFFSETS;
             }
+        } else if (k == AREA_MEX) {
+            // The nearest place, on it, and the smallest radius at least the order's: the widest, past them all.
+            const int64_t P = t.places + t.sites;
+            ox.resize(P);
+            oz.resize(P);
+            for (int64_t p = 0; p < P; ++p) place_point(t, cmp, p, 0, ox[p], oz[p]);
+            legal.assign(P, 1);
+            c_place = nearest(ox.data(), oz.data(), legal.data(), P, o.x, o.z);
+            c_group = bucket(o.radius);
+            if (c_group < 0) c_group = GROUP_COUNT - 1;
         } else if (k == RECLAIM) {
             int64_t f = -1;
             for (int64_t j = 0; j < t.features; ++j)

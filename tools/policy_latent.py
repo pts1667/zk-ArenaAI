@@ -41,6 +41,13 @@ trainer's state handling doesn't change.  `decide` leaves the newest frame's act
 * a decision's frame is its own latent tokens and `MEMORY_TOKENS` read off the state, after `Size.layers` blocks of them attending to each other;
 * the time transformer, the frames kept, and the action tokens with their reader are not made.  The plan, the units' reading and the heads are as they were;
 * training runs the GRU through a segment from the state kept at its start, a step a decision, and everything else for all its decisions at once (`segments`).
+
+**Or a Recurrent Divisive Normalization Network in the GRU's place** (`Size.memory` "rdnn", `RDNNCell`; the user, 2026-11-17, after arXiv 2608.01947),
+everything around it the same.  Its state is its units' rates and then their inhibitory pools, so twice its units wide; the memory tokens read the rates.
+
+**The memory told as a vector** (`Size.memory_as` "vector", the user, 2026-11-17; `RDNN`'s): one vector read off the state, added to what reads the frame, each
+controllable unit (`context`, so `reading` too) and each of the plan's slots (`plan`).  The frame is then its latent tokens alone.  As 4 tokens among the
+frame's, the memory was what a reader's attention gave it, a sixteenth at first.
 """
 from __future__ import annotations
 
@@ -84,20 +91,135 @@ class Size:
     decision's actions one after another, and of self-attention among the controllable units before they read the frame
     (`LatentActor.among`).  Kept in each checkpoint (`asdict`), to build the same again.
     gru: the width of a GRU's state, its memory in place of the time transformer (the module's notes); `layers` is then the blocks
-    in which a decision's own tokens attend to each other."""
+    in which a decision's own tokens attend to each other.
+    memory: what steps that state: "gru" (`nn.GRUCell`) or "rdnn" (`RDNNCell`, whose state is its units' rates and then their
+    pools, so `gru` is twice its units).
+    memory_as: how the rest reads the state: "tokens", `MEMORY_TOKENS` of the frame, or "vector", one vector added to what
+    reads the frame (the module's notes)."""
     d: int = 256
     heads: int = 8
     layers: int = 4
     plan_layers: int = 4
     unit_layers: int = 0        # none in any actor before 2026-11-14, whose checkpoints load as they were
     gru: int = 0                # none in any actor before 2026-11-17, the same
+    memory: str = "gru"         # the GRU itself in every actor with one before the RDNN, the same
+    memory_as: str = "tokens"   # tokens in every actor with a memory before 2026-11-17 21:00, the same
 
 
 SIZE = Size()               # the user's, 2026-11-09: about 10M trained parameters (it was d 128, 4 heads, 2 and 2: 1.9M)
 SMALL = Size(128, 4, 2, 2)
 WIDE = Size(384, 12, 4, 4, 2)   # the user's, 2026-11-14: 1.5x as wide, and two layers of the controllable units reading each other
 GRU = Size(256, 8, 1, 2, 0, 1024)   # the user's, 2026-11-17: a GRU for memory and a plan of half the depth, for RL from nothing
-SIZES = {"default": SIZE, "small": SMALL, "wide": WIDE, "gru": GRU}
+# The user's, 2026-11-17: as GRU, with an RDNN of 1,024 units in the GRU's place (arXiv 2608.01947), its state told as a vector.
+RDNN = Size(256, 8, 1, 2, 0, 2048, "rdnn", "vector")
+SIZES = {"default": SIZE, "small": SMALL, "wide": WIDE, "gru": GRU, "rdnn": RDNN}
+
+
+RDNN_RATE = -2.2            # an RDNNCell's rates at first, before the sigmoid: a tenth of the way to its drive a decision (the paper's; their spread of 1 is mine)
+RDNN_ETA = 1.0              # its semi-saturation at first (the paper gives none): with no pool yet, a unit's drive is what it takes in
+RDNN_FLOOR = 1e-5           # the least a semi-saturation can be (the paper's)
+
+
+class RDNNCell(nn.Module):
+    """A Recurrent Divisive Normalization Network's step (arXiv 2608.01947, its appendix B), called as `nn.GRUCell` is.  Its
+    state is B x 2 x units, flat: the units' rates R, then their inhibitory pools G.  With I the input through a linear layer:
+
+        R' = R + aR ((J relu(R) + I) / (eta + G) - R)
+        G' = G + aG (W relu(R) - G)
+
+    J, W and eta are positive (the softplus of what's learnt), so a pool that starts at 0 never goes below it and nothing is
+    divided by less than eta; aR and aG are each unit's own, in 0..1 (a sigmoid).  At first a unit's row of J and of W sums to
+    about 1 (each weight about 1 / units, the paper's), so its drive is the units' mean rate and what it takes in, over eta
+    and that mean.
+    Mine, where the paper is silent or doesn't fit: relu and not tanh, with which a pool could go negative; no noise on the
+    state, which play and training must step alike; eta 1 at first, and the rates' spread.
+    The gradient on what's learnt of J and W is the weight's times about 1 / units, far under the Adam eps a policy trains
+    with (1e-5): at 2e-3, with `scale` sqrt(units), a step moved J by 0.013% of its mean and then by nothing (rdnn-1's
+    smoke run).  So the trainer gives the two (`recurrent`) an Adam of their own with a small eps (policy_train.Learner),
+    whose step moves a weight by about the rate, as a share of the weight.  `scale` (1, the paper's) is what the softplus's
+    argument is over what's learnt, for trying other steps."""
+
+    def __init__(self, inputs: int, units: int, scale: float | None = None):
+        super().__init__()
+        self.units = units
+        self.scale = 1.0 if scale is None else scale
+        self.shift = -math.log(units)
+        self.input = nn.Linear(inputs, units)
+        self.j = nn.Parameter(torch.randn(units, units) / (math.sqrt(units) * self.scale))
+        self.w = nn.Parameter(torch.randn(units, units) / (math.sqrt(units) * self.scale))
+        self.eta = nn.Parameter(torch.full((units,), math.log(math.expm1(RDNN_ETA))))
+        self.rate_r = nn.Parameter(RDNN_RATE + torch.randn(units))
+        self.rate_g = nn.Parameter(RDNN_RATE + torch.randn(units))
+
+    def recurrent(self) -> list[nn.Parameter]:
+        """What's learnt of J and W, for an Adam of their own (the class's notes)."""
+        return [self.j, self.w]
+
+    def weights(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """J and W, units x units, and eta: positive."""
+        return (F.softplus(self.scale * self.j + self.shift), F.softplus(self.scale * self.w + self.shift),
+                F.softplus(self.eta) + RDNN_FLOOR)
+
+    def forward(self, taken: torch.Tensor, state: torch.Tensor, made: tuple | None = None) -> torch.Tensor:
+        """taken: B x inputs.  state: B x 2 x units, flat.  made: `weights`, where many steps share them."""
+        j, w, eta = self.weights() if made is None else made
+        r, g = state[:, :self.units], state[:, self.units:]
+        fired = F.relu(r)
+        drive = (F.linear(fired, j) + self.input(taken)) / (eta + g)
+        pool = F.linear(fired, w)
+        return torch.cat((r + torch.sigmoid(self.rate_r) * (drive - r), g + torch.sigmoid(self.rate_g) * (pool - g)), 1)
+
+    def run(self, taken: torch.Tensor, state: torch.Tensor) -> torch.Tensor:
+        """A segment's steps, for training: taken, B x T x inputs; state, B x 2 x units, before the first.  Returns B x T x
+        2 x units, the state after each, as `forward` a step at a time gives it, with what doesn't change from step to step
+        made once (the weights, J and W as one matrix, the rates, the input layer for every step) and the states stacked at
+        the end.  After `compile_memory` the steps go RDNN_CHUNK at a time through the compiled loop, the last chunk
+        filled out with steps that take in nothing, whose states are dropped."""
+        j, w, eta = self.weights()
+        both, given = torch.cat((j, w)), self.input(taken)
+        a_r, a_g = torch.sigmoid(self.rate_r), torch.sigmoid(self.rate_g)
+        r, g = state[:, :self.units], state[:, self.units:]
+        if _chunk is None:
+            rates, pools = _rdnn_steps(given, both, eta, a_r, a_g, r, g, self.units)
+        else:
+            count = given.shape[1]
+            given = F.pad(given, (0, 0, 0, -count % RDNN_CHUNK))
+            parts = []
+            for start in range(0, given.shape[1], RDNN_CHUNK):
+                parts.append(_chunk(given[:, start:start + RDNN_CHUNK], both, eta, a_r, a_g, r, g, self.units))
+                r, g = parts[-1][0][:, -1], parts[-1][1][:, -1]
+            rates, pools = (torch.cat(side, 1)[:, :count] for side in zip(*parts))
+        return torch.cat((rates, pools), -1)
+
+
+def _rdnn_steps(given: torch.Tensor, both: torch.Tensor, eta: torch.Tensor, a_r: torch.Tensor, a_g: torch.Tensor, r: torch.Tensor,
+                g: torch.Tensor, units: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """As many steps of an RDNN as `given` has (RDNNCell.run): given, B x T x units, what each step takes in, past the input
+    layer; both, J over W.  The rates and the pools after each step, B x T x units each."""
+    rates, pools = [], []
+    for t in range(given.shape[1]):
+        out = F.linear(F.relu(r), both)
+        r = torch.lerp(r, (out[:, :units] + given[:, t]) / (eta + g), a_r)
+        g = torch.lerp(g, out[:, units:], a_g)
+        rates.append(r)
+        pools.append(g)
+    return torch.stack(rates, 1), torch.stack(pools, 1)
+
+
+# Training's loop over a segment's steps, compiled (the user, 2026-11-17: "I'd keep the loop compiled", "Consider using
+# dynamic shapes").  A loop in Python is unrolled when it's compiled, so its length can't be one of the shapes left open:
+# the compiled thing is RDNN_CHUNK steps, called as often as a segment needs, with the number of segments open (a segment
+# is 20 to 60 decisions with --segment past a stretch, and a minibatch 3 to 20 of them).  results/bench_memory_loop.py has
+# what it saves.
+RDNN_CHUNK = 16
+_chunk = None
+
+
+def compile_memory() -> None:
+    """From here on `RDNNCell.run` goes through torch.compile, in this process.  The first call compiles (and the first of
+    one segment alone, which a shape left open doesn't cover)."""
+    global _chunk
+    _chunk = torch.compile(_rdnn_steps, dynamic=True)
 
 
 def window_frames(decide_every: int = 1) -> int:
@@ -280,6 +402,7 @@ class Context:
     anchor_keys: torch.Tensor
     ordered: torch.Tensor
     mine: torch.Tensor
+    memory: torch.Tensor | None = None      # B x D: the memory's vector, where it's told as one (Size.memory_as), for the plan's slots; `mine` has it already
 
 
 class LatentActor(nn.Module):
@@ -389,16 +512,24 @@ class LatentActor(nn.Module):
             self.head_done.bias[0] = pm.DONE_START
         # The controllable units reading each other (Size.unit_layers): made last, so that every weight before is drawn as it was.
         self.unit_blocks = nn.ModuleList(pm.Block(self.d, size.heads) for _ in range(size.unit_layers))
-        # Memory as a GRU (Size.gru), after everything else for the same reason.  Its input is half its state's width.
+        # Memory as a GRU (Size.gru), after everything else for the same reason.  Its input is half its units' width; an RDNN's
+        # state (Size.memory) is its units' rates and then their pools.
         self.frame_blocks = nn.ModuleList(pm.Block(self.d, size.heads) for _ in range(size.layers if size.gru else 0))
+        self.mem_vector = bool(size.gru) and size.memory_as == "vector"     # one vector for what reads the frame, not tokens of it
         if size.gru:
-            wide = size.gru // 2
+            if size.memory not in ("gru", "rdnn") or size.gru % 2 or size.memory_as not in ("tokens", "vector"):
+                raise ValueError(f"a memory is \"gru\" or \"rdnn\", its state of an even width, told as \"tokens\" or a \"vector\": "
+                                 f"{size.memory!r}, {size.gru}, {size.memory_as!r}")
+            units = size.gru // 2 if size.memory == "rdnn" else size.gru
+            wide = units // 2
+            self.mem_units = units      # what the memory tokens read of the state: a GRU's all, an RDNN's rates
             self.mem_frame = nn.Linear(encoder.tokens * encoder.latent, wide)
             self.mem_acts = nn.Linear(self.d, wide)
             self.mem_ln = nn.LayerNorm(wide)
-            self.memory = nn.GRUCell(wide, size.gru)
-            self.mem_out = nn.Linear(size.gru, MEMORY_TOKENS * self.d)
-            self.mem_slots = nn.Parameter(torch.randn(MEMORY_TOKENS, self.d) / math.sqrt(self.d))     # which memory token this is
+            self.memory = RDNNCell(wide, units) if size.memory == "rdnn" else nn.GRUCell(wide, size.gru)
+            self.mem_out = nn.Linear(units, self.d if self.mem_vector else MEMORY_TOKENS * self.d)
+            # Which memory token this is.
+            self.mem_slots = None if self.mem_vector else nn.Parameter(torch.randn(MEMORY_TOKENS, self.d) / math.sqrt(self.d))
 
     def code(self, place: torch.Tensor) -> torch.Tensor:
         """... x 2 to ... x CODE: every sine, then every cosine."""
@@ -496,22 +627,41 @@ class LatentActor(nn.Module):
         return self.mem_ln(self.mem_frame(latents.flatten(-2)) + self.mem_acts(did.to(latents.dtype)))
 
     def _step(self, taken: torch.Tensor, state: torch.Tensor) -> torch.Tensor:
-        """The GRU's state after a decision, B x gru, in float32 whatever the precision around it: a state goes through every
+        """The memory's state after a decision, B x gru, in float32 whatever the precision around it: a state goes through every
         decision of a game, and what half precision rounds off each time would add up."""
         with torch.autocast(taken.device.type, enabled=False):
             return self.memory(taken.float(), state.float())
 
+    def _steps(self, taken: torch.Tensor, state: torch.Tensor) -> torch.Tensor:
+        """`_step` through a segment: taken, B x T x ...; state, B x gru, before the first.  B x T x gru, the state after each.
+        An RDNN has the loop to itself (`RDNNCell.run`)."""
+        if isinstance(self.memory, RDNNCell):
+            with torch.autocast(taken.device.type, enabled=False):
+                return self.memory.run(taken.float(), state.float())
+        states = []
+        for t in range(taken.shape[1]):
+            state = self._step(taken[:, t], state)
+            states.append(state)
+        return torch.stack(states, 1)
+
     def _frame(self, latents: torch.Tensor, state: torch.Tensor, z: torch.Tensor | None) -> torch.Tensor:
         """N x (tokens + MEMORY_TOKENS) x D: what each decision's frame holds, its own latent tokens (N x tokens x latent) and
-        then its memory's (state: N x gru), after `Size.layers` blocks of them attending to each other."""
+        then its memory's (state: N x gru), after `Size.layers` blocks of them attending to each other.
+        With the memory told as a vector (Size.memory_as), N x (tokens + 1) x D: the latent tokens after the blocks, alone,
+        and then a row that is no token of the frame: the memory's vector, which `context` takes off for what reads the frame."""
         added = self.z_in.bias[None] if z is None else self.z_in(z.to(self.z_in.weight.dtype))
         own = self.latent_in(latents) + self.slots + added[:, None]
-        memory = self.mem_out(state).view(len(state), MEMORY_TOKENS, self.d) + self.mem_slots
-        x = torch.cat((own, memory.to(own.dtype)), 1)
+        told = self.mem_out(state[:, :self.mem_units])
+        if self.mem_vector:
+            x = own
+        else:
+            memory = told.view(len(state), MEMORY_TOKENS, self.d) + self.mem_slots
+            x = torch.cat((own, memory.to(own.dtype)), 1)
         everyone = torch.ones(x.shape[:2], dtype=torch.bool, device=x.device)
         for block in self.frame_blocks:
             x = block(x, None, everyone)
-        return self.lnf(x)
+        x = self.lnf(x)
+        return torch.cat((x, told[:, None].to(x.dtype)), 1) if self.mem_vector else x
 
     def memory_at(self, b, history: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """A frame's latents and the GRU's state after it, from what its seat kept (`decide`'s history): what a critic of the memory
@@ -541,14 +691,11 @@ class LatentActor(nn.Module):
             count = latents.shape[1]
             did = torch.cat((history[:, :1, self.gru:].to(acted.dtype), acted[:, :-1]), 1)     # each decision's: what the one before did
             taken = self._memory_in(latents, did)
-            state, states = history[:, 0, :self.gru], []
-            for t in range(count):
-                state = self._step(taken[:, t], state)
-                states.append(state)
+            states = self._steps(taken, history[:, 0, :self.gru])
             # Row by row, so segment by segment, and no padding goes further.
             real = torch.arange(count, device=latents.device)[None, :] < torch.as_tensor(lengths, device=latents.device)[:, None]
             told = None if z is None else z[:, None].expand(-1, count, -1)[real]
-            own, after = latents[real], torch.stack(states, 1)[real]
+            own, after = latents[real], states[real]
             if keep is not None:
                 keep["memory"] = (own, after)
             return self._frame(own, after, told)
@@ -588,8 +735,10 @@ class LatentActor(nn.Module):
         e = e + made * (a.produce >= 0)[..., None]
         e = e + self.act_group((a.group + 1).clamp_min(0))
         e = e + self.act_roles(pm.role_bits(a.roles, self.act_roles.in_features).to(e.dtype)) * (a.group >= 0)[..., None]
-        # `place` is a BUILD's place or a RECLAIM's feature token: each gathers only where it's its kind's.
-        builds, reclaims = (a.kind == rf.BUILD) & (a.place >= 0), (a.kind == rf.RECLAIM) & (a.place >= 0)
+        # `place` is a BUILD's place (an AREA_MEX's middle is one) or a RECLAIM's feature token: each gathers only where it's
+        # its kind's.
+        builds = ((a.kind == rf.BUILD) | (a.kind == rf.AREA_MEX)) & (a.place >= 0)
+        reclaims = (a.kind == rf.RECLAIM) & (a.place >= 0)
         if b.places is not None:
             place_h = self._places(b, keys, site_h)
             place = torch.gather(place_h, 1, torch.where(builds, a.place, 0)[..., None].expand(-1, -1, self.key))
@@ -637,15 +786,21 @@ class LatentActor(nn.Module):
         return torch.where(at >= 0, unit, site)
 
     def context(self, b, now: torch.Tensor) -> Context:
-        """now: B x tokens x D, what each decision's frame holds."""
+        """now: B x tokens x D, what each decision's frame holds; with the memory told as a vector (Size.memory_as), that vector
+        is its last row (`_frame`), taken off here and added to each controllable unit as it reads the frame."""
         hu, keys, reg_h, site_h, feat_h = self._raw(b)
         now = now.to(hu.dtype)
+        memory = None
+        if self.mem_vector:
+            now, memory = now[:, :-1], now[:, -1]
         units = b.ctrl_mask.shape[1]
         everyone = torch.ones(now.shape[:2], dtype=torch.bool, device=now.device)
         mine = self.among(hu[:, :units], b.ctrl_mask)
+        if memory is not None:
+            mine = mine + memory[:, None]
         read = self.unit_read(mine, now, everyone)
         anchor_keys = torch.cat((self.key_anchor(read), keys[:, :units, self.d:]), -1)
-        return Context(now, hu, keys, reg_h, site_h, feat_h, anchor_keys, self.head_ordered(read)[..., 0].float(), mine)
+        return Context(now, hu, keys, reg_h, site_h, feat_h, anchor_keys, self.head_ordered(read)[..., 0].float(), mine, memory)
 
     def among(self, mine: torch.Tensor, real: torch.Tensor) -> torch.Tensor:
         """mine: B x C x D, the controllable units' embeddings; real: B x C, which are units and not padding.  Returns them after
@@ -666,6 +821,8 @@ class LatentActor(nn.Module):
         next reads, each from the frame and the actions before it."""
         count = vectors.shape[1] + 1
         x = torch.cat((self.plan_start.to(vectors.dtype).expand(len(vectors), 1, self.d), vectors), 1) + self.plan_slots[:count].to(vectors.dtype)
+        if ctx.memory is not None:
+            x = x + ctx.memory[:, None].to(x.dtype)
         for block in self.plan_blocks:
             x = block(x, ctx.now.to(x.dtype))
         return self.plan_ln(x)

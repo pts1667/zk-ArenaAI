@@ -242,15 +242,16 @@ def test_a_frozen_player_copies_the_actor_and_its_encoder(tmp_path, encoder_path
     assert torch.equal(player.actor.latent_in.weight, learner.actor.latent_in.weight)
 
 
-@pytest.mark.parametrize("size", ("default", "gru"))
+@pytest.mark.parametrize("size", ("default", "gru", "rdnn"))
 def test_segments_score_in_training_as_their_decisions_did_in_play(tmp_path, encoder_path, size):
     """All of it: played through the trainer's own path and cut into segments, mid-game ones starting from the frames the seat had kept, then
-    featurized again and read, every segment in one forward pass.  With a GRU for memory too, whose seat keeps its state alone."""
+    featurized again and read, every segment in one forward pass.  With a GRU for memory too, whose seat keeps its state alone,
+    and with an RDNN told as a vector, whose recurrent weights have an Adam of their own."""
     cfg = _config(encoder_path, size=size)
     past = pl.SIZE.layers * (pl.window_frames(cfg.decide_every) - 1)       # the windowed actor's reach
     frames, bundle = sim_frames(past + 12)
     learner = pt.Learner(cfg, tmp_path, pt.DataWorkers(0, [bundle], cfg.enabled_kinds), "cpu")
-    assert learner.actor.reach == (1 if size == "gru" else past)
+    assert learner.actor.reach == (past if size == "default" else 1) and (learner.recurrent is not None) == (size == "rdnn")
     with torch.no_grad():
         learner.actor.head_done.bias[0] = -3.0      # so that it acts, and later decisions read what it did
     names = np.arange(VOCABULARY, dtype=np.int32)
@@ -568,3 +569,15 @@ def test_resignation_plays_games_out_to_measure_then_gives_up_those_under_the_th
     assert resigned
     learner.follow_resignation([(-1.0, 0.0)] * 20 + [(-0.65, 1.0)] * 2)
     assert learner.resign_at == -0.7
+
+
+def test_the_data_workers_featurize_in_cpp_as_in_python():
+    """Config.featurize_threads: what a collector or a data worker makes of a frame through libzkpolicy is featurize's own,
+    every field to the bit (tools/policy_parity.py has the tens of thousands of frames; this is the trainer's own call)."""
+    from policy_parity import tensor_diff
+
+    frames, bundle = sim_frames(6, 3)
+    items = [(f, bundle) for f in frames]
+    want = pt.DataWorkers(0, [bundle], pt.Config.enabled_kinds).map(items)
+    got = pt.DataWorkers(0, [bundle], pt.Config.enabled_kinds, threads=3).map(items)
+    assert len(got) == len(want) == 6 and not any(tensor_diff(a, b) for a, b in zip(want, got))

@@ -78,7 +78,9 @@ def _as_given(got: rf.Frame, want: rf.Frame, map_w: float, map_h: float, y_step:
     """A frame read back is the one given, within the narrowing zkrecord.h describes: its units, how many."""
     exact = ("uid", "ord_target", "def_id", "flags", "knowledge", "ord_kind", "player", "ally_team", "ord_age")
     assert np.array_equal(got.glob.view(np.uint32), want.glob.view(np.uint32))
-    assert np.array_equal(got.sites, want.sites)
+    spots = want.sites.copy()
+    spots["status"] = rf.SITE_FREE      # a recording keeps a game's spots once: who holds them is SimEnv.frame's, a frame at a time
+    assert np.array_equal(got.sites, spots)
     u, w = got.units, want.units
     assert len(u) == len(w)
     for name in exact:

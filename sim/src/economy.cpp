@@ -310,6 +310,8 @@ void World::advance_frame(int b, int f) {
     if (d.metal_cost * step > p.metal) step = p.metal / d.metal_cost;
     if (d.energy_cost * step > p.energy) step = p.energy / d.energy_cost;
     p.metal = std::max(0.0f, p.metal - d.metal_cost * step);
+    // What goes into units, apart from buildings: a factory's work and its helpers' (capi.h ZK_STATS [11]).
+    if (d.flags & ZK_U_MOBILE) unit_spent[team[size_t(b)]] += double(d.metal_cost) * double(step);
     p.energy = std::max(0.0f, p.energy - d.energy_cost * step);
     p.energy_spent += d.energy_cost * step;
     hp[size_t(f)] = std::min(d.hp, hp[size_t(f)] + d.hp * step);

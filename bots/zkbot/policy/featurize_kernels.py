@@ -26,13 +26,13 @@ BEING_BUILT, CLOAKED, PARALYZED, IN_LOS, IDLE, TYPE_KNOWN, DAMAGED, RESERVED, JU
 CARRIED, LOADED = 1024, 2048
 KNOW_LOS, KNOW_RADAR, KNOW_MEMORY, KNOW_HIDDEN = 0, 1, 2, 3
 KEEP, MOVE, FIGHT, ATTACK_UNIT, ATTACK_GROUND, STOP, MANUAL_FIRE, JUMP, CLOAK_ON, CLOAK_OFF = range(10)
-BUILD, ASSIST, REPAIR, RECLAIM, PRODUCE, RESERVED_KIND = range(10, 16)
+BUILD, ASSIST, REPAIR, RECLAIM, PRODUCE, AREA_MEX = range(10, 16)
 THROW, PUSH, PULL, PLACE_BEACON, WAIT_AT_BEACON = range(16, 21)
 LOAD, UNLOAD, DROP = range(21, 24)
 ORDER_SLOTS, KIND_COUNT = 16, 24
 _MIRRORED = ("BEING_BUILT CLOAKED PARALYZED IN_LOS IDLE TYPE_KNOWN DAMAGED RESERVED JUMP_READY PULLING CARRIED LOADED KNOW_LOS KNOW_RADAR KNOW_MEMORY "
              "KNOW_HIDDEN KEEP MOVE FIGHT ATTACK_UNIT ATTACK_GROUND STOP MANUAL_FIRE JUMP CLOAK_ON CLOAK_OFF BUILD ASSIST REPAIR RECLAIM "
-             "PRODUCE RESERVED_KIND THROW PUSH PULL PLACE_BEACON WAIT_AT_BEACON LOAD UNLOAD DROP ORDER_SLOTS KIND_COUNT").split()
+             "PRODUCE AREA_MEX THROW PUSH PULL PLACE_BEACON WAIT_AT_BEACON LOAD UNLOAD DROP ORDER_SLOTS KIND_COUNT").split()
 _CHANGED = [name for name in _MIRRORED if globals()[name] != getattr(rf, name)]
 if _CHANGED:
     raise ImportError(f"rawframe's {_CHANGED} changed: update featurize_kernels' copies")
@@ -52,7 +52,7 @@ PASS_CELL = 16.0          # bundle's, checked there
 (T_COST, T_SPEED, T_RANGE, T_DPS_GROUND, T_DPS_AIR, T_MANUAL_RANGE, T_MANUAL_RELOAD, T_JUMP_RANGE, T_THROW_RADIUS, T_THROW_REACH,
  T_LIFT_LIGHT, T_LIFT_MEDIUM, T_LIFT_HEAVY, T_LIFT_SIZE, T_LOAD_CLASS, T_LOAD_SIZE) = range(16)
 (B_MOBILE, B_AIR, B_ARMED, B_HIT_GROUND, B_HIT_AIR, B_BUILDER, B_FACTORY, B_COMBAT, B_MANUALFIRE, B_JUMP, B_CLOAK, B_SWITCHES,
- B_TELEPORTS, B_BEACON, B_MISSILE, B_LAUNCHER, B_ACTS_IN_PLACE, B_CONSTRUCTOR, B_PRODUCES, B_BUILDS, B_TRANSPORT) = range(21)
+ B_TELEPORTS, B_BEACON, B_MISSILE, B_LAUNCHER, B_ACTS_IN_PLACE, B_CONSTRUCTOR, B_PRODUCES, B_BUILDS, B_TRANSPORT, B_AREA_MEX) = range(22)
 
 _F0, _F1, _F2, _F4 = np.float32(0.0), np.float32(1.0), np.float32(2.0), np.float32(4.0)
 _F6, _F15, _F30 = np.float32(6.0), np.float32(15.0), np.float32(30.0)
@@ -255,11 +255,13 @@ def select(units, row_of_def, tf, tb, player, ally, cap_controllable, cap_units)
     taken = np.zeros(n, np.bool_)
     for i in control:
         taken[i] = True
-    # The rest: what can be aimed at first, in sight before on radar; within each, value over distance from our army.
+    # The rest: what can be aimed at first, in sight before on radar; within each, value over distance from our army.  Only
+    # what's in sight or on radar: a building seen once and out of sight since (KNOW_MEMORY) is no token (the user,
+    # 2026-11-18: with a recurrent memory the actor keeps what it saw itself), and goes with the hidden, to a critic alone.
     rest = np.empty(n, np.int64)
     m = 0
     for i in range(n):
-        if units[i]["knowledge"] != KNOW_HIDDEN and not taken[i]:
+        if units[i]["knowledge"] < KNOW_MEMORY and not taken[i]:
             rest[m] = i
             m += 1
     rest = rest[:m]
@@ -307,7 +309,7 @@ def _instance_row(u, r, i, stats, tf, height, cell, map_w, map_h, out):
     for k in range(len(_INSTANCE_BITS)):
         out[i, at + 9 + k] = _F1 if (flags & _INSTANCE_BITS[k]) != 0 else _F0
     out[i, at + 16] = u["blip_top_speed"] / _F150
-    # A remembered structure's ord_age says how long ago it was seen.
+    # A remembered structure's ord_age says how long ago it was seen: a critic's hidden units alone have one (featurize._hidden).
     out[i, at + 17] = np.log1p(_max(u["ord_age"], _F0) / _F30) / _F6 if u["knowledge"] == KNOW_MEMORY else _F0
     out[i, at + 18] = _F1 if (flags & JUMP_READY) != 0 else _F0
     out[i, at + 19] = _F1 if (flags & CARRIED) != 0 else _F0
@@ -415,7 +417,7 @@ def unit_block(units, rows, all_units, stats, tf, tb, move_class, label, height,
         out[i, o_at + 20] = _F1 if has_target else _F0
         out[i, o_at + 21] = _F1 if has_target and alive else _F0
         fresh = has and age < commit_frames
-        out[i, o_at + RESERVED_KIND] = _F1 if own and (flags & PULLING) != 0 else _F0      # no order has this kind
+        out[i, o_at + AREA_MEX] = _F1 if own and (flags & PULLING) != 0 else _F0      # no unit's order has this kind (rawframe)
         released = (flags & (DAMAGED | IDLE)) != 0 or (has_target and not alive)
         locked[i] = fresh and not released
         out[i, o_at + 22] = _F1 if locked[i] else _F0
@@ -483,7 +485,7 @@ def region_block(units, rows, features, tf, label, cell, ally, out):
             out[k, 33] = np.float32(np.log1p(metal[k]) / 10.0)
     if not len(units):
         return
-    sums = np.zeros((6, r), np.float64)     # value of friends, of foes in sight, on radar; DPS of friends, of foes in sight; memories
+    sums = np.zeros((5, r), np.float64)     # value of friends, of foes in sight, on radar; DPS of friends, of foes in sight
     for i in range(len(units)):
         u = units[i]
         row = rows[i]
@@ -502,14 +504,12 @@ def region_block(units, rows, features, tf, label, cell, ally, out):
             sums[4, at] += np.float64(tf[row, T_DPS_GROUND])
         elif know == KNOW_RADAR:
             sums[2, at] += value
-        elif know == KNOW_MEMORY:
-            sums[5, at] += 1.0
     for k in range(r):
         for j in range(3):
             out[k, 27 + j] = np.float32(np.log1p(sums[j, k]) / 10.0)
         out[k, 30] = np.float32(np.log1p(sums[3, k]) / 8.0)
         out[k, 31] = np.float32(np.log1p(sums[4, k]) / 8.0)
-        out[k, 32] = np.float32(np.log1p(sums[5, k]) / 3.0)
+        out[k, 32] = _F0        # the remembered structures there, till 2026-11-18: none is told to the nets now (select)
 
 
 @njit(cache=True)
@@ -668,6 +668,7 @@ def masks(units, rows, region, targets, foes, beacons, features, locked, c, tf, 
             makes = makes or ptr_produce[i, k]
         kind[i, PRODUCE] = free and tb[me, B_PRODUCES] and makes
         kind[i, BUILD] = free and tb[me, B_BUILDS]          # there's always a place: beside itself
+        kind[i, AREA_MEX] = free and tb[me, B_AREA_MEX]     # the same places; whether a free spot is in reach of one isn't asked
         kind[i, ASSIST] = free and any3
         kind[i, RECLAIM] = free and tb[me, B_CONSTRUCTOR] and features > 0      # any feature token: it walks there
         for k in range(KIND_COUNT):

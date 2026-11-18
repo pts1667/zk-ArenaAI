@@ -133,7 +133,7 @@ def test_the_rewards_terms_are_zero_sum_and_the_economy_a_discounted_average_who
     the income balance a step and its whole level at the end; the result pays the win and the speed term.  The leads are
     paid as the economy is, of what each team has: 6 extractors and one half built, worth a tenth of one, against 2; one
     idle raider against none, a penalty; a constructor and one half built against 6, of which one a team counts in the
-    first 2 minutes, 2 in the next 2 and 5 from 8."""
+    first 2 minutes, 2 in the next 2 and 5 from 8; and 42 metal a second put into units, of which 30 count, against 10."""
     env = _env_with_values(16000.0, 6000.0, units=8)
     env.speed_weight, env.count_leads = 0.1, True
     held = env.batch.step
@@ -147,10 +147,14 @@ def test_the_rewards_terms_are_zero_sum_and_the_economy_a_discounted_average_who
         for i, (name, flags, built) in zip(own, units):
             view["def_id"][i], view["flags"][i], view["build_frac"][i] = def_of[name], flags, built
 
+    spent = np.zeros(2)
+
     def step(*args, **kwargs):
         held(*args, **kwargs)
         env.batch.globs[0, :2, rf.G["metal_income"]] = (15.0, 5.0)
         env.batch.stats[0, :2, se.EXTRACTORS_STAT] = (6.0, 2.0)
+        spent[:] += np.array((42.0, 10.0)) * env.seconds_a_step
+        env.batch.stats[0, :2, se.SPENT_STAT] = spent
         put(0, [("staticmex", rf.BEING_BUILT, 0.5), ("cloakraid", rf.IDLE, 1.0), ("cloakraid", 0, 1.0), ("cloakraid", rf.BEING_BUILT | rf.IDLE, 0.9),
                 ("cloakcon", rf.IDLE, 1.0), ("cloakcon", rf.BEING_BUILT, 0.5)])
         put(1, [("cloakcon", 0, 1.0)] * 6)
@@ -160,7 +164,8 @@ def test_the_rewards_terms_are_zero_sum_and_the_economy_a_discounted_average_who
     part = se.BUILD_RAMP * 0.5
 
     def leads(most: float) -> np.ndarray:        # with `most` constructors a team counting
-        return np.array([(6.0 + part - 2.0) / se.EXTRACTOR_LEAD, -1.0 / se.IDLE_LEAD, (min(1.0 + part, most) - min(6.0, most)) / se.CONSTRUCTORS])
+        return np.array([(6.0 + part - 2.0) / se.EXTRACTOR_LEAD, -1.0 / se.IDLE_LEAD, (min(1.0 + part, most) - min(6.0, most)) / se.CONSTRUCTORS,
+                         (se.PRODUCTION_LEAD - 10.0) / se.PRODUCTION_LEAD])
     at = [names.index(name) for name in se.LEAD_TERMS]
     assert gamma == pytest.approx(math.exp(-0.5 / se.TERM_HORIZONS["economy"]))     # a decision is 15 frames
     for _ in range(se.EARLY_END_DECISIONS):
@@ -839,3 +844,81 @@ def test_a_chicken_game_is_lost_when_its_players_are_out_and_drawn_at_the_time_l
         env.step(0.0)
     assert env.outcome[0, :3].tolist() == ([-1.0, -1.0, 1.0] if out else [0.0, 0.0, 0.0])
     assert env.decisions[0] == (1 if out else 6) and env.ended[0]["how"] == ("eliminated" if out else "limit")
+
+
+def test_an_area_mex_is_built_a_spot_at_a_time_from_the_nearest_to_the_unit_and_ends_with_its_spots_or_at_another_order():
+    """rf.AREA_MEX, from the choices to the sim: a commander told one round itself is legal for it and for nothing that can't
+    build an extractor; decoded, it's an order with the place and the radius; the env sends the unit to the free spot nearest
+    it, then on, till every free spot in the radius has an extractor and none outside it; and a move order ends one."""
+    from zkbot.policy import actions, groups as gr
+
+    env = se.SimEnv(1, 5, ["mirror"], threads=1, decide_every=6)      # the policy on both sides: no one attacks
+    env.policy_economy_share = 1.0
+    env.begin()
+    while not env.seats[0][0].done:
+        env.step(0.0)
+        env.finished_seats()
+    mex = next(u["def_id"] for u in se.catalog().units if u["name"] == "staticmex")
+
+    def extractors() -> list[tuple[float, float]]:
+        own = env.frame(0).units
+        own = own[(own["player"] == 0) & (own["def_id"] == mex)]
+        return list(zip(own["x"].tolist(), own["z"].tolist()))
+
+    def area(radius_at_least: float) -> tuple[list, int, np.ndarray, np.ndarray]:
+        """The order for an area mex round the commander of the smallest radius at least this, with its uid, the free spots
+        in it and their distances from the commander."""
+        f, bundle = env.frame(0), env.bundle_of(0)
+        t = fz.featurize(f, bundle, env.table, enabled_kinds=se.KINDS, economy=True)
+        uid = int(f.glob[rf.G["commander_uid"]])
+        i = int(np.flatnonzero(t.uids[:t.controllable] == uid)[0])
+        legal = t.kind_mask[:, rf.AREA_MEX]
+        assert legal[i] and not (legal & ~env.table.area_mex[t.unit_name[:t.controllable]]).any()
+        d = actions.Decision(*(np.full(t.controllable, v, np.int64) for v in (rf.KEEP, -1, -1, -1, -1, -1, 0, -1, -1)))
+        d.kind[i], d.place[i], d.group[i] = rf.AREA_MEX, int(np.flatnonzero(t.place_tokens == i)[0]), gr.bucket(radius_at_least)
+        x, z = actions.world_positions(t, bundle)
+        orders = actions.decode(d, t, bundle, x, z)
+        me = f.units[f.units["uid"] == uid][0]
+        radius = gr.GROUP_RADII[int(d.group[i])]
+        assert orders == [actions.Order(uid, rf.AREA_MEX, float(x[i]), float(z[i]), radius=radius)]
+        free = f.sites[f.sites["status"] == rf.SITE_FREE]
+        away = np.hypot(free["x"] - me["x"], free["z"] - me["z"])
+        return orders, uid, free[away <= radius], away[away <= radius]
+
+    # The opening's extractors hold their spots, and no one else's are known of.
+    status = env.frame(0).sites["status"]
+    assert (status == rf.SITE_OURS).sum() == len(extractors()) >= 2 and set(status.tolist()) == {rf.SITE_FREE, rf.SITE_OURS}
+    free = env.frame(0).sites[status == rf.SITE_FREE]
+    me = env.frame(0).units[env.frame(0).units["uid"] == int(env.frame(0).glob[rf.G["commander_uid"]])][0]
+    second = float(np.sort(np.hypot(free["x"] - me["x"], free["z"] - me["z"]))[1])
+    orders, uid, inside, away = area(second)
+    assert len(inside) >= 2
+    before, new = set(extractors()), []
+    env.give_orders(0, orders)
+    for _ in range(400):
+        env.step(0.0)
+        env.finished_seats()
+        new += [at for at in extractors() if at not in before and at not in new]
+        if 0 not in env.areas:
+            break
+    nearest = inside[int(np.argmin(away))]
+    assert 0 not in env.areas and new[0] == (float(nearest["x"]), float(nearest["z"]))
+    assert sorted(new) == sorted(zip(inside["x"].tolist(), inside["z"].tolist()))
+    # Another, wider, and then a move: the area is gone and the unit is on the move.
+    orders, uid, inside, _ = area(gr.GROUP_RADII[-1])
+    assert len(inside) >= 2
+    # Two plain builds of an extractor told to one point in one decision go to two spots, and neither to the one a unit on an
+    # area mex is on its way to.
+    env.give_orders(0, orders)
+    env.step(0.0)
+    going = env.areas[0][uid][4:]
+    rows = np.array([(-2, zksim.ORDER_BUILD, going[0], going[1], env.extractor_type), (-3, zksim.ORDER_BUILD, going[0], going[1], env.extractor_type)], zksim.ORDER_DTYPE)
+    placed = env._placed(0, rows)
+    assert len({(float(r["x"]), float(r["z"])) for r in placed} | {tuple(going)}) == 3
+    env.give_orders(0, orders)
+    env.step(0.0)
+    assert list(env.areas[0]) == [uid]
+    env.give_orders(0, [actions.Order(uid, rf.MOVE, float(me["x"]), float(me["z"]))])
+    env.step(0.0)
+    told = env.frame(0).units
+    assert 0 not in env.areas and told["ord_kind"][told["uid"] == uid][0] == rf.MOVE

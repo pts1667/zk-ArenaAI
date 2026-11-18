@@ -320,6 +320,9 @@ def test_in_sim_games_the_economy_grows_and_its_orders_are_not_the_scripts():
         own = f.units[f.units["player"] == seat % 2]
         rows = games.table.rows(own["def_id"])
         extractors.append(int(games.eco_data.extractor[rows].sum()))
+        # One extractor a spot: a spot a constructor is walking to isn't the next idle one's too.
+        on = own[games.eco_data.extractor[rows]]
+        assert len(set(zip(on["x"].tolist(), on["z"].tolist()))) == len(on) <= int(np.isin(f.sites["status"], (rf.SITE_OURS, rf.SITE_BUILDING)).sum())
         lights.append(int((rows == games.table.names.index("turretlaser")).sum()))
         builders.append(int((games.table.builder[rows] & games.table.mobile[rows] & ~games.eco_data.commander[rows]).sum()))
     assert np.median(extractors) > 6        # more than the opening takes

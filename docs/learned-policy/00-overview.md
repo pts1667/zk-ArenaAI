@@ -52,7 +52,7 @@ free-for-alls of up to 8 and chicken defense, each on the maps that hold it (01-
 | Topic | Decision |
 |---|---|
 | Timing | Engine 30 frames a second.  The sim ticks every 5 frames, and a slot is 3 ticks (15 frames, 0.5 s).  The actor decides every 6 slots (3 s), when the army script looks; the sim still steps every slot (`--fine-sim`), as the data was recorded |
-| What the actor sees | What a player sees: its own units, enemies in sight, radar blips and remembered structures.  The critic sees everything, in training only |
+| What the actor sees | What a player sees now: its own units, enemies in sight and radar blips.  Not the buildings it saw once and sees no longer (the user, 2026-11-18): what it saw is for its own memory to keep.  The critic sees everything, in training only |
 | Units | One token per unit: type stats from the catalog, a name embedding with 30% dropout to "unknown", and instance state.  No logic keyed on a unit's name |
 | Players | One pool of units.  Each unit carries its player and allyteam, numbered from the viewer: up to 64 players and 8 allyteams.  The sim plays up to 8 teams a game, in alliances |
 | Games | 1v1s, team games of 2 to 4 a side, free-for-alls of 3 to 8, and chicken defense at Zero-K's own timings (the user, 2026-11-10).  Up to 80 minutes.  Against the scripts the policy plays one team, and scripts its allies and enemies; against itself, every team.  RL plays 1v1s alone till iteration 500, then the rest mixed in, to half its games by 2,500 (the user, 2026-11-16); the headline test stays a 1v1 |
