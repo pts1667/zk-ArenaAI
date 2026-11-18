@@ -1,81 +1,49 @@
 # zk-ArenaAI, the learned policy: where it stands
 
-Updated 2026-11-18.  Branch `gru-memory`, committed and pushed 2026-11-17 at about 20:00 with the GRU run still going (the
-user; the RDNN and what's written here since aren't committed).  `main` and `learned-policy-plan` are both at `1d80deb`.  Repo: `C:/Users/Thoma/Documents/sources/zk-ArenaAI`.  This file was
-`HANDOFF.md`.
+Updated 2026-11-18.  Branch `gru-memory`, committed and pushed 2026-11-18 at about 07:30 with the run `rdnn-3` still going
+(the user says when to commit).  `main` and `learned-policy-plan` are both at `1d80deb`.  Repo:
+`C:/Users/Thoma/Documents/sources/zk-ArenaAI`.
 
-The current state only.  How things got here is in git history.  How everything works, with its numbers, is in
-`docs/learned-policy/` (start at `00-overview.md`) and `docs/model.md`.
+The current state only.  How things got here is in git history: this file as it was at `f8a156c` has the long record of
+every run to 2026-11-18 (each change made in the middle of one, each hourly check, the timings).  How everything works,
+with its numbers, is in `docs/learned-policy/` (start at `00-overview.md`) and `docs/model.md`.
 
 ## Goal and status
 
-The goal is a Zero-K AI that beats CircuitAI, pursued as a Pluto-style learned policy.  It's a network trained in a simplified
-simulator (`sim/`): first by cloning scripted players, then DAgger, then PPO.
+The goal is a Zero-K AI that beats CircuitAI, pursued as a Pluto-style learned policy: a network trained in a simplified
+simulator (`sim/`).  First by cloning scripted players, then DAgger, then PPO or GRPO from the clone; since 2026-11-17 by
+RL from nothing, against itself, with a recurrent memory.
 
-* **Nothing plays in the engine yet.**  `bots/zkbot` hosts the policy: it chooses a commander and sends no commands.  The rules
-  bot that was there is at the tag `rules-bot-final` (local only).
-* **In the sim**, every team plays a scripted opening.  The C++ economy script runs their constructors (or the policy does, in a
-  share of PPO games).  The C++ army script, or the policy, runs their fighters, factories, missiles, the Trinity
-  and air transports.
-* **The sim plays four kinds of game** (the user, 2026-11-10): 1v1s, team games of 2 to 4 a side, free-for-alls of 3 to 8,
-  and chicken defense, each on the pool maps that hold it, for up to 80 minutes.  See "Variety" below: it's built and
-  tested, and **nothing has been trained on it yet**.
-* **Shots fly in the sim** (2026-11-12, the user): a shot that takes time is a projectile, aimed ahead of its target as the
-  engine aims it, that hits whoever is where it comes down, and raiders on a fight order jink up to slow shooters as Zero-K's
-  tactical AI has them do.  Before, 13 Ronins beat 18 Glaives every time; now the Glaives win, as in a game.  The sim's
-  movement is also 1.1 to 1.7 times faster, with no game changed by that.  01-simulator.md, "Weapons and damage", "Unit AI"
-  and "Validation".  Everything recorded or trained before it played the old sim.
-* **The rest of Zero-K's tactical AI is in the sim** (2026-11-12, the user), data-driven from the gadget's tables: ward fire
-  at personal shields (38 types), the tables for the sea and for fight-only targets, the parameters single units have, the
-  AI's turn every 20 frames, and the AI being off for nine types until an order turns it on.  A game's Ronin, Glaive and
-  Mace wear a Thug's shield down as the sim's do.  01-simulator.md, "Unit AI", "Validation", and "Known gaps" for what
-  isn't modelled.
-* **No side goes first in the sim** (2026-11-12, the user).  The policy plays team 0, whose units are made first, and in
-  mirror fights that decided who won: of 4 Maces a side, side 1 every time, of 8 Ronins side 0 every time.  The tactical
-  AI's turn went by the handle, a unit moved before the ones made after it had said what they'd do, and a stun stopped a
-  unit made later from firing back that tick.  Now the turn and a unit's first side are drawn by the seed, and a tick's
-  moves, shots and deaths are settled before any takes effect: of 1,600 mirror fights with the starts shaken, the side made
-  first won 642 and the other 689, side 0 672 and side 1 659.  A game's own 96 went 51 to 40 for the side made first.
-  01-simulator.md, "Unit AI" ("No one goes first") and "Validation" ("Mirror fights"); "Known gaps" for Glaives against
-  Glaives, which take twice a game's time.
-* **Zero-K's end of a game, whole** (2026-11-13, the user): an alliance of AIs with no finished builder or factory left is
-  destroyed (`game_over.lua`'s `vitalAlive`; libzksim ABI 25, `rules.json`'s `vital`), so a game of two ends.  Every team
-  in the sim stands for an AI, so it's always on but for the chickens.  The 25x reveal was already in.  The lead rule and
-  the time limit stay, on top, to hurry games.  01-simulator.md, "Teams and alliances" ("No builder left").
-* **The economy script builds defences** (the user, 2026-11-13; libzkscripts ABI 14): LLTs by contested spots from 2:30
-  (before the extractor), Pickets among them against tanks, AA once the enemy flies, and from 30 metal a second a Stinger
-  by an extractor with 700 metal of wrecks near it, or a Gauss where turrets are being lost.  Before, it built none but
-  Cerberus and Lucifer, so no clone built a turret.  01-simulator.md, "The economy script" ("Defences").  Since 2026-11-16 (the
-  user; libzkscripts ABI 17), by a spot or extractor in water it builds an Urchin in place of an LLT or Picket once an enemy
-  has been seen under water, which neither can fire at.
-* **Weapons know water** (the user, 2026-11-16; libzksim ABI 29), as the engine has them: only a water weapon (torpedoes and
-  depth charges, the Dagger's, Gauss's and Ultimatum's guns, the Hunter's, Siren's and submarines') aims at what's under water,
-  or from under water at what's in it; a torpedo only at what's in water; other weapons don't fire from under the surface, and
-  their shots go off at it.  The amphibious units with a float (Buoy, Grizzly, Bulkhead, Scallop, Archer, Angler) rise to the
-  surface to fire, in 1-3 s, by `unit_impulsefloat_toggle.lua`'s arithmetic and the engine's drag in water, and sink when
-  they've nothing to aim at.  Checked against the engine's cases and float traces.  A frame's `y` is now a unit's base, so a
-  ship's or submarine's is below the surface.  On a map with no ground below 0 the sim plays as before.  01-simulator.md,
-  "Water".
-* **Sonar** (the user, 2026-11-16; libzksim ABI 30), as the engine has it with Zero-K's `requireSonarUnderWater`: what's under
-  water is found only by sonar, in sight or on radar, and what's in water is on radar within sonar too.  Each type's sonar
-  radius is in `catalog.json` (392 of 615).  01-simulator.md, "Sensing".
-* **Two damage stats a team** (2026-11-12, the user; libzksim ABI 24, `ZK_STATS` 6): `[4]` the damage its units have done
-  to enemies' units, in metal, and `[5]` what enemies' have done to its own, for a combat-efficiency head.  01-simulator.md,
-  "Teams and alliances".
-* **The metal a team puts into units** (the user, 2026-11-18; libzksim ABI 31, `ZK_STATS` 12): `[11]`, what its builders
-  have paid into units that move (a factory's work and whatever helps it; nothing for a building), for the production
-  lead.  01-simulator.md, "Teams and alliances".
-* **An area mex** (the user, 2026-11-18; libzkpolicy ABI 3): the policy's kind 15, extractors on the free spots within a
-  radius of a place, the nearest to the unit first, carried out by `SimEnv` a BUILD at a time.  02-policy.md, "Kinds".
-* **One extractor a spot, and frames that say who holds it** (the user, 2026-11-18): the economy script sent each idle
-  constructor to the nearest spot with no extractor yet, one already walking there or not, and the opening sent the
-  commander to its planned spots whoever had taken them; the sim builds wherever it's told and pays each extractor.
-  Fixed in both (`Pass::going`, `policy_opening.Seat._taken`).  The scripts' own games, a seat, before and after: 9.6
-  extractors on 8.7 spots at 6 minutes and 23.8 on 16.0 at 12, for 30.6 and 75.6 metal a second; 8.5 on 8.5 and 12.6 on
-  12.6, for 27.0 and 43.8.  **Every test, eval and recording before was against the script with the higher income.**
-  And `SimEnv.frame` gives each site's status (free, ours, the enemy's, being built) as the seat knows it; the sim's
-  records leave every spot free, and so had every RL run's frames.  01-simulator.md, "Known gaps" ("Extractors on one
-  spot").
+* **Nothing plays in the engine yet.**  `bots/zkbot` hosts the policy: it chooses a commander and sends no commands.  The
+  rules bot that was there is at the tag `rules-bot-final` (local only).
+* **No policy beats the scripts.**  From nothing, the best is `gru-1`'s 3 wins of 128 1v1s against the script at iteration
+  1250 (the score 0.184 from 0.148), with 3 extractors at 6 minutes for the script's 11.  From a clone, 8-17% of test
+  games won after DAgger (`full-2` to `full-4`) with about half the script's extractors at 6 minutes, and no RL stage
+  since `full-1`'s moved that beyond noise.  "Earlier runs" below.
+* **In the sim** every team plays a scripted opening.  The C++ economy script runs its constructors, or the policy does;
+  the C++ army script, or the policy, runs its fighters, factories, missiles, the Trinity and air transports.  Four
+  kinds of game: 1v1s, team games of 2 to 4 a side, free-for-alls of 3 to 8, and chicken defense, each on the pool maps
+  that hold it (404 maps, 31 held out), for up to 80 minutes.
+* **What the sim models** is in 01-simulator.md, and since the first runs: shots as projectiles aimed ahead and the whole
+  of Zero-K's tactical AI ("Weapons and damage", "Unit AI"); no side going first ("Unit AI", "Validation"); Zero-K's end
+  of a game, an alliance with no builder or factory left ("Teams and alliances"); plates and idle caretakers, and an
+  economy script that builds them, a second factory at 40 metal a second and defences ("Economy", "The economy
+  script"); water weapons, floats and sonar ("Water", "Sensing"); air transports ("Transports"); chicken defense; 12
+  stats a team ("Teams and alliances").  The libraries: libzksim ABI 31, libzkscripts 17, libzkrecord 2, libzkpolicy 4.
+* **A test compares only with tests on the same sim and script.**  The sim changed on 2026-11-12 (projectiles, the
+  tactical AI, no side first), 2026-11-13 (the end of a game, the script's defences) and 2026-11-16 (water, sonar).  And
+  on 2026-11-18 the script and the opening stopped standing several extractors on one spot, each of which the sim pays:
+  the scripts' own games went from 9.6 extractors on 8.7 spots at 6 minutes and 23.8 on 16.0 at 12, for 30.6 and 75.6
+  metal a second, to 8.5 on 8.5 and 12.6 on 12.6, for 27.0 and 43.8.  So every test, eval and recording before
+  `rdnn-1`'s iteration 364 was against a richer script.  Against the script as it is: `rdnn-1`'s test at 500, and all of
+  `rdnn-2`'s and `rdnn-3`'s.
+* **One extractor a spot, and frames that say who holds it** (the user, 2026-11-18): `Pass::going` in
+  `sim/scripts/src/eco.cpp` and `policy_opening.Seat._taken` (a spot a constructor is walking to is held);
+  `SimEnv.site_status` (each seat's sites its own copy, with who holds each spot from the extractors its frame shows,
+  made once a step); `SimEnv._going` (the policy's extractor keeps off a spot another of the team's units is on its way
+  to).  Not fixed: a recording keeps a game's spots once, so its frames read every spot free; two allies' constructors
+  can still go to one spot; the sim itself builds wherever it's told.  01-simulator.md, "Known gaps" ("Extractors on
+  one spot").
 * **Nothing remembered among the tokens** (the user, 2026-11-18; libzkpolicy ABI 4): a building a seat saw once and no
   longer sees ("unit ghosts": `KNOW_MEMORY` records, standing or dead, till their place is seen empty) was a unit token,
   a count in its region and firepower in its neighbours' sectors.  The featurizer, in Python and in C++, now gives the
@@ -83,45 +51,28 @@ simulator (`sim/`): first by cloning scripted players, then DAgger, then PPO.
   still goes by them, and a privileged critic has them among its hidden units.  `FEATURE_VERSION` stays 10 (no column
   moved), so `full-4`'s frozen encoder, trained with those tokens, still loads and now reads frames without them.
   02-policy.md, "Nothing remembered".
-* **The actor** (`tools/policy_latent.py`, 10.5M parameters) reads a frozen frame encoder's 40 latent tokens a frame, over a
-  window of 4 frames in each of 4 layers.  It decides every 3 s, as actions one after another: a unit, then its order.
-* **One command runs everything** (`tools/policy_pipeline.py`): recording the scripts' games, frames, encoder, 10,000 steps
-  of cloning as `clone-8` with z from the variant, two DAgger rounds, an eval, PPO.  While it runs it serves a dashboard at `http://localhost:8765`: the log as
-  it's written, each stage's results, and replays of test games (4 after each test, 4 every hour of PPO).
-* **`runs/full-1` is its first whole run** (2026-11-10), against the army script, told its variant:
-  * the clone picks a unit the scripts told 91% of the time held out, and wins 5% in play;
-  * DAgger took it to 13% in one round, the second adding nothing.  The stall in expansion stays: at 6 minutes it has about
-    half the script's extractors;
-  * PPO reached 22-31% test wins by iteration 88 (360,552 decisions), with explained variance 0.94, when the user stopped it.
-    It can't be resumed: its encoder and actor don't load since feature version 7.
-* **PPO plays as CUDA graphs** (`policy_graphs.py`), optionally with collector processes (`policy_collectors.py`): 158 and 178
-  decisions a second against 92 eager.  The GPU is now the limit.  A round's action steps stop at the first cut where every
-  decision is done: 6% more with 4 concurrent collectors (186 against 175 from `full-1`'s PPO actor), and no more memory.
-* **The KL to the clone and the cloning loss fade by iteration** (`--kl-fade`, `--clone-fade`, the user, 2026-11-10): from
-  their weights at iteration 0 to 20% at 100 and nothing at 500.  The KL had fallen over the run's decisions instead, and was
-  still 0.48 at iteration 88 of `full-1`, about 0.14 of the loss against the policy gradient's 0.003; the cloning loss, kept
-  at 0.5, was about 1.2.  Resumed, `full-1` goes on at 0.15 for each.  Once the cloning loss is gone the army script stops
-  advising, and it never advises in tests.
-* **The policy loss is SPO's** (Simple Policy Optimization, the user, 2026-11-10) in place of PPO's clip, and dual-clip is
-  gone (`--dual-clip` no longer exists).  The stage and its directory are still called PPO.  Checked by a unit test of the
-  objective, a short CPU run, and `spo-1` below.
-* **`runs/spo-1`** (2026-11-10, the user's): SPO and the fades from `full-1`'s DAgger actor, as `full-1`'s PPO began, with
-  `--collectors 4 --concurrent` (156 decisions a second with tests).  The user stopped it at iteration 140 (573,440 of 4.3M
-  decisions, `ppo/ckpt/it-000140.pt`), with test wins of 12-28% and no trend (03-training.md, "What the earlier runs showed").
-  Its clone, DAgger rounds and evals are links into `full-1` (don't `--redo` them there).  It played the scripts as they were
-  before the economy change below, and like `full-1` it can't be resumed.
-* **The economy script's factories** (the user, 2026-11-10).  It used to spend floating metal on copies of its first factory, 3
-  by minute 10 and up to 6.  Now it builds one plate beside the factory, then caretakers in reach of both.  The second factory
-  comes at 40 metal a second (the user's rule), at a median of 7.6 minutes in the sim, and there's no third.  Two more
-  constructors are made while metal floats.  On 48 games, a side's value at 19 minutes went from 27,800 to 31,700.
-  * The sim now models plates (`unit_factory_plate.lua`: they build only near their factory) and idle caretakers (they help what's
-    being built in their reach, as Zero-K's default widget has them patrol).  01-simulator.md, "Economy" and "The economy script".
-  * Plates are factories in the policy's type table (masks only, and no new feature version for it, since no data held one).
-  * `clone/army-6` was recorded by the old scripts, so a clone of it learns factory copies: new recordings are needed first.
+* **An area mex** (the user, 2026-11-18; the policy's kind 15): extractors on the free spots within a radius of a place,
+  the nearest to the unit first, carried out by `SimEnv` a BUILD at a time; any other order to the unit ends it.
+  02-policy.md, "Kinds".
+* **The actor** (`tools/policy_latent.py`, `policy_train.py --size rdnn`; docs/model.md, "An RDNN in the GRU's place"):
+  `full-4`'s frozen frame encoder (192 wide, 64 latent tokens a frame), then a recurrent divisive normalization network
+  of 1,024 units (arXiv 2608.01947) over each decision's latents and a summary of what the last decision did.  Its state
+  is all a seat keeps, told to the rest as one vector added to each controllable unit and each of the plan's slots.  It
+  decides every 3 s, as actions one after another: a unit, then its order.  `--size gru` is a GRU in its place, told as
+  4 memory tokens.  The actors that cloning trains read a window of 4 frames instead (10.5M parameters; `WIDE` 27.0M).
+* **Training** (`tools/policy_train.py`; 03-training.md, "GRPO from branched games", "Reward", "Playing"): bootstrapped
+  GRPO.  Groups of 8 copies of a game play stretches apart, and each branch is judged against its group on 15 reward
+  terms, a small critic a term (`policy_model.MemoryCritic`) valuing where a branch ended.  Against itself only, the
+  policy running its own economy, each seat told its own draw of the terms' weights (z), two collector processes playing
+  as CUDA graphs and featurizing through libzkpolicy.  The stage and its directory are still called PPO, and the policy
+  loss is SPO's.
+* **The cloning pipeline** (`tools/policy_pipeline.py`: record, frames, encoder, clone, DAgger, eval, PPO, with a
+  dashboard at `http://localhost:8765`) isn't the current path.  It last ran as `full-4`, whose encoder every run since
+  reads.
 
 ## RL from nothing with an RDNN and nothing remembered among the tokens (2026-11-18): `rdnn-3`, a run of 24 hours, going
 
-The user, 2026-11-18 at about 04:35, two hours into `rdnn-2` below: "Currently, the encoder is given units that have been
+The user, 2026-11-18 at about 04:35, two hours into `rdnn-2`: "Currently, the encoder is given units that have been
 seen in the past but aren't actually there ("unit ghosts" to help memorize where units were last seen); in addition, or
 consequently, the policy is making "attack unit" commands against unit ghosts. Since there is now a recurrent memory
 block, the unit ghost feature where units are still "seen" when out of line-of-sight can be removed. Afterwards, restart
@@ -129,946 +80,218 @@ the run from iteration 0."
 
 * **The run**: `results/start-rdnn.sh 24`, started 2026-11-18 05:23:30 from nothing, so `rdnn-3/ppo`,
   `rdnn-3/logs/ppo.out`, `rdnn-3/end` (2026-11-19 05:23), the dashboard at `http://localhost:8765` on it,
-  `rdnn-3/memguard.log` (3 GB), `rdnn-3/pss.log`, `rdnn-3/watchdog.log`.  Every `results/*rdnn*` helper names `rdnn-3`
-  now; `rdnn-2` is kept as it stopped (4.7 GB), `rdnn-1` too (13 GB).  24 hours from its start is mine again.
-* **What it is**: `rdnn-2`, every flag the same (`results/launch-rdnn.sh`'s defaults), with one thing changed in the
-  code: the featurizer gives the nets no building a seat only remembers ("Goal and status", "Nothing remembered among
-  the tokens"; 02-policy.md, "Nothing remembered").
-* **What was removed**: the frame's `KNOW_MEMORY` records (an enemy building once seen, standing or dead, till its place
-  is seen empty) as unit tokens, as a count in each region (column 32, now 0), and so as firepower in the eight sectors
-  of the tokens near them.  `featurize_kernels.select` and `region_block`, `featurize._hidden`, and the same three
-  places of `sim/policy/src/featurize.cpp` (libzkpolicy ABI 4).  The raw frame is as it was: the sim and the live
-  host still keep the records.
-* **Checked** in a tree copy beside `rdnn-2`, then with it stopped (850 tests pass; one changed, one widened, none new):
-  * 600 frames of the scripts' games (the scratch `ghost_check.py`), 199 of them with remembered buildings: 1,247 such
-    tokens before and none after; every other token's row, every mask, pointer, site and global number the same; the
-    regions the same but column 32; in Python and in C++ alike;
-  * the five golden live frames: 156 tokens gone, all of them remembered buildings, the rest in their order, 21 of
-    their rows moved in the sectors' firepower alone (`expected_0` to `_4` rewritten);
-  * `tools/policy_parity.py check` on the tree copy: 49,451 frames, 74,254 featurizations, no mismatch
-    (`/mnt/d/zk-learned/parity/check-noghost.json`).
+  `rdnn-3/memguard.log` (3 GB), `rdnn-3/pss.log`, `rdnn-3/watchdog.log`.  Every `results/*rdnn*` helper names `rdnn-3`.
+  24 hours from its start is mine.
+* **What it is** (`results/launch-rdnn.sh`'s defaults), all of it from iteration 0: the RDNN of 1,024 told as a vector;
+  a whole stretch as one segment (`--segment 128`) and the compiled loop (`--compile-memory`); the schedule from 2e-3
+  (`--lr-start`), the actor at what the KL guard leaves of it, from 0.15 (`--lr-scale-start`), the recurrent weights at
+  all of it in an Adam of their own (`--recurrent-lr 2e-3`), the critics at 3e-4; 96 games in two collectors of 48
+  (`--gpu-share 0.65`, `--featurize-threads 4`); against itself only, the lead rule in every game, the policy's own
+  economy; 15 terms, the last `production_lead`; a seat's own objective (`--z objective --objective-sigma 0.3
+  --explore-share 0.25 --explore-weight 1`); the area mex; 1v1s on the pool's maps till iteration 500, then the other
+  kinds ramped in to half by 2,500; a test of 128 1v1s against the script every 250 iterations and 4 replays an hour.
+  It is `rdnn-2` with one thing changed in the code: the remembered buildings out of what the nets read.
+* **What was removed**: the frame's `KNOW_MEMORY` records as unit tokens, as a count in each region (column 32, now 0),
+  and so as firepower in the eight sectors of the tokens near them.  `featurize_kernels.select` and `region_block`,
+  `featurize._hidden`, and the same three places of `sim/policy/src/featurize.cpp`.  Checked on 600 frames of the
+  scripts' games (1,247 such tokens before, none after, everything else the same but column 32, in Python and C++
+  alike), the five golden frames (156 tokens gone, 21 rows moved in sector firepower alone) and
+  `tools/policy_parity.py check` (49,451 frames, no mismatch: `/mnt/d/zk-learned/parity/check-noghost.json`).
 * **The policy made no attack on a ghost, as far as the masks go**: in those 600 frames no legal pointer of any kind was
-  at a remembered building.  An ATTACK_UNIT is at a foe in sight (a missile's in sight or on radar), and the trainer
-  stops on a choice outside its mask (`masked_out`: 0 in all of `rdnn-2`).  What a replay shows that looks like it: an
-  attack on a building stands when the building goes out of sight, as the engine's does (`World::target_lost`); a
-  unit's record keeps the last order it was told till the next; and the viewer draws that order to wherever its target
-  really is.  None of that changed.  Told to the user.
-* **My choices** (the user's words are above):
-  * **the featurizer, not the frame**: the sim's and the host's records stay, so nothing else moved (the scripts read
-    the enemy's own frame; recordings keep `knowledge`);
+  at a remembered building.  Every head is masked, an ATTACK_UNIT is at a foe in sight (a missile's in sight or on
+  radar), and the trainer stops on a choice outside its mask (`masked_out`).  No term penalises an order.  What a
+  replay shows that looks like it: an attack on a building stands when the building goes out of sight, as the engine's
+  does (`World::target_lost`); a unit's record keeps the last order it was told till the next; and the viewer draws
+  that order to wherever its target really is.  None of that changed.  Told to the user.
+* **My choices**:
+  * the featurizer, not the frame: the sim's and the host's records stay (the scripts read the enemy's own frame;
+    recordings keep `knowledge`);
   * **a site's status still remembers**: a spot the enemy was seen to hold reads "enemy" from a remembered extractor
-    till it's seen free (`SimEnv.site_status`).  The policy's extractors are placed by it, and the sim would stand one
-    on a spot held out of sight and pay it.  It's the one input left that says what was seen and isn't now: put to the
-    user;
-  * **a privileged critic has them** among its hidden units, with how long ago each was seen (the frame doesn't say
-    which have died since).  This run's critics read the actor's latents and memory, so nothing of it reaches them;
-  * **`FEATURE_VERSION` stays 10** and `full-4`'s frozen encoder is not trained again: it was trained on frames with
-    those tokens (and gave back each region's count of them), and now reads frames without them, as it read every
-    frame before a first sighting;
-  * **`rdnn-2` ran on to its test at 250** (45 minutes after the user's message, the change being made and checked in
-    a tree copy meanwhile) so that this run has one test to stand beside at the same iteration.
-* **Its test at iteration 0**: 2 wins of 128, the score 0.151 +- 0.008, extractors at 6 minutes 2.1 (the script's 10.4).
-  Against `rdnn-2`'s iteration 0 over the same 128 games: the score +0.006 +- 0.006 (1.1 SE), every measure within
-  1.4 SE.  An actor not yet trained, so nothing to read but that the test is the same.
-* **Reading its tests**: each paired with its own iteration 0 (`paired_tests.py`), and beside `rdnn-2`'s at the same
-  iteration (`compare_tests.py`, both in `rdnn-status.sh`): `rdnn-2` is like for like, and has only 0 and 250.  At 250
-  it scored 0.163 (+0.019 +- 0.004 on its 0), 1 win, extractors at 6 minutes 2.6.  Past 250 the only outside test
-  against this script is `rdnn-1`'s at 500 (0.165, 2 wins, extractors 2.5), a run with five restarts behind it.
-* **The memory** (the user, 03:15, of `rdnn-1`): a small state early isn't a fault.  The checks give its numbers as
-  facts and act on neither.
-* **Its first iterations** (to 16, 05:32): the actor training from iteration 11, the KL an iteration 0.013, 0.046,
-  0.020, 0.024, 0.040, 0.023 with the guard taking the scale from 0.15 to 0.03, where `rdnn-2`'s was 0.026 falling to
-  0.007-0.011 at a scale of 0.10-0.15 (the smoke run before `rdnn-1` went 0.08 to 0.006 as its scale fell to 0.044):
-  to watch, not acted on; the state's mean size 0.33; BUILD 3-4% of actions and the area mex 3-4%; 570-700 decisions
-  a second (`rdnn-2`'s first: 930-1,300, then 770 at 29); the card 6.8 GB.
+    till it's seen free.  The policy's extractors are placed by it, and the sim would stand one on a spot held out of
+    sight and pay it.  It's the one input left that says what was seen and isn't now.  Put to the user, not answered;
+  * a privileged critic has them among its hidden units, with how long ago each was seen.  This run's critics read
+    the actor's latents and memory, so nothing of it reaches them;
+  * `full-4`'s encoder is not trained again: it now reads frames without those tokens, as it read every frame before
+    a first sighting;
+  * `rdnn-2` ran on to its test at 250 so that this run has one to stand beside.
+* **Reading its tests**: each paired with its own iteration 0 (`paired_tests.py`) and beside `rdnn-2`'s at the same
+  iteration (`compare_tests.py`; both in `rdnn-status.sh`).  `rdnn-2` is like for like and has only 0 and 250.  Past
+  250 the only outside test against this script is `rdnn-1`'s at 500 (0.165, 2 wins, extractors 2.5), a run with five
+  restarts behind it.  Learning, as put to the user: wins, or the score up by more than 2 SE on iteration 0's, or two
+  of own value, income, damage dealt and extractors at 6 minutes up by more than 2 SE.
+* **Its tests**:
+  * iteration 0: 2 wins of 128, the score 0.151 +- 0.008, extractors at 6 minutes 2.1 (the script's 10.4); within 1.4
+    SE of `rdnn-2`'s iteration 0 on every measure;
+  * iteration 250 (about 07:20), against its iteration 0: 1 win, the score 0.160 (+0.009 +- 0.007, 1.4 SE), own value at the
+    end 4,374 to 5,681 (+4.8), income over the game +3.0, damage dealt -0.1, extractors at 3 minutes 2.4 to 3.1 (+5.2)
+    and at 6 2.1 to 2.6 (+3.0, the script's 11.0), games 28 s longer.  Learning by the rule (own value, income,
+    extractors).  Against `rdnn-2`'s 250 over the same games: the score -0.003 +- 0.004 (-0.9 SE), income -1.8 SE,
+    extractors at 6 minutes the same, nothing past 2 SE.  So at 250 the remembered buildings make no difference that
+    128 games show.
+* **The memory** (the user, 03:15, of `rdnn-1`: "The fading memory is to be expected early on; most games end early and
+  there's not much to remember"): a small state early isn't a fault.  The checks give its numbers as facts and act on
+  neither.  And (the user, 2026-11-18 00:45): "No need to put recurrent weights under a KL guard".
 * **The checks** (a line or two each):
-  * 05:49, iteration 58 (1.00M decisions): the early KL settled, 0.022 an iteration over 10-19 (the scale cut to
-    0.03) and 0.005-0.009 since, the scale back up to 0.51; 706 decisions a second over the last 50 iterations
-    (810-930 at the last two); the recurrent weights' step 0.008% of their mean, the state's mean size 0.20 (0.32 at
-    10-30); BUILD 2.5-3.5% of actions and the area mex the same; the critics at idle 0.59-0.72, constructors 0.41-0.60,
-    made economy 0.47-0.59, economy 0.28-0.38, extractors 0.26-0.33, the rest still 0 (`production_lead` 0.01); the
-    card 7.7 GB, a collector 0.88 GB, WSL 28 GB available; no error, the watchdog only watching.
-  * 06:49, iteration 198 (3.39M decisions): 643 decisions a second over the last 50 iterations (681 the 50 before);
-    the KL an iteration 0.006 with the scale whole (0.011 at 0.71 the 50 before; 0.020 over 130-139); the recurrent
-    weights' step 0.007% of their mean, the state's mean size 0.051 (largest 0.56); BUILD 3-5% of actions to iteration
-    159, 9% at 160-169 and 15% at 170-199, the area mex 3% and then 5%: the rise at the iteration of `rdnn-2`'s
-    (161), not looked into, BUILD as high as there and the area mex lower; the critics at result 0.52-0.61, economy
-    0.78, the three older leads 0.74-0.86, `production_lead` 0.47-0.54, score 0.56, map 0.2, combat 0.1, experience
-    0 (`rdnn-2` at 170 much the same); the replays at 145 (4 games) with 1.2 extractors at 6 minutes (the script's
-    11.5) and no constructor made; no test since 0 (250 at about 07:15); the card 8.9 GB, a collector 1.22 GB, WSL
-    27 GB available; no error, the watchdog only watching.
-* **No change in the middle of it**: as `rdnn-2`.  The hourly check (cron job `bb15e96e` in the session that started
-  it, at about 49 minutes past) reports, and carries the run on only if it has died; anything else is put to the user.
-* **To watch**: the tests at 250 and on against its own 0 and `rdnn-2`'s 250; the shares of BUILD and of the area mex
-  (`rdnn-2`'s rose at 161-170: below); the replays' extractors; the KL an iteration and the lr scale; the state's size
-  and `memory_step` (with nothing remembered in the frame, the memory is all the actor has of what it saw); the
-  critics; the card; `collect_rate`, `wait_s`.
+  * to iteration 16: the KL an iteration 0.013 to 0.046 with the guard taking the scale from 0.15 to 0.03 (`rdnn-2`'s
+    was 0.026 falling to 0.007-0.011 at a scale of 0.10-0.15); the state's mean size 0.33; 570-700 decisions a second.
+  * 05:49, iteration 58 (1.00M decisions): the KL 0.005-0.009 an iteration since 20, the scale back up to 0.51; 706
+    decisions a second over the last 50 iterations; the recurrent weights' step 0.008% of their mean, the state's mean
+    size 0.20; BUILD 2.5-3.5% of actions and the area mex the same; the critics at idle 0.59-0.72, constructors
+    0.41-0.60, economy 0.28-0.38, extractors 0.26-0.33, the rest 0; the card 7.7 GB, a collector 0.88 GB, WSL 28 GB
+    available; no error.
+  * 06:49, iteration 198 (3.39M decisions): 643 decisions a second over the last 50 iterations; the KL 0.006 with the
+    scale whole (0.020 over 130-139); the recurrent weights' step 0.007%, the state's mean size 0.051; BUILD 3-5% of
+    actions to iteration 159, 9% at 160-169 and 15% at 170-199, the area mex 3% and then 5%: the rise at the iteration
+    of `rdnn-2`'s (161: BUILD 8-21% there, the area mex 4-13%), not looked into; the critics at result 0.52-0.61,
+    economy 0.78, the three older leads 0.74-0.86, `production_lead` 0.47-0.54, score 0.56, map 0.2, combat 0.1,
+    experience 0, much as `rdnn-2`'s at 170; the replays at 145 (4 games) with 1.2 extractors at 6 minutes (the
+    script's 11.5) and no constructor made; the card 8.9 GB, a collector 1.22 GB, WSL 27 GB available; no error, the
+    watchdog only watching.
+* **No change in the middle of it** (mine, from the user's question about `rdnn-1`; this run exists to have none).  The
+  hourly check (cron job `bb15e96e` in the session that started it, at about 49 minutes past) reports, and carries
+  the run on with `results/resume-rdnn.sh` only if it has died and the cause is understood; anything else is put to
+  the user.  A watchdog (`results/rdnn-watchdog.sh`) kills a trainer 25 minutes without a report and carries it on
+  from its last checkpoint, 3 times at most, each said in `rdnn-3/watchdog.log`.  At its end: no resume, the cron job
+  deleted, `touch /mnt/d/zk-learned/runs/rdnn-3/stop-pss`, a summary.
+* **To watch**: the tests at 500 and on; the shares of BUILD and of the area mex; the replays' extractors and
+  constructors; the KL an iteration and the lr scale; the state's size and `memory_step`; the share of other kinds
+  from 500; the card (a collector's share grows with the games' age: `rdnn-1` reached 9.6 GB of 12.3 with games an
+  hour old, and `gru-1` stalled at 11.3); `collect_rate`, `wait_s`.
 
-## RL from nothing with an RDNN, from iteration 0 with everything (2026-11-18): `rdnn-2`, stopped at iteration 251, 2 hours in, for `rdnn-3`
+## Earlier runs
 
-* **How it ended** (the user, 2026-11-18 04:35: "restart the run from iteration 0", with the remembered buildings out
-  of the tokens): stopped by its `stop` file at 05:20, iteration 251, 4.29M decisions, `rdnn-2/ppo/ckpt/it-000251.pt`;
-  its watchdog, memory log, guard and dashboard with it.  No restart in its two hours, no error.
-  * **Its test at 250** (05:19), against its iteration 0 over the same 128 games: 1 win again, the score 0.145 to
-    0.163 (+0.019 +- 0.004, 4.9 SE), own value at the end 4,285 to 5,942 (+6.3), income over the game +3.8, damage
-    dealt +1.7, extractors at 3 minutes 2.3 to 3.0 (+4.9) and at 6 2.1 to 2.6 (+3.4, the script's 10.8), games 80 s
-    longer.  So it learnt by the rule, in 250 iterations.  Against `rdnn-1`'s test at 250 (which was against the
-    richer script, so not like for like): the score +0.005 +- 0.004, income +2.2 SE, the rest within 1.9.
-  * At the end (249-250): the KL an iteration 0.002-0.004 with the rate whole, 430-500 decisions a second, the state's
-    mean size 0.03-0.04 and the recurrent weights' step 0.01% of their mean, a collector 1.44 GB of its 2.0.
-  * To carry it on, the helpers would have to name `rdnn-2` again (`results/*rdnn*`), with no other trainer running,
-    and the featurizer as it was before `rdnn-3`'s change (not committed apart: the three places named above, in
-    Python and C++): its actor was trained with the remembered buildings as tokens.
+Each is under `/mnt/d/zk-learned/runs/` unless said.  Since `full-4` a test is 128 1v1s against the script, the same games
+each time, read as each game's change from iteration 0's (`results/paired_tests.py`); the score is `eval_fight_score`.
+Read them with "A test compares only with tests on the same sim and script" above.
 
-The user, 2026-11-18 at about 02:40, of `rdnn-1` below: "Could the bad/lackluster results be the results of applying our
-recent changes in the middle of the run? Could a fresh run at iteration 0 give better results?"  My answer: partly (the
-area mex added to a policy 324 iterations old and then chosen less and less, the site statuses its weights had never
-seen, five restarts, and tests no longer comparable), and not the slow learning or the memory's fading.  Then, at 03:15:
-"The fading memory is to be expected early on; most games end early and there's not much to remember. OK, restart the
-run with the recurrent learning rate set back to 2e-3."
+* **`rdnn-2`** (2026-11-18, 03:18 to 05:20; 4.7 GB): `rdnn-3` with the remembered buildings as tokens.  The first run with
+  everything from iteration 0 and nothing changed in the middle (the user, of `rdnn-1`: "Could the bad/lackluster
+  results be the results of applying our recent changes in the middle of the run? Could a fresh run at iteration 0
+  give better results?").  Stopped at iteration 251 (4.29M decisions, `ppo/ckpt/it-000251.pt`) for `rdnn-3`.
+  * Its test at 250 against its iteration 0: 1 win each, the score 0.145 to 0.163 (+0.019 +- 0.004, 4.9 SE), own value
+    at the end 4,285 to 5,942 (+6.3), income +3.8, damage dealt +1.7, extractors at 3 minutes 2.3 to 3.0 (+4.9) and at
+    6 2.1 to 2.6 (+3.4, the script's 10.8), games 80 s longer.
+  * At 170: the KL 0.011 an iteration at 0.75 of the rate, the state's mean size 0.059, 723 decisions a second, the
+    card 8.3 GB.  At the end: the KL 0.002-0.004, 430-500 decisions a second, the state 0.03-0.04.
+  * To carry it on: the helpers naming `rdnn-2` again, no other trainer running, and the featurizer as it was before
+    `rdnn-3`'s change (the three places above; never committed apart).
+* **`rdnn-1`** (2026-11-17 21:43 to 2026-11-18 03:18; 13 GB).  The user: "Instead of a GRU, consider implementing the
+  Recurrent Divisive Normalization Network (RDNN)", "a new 24-hour run with a higher learning rate (around 2e-3) and
+  RDNN enabled", "pass in memory input as a vector".  `gru-1` as that ended, with the memory, the vector and the rates
+  changed at once, then changed five times in the middle, each a restart with every game anew: at 146 whole stretches,
+  the compiled loop and the recurrent weights at 5e-3; at 160 faster collection; at 219 featurizing through
+  libzkpolicy; at 324 `production_lead` and the area mex; at 364 one extractor a spot and the sites' status.  Stopped
+  at 526 (9.01M decisions).
+  * Its tests: the score 0.149, 0.159, 0.165 at 0, 250, 500, with 1, 1 and 2 wins.  At 500 against 0: +0.016 +- 0.006
+    (2.4 SE), extractors at 6 minutes 2.0 to 2.5 (the script's 11.1).  About where `gru-1` was by 750.
+  * **The rates**: at the whole of 2e-3 the KL was 1.9 to 10.6 an iteration and the anchor head's entropy fell from
+    0.85 to 0.03 in two iterations; from 0.15 of it under the guard, 0.08 falling to 0.006.  In the actor's own Adam
+    (eps 1e-5) the recurrent weights stopped moving, their gradient being the weight's times about 1 / units: hence
+    their own Adam with eps 1e-8.
+  * **Bursts of KL** of 0.03-0.07 an iteration came 10 to 14 iterations after each restart and settled in a few.  In
+    one the recurrent weights at 5e-3 moved it, which the guard doesn't slow; the user wants no guard on them (above).
+  * **The memory's state shrank**: its mean size 0.08-0.13 with games of every age, under 0.01 twice (iterations
+    308-346, 418-461), a restart or a new term bringing it back for a while.  The weights
+    (`results/inspect_rdnn.py CHECKPOINTS`, with the run stopped): a rate's gain on itself (J over eta) from 1 to 0.91
+    at 219 and 0.81 at 324, so what a unit holds fades over about 55 decisions unless it's driven.
+  * **The area mex**, added to a policy 324 iterations old, was chosen less and less (0.1% of actions from 380).  From
+    iteration 0 it's as common as BUILD.
+  * **On the paper's own task** (`results/rdnn_check.py`: angle integration as I rebuilt it, 128 units, 1,000 steps,
+    one seed): the RDNN at the paper's settings (5e-3, the gradient whole) reached -3.8 dB and was still improving
+    (the paper's: -15.6 dB after 100 epochs); at 2e-3 with the gradient cut at 16 it learnt nothing (-0.4 dB) where a
+    GRU reached -10.3 dB.  Not separated: the cut or the rate (arms at 5e-3 cut at 16, 2e-3 whole and a cut at 64
+    would say).  The paper has no RL and nothing of this size.
+  * **A segment** ends with its stretch, 20 to 60 decisions: further back needs the memory's inputs kept from the
+    game's start (about a day's work, put to the user, not built).  Compiled, 5 segments of 60 take 24 ms, for 72
+    uncompiled in one pass and 109 a step at a time.
+  * **A collector's time** before the changes at 160 and 219 (py-spy): 57% in its forward passes, 12% featurizing, 6.5%
+    counting the leads, 4% the sim.  Counting the leads at once and sharing a collection by each collector's speed took
+    collecting from 555-713 decisions a second to 760-980 at the same age after a restart, and featurizing through
+    libzkpolicy from 680-870 to 880-1,070: training is now as much the limit.  Not done: a third collector (the card),
+    fusing the forward pass's kernels.
+* **`gru-1`** (2026-11-17 07:53 to 20:54; 28 GB).  The user: an RL-only run with a GRU for memory as Pluto has, the parts
+  the GRU makes needless out, and a small critic for each of the reward's terms.  From nothing, bootstrapped GRPO.
+  Stopped at iteration 1269 (22.32M decisions) for the RDNN.  docs/model.md, "A GRU for memory".
+  * Its tests, all against the richer script: the score 0.148, 0.150, 0.158, 0.167, 0.169 and 0.184 at iterations 0,
+    250, 500, 750, 1000 and 1250, with 0, 0, 0, 1, 1 and 3 wins.  At 1250 against 0 over the 96 games they share:
+    +0.036 +- 0.011 (3.4 SE), own value 4,596 to 6,417 (+6.7), extractors at 6 minutes 2.2 to 2.9 (+3.3, the script's
+    11.6).  It learnt slowly to the end and never built more than 3 extractors by 6 minutes.
+  * Within noise of its start at 250 (the KL an iteration down to 0.0005-0.001).  From 386 a seat's own objective and
+    the five exploratory `made_*` terms (the user: "it's clear this training run isn't improving. Apply the changes
+    sooner then restart the run"); the first test above iteration 0 was at 500.  From 1149 the three leads in
+    `extractors`' place (the user), too late to read.  Every term but the `made_*` is zero-sum over alliances
+    (checked to the bit on 48 script games).
+  * **It stalled just past iteration 1100 with the card full**: 11.3 GB of 12.3, where Windows stops giving a process the
+    card's own memory, a collector holding about 2.5 GB late in a run.  Hence two collectors of 48 games,
+    `--gpu-share 0.65`, and the watchdog.
+  * 1,250 decisions a second on the five training maps, 610-750 on the pool, 470-640 late in the run.  WSL's memory in
+    use rose 1 GB an hour for a few hours, then held at about 18 GB.
+  * **If the policy stops moving** (the user, 10:05): small random variation of the terms' weights and rarely-on
+    exploratory terms (both built, as a seat's own objective), or MARA (arXiv 2510.20817; not built: it needs a KL
+    penalty to a reference policy, which these runs haven't).  My rule then: two tests in a row within noise of the one
+    before with the KL under 0.001, and the policy is made to move more (`--group-step 1024` first).
+  * To carry it on: `results/resume-gru.sh "DATE TIME"`, with no other trainer running.
+* **Self-play from `full-4`'s DAgger actor** (2026-11-16 14:17 to 2026-11-17 06:21; `full-4/ppo`).  The user, after
+  Pluto's README: train against itself, a tenth of the games against the scripts, 1v1s first.  Unbootstrapped GRPO on
+  seven terms, `--self-play 0.9`.  Stopped at iteration 275 (4.80M decisions) as not learning: test wins 10.9%, 10.2%,
+  11.7%, 17.2%, 13.3%, 13.3% at 0 to 250; the last four less iteration 0, the score +0.027 +- 0.017 and extractors at 6
+  minutes +0.55 +- 0.20 (4.8 to 5.6, the script's 9.2-9.5).  119 decisions a second.  Seen and not changed:
+  `adv_abs_max` in the thousands in iterations where no group's copies differ in who won (the clip at 3 bounds it).
+* **`full-4`** (2026-11-14 to 16): a bigger model on `army-8`, the encoder 192 wide with 64 latent tokens and the actor
+  `WIDE` (27.0M).  The clone (held out: kind 0.971, anchor 0.910) and one DAgger round played as `full-3`'s: 9.4% of 64
+  1v1s, extractors at 6 minutes 4.4 for the script's 9.9.  Bootstrapped GRPO with resignation for 120 iterations
+  (`ppo-boot`): the critic learnt (explained variance 0.7-0.8), the policy barely moved, tests 15.6%, 10.9%, 14.8%.
+  Then unbootstrapped on seven terms for 141 (`ppo-script`): it moved and the tests didn't rise.  The gradient checks
+  found noise but for the seven terms mixed (03-training.md, "Signal or noise").  Its frames are deleted, the
+  `manifest.json` kept so that the pipeline, run again, plans no `frames` stage (`full-3`'s too).
+* **`full-3`** (2026-11-13 to 14): recorded `army-8`, the encoder stopped by the user at step 20,600 of 75,000 (levelled
+  off), a clone of 10,000 steps and one DAgger round (10.9% of 64 1v1s), then GRPO with the policy's own economy: tests
+  17.2%, 7.8%, 10.9% at iterations 50, 100, 150 (its last checkpoint is 141).  The memory guard killed it twice.
+* **`grpo-trial`** (2026-11-13, at feature version 9): from `full-2`'s DAgger actor (9.4% of 64 1v1s), GRPO won 14.1%,
+  15.6% and 14.1% at iterations 25, 50 and 75, and PPO 6.2%, 7.8% and 20.3%.  GRPO's orders swung from FIGHT to MOVE at
+  72-79, since fixed (03-training.md, "GRPO from branched games").
+* **`full-2`** (2026-11-11 to 13, at feature version 9, so nothing of it loads): the first whole run on every kind of
+  game.  The clone won 9% of 64 mixed games and 17% after a DAgger round; PPO then got worse over 971 iterations
+  (tests from 11% to 0-5%) as the KL to the clone and the cloning loss faded.  The user judged that PPO isn't working.
+* **`full-1`, `spo-1` and before** (no longer on disk): 03-training.md, "What the earlier runs showed".
 
-* **The run**: `results/start-rdnn.sh 24`, started 2026-11-18 03:18:40 from nothing, so `rdnn-2/ppo`,
-  `rdnn-2/logs/ppo.out`, `rdnn-2/end` (2026-11-19 03:18), the dashboard at `http://localhost:8765` on it,
-  `rdnn-2/memguard.log` (3 GB), `rdnn-2/pss.log`, `rdnn-2/watchdog.log`.  Every `results/*rdnn*` helper named `rdnn-2`
-  while it ran (`rdnn-status.sh`, `rdnn_terms.py`, `stop-rdnn.sh`, `resume-rdnn.sh`, `kill-rdnn.sh`, the watchdog and
-  the memory log); `rdnn-1` is kept as it stopped (13 GB).
-* **What it is**: `rdnn-1` as that stood at its end, all of it from iteration 0 (`results/launch-rdnn.sh`'s defaults):
-  the RDNN of 1,024 told as a vector; whole stretches as segments (`--segment 128`) and the compiled loop; the actor at
-  what the KL guard leaves of 2e-3, from 0.15 of it; the faster collection and featurizing through libzkpolicy; 15
-  terms with `production_lead`; the area mex; one extractor a spot in the scripts and the opening; the sites' status in
-  the frames.  One thing changed: the recurrent weights at the schedule's 2e-3, where they were at 5e-3 from
-  `rdnn-1`'s iteration 146 (`--recurrent-lr 2e-3`, which is `RECURRENT_LR=0`: either way they follow the schedule, in
-  their own Adam).
-* **24 hours from its start** is mine: the user didn't say whether that or `rdnn-1`'s end at 21:43.
-* **Its test at iteration 0**: 1 win of 128, the score 0.145 +- 0.006, extractors at 6 minutes 2.1 (the script's 10.4).
-  Against `rdnn-1`'s iteration 0 over the same 128 games, which was against the script that stood several extractors
-  on a spot: the score -0.005 +- 0.003 (-1.4 SE), own value -1.2 SE, extractors at 6 minutes the same.  So over a
-  test's 9 minutes the script as it is now is no easier for an untrained actor: what it lost is its income later (0.9
-  of it at 6 minutes, 0.6 at 12).
-* **Reading its tests**: all of them are against the same script, so each is paired with its own iteration 0
-  (`paired_tests.py` in `rdnn-status.sh`).  Of `rdnn-1`'s only the test at 500 is like for like (the score 0.165, 2 wins
-  of 128, extractors at 6 minutes 2.5; `compare_tests.py` in the status sets the two runs side by side and says so);
-  the GRU run's were all against the old script.
-* **The memory** (the user's reading, above): a small state early isn't a fault, games being short and there being
-  little to remember.  So the checks give its numbers (the state's mean size, `memory_step`) as facts and act on
-  neither.  In `rdnn-1` the state's mean size went under 0.01 twice (iterations 308-346 and 418-461) and was 0.03 again
-  at 505-524.
-* **Its first iterations**: 930-1,300 decisions a second; the area mex 2.3-3.6% of actions, as many as BUILD
-  (2.3-3.7%), where `rdnn-1`'s had fallen to 0.1%; the state's mean size 0.28-0.33; the actor waiting 10 iterations for
-  the critics.
-* **The checks** (a line or two each):
-  * 03:32, iteration 29 (0.49M decisions): the actor training from iteration 11, the KL an iteration 0.026 falling to
-    0.007-0.011 with the guard at 0.10-0.15 of 2e-3; the recurrent weights' step 0.013% of their mean, the state's
-    mean size 0.32; the area mex 2.6% of actions beside BUILD's 2.9%; only `idle_lead`'s critic off the ground (0.41);
-    770 decisions a second; the card 7.1 GB, a collector 0.76 GB, WSL 28 GB available; no error.
-  * 04:32, iteration 170 (2.91M decisions): 723 decisions a second over the last 50 iterations (789 the 50 before);
-    the KL an iteration 0.011 with the guard's scale up to 0.75 (0.53 the 50 before); the recurrent weights' step
-    0.006% of their mean, the state's mean size 0.059 (largest 0.69); BUILD 3-4% of actions to iteration 119, 5% at
-    120-159 and 8-21% at 161-170, the area mex 2-3% and then 4-13% over the same last ten; the critics at result
-    0.63, economy 0.78, the three older leads 0.81-0.87, `production_lead` 0.49, score 0.49, combat and experience
-    still 0; the replays at 156 with 2.8 extractors at 6 minutes (the script's 7.8); no test since 0 (250 at about
-    05:10); the card 8.3 GB, a collector 1.13 GB, WSL 27 GB available; no error, the watchdog only watching.
-* **No change in the middle of it** (mine, from the user's question): this run existed to have none, and had none.  Its
-  hourly check was a cron job in the session that started it, ended with it.
-* **The card** (for the next run): a collector's share grows with the games' age: `rdnn-1` reached 9.6 GB of 12.3 with
-  games an hour old, and `gru-1` stalled at 11.3.  This run's was at 8.3 GB at 04:32.
+## What loads
 
-## RL from nothing with an RDNN for memory, `rdnn-1` (2026-11-17): stopped at iteration 526, 5.5 hours in, for `rdnn-2`
+* **`FEATURE_VERSION` is 10** since 2026-11-13.  Trained at 10: `full-3`'s and `full-4`'s encoders and actors, `gru-1`'s
+  and the `rdnn` runs' actors (on `full-4`'s encoder).  All but `rdnn-3`'s were trained with the remembered buildings as
+  tokens, which the featurizer no longer makes.  Nothing trained before 10 loads.
+* **`policy_latent.ENCODER` still names `encoder-big`**, which doesn't load: every tool that loads an actor needs
+  `--encoder` (`policy_train.py`: `--latent-encoder`), `/mnt/d/zk-learned/runs/full-4/encoder/vae-last.pt`.
+* **Recorded games** are raw and still read: `clone/army-8` (data version 7, every kind of game).  But they're by the
+  scripts before one extractor a spot, and their frames read every spot free.
+* A run carried on with other reward terms keeps the critics of those it had, by name; the new ones start from nothing
+  while the actor waits 10 iterations.
 
-* **How it ended** (the user, 2026-11-18 03:15: "restart the run"): stopped by its `stop` file at 03:18, iteration 526,
-  9.01M decisions, `rdnn-1/ppo/ckpt/it-000526.pt`; its watchdog, memory log, guard and dashboard with it.  Five
-  restarts in those hours (146, 160, 219, 324, 364), each with every game anew.
-  * **Its tests**: the score 0.149, 0.159 and 0.165 at iterations 0, 250 and 500, with 1, 1 and 2 wins of 128; the one at
-    500 against the script with one extractor a spot.  At 500 against its iteration 0: the score +0.016 +- 0.006
-    (2.4 SE), own value at the end 4,544 to 5,942 (+5.1), income over the game +5.1, extractors at 3 minutes 2.3 to
-    2.9 (+3.7) and at 6 2.0 to 2.5 (+2.6, the script's 11.1), damage dealt +1.2, games 60 s longer.  So it learnt,
-    about as the GRU run had by 750, and built no more extractors than at 250.
-  * At the end: the KL an iteration 0.004, the rate whole, 493 decisions a second over the last 50 iterations
-    (collecting 575, training 523; a minibatch 176 decisions), the state's mean size 0.031 and the recurrent weights'
-    step 0.06% of their mean over 505-524, a collector 1.49 GB of its 2.0.
-  * To carry it on, the helpers would have to name `rdnn-1` again (`results/*rdnn*`), with no other trainer running.
+## My choices the user hasn't confirmed
 
-The user, the evening of 2026-11-17, after arXiv 2608.01947 ("Divisive Normalization Shapes Low-Rank Slow Manifolds for
-Continuous Working Memory"): at 20:15 "Instead of a GRU, consider implementing the Recurrent Divisive Normalization
-Network (RDNN)"; at 20:50 "Stop the run and start a new 24-hour run with a higher learning rate (around 2e-3) and RDNN
-enabled. Check on the run once every hour or so"; at 21:10 "pass in memory input as a vector. Add it and restart".
-docs/model.md, "An RDNN in the GRU's place", has the cell and how it's told to the rest.
+Each is a constant or a flag, easy to change.
 
-* **The run**: `results/start-rdnn.sh` (`results/launch-rdnn.sh` with `HOURS=24 EVAL_EVERY=250`), started 2026-11-17
-  21:43 from nothing, so `rdnn-1/ppo`, `rdnn-1/logs/ppo.out`, `rdnn-1/end` (when it ends: 2026-11-18 21:43), the
-  dashboard at `http://localhost:8765` on it now, `rdnn-1/memguard.log` (3 GB), `rdnn-1/pss.log`, `rdnn-1/watchdog.log`.
-  The GRU run below as it stood at its end (the 14 terms with the three leads, a seat's own objective, two collectors
-  of 48 games, the other kinds from iteration 500, bootstrapped GRPO in groups of 8, the actor waiting 10 iterations
-  for the critics), with three things changed, so a difference from that run can't be put down to any one of them:
-  * **The memory**: `--size rdnn`, `policy_latent.RDNNCell`, 1,024 units (a state of 2,048: rates, then pools).
-  * **Told as a vector** (`Size.memory_as`): one vector off the rates, added to each controllable unit as it reads the
-    frame and to each of the plan's slots, where the GRU run's memory was 4 tokens among the frame's 68.
-  * **The rate**: the schedule starts at 2e-3 (`--lr-start`; it was 3e-4).  The RDNN's recurrent weights train at all
-    of it in an Adam of their own with eps 1e-8 (`Learner.recurrent`).  The rest of the actor starts at 0.15 of it
-    (`--lr-scale-start`, new: 3e-4) and the KL guard moves it from there, up to the whole.  The critics stay at 3e-4.
-* **Changed at iteration 146, 23:36** (the user, 23:00: "Ok, try --segment 128. Compile the loop if you think it's
-  faster and increase the learning rate for RDNN to 5e-3. Consider increasing the learning rate for other parameters as
-  well"; then "I'd keep the loop compiled" and "Consider using dynamic shapes with torch.compile").  All three are
-  `results/launch-rdnn.sh`'s defaults now (`SEGMENT=16 RECURRENT_LR=0 COMPILE=` for the run as it started):
-  * **`--segment 128`**: a stretch is one segment, 20 to 60 decisions, where it was cut every 16.  A segment ends with
-    its stretch, so that's all the flag can give; further back needs the memory's inputs kept from the game's start
-    (about a day's work, put to the user, not built).
-  * **`--recurrent-lr 5e-3`** (new flag): the RDNN's J and W, in their Adam.  A step moves them 0.02-0.03% of their
-    mean now, where it was 0.006-0.009% at 2e-3 and segments of 16.
-  * **`--compile-memory`** (new flag; docs/model.md, "The loop over a segment's steps"): 16 steps compiled, the number
-    of segments a shape left open.  5 segments of 60: 109 ms a step at a time, 72 uncompiled in one pass, 24 compiled.
-    Training with whole stretches compiled is as fast as segments of 16 were (900-1,280 decisions a second in the
-    checks, both ways).
-  * **The other rates: unchanged.**  The actor's is what the KL guard leaves of 2e-3, not the ceiling: 0.34-0.51 of it
-    before the stop.  The critics learnt at 3e-4.  My call, told to the user.
-  * **Checked first** (`results/check-rdnn.sh NAME N`: a copy of the last checkpoint carried on N iterations by the
-    launch file as it is; `rdnn-1/check-seg128`, `check-seg16`, scratch): 5 iterations with the changes and 5 with the
-    old settings from the same checkpoint.  Both had a KL of 0.0002 rising to 0.0016 an iteration with the guard up to
-    the whole of 2e-3 by the fourth: that's the restart, every game back at minute 0 (0.7 actions a decision at
-    first, 2 by the fifth iteration), not the changes.
-  * **Since**: by iteration 158 the KL was 0.010-0.016 an iteration at the whole of 2e-3 (the guard holds between 0.005
-    and 0.02), the state's mean size 0.08-0.11, the anchor head's entropy 3.3-3.4, the learner at 3.0 GB.
-* **Changed at iteration 160, 23:47, to collect faster** (the user, 23:20: "Collection was ~1000-1500 decisions/sec in
-  the GRU run. Are you running with collector threads?", "consider increasing the collection rate").
-  * **Where it stood**: the collectors are two processes of 48 games, as the GRU run ended, each one Python thread and
-    8 of the sim's.  The GRU run's 1,000-1,500 was on the five training maps; on the pool it collected 640-1,040 a
-    second at this age and this run 720-890.  The learner waited on them 4-14 s an iteration (`wait_s`).
-  * **A collector's time** (py-spy on a check run, `rdnn-1/prof-check-prof`, `results/profile-run.sh` as root, the
-    scratch `spy_tree.py`): 57% in its forward passes, 28% of it waiting on the card at the first sync, 17% capturing
-    graphs (a restart's cost); 12% featurizing its 96 frames a round one at a time (`DataWorkers(0)`); 6.5% counting
-    the leads (`SimEnv._counted`, a loop in Python over every team after every step of the sim); 4% the sim; 6% the
-    pipe.  And the collector that ended first waited, sending, till the slowest was read: their times were 20-30%
-    apart after the restart, 10% before it.
-  * **Done** (`results/edit_collect.py`, made and checked in a tree copy, `~/zksim/agent-collect`, with no torch
-    beside the run): `_counted` reads every team's records at once (0.25 ms a step of 48 games for 2.2; the same counts
-    to 7e-8 on 1v1s, team and chicken games); and a collection is shared by each collector's speed of late
-    (`policy_collectors.shares`), none under half an even share.  846 tests pass.
-  * **Since** (iterations 166-185): the collectors end within 1-6% of each other in most iterations, the learner waits
-    3-8 s, collecting makes 760-980 decisions a second and the run 660-920 overall, where the same ages after the
-    restart before made 555-713 and 505-675.  Not all of it the changes: these games' decisions have fewer actions
-    (1.2-1.7 for 1.9-2.6), so fewer steps a pass.
-  * **A burst of KL after the restart**: with every game young the KL was 0.001-0.006 and the guard went to the whole
-    of 2e-3; at iterations 174 and 175 it was 0.028 and 0.057, the guard took the scale to 0.44, and by 177 it was
-    0.005-0.013 again.  The state's mean size is 0.04-0.07 since, where it was 0.08-0.11 before this restart: to
-    watch, under about 0.02 would be the memory going to nothing.
-  * **Not done, and why**: a third collector (what the GRU run had till the card filled at 11.3 GB: a collector holds
-    2.5 GB of it late in a run); fusing the forward pass's kernels.  Featurizing through libzkpolicy came next (below).
-* **Changed at iteration 219, 00:19 on 2026-11-18: frames featurized through libzkpolicy** (the user, 00:05: "OK,
-  proceed with featurizing through the C++ library").  `--featurize-threads 4` (new flag, `Config.featurize_threads`,
-  the launch file's default; `FEATURIZE_THREADS=0` for featurize's Python): `policy_train._worker_chunk` calls
-  `zkpolicy.featurize_many`, on 4 threads in each collector and one in each of the learner's data workers.
-  `results/edit_featurize.py` is the edit.
-  * **Checked first**, in a tree copy with no torch beside the run (`~/zksim/agent-featurize`, the scratch
-    `featurize_check.py`): 601 frames of the sim as it is now (1v1s to 45 minutes, team and chicken games, up to 450
-    units), featurized as training does, every field the same to the bit; a collector's round of 96 frames in 36 ms in
-    numba, 19 in C++ on one thread, 10 on 4 and 8 on 8; a bundle in the library copies none of its arrays.  The library
-    in `~/zksim/build` is of 2026-11-13, and featurize's Python hasn't changed since.
-  * **Since** (iterations 221-226, against 162-167, the same ages after the restart before): collecting 880-1,070
-    decisions a second for 680-870, the learner's wait 1-4 s an iteration for 3-8.  Training is now as much the limit
-    as collecting (760-1,040 a second).  No action masked out, no error.
-  * 847 tests pass (one new: the data workers' frames through C++ against Python).
-* **The test at 250 is above iteration 0** (00:34 on 2026-11-18; 146 iterations with the gradient cut at 16 behind
-  it and 104 with whole stretches).  Against iteration 0's same 128 games: 1 win again, the score 0.149 to 0.159
-  (+0.009 +- 0.004, 2.4 SE), own value at the end 4,544 to 5,589 (+4.0), income over the game +4.2, extractors at 3
-  minutes 2.3 to 3.0 (+4.9) and at 6 2.0 to 2.5 (+3.4, the script's 11.6), damage dealt +1.2, games 38 s longer.
-  Against the GRU run's test at 250 over the 96 games they share: the score +0.004 +- 0.004 (0.9 SE), own value +808
-  (+2.6), income +2.4, extractors at 3 minutes +0.4 (+2.5) and at 6 +0.2 (+1.2).  The GRU run was within noise of its
-  start at 250 and about here at 500; but it had a seat's own objective only from 386 and the leads from 1149, which
-  this run has had throughout, beside the memory, the vector and the rates: no one of them can be credited.
-* **The memory's state, and two bursts of KL: open, put to the user.**
-  * **Twice the KL went far past the guard's bound**, each time 10 to 14 iterations after a restart: 0.028 and 0.057 at
-    iterations 174-175 (the actor's rate cut to 0.44 of 2e-3), and 0.041, 0.059, 0.072, 0.068, 0.026, 0.028 at 229-234
-    (cut to 0.09).  Both settled in a few iterations, to 0.002-0.013, and the rate climbs back.
-  * **In the second the recurrent weights moved it**: their step went from 0.008% of their mean to 0.17-0.24% for two
-    iterations and the state's mean size from 0.028 to 0.144.  They train at 5e-3 in their own Adam, which the guard
-    doesn't slow: it cut the actor's rate four times while the KL stayed at 0.06-0.07.
-  * **The state shrinks after each restart**: 0.108 to 0.057 in 5 iterations after 160, 0.079 to 0.026 after 219,
-    where it was 0.08-0.13 with games of every age.  Part of that is the games' age (a state starts at 0).
-  * **What the weights have become** (`results/inspect_rdnn.py CHECKPOINTS`, with the run stopped), iterations 20,
-    140, 219: J's rows sum to 1.000, 0.998, 0.975; W's to 1.002, 1.018, 1.039; eta 1.000, 1.020, 1.076; the rates'
-    medians 0.10 throughout; the input layer's and the readout's sizes within 2%.  So a rate's gain on itself (J over
-    eta) is 0.91 where it started at 1, the paper's slow manifold: what a unit holds now fades over about 100
-    decisions unless it's driven.  Most of the move is since iteration 146.
-  * **Not changed, and not to be** (the user, 2026-11-18 at about 00:45: "No need to put recurrent weights under a KL
-    guard"): the guard's scale on the recurrent weights' rate too.
-  * **By iteration 324 the state is under the 0.02 I'd named, and the policy has all but stopped moving** (no restart
-    between 219 and 324).  The state's mean size: 0.049 at 248, 0.034 at 266, 0.022 at 278, 0.015 at 296, 0.008-0.010
-    from 308 to 324 (its largest 0.14-0.19).  The recurrent weights' step: 0.03% of their mean at 248, 0.001-0.002%
-    from 308.  The KL an iteration: 0.004 at 248-266, 0.0004-0.0011 from 308, the rate unslowed.  The weights at 260,
-    300 and 324: J's rows 0.932, 0.924, 0.924; W's 1.073, 1.076, 1.076; eta 1.118, 1.136, 1.138; the readout's bias's
-    size 0.87, 0.99, 1.02 (0.50 at 219).  So a rate's gain on itself is 0.81, and by the arithmetic that made 100
-    decisions of 0.91, what a unit holds fades over about 55.  They moved in the burst at 229-234 and have stood
-    since 300.  What I can't say: whether the actor has stopped reading the memory or reads a small one; no test
-    since 250 (the next at 500).  Put to the user; nothing changed.
-  * **It came back with the new term** (below): the state's mean size 0.009 at 346, 0.016 at 356, 0.027-0.031 from
-    358 to 364; the recurrent weights' step 0.003% at 346, 0.02-0.04% from 358; the KL an iteration 0.002-0.009.
-* **Changed at iteration 324, 01:13 on 2026-11-18: a production lead and an area mex** (the user, about 00:45: "add a
-  zero-sum score term for the lead of average metal spent in factories (i.e. on units), capping at 30- e.g. (metal
-  spent in factories/units assisting factories on our side minus enemy side), and add an 'area mex' action: builds
-  metal extractors within a radius from a specified centre, starting with the mex closest to the unit (or closest to
-  the centre of selected units that can build)").  Made and checked in a tree copy beside the run, then one stop for
-  both: the sim's libraries rebuilt in `~/zksim/build`, the whole suite (850 pass, three new), carried on by
-  `results/resume-rdnn.sh`.
-  * **`production_lead:0.3`**, the fifteenth term, last in `results/launch-rdnn.sh` so that the others keep their place
-    in z (`LEADS="idle_lead:0.3 constructor_lead:0.3"` for the run without it): the metal a second a team's builders
-    put into units that move (`ZK_STATS` `[11]`, new), over the step just taken, no more a team than 30; an
-    alliance's a player less the mean of the others', over 30, held to -1 to 1 and averaged over 10 minutes as the
-    other leads.  03-training.md, "Reward" ("The leads").  Its critic started from nothing, the other 14 were kept,
-    and the actor waited 10 iterations (325-334).
-  * **`rf.AREA_MEX`**, the policy's kind 15, kept in reserve till now: no tensor, head or checkpoint changed shape, and
-    the run's actor loaded.  A place as a BUILD's, on it (one of our units or a site token), then a radius, one of
-    the group head's 10 (60 to 2,250 elmos) with "alone" masked out; legal for whatever has an extractor among what
-    it builds (`TypeTable.area_mex`), where the policy runs its economy.  The sim has no queue of orders, so the env
-    carries it out (`SimEnv._take_areas`, `_area_builds`): each step a unit just told, or idle, is sent to the free
-    spot in the area nearest it, till none is left; any other order to the unit ends it.  02-policy.md, "Kinds".  In
-    Python and in libzkpolicy (ABI 3, `policy_table.bin` rewritten), the two to the bit in the parity test.
-  * **An extractor only on a spot no one holds** (found on the way; a change to BUILD as it was, mine): the sim's
-    frames leave every site's `status` free, so `place_build`'s "free spot nearest the point" was the nearest spot,
-    held or not, and the sim pays every extractor that stands on a spot: in the first try a commander on an area mex
-    put 16 on one, for an income of 55 a second.  `SimEnv.site_status` says who holds a spot from the extractors the
-    seat's frame shows, for a BUILD and an area mex alike.  No policy had put two on a spot: none in the 36 replays
-    of `gru-1` and `rdnn-1`.
-  * **My choices** (the user gave the words above and no more):
-    * the term: its name; the rate over one step of the env (3 s) and the cap on each team's rate, not on the lead
-      or on an average; a player's rate in a team game; the 10 minutes' average and the weight 0.3, as the others';
-    * the action: the reserved kind and not a 25th; its middle one of a BUILD's places and not a free point; the
-      radii the group head's; a unit an action, so "the centre of selected units that can build" isn't there; two
-      units of an alliance on area mexes don't go to one spot; a unit 300 elmos or more from its spot when someone
-      else takes it goes to the next (`AREA_RETARGET`); a cloak's order doesn't end an area; the unit's frame shows
-      the BUILD it's on; legal with no look for a free spot in reach.  Between two extractors the unit stands for up
-      to a step (3 s), where a game's queue sends it on at once.
-  * **Found then, put to the user, and fixed at iteration 364** (below): the RL trainer's frames never said who holds a
-    spot, and the C++ economy script put extractors on spots it already held (113 of its 790 in those 36 replays, 0
-    to 8 a game, some in 34 of them).
-  * **The map cache was made again** at the restart (libzksim changed): about 2 minutes before the trainer's first
-    line, where a load takes 27 s.  `~/zksim/build-areamex` is the tree copy's build: a leftover.
-  * **Iterations 325 to 364**: the KL an iteration 0.015-0.033 at 336-338 as the actor began on the new term (the
-    guard cut the rate to 0.44 for two iterations), 0.001-0.009 after; the term's spread in a group 0.012-0.015, its
-    critic at -0.03 after 6 iterations (not read since); the area mex 1.3-2.4% of actions in the first iterations and
-    0.2-0.5% by 361-364, so the policy was choosing it less: 30 iterations, no test, not looked into.  A unit told
-    anything else ends its area, and this policy tells a constructor something every 30 s or so.
-* **Changed at iteration 364, 01:39 on 2026-11-18: one extractor a spot, and the frames' site status** (the user, at
-  about 01:30: "OK, fix the C++ economy script bug", "Also fix the RL trainer frames spot bug").  Checked in a tree
-  copy beside the run, then a stop: libzkscripts rebuilt, the whole suite (850 pass), carried on.  No new term, so no
-  wait for the critics.
-  * **The economy script** (`sim/scripts/src/eco.cpp`, `Pass::going`): a spot a constructor of ours has been told to
-    build on is held, as one with an extractor is.  `claimed` was each pass's alone, so a spot whose constructor was
-    still walking went to the next idle one too, and the sim stood both extractors on it.  A test that failed on the
-    old library (20 extractors on 16 places at 6 minutes) passes.
-  * **The opening too** (`policy_opening.Seat._taken`; found by the same test, which still failed with the script
-    alone fixed: 3 of 112 extractors in 4 games): the commander leaves out a planned extractor whose spot a
-    constructor has taken or is on its way to; its solar still goes beside it.
-  * **The frames** (`SimEnv.frame`, `site_status`): each seat's sites are its own, with who holds each spot from the
-    extractors its frame shows, made once a step (45 us a frame: about 1.5% of a collector's round).  The actor reads
-    it in the site tokens (4 numbers a site, where the policy runs its economy) and through the encoder, which was
-    trained with it filled (`frame_data.with_site_status`).  Its own weights on "ours", "the enemy's" and "being
-    built" had never had a gradient: they're as they were made, so its choice of places moved a little at the
-    restart for no reason of its own.
-  * **And the policy's extractors keep off a spot in flight** (mine, the same fault on the policy's side:
-    `SimEnv._going`): a BUILD's or an area mex's extractor doesn't go to a spot another of the team's units is on its
-    way to, or was told to in the same decision.  Without it two constructors told to one spot before either began
-    would both be paid.
-  * **What it does to the tests: they are no longer comparable with those before.**  The script now has about 0.9 of
-    its income at 6 minutes and 0.6 at 12 (above).  The tests at 500 and on are against it; iteration 0's and 250's,
-    and all the GRU run's, were against the richer one.  A rise in score or wins from 250 to 500 can't be read as
-    learning.  To read them: test old checkpoints against the script as it is (the run keeps one every 20
-    iterations from 20; none of iteration 0), which needs the card, so the run stopped or ended.  Not done: put to
-    the user.
-  * **Not fixed**: recorded games (cloning's data) keep a game's spots once, so their frames still read every spot
-    free, and a clone of them would meet real statuses only in play.  Two allies' constructors can still go to one
-    spot.  The sim itself still builds wherever it's told.
-  * **Since** (iterations 365 to 461, at 02:35):
-    * the memory's state fell again: its mean size 0.03 at 364, 0.022 at 402, 0.010 at 410 and 0.005-0.008 from 418,
-      the recurrent weights' step 0.001-0.003% of their mean.  Twice now it has gone under 0.01 within 50 iterations
-      of the actor settling, a restart or a new term bringing it back for a while.  Not acted on (the memory and its
-      rates are the user's); told to them at each check;
-    * a burst of KL with no restart before it: 0.009 at 432 rising to 0.051 at 439, the guard cutting the rate to
-      0.20 by 441, then 0.001-0.003 and the rate whole again at 446.  The recurrent weights' step stayed under 0.008%
-      through it, so it was the actor's own;
-    * the area mex is 0.1% of actions or less from iteration 380; `production_lead`'s critic at 0.79 (0.00 at 372);
-    * 575 decisions a second over 50 iterations (460-560 at the last, as games age), the card 9.6 GB of 12.3, a
-      collector 1.32 GB of its 2.0, WSL 26.7 GB available.
-* **Why the rate isn't simply 2e-3** (two smoke runs of 5 and 6 iterations with no wait for the critics, `rdnn-1/smoke*`,
-  deleted): at the whole of 2e-3 the KL was 1.9, 10.6, 5.9, 1.2 and 1.7 an iteration against the guard's 0.01, the
-  guard slowing it 1.5 times an iteration, and the anchor head's entropy fell from 0.85 to 0.03 in two iterations.  And
-  in the actor's own Adam (eps 1e-5) a step moved the recurrent weights 0.013% of their mean and by the fourth iteration
-  nothing: their gradient is the weight's times about 1/units.  With the changes: KL 0.08, 0.05, 0.02, 0.009, 0.008,
-  0.006 as the guard took the scale from 0.15 to 0.044, entropies steady (anchor 1.2 rising to 2.5), the recurrent
-  weights moving 0.01-0.05% of their mean a step, 515-596 decisions a second (with the check below on the card too),
-  no split.  Put to the user as done, not asked first: they were asked for "around 2e-3".
-* **On the paper's own task the RDNN learns slowly, and trained this run's way not at all in 1,000 steps**
-  (`results/rdnn_check.py`, the user asked, 21:35: "Does our implementation not learn on the RDNN paper's
-  samples/problems?").  Angle integration as I rebuilt it (the paper's text gives neither the turns' spread nor an
-  epoch's size): 128 units, 1,000 steps of 64 sequences of 256, the test error's power over the target's:
-
-  | Arm | Rate, Adam eps | Gradient | Test at 256 steps | In training, at steps 250, 500, 750, 1,000 |
-  |---|---|---|---|---|
-  | RDNN, the paper's settings | 5e-3, 1e-8 | whole | -3.8 dB | -0.3, -0.4, -1.6, -4.1 |
-  | RDNN, as this run trains | 2e-3, 1e-8 | cut at 16 | -0.4 dB | -0.3, -0.2, -0.3, -0.4 |
-  | GRU, the same | 2e-3, 1e-8 | cut at 16 | -10.3 dB | -0.9, -10.8, -11.3, -10.1 |
-  | RDNN, eps 1e-5 | 2e-3, 1e-5 | cut at 16 | -0.2 dB | -0.3, -0.2, -0.2, -0.2 |
-  | RDNN, eps 1e-5, weights scaled by sqrt(units) | 2e-3, 1e-5 | cut at 16 | -1.6 dB | -0.4, -0.9, -1.6, -1.6 |
-
-  The paper's RDNN of this size: -15.6 dB after 100 epochs.  So the cell learns the task, slowly and still improving
-  at the paper's settings, which is as far as "is the implementation right" got; and with the gradient cut at 16 and
-  2e-3 it learnt nothing where a GRU learnt in 500 steps.  Not separated: whether that's the cut or the rate (the
-  paper's own 1e-3 was "notably" worse than 5e-3); arms at 5e-3 cut at 16, 2e-3 whole, and a cut at 64 would say.
-  One seed each.  Told to the user at the launch, with the alternative: the GRU with the same vector and rates.
-* **The paper** shows the RDNN on two toy tasks of continuous working memory (an angle integrated or held; 1-3 numbers
-  in, 64-256 units, supervised, the gradient through all 256-512 steps), where it keeps a ring a GRU breaks into
-  points.  No RL, nothing of this size, and by its own account sensitive to the rate.
-* **My choices** (docs/model.md has each): relu and not tanh; no noise on the state; eta 1 and the rates' spread at
-  first; the recurrent weights' own Adam; the vector not LayerNormed and added in three places, the memory tokens gone
-  (not both); the actor's start at 0.15 of the schedule; the critics' rate unchanged; 1,024 units, as the GRU's width.
-* **New in the trainer's metrics**: `memory_step` (how far an optimizer step moved the recurrent weights, as a share of
-  their mean), `state_abs` and `state_max` (the memory's state as training steps it).  `results/rdnn-status.sh` prints
-  them, the heads' entropies, and each test against the GRU run's at the same iteration (`results/compare_tests.py`:
-  the two runs test the same 128 games).
-* **Helpers**, as the GRU run's under `rdnn` names (`results/rdnn-status.sh`, `rdnn_terms.py`, `rdnn-alive.sh`,
-  `rdnn-dump.sh`, `kill-rdnn.sh`, `stop-rdnn.sh`, `resume-rdnn.sh`, which reads `rdnn-1/end`, `rdnn-watchdog.sh`,
-  `rdnn-pss-log.sh`), and `check-rdnn.sh`, `bench_memory_loop.py`; `results/edit_rdnn.py`, `edit_rdnn2.py` and
-  `edit_collect.py` are edits that made the code, as scripts.
-* **The hourly check** (the user's; a cron job in the session that started the run, ended with it): is
-  it running and moving, the memory's numbers, the tests against iteration 0's and the GRU run's.  It doesn't change
-  the memory or the rates on its own: those are the user's for this run.
-* **To watch**: the test at 500 and on, which are against the script with one extractor a spot and so not to be set
-  beside 0's and 250's (above); `memory_step` and the state's size (0.008-0.010 at 308-346, 0.03 at 358-364); the KL
-  an iteration; `share_kind15` (the area mex's share of actions: 0.2-0.5% at 361-364) and
-  `explained_variance_production_lead` (`results/rdnn_terms.py`); the replays' extractors, the policy's and the
-  script's; the anchor head's entropy; `collect_rate`, `wait_s` and `collector_seconds_min` against `_max`.
-* 850 tests pass.
-
-## RL from nothing with a GRU for memory (2026-11-17): stopped at iteration 1269, 13 hours in, for the RDNN run
-
-The user, after the self-play run below didn't learn: an RL-only run again (no clone, no DAgger), with a GRU for memory as
-Pluto has; then, as it was being built: the parts the GRU makes needless out, the layers that grow with the square of the
-controllable units out, and a small critic for each of the reward's terms, as Pluto's, each reading the encoded fogged frame
-and the GRU's memory.  docs/model.md, "A GRU for memory"; 03-training.md, "Bootstrapped" and "Playing".
-
-* **How it ended** (the user, 2026-11-17 20:50: "Stop the run and start a new 24-hour run with a higher learning rate
-  (around 2e-3) and RDNN enabled"): stopped by its `stop` file at 20:54, iteration 1269, 22.32M decisions,
-  `gru-1/ppo/ckpt/it-001269.pt`; its watchdog, memory log and hourly check ended with it.
-  * **Its tests** (128 1v1s against the script, the same games each time): the score 0.148, 0.150, 0.158, 0.167, 0.169
-    and 0.184 at iterations 0, 250, 500, 750, 1000 and 1250, with no win, none, none, 1, 1 and 3.  At 1250 against
-    iteration 0, over the 96 games the two share (the tests' games are dealt by collector, and it had three till 1100):
-    the score +0.036 +- 0.011 (3.4 SE), own value at the end 4,596 to 6,417 (+6.7), income over the game +5.8, damage
-    dealt +3.3 and taken as before, extractors at 3 minutes 2.4 to 3.1 (+4.4) and at 6 2.2 to 2.9 (+3.3, the script's
-    11.6).  So it learnt, slowly, to the end; it never built more than 3 extractors by 6 minutes.
-  * The test at 1250 had 100 iterations of the three leads behind it and is no step up in extractors on 1000's (2.9
-    both): too little to say what they do.  Their critics learnt in 100 iterations (explained variance at the end: idle
-    0.87, constructors 0.73, extractors 0.55); the extractor lead's spread in a group stayed 0.002.
-  * At the end: KL 0.0001-0.0004 an iteration (the rate unslowed throughout), 556 decisions a second, the other kinds 19%
-    of new games, the card 5-8 GB with two collectors.
-  * To carry it on: `results/resume-gru.sh "DATE TIME"` (its end), with no other trainer running.
-* **The actor** (`policy_latent.GRU`, `policy_train.py --size gru`; not for cloning): a GRU of 1,024 over each decision's
-  latents and a summary of what the last decision did; the state is all a seat keeps.  A frame is its latent tokens and 4
-  memory tokens read off the state, 1 block; the plan at 2 layers.  No time transformer, kept frames, action tokens or unit
-  layers.  On `full-4`'s frozen encoder.
-* **The critics** (`--critic-size memory`, `policy_model.MemoryCritic`, with `--bootstrap`): a net of 0.87M parameters a term,
-  on the frame's latents, flat, and the GRU's state, detached (my choice: the value loss teaches the memory nothing).  They
-  value where each branch ended, from what its seat kept there (`Segment.end_history`).  Not with `--resign`.
-* **Throughput** (the user asked for it checked before the run): about 870 decisions a second as first built (3 collectors
-  of 16 games, a side a pass, 100,000 tokens a minibatch; the wide actor made 119), 1,250 with 3 of 32, both sides of a game
-  in one pass (`--pass-seats 2`, new) and `--token-budget 250000`.  py-spy: the learner one thread at 97% over minibatches of
-  250 decisions, the collectors waiting on the card 44% of their time over passes of 16 rows, the CPUs 70% idle.  Apart,
-  collecting makes 1,500 and training 2,000; together 0.7 of each, on a card four processes share.  What's left is the
-  learner's one thread, nothing in it above a tenth but the backward pass.
-* **The run**: `results/launch-gru.sh` with `HOURS=24 EVAL_EVERY=250`, started 2026-11-17 07:53 from nothing, so `gru-1/ppo`,
-  `gru-1/logs/ppo.out`, `gru-1/memguard.log` (`mem-guard.sh`, 3 GB), the dashboard at `http://localhost:8765`
-  (`policy_dashboard.py --root /mnt/d/zk-learned/runs/gru-1`, started by hand).  Self-play only (`--self-play 1`), the lead
-  rule in every game (`--lead-fade 0:1`), the policy's own economy (`--economy-start 1 --economy-end 1`, the user),
-  bootstrapped GRPO in groups of 8 with the seven terms, the trainer's own rates (3e-4 to 1e-4, the KL guard at 0.01), the
-  actor waiting 10 iterations for the critics, a test of 128 1v1s against the script every 250 iterations.  A stop:
-  `gru-1/ppo/stop`; the same command carries on (its `--hours` count from then).
-  * **The other kinds ramped in** (the user, 2026-11-17, as the self-play run below had them): `--kinds 1v1:0.5 teams:0.2
-    ffa:0.2 chicken:0.1 --kinds-ramp 500:0 2500:0.5`, so 1v1s alone till iteration 500 (about 2 hours in at this rate) and
-    half the new games of the other kinds from 2,500.  That needs the map pool (`--maps /mnt/d/zk-learned/maps`): the five
-    training maps have two start boxes each, so hold no free-for-all.  The 1v1s and the tests are on the pool's maps too.
-  * 96 games, 3 collectors at `--collector-gb 2.0` (a pass of 64 rows at the frame caps peaks at 1.63 GB:
-    `results/collector_caps.py`), `--token-budget 160000` (the learner's 3.0 GB).  Should the run still end in an error the
-    launch file carries on once, from the last checkpoint, with a side a pass (half the rows).
-  * **Stopped at iteration 36 and carried on at 08:39 with a pass a level of frame size** (the user: address the fall in
-    throughput, then resume).  On the pool it had fallen from 800 decisions a second to about 610 in 25 iterations: a
-    collector's graph padded every pass to the widest frame it had ever played.  Now a round's seats go in a pass for each
-    level of unit tokens (`policy_graphs.LEVELS`), each level with its own widths, a wide pass with fewer rows
-    (03-training.md, "Playing").  A copy of the run carried on 30 iterations (`gru-1/time-levels`): 753 a second against
-    609 at the same age, still capturing graphs.  The rest of the fall from the five maps' 1,150 is work: more actions a
-    decision, bigger frames.  Carried on with `HOURS=23.7`, so it ends at about 2026-11-18 08:20.
-  * `gru-1/check-kinds`: 7 iterations with the other kinds as half the games from the start: free-for-alls, team games and
-    1v1s ended and were judged (no chicken game ended in that time), about 900 decisions a second, no error.
-  * `gru-1/ppo-1v1-31` is the same run's first start, 1v1s only on the five training maps (07:38 to 07:47, 31 iterations,
-    930-1,300 decisions a second; its test at iteration 0: no wins of 128, extractors at 6 minutes 2.0 against the script's
-    13.8), stopped for the ramp.
-  * To watch: `explained_variance_TERM` (the critics; `full-4`'s privileged one took 60 iterations to reach 0.7), and the
-    tests' `eval_fight_score` and extractors.  In `full-4` the bootstrapped advantages checked as noise where the
-    unbootstrapped seven terms didn't (03-training.md, "Signal or noise"): if the critics don't learn, `--no-bootstrap`
-    from this run's actor (`--init`) is the same run without them.
-* **Stopped at iteration 386 and carried on at 11:24 with a seat's own objective** (the user, 2026-11-17: "it's clear
-  this training run isn't improving. Apply the changes sooner then restart the run"; they had first said at iteration
-  500).  The test at 250: no wins of 128, the score's change +0.003 +- 0.004, every measure within 1 SE of iteration 0
-  (own value +155 +- 286, damage dealt +59 +- 158, income +227 +- 444, extractors at 6 minutes 2.2 for 2.3, the script's
-  11.7); the hourly replays at 323 no better than at 182 (`results/replay_summary.py`, in `gru-status.sh` now).
-  * **What changed** (03-training.md, "A seat's own objective" and "Reward"): `--z objective --objective-sigma 0.3
-    --explore-share 0.25 --explore-weight 1`, and five exploratory terms at weight 0 (`made_builders`, `made_economy`,
-    `made_defences`, `made_factories`, `made_roles`: what a team has itself made, each unit paid up to a cap).  In each
-    new game each seat's weights of the seven terms are the run's times exp(0.3 x a normal draw), and in a quarter of its
-    games one exploratory term is on at weight 1; its actor is told the draws as z, and in tests nothing, so it plays the
-    run's weights there.  `results/launch-gru.sh` has it by default (`OBJECTIVE=0` for the run as it was).
-  * **Carried on, not started again**: from `ppo/ckpt/it-000386.pt`, the seven critics kept (a net a term), the five new
-    ones from nothing, the actor waiting 10 iterations for them; `results/resume-gru.sh` (`HOURS` what was left, 20.93,
-    so it still ends at about 2026-11-18 08:20).  `gru-1/check-objective` is its 3-iteration check.
-  * **Seen when it was stopped, and not looked into**: the KL an iteration, 0.0005-0.001 from iteration 230, rose from
-    348 to 0.02-0.03 at 360-364 (the guard slowed the rate for five iterations), then held at 0.002-0.003 to 386.  The
-    policy had begun to move more; whether for the better no test says (the next was to be at 500).  To carry the run
-    on as it was instead: `OBJECTIVE=0` from a copy of that checkpoint.
-  * **My choices** (put to the user at 10:31, not changed by them): sigma 0.3, the share a quarter, the weight 1, the
-    five classes and their caps (10, 30, 10, 4, 8); the critics not told the draws; carrying on from the checkpoint
-    where the user said "restart".
-  * To watch: the tests at 500 and on against iteration 0's (the same 128 games); `explore_branches` (about 0.25);
-    `explained_variance_made_*`; the replays' extractors and floated metal.
-  * **The test at 500 is the first above iteration 0** (12:57, `results/paired_tests.py`, in `gru-status.sh` now: each
-    test's games against iteration 0's, by seed and slot).  No wins of 128, the score +0.010 +- 0.004 (2.7 SE), own
-    value at the end 4,701 to 5,626 (+3.9 SE), value at 6 minutes 4,401 to 5,064 (+4.6), income over the game +4.1,
-    extractors at 3 minutes 2.5 to 2.9 (+3.0) and at 6 2.3 to 2.6 (+2.2, the script's 11.7), damage dealt +1.9, games
-    36 s longer (+3.3).  So learning by the rule below, slowly, and nothing changed.  Which of the two it comes from no
-    test says: iteration 500's actor has the KL's burst at 348-366, before the change, and 104 iterations of moving
-    after it.  The KL since is 0.0004-0.0008 an iteration, as low as in the flat stretch.  The new critics learnt in
-    180 iterations where a team makes the thing (builders 0.78, economy 0.82, roles 0.73) and not where few do
-    (defences 0.02, factories -0.01).
-  * **The test at 750 is above 500's** (14:57): the run's first win (1 of 128), the score +0.019 +- 0.006 on iteration
-    0 (3.1 SE), own value at the end 5,927 (+5.1), income over the game +4.4, damage dealt 2,008 to 2,852 (+3.0; at 500
-    +1.9), the damage share 0.40 to 0.45 (+2.5), extractors at 6 minutes 2.6 (+2.4, the script's 12.0), games 51 s
-    longer.  Still far from the script.  Nothing changed.  The KL an iteration 0.0003-0.0006, the other kinds 6% of new
-    games, 546 decisions a second (644 at iteration 569: smaller minibatches as frames grow).
-  * **The test at 1000 a little above 750's** (17:57): 1 win of 128 again, the score +0.021 +- 0.006 on iteration 0
-    (3.5 SE; 0.148, 0.158, 0.167, 0.169 at 0, 500, 750, 1000), own value at the end 6,052 (+5.9), income over the game
-    +5.8, damage dealt 3,178 (+3.3), extractors at 3 minutes 3.2 (+5.0) and at 6 2.9 (+4.5, the script's 11.7), games
-    63 s longer.  Nothing changed: the rule acts only on tests within noise.  The KL an iteration 0.0003-0.0004, the
-    other kinds 13% of new games (free-for-alls ending in 19 iterations of 50), 475-640 decisions a second.
-  * **It stopped moving at 18:38, the card full; killed and carried on at 19:04 from iteration 1100 with two collectors
-    of 48 games** (the hourly check at 18:57; the checkpoint at 1100 was the last thing it wrote, so nothing was lost
-    but the 26 minutes).  What was seen: no report for 19 minutes; the learner in a backward pass and one collector in
-    a forward pass, both waiting on the card (`cudaStreamSynchronize`; `results/gru-dump.sh`, py-spy as root, the
-    stacks the same a minute apart), the other two collectors waiting to send; the card at 100% and 56 W.  On Windows
-    (`Get-Counter '\GPU Process Memory(*)\Dedicated Usage'`) the run's four processes held 3.1, 2.65, 2.57 and 2.54 GB
-    of the card and 0.4 GB of shared memory, the desktop 0.4: 11.3 GB of 12.3, which is where Windows stops giving a
-    process the card's own memory.  A collector holds about 1.25 GB beside what its allocator reserves (1.35 GB then),
-    where the learner's limit allows each `--collector-gb` and 0.4.  From iteration 1061 an iteration trained 2 to 4
-    times slower (160-320 decisions a second for 600) whenever the learner reserved its 3.0 GB; at 12:57, the learner
-    at 3.0 too and the collectors at 1.15, it didn't.  So my reading: the card's memory, not a fault in the code, and
-    the kill and the stacks are all I have for it.
-    * **Changed**: `--collectors 2` (48 games each; a pass is still 64 rows at most) and `--gpu-share 0.65` (new flag
-      for `Config.gpu_share`, 0.85: with two collectors that keeps the learner's limit at 3.0 GB), both
-      `results/launch-gru.sh`'s defaults now (`COLLECTORS=3 GPU_SHARE=0.85` for the run as it was).  840 tests pass.
-    * `results/kill-gru.sh` kills a run that doesn't report (the launch file first, or it carries the dead trainer on
-      with a side a pass); `gru-alive.sh` says whether it moves; `gru-status.sh` now gives the seconds since the last
-      report and the card's memory; `gru_tail.py` the last iterations' rates and memory.
-    * **A watchdog** (`results/gru-watchdog.sh`, started by `start-gru-watchdog.sh`, till 08:20; mine, for the night):
-      a trainer 25 minutes without a report is killed and carried on from its last checkpoint, 3 times at most, each
-      said in `gru-1/watchdog.log`.  The hourly check (cron job `8c1ebb1f` in the session that started the run) reads it.
-    * **My rule from here** (the first was for tests within noise of iteration 0, which they weren't): two tests in a
-      row within noise of the one before, with the KL an iteration under 0.001, and the policy is made to move more
-      (`--group-step 1024` first).
-  * **Stopped at iteration 1149 and carried on at 19:40 with three leads as terms** (the user, 19:20-19:40: the lead in
-    extractors with a ramp while one is built, then "an idle mobile units lead penalty" and "a constructor lead", its
-    cap from 1 up to 5 by 2 minutes, "You may pause the run then resume with the new term").  03-training.md, "Reward"
-    ("The leads"): `extractor_lead`, `idle_lead`, `constructor_lead` (`policy_sim_env.LEAD_TERMS`), each an average
-    over 10 minutes of a lead a player, as `economy` is of the income balance.
-    * In the run: `extractor_lead:0.3` where `extractors:0.3` was (the same place in the terms, so what a seat is told
-      of it by z stays put), `idle_lead:0.3 constructor_lead:0.3` after the exploratory terms; 14 terms.  The critics of
-      the 11 kept terms carried over, the three new from nothing, the actor waiting 10 iterations (1150-1159).
-      `results/launch-gru.sh` has them by default (`LEADS=` for the run without the last two, from a copy of
-      `ppo/ckpt/it-001149.pt`).  840 tests pass.
-    * **`extractors` is gone** (the user, 20:00: "`extractors` can be removed/replaced with the `extractor_lead` term
-      now"): out of `policy_sim_env.TERMS` and `BALANCE_TERMS`, and `extractor_lead` in its place in
-      `launch-full4.sh` and `launch-selfplay-test.sh`.  The run doesn't use it.  Then (the user: "resume the run with
-      our scoring changes then commit+push") stopped at iteration 1170 at 19:52 for the whole suite on the code as
-      committed (840 pass) and carried on at 19:56, the same terms, its games anew.
-    * **The user also asked for `score`, `combat`, `map` and `experience` to be made zero-sum: they were.**  Every term
-      but the `made_*` is one alliance's against the others' (`_balance`, `_shaped`, `_view`); in 48 of the scripts' 1v1s
-      over 8 minutes each was side 0's turned round for side 1 at every step, to the bit (scratch `zero_sum.py`).  Put
-      to the user; nothing changed.
-    * My choices, listed for the user after the fact: terms of their own and not parts of `score`; all three averaged
-      over time; the scales (20 extractors or idle fighters a player, 5 constructors); the weights 0.3.
-    * To watch: the test at 1250 has 90 iterations of it and the one at 1500 the first whole stretch;
-      `explained_variance_extractor_lead` and the other two, their `group_spread_`s (`results/gru_terms.py`); the
-      replays' extractors and constructors.  The first iteration's spreads in a group: extractor lead 0.002, idle 0.017,
-      constructors 0.006.
-  * **WSL's memory in use rises about 1 GB an hour** (14.3 GB at 12:00, 17.2 at 14:57; 22.9 GB available, the guard's
-    floor 3): at that rate the run ends with about 5 GB available, and the other kinds' share is still growing.  A
-    process's own at 14:58: the learner 3.9 GB, the collectors 3.8, 3.5 and 3.3, the featurizing workers 0.4 each.
-    `results/gru-pss-log.sh` (started by `start-gru-pss-log.sh`) writes each process's every 10 minutes to
-    `gru-1/pss.log`, and `gru-status.sh` prints the last hour's.  My rule: under about 8 GB available, stop and resume
-    (`stop-gru.sh`, `resume-gru.sh`), which starts the games anew; and say which process grew.  From 15:00 to 16:00
-    it held at 17.5-18.0 GB with every process's own flat (the learner 4.1 GB, the collectors 3.5-4.0), the other
-    kinds 9% of new games.
-  * **The hourly check may adjust and resume** (the user, 11:35: "check the health of the run every hour or so (e.g. is
-    it still running? does it appear to be learning?), adjusting and resuming as necessary"; they chose to leave the KL
-    guard as it is).  Learning, as I put it to them: wins, or the score up by more than 2 SE on iteration 0's, or two of
-    own value, income, damage dealt and extractors at 6 minutes up by more than 2 SE.  My rule for a change: only on
-    evidence, one at a time, a test (250 iterations) before judging it; if the tests at 750 and 1000 are both within
-    noise, more optimizer steps (`--group-step 1024`) or a looser guard (`--kl-target 0.03`) where the KL is under 0.001,
-    and a look at the terms' spreads, `adv_clipped` (a fifth of decisions' advantages are past the clip at 3) and the
-    critics where it moves without direction.  Each change goes here.
-* **If the policy stops moving** (the user, 2026-11-17 10:05, when the KL an iteration had fallen from 0.008 to 0.0007 by
-  iteration 230 and the policy gradient's norm from 2.0 to 0.5, the rate unslowed and the heads' entropies steady: anchor
-  2.7 to 3.0, kind 1.1): consider small random variation of the terms' weights, rarely-activated exploratory terms (the
-  number of certain unit types or roles made), or MARA (arXiv 2510.20817, "KL-regularized RL is designed to mode collapse":
-  every sample above a reward threshold given the anchor's reward plus beta times the difference of their reference
-  log-probabilities).  My reading, put to the user: the first two help only if the actor is told its game's weights (the
-  strategy input z, unused in this run), else they average back to the mean weights; told, they are one mechanism, a
-  per-seat objective drawn each game, off in tests.  MARA needs a KL penalty to a reference policy, which this run hasn't,
-  and treats entropy collapse, which isn't seen.  The first two are built and in the run from iteration 386 (above);
-  MARA isn't, and the gradient check I'd proposed first (03-training.md, "Signal or noise") wasn't run.
-* `gru-1/ppo-unboot-13` is the very first start (13 iterations, unbootstrapped, 48 games; stopped to add the critics);
-  `smoke*`, `time-*` and `prof-*` there are the checks and timings: scratch.  `results/time-gru.sh NAME N` times a
-  configuration (a copy of a run's directory under NAME carries on from its checkpoint), `results/profile-run.sh` (as
-  root) profiles a running one, `results/collector_caps.py` and `collector_levels.py` measure a collector's passes at
-  given widths, `results/gru-status.sh` says where the run stands (no torch: safe beside it), `results/stop-gru.sh`
-  stops it and waits, `results/resume-gru.sh` carries it on to its 24 hours' end, `results/check-objective.sh NAME N`
-  carries a copy of its last checkpoint on for N iterations with the launch file as it is, and `results/run-tests.sh` is
-  the test suite (it refuses beside a trainer).  A copy carried on needs `--decisions` past the checkpoint's: an iteration
-  collects a little over its 16,384, so `ITERATIONS` times that falls behind and the copy ends at once.
-* **My choices, not put to the user before the run**: the GRU's sizes (1,024, 4 memory tokens, 1 block, 2 plan layers);
-  the critics two layers of 256 and detached from the GRU; no script games in training (`--self-play 1`, where the run
-  below had a tenth) and the lead rule on throughout; 96 games (12 groups in flight, about two stretches of each an
-  iteration) and the bigger minibatches; the ramp's iterations as the user gave them for the run below, which was nine
-  times slower.
-
-## Self-play (2026-11-16): a run of 16 hours, stopped at iteration 275
-
-The user, after Pluto's README (self-play alone, 1v1s) and `full-4`'s RL not improving: train against itself, a tenth of
-the games against the scripts, 1v1s first and the other kinds mixed in later.  03-training.md, "Opponents".
-
-* **The run** (the user, 2026-11-16: 24 hours, the policy's own economy in every game, after a look for easy speed):
-  `results/launch-full4.sh`, the pipeline's `ppo` stage, so `full-4/ppo`, `full-4/logs/ppo.out`, the dashboard at
-  `http://localhost:8765`, `full-4/pss.log` and `memguard.log`.  From the DAgger actor, GRPO as `full-4` ended (unbootstrapped,
-  the seven terms, `--group-step 2048 --lr-start 1e-5 --kl-target 0.005`), `--self-play 0.9`, `--kinds-ramp 500:0 2500:0.5`,
-  `--economy-start 1 --economy-end 1`, `--hours 24`, a test of 128 1v1s against the script every 50 iterations.  Three
-  collectors of 16 games at `--collector-gb 1.4`.  Started 14:17; the user stopped it at iteration 275 (2026-11-17 06:21,
-  4.80M decisions, `ppo/ckpt/it-000275.pt`, `ppo` not marked done) as not learning.  To go on: remove `full-4/ppo/stop` and
-  run the launch file again (with `--ppo-hours` what's left of the 24, about 8).  The script-only GRPO
-  is `full-4/ppo-script` now, its replays `replays/ppo-script`.  Its test at iteration 0 (9.4 minutes): 10.9% wins, 1.6%
-  draws, a score of 0.245 +- 0.019, extractors at 6 minutes 4.8 against the script's 9.2.  At 50 (16:59, 875,000
-  decisions): 10.2% wins, the score's change -0.006 +- 0.021, extractors 5.1 against 9.5.  119 decisions a second over
-  iterations 2-50 (`selfplay-test`'s 2-16 made 98, its own 136), about 2.5 minutes an iteration and 15 a test, so 24
-  hours end at about iteration 500, all of it 1v1s.  A collector 1.05 GB at most, WSL 15-16 GB, the KL past 0.01 in 10
-  iterations of 50, no errors.
-* **At iteration 268** (2026-11-17 05:56, 4.67M decisions, 15.6 hours; the user: "I don't think it's learning").  Tests at
-  100, 150, 200 and 250: wins 11.7%, 17.2%, 13.3%, 13.3%, the score's change +0.017, +0.045, +0.017, +0.028, each +- 0.02.
-  Game by game (`ppo/tests.jsonl`), the mean of those four less iteration 0's: the score +0.027 +- 0.017, the result +0.036
-  +- 0.025, income share +0.019 +- 0.007, extractors at 6 minutes +0.55 +- 0.20 (4.77 to 5.63 at 250, the script's
-  9.2-9.5), games 166 s +- 61 longer.  So a little economy, about 2.7 SE on the best of several measures looked at, and no
-  wins a test can show.  The first RL run here whose tests are all above its start, and far too slow to matter.  In
-  training nothing trends: the KL 0.006-0.008 an iteration with the guard slowing the rate in 201 iterations of 268 (so the
-  step isn't what limits it), about 450 branches (56 groups) an iteration, 1.3-2 new games.
-* **Where the time goes** (py-spy on a run's processes with `results/profile-run.sh`, as root; 03-training.md, "Playing"):
-  the GPU, about 90% busy with the learner and the collectors on it.  A collector of 16 games waited on its passes for
-  about 75% of its time, with the sim 2% and featurizing 4% (one of 48 games: 60%, and featurizing 20%); the learner
-  waited on its data workers for 20%, and copied every gradient before each minibatch for 12%.
-  * Kept: the learner asks for the next minibatch's decisions while the GPU is on this one's, and takes a minibatch's
-    gradient apart from the parameters' (no copy).  With them the run made 163 and 156 decisions a second overall at
-    iterations 2 and 3, where `selfplay-test`, the same but for them, made 124 and 124: training at 166 against 129-132,
-    and collecting at 171 and 154 against 128 and 121, with the GPU the learner leaves.
-  * Not kept: fewer, bigger collectors.  Runs of 5 iterations from the DAgger actor, no test, decisions a second overall
-    at iterations 4 and 5: three of 16 as it was 119 and about 105; one of 48 128 and 102; two of 24 with the learner's
-    changes 138 and 136.  So the run started with two of 24 at `--collector-gb 2.0` (13:42, now `full-4/ppo-2x24`).
-    But those runs had no test, and a test's long games widen every pass after it: with it, two collected 108 decisions
-    a second at iteration 2 where three had made 128, the learner waiting 70 s of the iteration's 158, and the test took
-    24 minutes, not 13.  Collecting is the limit, and three processes get more of the GPU and of the CPUs than two.
-    Restarted at 14:17 with three of 16.
-  * Tried and taken out: a pass takes about 0.25 s by iteration 5 whatever its rows (16, 24 or 48) and however many
-    collectors.  A `Graphs` for each class of frame size, small frames in wide passes and wide ones in narrow, made each
-    pass no faster and a round more of them (98 decisions a second collecting against 147).  No stops among the action
-    steps (one graph for all 16) made it no faster either.  So more rows a pass is what collects faster, and a collector's
-    memory, which grows with rows times the widest frame it has played, is what limits that.
-  * `full-4/selfplay-profile`, `selfplay-ab-*` and `ppo-2x24` are those runs: scratch.
-
-* **`--self-play 0.9`** (the pipeline's `ppo` stage now): nine new training games in ten the policy plays every player's
-  team; the rest it plays team 0 against the scripts, as before.  The gate it replaces (self-play once two tests averaged
-  80% wins) never opened.  Under GRPO each side's branches are judged against the same side's in the group's other copies.
-* **`--kinds-ramp 500:0 2500:0.5`** (the pipeline's): the share of new games that aren't 1v1s, by iteration: none till 500,
-  then up to half at 2,500, split among team games, free-for-alls and chicken games as `--kinds` weighs them.  It counts
-  the learner's iterations, which start at 0 with `--init` and carry on with a resume, as the lead rule's fade does.
-* **A pass is a seat a game at most**: against itself a round has 2 seats a 1v1 and up to 8 a team game, and a collector's
-  graphs grow with a pass's rows, so a round goes in passes of the collector's games (16).
-* **The test** (`results/launch-selfplay-test.sh`, `full-4/selfplay-test`): 16 iterations of 16,384 from `full-4`'s DAgger
-  actor, with `full-4`'s last GRPO flags (unbootstrapped, the seven terms, `--group-step 2048 --lr-start 1e-5 --kl-target
-  0.005`).  It ran through.  Of the games ended, 266 copies were against itself and 61 against the scripts (all lost).
-  82-124 decisions a second overall (the script-only run's first 16: 82-145), a collector 0.95-1.05 GB of its 1.4, WSL
-  17.2 GB at most, the KL 0.002-0.025 an iteration with the guard slowing the rate from iteration 8 to 15.  Tests of the
-  same 128 1v1s against the script: 14.8% wins at 0 and at 16, the score's change -0.009 +- 0.024.  16 iterations say
-  nothing about learning, and weren't meant to.
-* **About 3 minutes an iteration**, so iteration 500 is about a day in and 2,500 about 5 days, tests (13 minutes each) on top.
-  A game is played through as one group of 8 copies, about 2 new games an iteration.
-* **The other kinds' check** (`full-4/selfplay-mixed`: `KINDS_RAMP=0:0.5 ITERATIONS=3`, no test): it ran through, with
-  free-for-alls ended and judged (`wins_mirror_ffa` a third), at 131-201 decisions a second.  Its collectors held 0.5-0.6
-  GB, but it had no test's late frames: `full-4`'s passes of the same 16 rows, of every kind, reached 1.07 GB.
-* **Seen in both, and in `full-4`'s script-only GRPO** (13 of its 141 iterations): `adv_abs_max` in the thousands.  In an
-  iteration where no group's copies differ in who won, the result term's scale (its mean spread over the groups where it
-  varied) is about 1e-4, and a decision taken after other copies of its game had ended is a whole result from its
-  group's mean from that moment (`_judge`, reward-to-go).  The clip at ±3 bounds it.  Not changed: my reading of the
-  code, not reproduced in a test.
-* **The scripts and the sim are being changed** by another agent (the user, 2026-11-16): `~/zksim/build` was rebuilt at
-  11:24, after the test and before the other kinds' check.  A long run plays the build it starts with.
-* **My choices, listed for the user before they asked for the run, and not changed by them**: the method (GRPO as `full-4`
-  ended, not PPO with the critic) and the start (the DAgger actor, not `ppo-script/ckpt/it-000141.pt`); the lead rule
-  fading as before (`--lead-fade 0:0.9 100:0`); the ramp's share split by `--kinds`' weights (two fifths team games, two
-  fifths free-for-alls, a fifth chickens); both flags on by default in the pipeline's `ppo` stage.
-
-## `runs/full-3` (started 2026-11-13 21:44)
-
-The user's next whole run, `results/launch-full3.sh` (the same command again carries on):
-
-    policy_pipeline.py --root /mnt/d/zk-learned/runs/full-3 --train-encoder --data /mnt/d/zk-learned/clone/army-8         --encoder-steps 75000 --clone-steps 10000 --dagger-rounds 1 --ppo-hours 10 --ppo-decisions 100000000         --ppo-iteration 16384 --record-args "--workers 4 --threads 16"         --ppo-args "--group 8 --collectors 4 --concurrent --economy-start 1 --economy-end 1 --eval-every 50"
-
-* Recorded anew (`army-8`) on the sim as it is now, with the economy script's defences: the encoder 3x its default steps,
-  the clone 2x `full-2`'s, one DAgger round (the user), then GRPO for 10 hours with the policy's own economy in every game.
-* 16,384 decisions an iteration, 4x the trial's: 55 groups scored an update (03-training.md, "GRPO from branched games",
-  "Memory, and bigger batches").  To change GRPO's flags, stop the pipeline before its `ppo` stage and run it again with
-  them: the stages done are kept.
-* Deleted for room, the user asked: `clone/army-7`, and `full-2`'s `frames`, `ppo`, `ppo-kl-127` and `dagger`; on
-  2026-11-14, during GRPO, `full-3/frames`' shards (118 GB).  Its `manifest.json` is kept so that the pipeline, run again,
-  doesn't plan a `frames` stage (it's planned whenever the manifest is missing, and no longer in `pipeline.json`'s done).
-* Its recording thrashed WSL at 100% of its memory at first (the user saw it, 2026-11-13 22:05): a recorder worker of 64 games now holds about
-  2.5 GB beside the map pool's 14.7 GB, against about 1 GB in `full-2`, and 12 of them don't fit in 40 GB.  Killed, and
-  relaunched at 22:17 with 4 workers of 16 threads (`--record-args`, new in the pipeline), and
-  `results/mem-guard.sh` watching: it kills the run when less than 4 GB is left (`full-3/memguard.log`; 8 GB at first, but
-  recording leaves about 15 and GRPO's measurement 12, so 8 risked killing a healthy stage overnight).
-* Recorded in 89 minutes (8,800 games or so, 100M decisions, about 1,775 bytes a decision against `full-2`'s 1,420), frames
-  in 29.  The encoder levelled off from about step 10,000 (loss 0.02-0.04, the probes' R² flat), so the user had it
-  stopped at step 20,600 of 75,000 (2026-11-14 02:16, 2 hours in, the rate still 4e-4): its `stop` file, then
-  `encoder` marked done in `pipeline.json` by hand and the same command run again.
-* GRPO started at 13:42 on 2026-11-14 and ran to iteration 105 (1.79M decisions), tests winning 17.2% of 64 1v1s at 50 and
-  7.8% at 100.  WSL's memory went from 26 GB to 32 in its first hour, then about 1 GB an hour more as the lead rule faded
-  (none from iteration 100), to 35.5 of 40, and `mem-guard.sh` killed it at 17:34 under 4 GB free.  Its rates fell as games
-  grew: collecting from 415 decisions a second to about 150, training from 340 to about 140.  Resumed at about 18:40 from
-  iteration 100 (the logs cut there, the originals kept as `*.before-resume`) with 3 featurizing workers, not 6 (each about
-  1.5 GB, and far from the bottleneck), and `--hours 6.3`, 10 in all; `results/pss-log.sh` logs each process's memory
-  every 10 minutes to `full-3/pss.log`.
-* Minutes after, WSL held 33.5 GB: the collectors 4-6 GB each (3 GB in the measurement), with games no longer ended by a
-  lead, and training the limit (60-85 decisions a second against collecting's 125; the 3 featurizing workers at 13% CPU).
-  Stopped at iteration 111 by its `stop` file (a checkpoint saved) and resumed with 3 collectors of 16 games (48; games
-  must be a multiple of `--group` times `--collectors`) and `--hours 5.85`, the 10 hours in all kept.
-* GRPO moved the policy about 3x less a decision than the trial's PPO (KL 0.0006 per 1,000 decisions against 0.0019): 0.8
-  optimizer steps per 1,000 decisions against 9.7, at the pipeline's rate of 1e-5, and the cloning loss (weight 0.095 at
-  iteration 122, about 0.31 of the loss against the policy loss's 0.06) and the KL to the clone (about 0.04) holding it to
-  the scripts' play.  So, the user (2026-11-14, after cameronrwolfe.substack.com/p/grpo-tricks, whose methods drop the
-  KL penalty): from iteration 123 or so `--kl-start 0 --clone-weight 0 --kl-target 0 --group-step 256`, no KL loss, no
-  cloning loss (the scripts no longer advise), no KL guard, and an optimizer step a group or so.  About 40 optimizer steps an
-  iteration, but the KL an iteration fell (0.002-0.008): the cloning loss had been what moved it.  Twice as fast (170-385
-  decisions a second), as the clone's forward pass and the scripts' advice went.  The test at 150 won 10.9%, as the DAgger
-  actor had.
-* `mem-guard.sh` killed it at 20:15 when I ran tests and a parameter count beside it (resumed from 140), and the user then
-  stopped it: iteration 141 (2.41M decisions) is its last checkpoint, `ppo` not marked done.  The user asked for a critic-free
-  method's review (arXiv 2508.08221) before the next RL stage.
-
-## `runs/full-4` (2026-11-14)
-
-The user's next run, with a bigger model, `results/launch-full4.sh`, started 2026-11-14 20:56: the encoder 192 wide (was 144)
-with 64 latent tokens (was 40), and the actor `policy_latent.WIDE`, 384 wide in 12 heads (was 256 in 8) with two layers of
-self-attention among the controllable units (`Size.unit_layers`, `LatentActor.among`): 27.0M trained parameters, was 10.5M.
-On `army-8`, frames collected anew, the encoder at its default 25,000 steps, the clone 10,000 (`--clone-args "--size wide
---pass-gb 4.5"`), one DAgger round, then GRPO.  The pipeline's `--encoder-args` is new for it.
-* `--pass-gb 4.5` for the clone and DAgger (`results/wide-smoke.sh`, 60 steps from a random encoder): at the default 7.0 the
-  wide actor's passes split 19 times and the allocator retried 258, at 382 decisions a second; at 4.5 none split, 2
-  retries, 410-585 a second.  So its clone takes about 5-7 hours more than `full-3`'s 553 minutes.
-* `results/stop-before-ppo.sh` puts a `stop` file in its root when the eval stage starts, so it halts before GRPO.  Then,
-  before GRPO: `policy_train.py --grad-check 16384` from the DAgger actor (03-training.md, "GRPO from branched games",
-  "Signal or noise"; without `--bootstrap`, as the critic is untrained then), which decides `--group-step` and `--lr-start`,
-  and a short GRPO run to size the wide actor's memory with 3 collectors and a test of 128 games (below).  GRPO then starts with what the review of arXiv 2508.08221 brought (the user,
-  2026-11-14): tests of the same 128 games each time, scored and paired; the economy as the change from each decision;
-  no entropy bonus; advantages clipped at ±3 and SPO's pull bounded.  And bootstrapped (`--bootstrap`, the user's choice
-  over alternating GRPO and PPO by the hour): each branch's return to its stretch's end plus the critic's value of where it
-  ended, the critic learning in the learner only, the actor waiting 10 iterations for it; the actor's and the critic's
-  gradients clipped apart; and resignation as AlphaGo Zero's (`--resign`), with how much play goes to lost games logged
-  (`hopeless80`).  `full-3`'s GRPO had none of it.
-* The memory guard killed its encoder at step 5,100 (2026-11-14 22:01): I ran a CPU smoke run of GRPO through collectors
-  beside it, whose main process grew to 31 GB.  Relaunched at 22:02, the encoder from step 0 (it saves only at its end; the
-  killed one's log is `encoder-killed-5100/`).  Run again alone at the stop (2026-11-15), with stacks dumped as it grew: it's
-  the learner's first training step on the CPU, the time transformer's dense attention (`policy_latent.py`,
-  `F.scaled_dot_product_attention` with a mask, which on the CPU keeps every score), 1 to 23 GB in 6 s.  CPU-only: on the
-  GPU it's a fused kernel in the card's memory.
-* Done in 637 minutes, the clone (held out: unit kind 0.971, anchor 0.910) played as `full-3`'s: record-1 15.6% / 4.7% /
-  79.7% of 64 mixed games (`full-3` 15.6% / 6.3% / 78.1%), extractors at 6 minutes 5.3 against the script's 8.8.  DAgger's
-  actor, 64 1v1s: 9.4% / 3.1% / 87.5% (`full-3`'s 10.9% / 1.6% / 87.5%), extractors 4.36 against 9.89.  The wide actor
-  bought nothing in play by cloning.  The clone's memory spiked by 4-6 GB for a minute twice (02:09, 10:05), to 4.0 GB
-  available; the guard's floor is 3 GB since 07:48 (the user: 3-4 GB available is fine).
-* Before GRPO (2026-11-15): the gradient check from the DAgger actor, unbootstrapped, found noise (03-training.md, "Signal
-  or noise": all -0.03 against shuffled -0.06), so `--group-step 4096 --lr-start 3e-6`.  The A/B, 3 iterations each:
-  bootstrapped with resignation, 125-130 decisions a second overall (training 128-141, the learner's 4.8 GB of the card
-  full: minibatches split, the token budget down to 72,900); unbootstrapped 235-245.  WSL at 29.0 GB at most with a test.
-  Its first try ran a collector out of its 1 GB in the iteration-0 test (128 games, 43 a collector): tests through
-  collectors now go in chunks of a collector's training share (16; 03-training.md, "Opponents"), and `--collector-gb 1.4`
-  (a collector held 1.07 GB).  A test of 128 takes 13-16 minutes.
-* GRPO started 2026-11-15 15:08 (`results/launch-full4.sh`, `full-4/pss.log` every 10 minutes): 10 hours, bootstrapped,
-  resigning, the actor waiting 10 iterations for the critic.  `full-4/ab-*` and `full-4/grad-check` are the checks'.
-* Stopped at iteration 120 (2026-11-15 22:06, 2.03M decisions, about 6.9 of its 10 hours; `ppo` not marked done), the user
-  asked, for a bootstrapped gradient check (`full-4/grad-check-120`).  By then the critic had learnt (explained variance
-  0.7-0.8 from iteration 60), but the policy barely moved (KL 0.0006-0.0008 an iteration, 4 optimizer steps of 3e-6), and
-  tests of 128 games won 15.6%, 10.9% and 14.8% at 0, 50 and 100, the score's change from iteration 0 -0.029 +- 0.020 and
-  -0.003 +- 0.023.  The check found noise still (03-training.md, "Signal or noise").  The user's next idea: more reward
-  terms, closer to the decisions.  Built the same night: `--terms` `extractors`, `map` (the shares of the map in sight
-  and radar) and `experience` (the army's trades), from five new team stats (libzksim ABI 27, `ZK_STATS` 11; 03-training.md,
-  "Reward"), and `--grad-splits`.  An unbootstrapped gradient check from iteration 120's actor (`full-4/grad-check-terms`,
-  8 splits) found each new term noise alone, but the mix of all seven above the floor in every split (0.12 against 0.01),
-  where the bootstrapped check of that actor wasn't.
-* So GRPO began again at 23:34 (the user asked for the RL phase to go on, and for adjustments if it still didn't learn):
-  unbootstrapped from iteration 120's actor (`--init`), the seven terms (`result:1 score:0.5 economy:0.3 combat:0.3
-  extractors:0.3 map:0.3 experience:0.3`), `--group-step 2048 --lr-start 1e-5 --kl-target 0.005`, 10 hours
-  (`results/launch-full4.sh`).  Its iterations count from 0 again, so the lead rule fades anew.  The bootstrapped run is
-  `full-4/ppo-boot` (its replays `replays/ppo-boot`): to resume it, put it back as `ppo` and run the launch file with its old
-  ppo-args (in its comments).
-* It moved (KL 0.002-0.018 an iteration, the guard slowing it at times), but tests of the same 128 games didn't rise: the
-  score's change from iteration 0 -0.022 +- 0.028 at 50 and -0.026 +- 0.023 at 100.  At 50 its economy was up 2-3 SE
-  (extractors at 6 minutes 5.27 to 5.92, income at 3 minutes +1.4), but back to 5.06 at 100.  The user stopped it at
-  iteration 141 (2026-11-16 07:41, 2.38M decisions, `ppo/ckpt/it-000141.pt`, `ppo` not marked done): WSL held 33-34.5 GB
-  of its 40, and Windows, on 48 GB, ran short.  Where it went (smaps, iteration 140): the map pool 13.8 GB, shared by
-  all 7 processes through fork; the learner's own 5.7 GB; each collector's own 3.5-4.1 GB, growing with games' length;
-  each featurizing worker's own 0.2 GB (their 2.2 GB in `pss.log` is their share of the pool).  A pool map was about 20 MB
-  as `zksim.Map`, which kept its numpy arrays (height, speed, slope, segments, routes: about 8 MB) beside the C++ copies.
-  So, the user asked (2026-11-16): `zksim.Map` keeps none, the C++ scripts copy no ground, and the sim reads each map from
-  a file of the map cache mapped into memory (01-simulator.md, "The map cache"): the pool now takes 1.36 GB of the
-  processes' own memory, and the cache's pages are shared and droppable.
-* `results/mem-guard.sh` watches it (`full-4/memguard.log`).
-* Its frames (118 GB, D: down to 31 GB free) are deleted once the encoder is done, the user asked (2026-11-14), but
-  `manifest.json`, as `full-3`'s: `results/delete-frames-after-encoder.sh`, which says what it did in
-  `full-4/frames-deleted.log`.
-
-## `runs/full-2` (started 2026-11-11 04:15)
-
-The first whole run on the variety work, started by me while the user slept:
-
-    policy_pipeline.py --root /mnt/d/zk-learned/runs/full-2 --train-encoder --data /mnt/d/zk-learned/clone/army-7 \
-        --clone-steps 5000 --ppo-decisions 4000000 --ppo-args "--collectors 4 --concurrent --economy-start 1 --economy-end 1"
-
-* The policy runs its own economy in every PPO game (economy share 1 throughout, the user), for 4M decisions.
-* Its first attempt filled WSL's 40 GB in 5 minutes of recording: the recorder's buffers, fixed in `sim/record/src/record.cpp`
-  (03-training.md, "Script data").
-* The critic sees up to 256 hidden enemies, not 64 (the user, 2026-11-11; 02-policy.md, "Kinds").
-* Record 87 minutes (11,938 games, 110M decisions, 156 GB), frames 27, encoder 163 (held-out region R² 0.966), `zindex` 28.
-* The clone ran out of the card in 5 minutes, at 4 samples a pass.  Resumed with passes split when they run out, it made 323
-  decisions a second (27 hours for 10,000 steps), and went NaN between steps 500 and 1000; I stopped it.  The user's PC
-  restarted.  Then, the user asked, cloning was made faster, to about 750 a second (03-training.md, "Speed"), and its
-  fixes kept: passes by size, splitting, a non-finite pass logged in `clone/nonfinite.jsonl`.
-* The clone is 5,000 steps, not 10,000 (the user, 2026-11-11: about 5-6 hours): `--clone-steps 5000`.
-* Stopped at 15:48, the user asked, to make it faster still: no waiting on the GPU each pass, reads taken as they're done, and
-  `--compile dynamic` (the pipeline's now), to about 1,070 a second.  Restarted at 17:08: about 4 hours for the clone.
-* The NaN's cause, found from `nonfinite.jsonl` at 17:40: dying units' health below zero made a summary token's `log1p`
-  NaN (`featurize._summaries`, fixed).  The running clone's workers featurize as before the fix, so such a stretch still
-  skips its step there (1 in its first 500); every later stage featurizes with the fix.
-* The clone finished at 21:12 (245 minutes, 5 steps of 5,000 skipped): held out, the unit the scripts told 84%, the kind
-  96%.  In 64 games against the army script (by kind: 38 1v1s, 9 team games, 9 free-for-alls, 8 chicken games), told its
-  variant and running its own economy:
-
-  | Actor | Wins / draws / losses | 1v1 wins | Extractors at 6 min (script's) |
-  |---|---|---|---|
-  | clone | 9% / 5% / 86% | 5% | 5.2 (9.2) |
-  | after DAgger round 1 | 17% / 2% / 81% | 11% | 5.2 (8.6) |
-
-  The stall in expansion stays.  `record-1` and `record-2` took 97 and 128 minutes; recording is faster since (03-training.md,
-  "DAgger").  After round 2, the final eval (64 1v1s): 8% / 5% / 88%, extractors at 6 minutes 4.6 (10.5).
-* PPO started at 02:52 on 2026-11-12, after the critic was made to read the frame with learnt queries and Muon trains it (the
-  user; 03-training.md, "PPO").  Neither had been tried at scale before it.  Explained variance reached 0.41 by iteration 7.
-* A collector ran out of its 0.75 GB at iteration 8 (`ppo-oom-0.75`); at 1.0 one reached 0.96 by iteration 16, holding its
-  previous graph shape while capturing the next.  Training had fallen from 252 decisions a second to 70: as frames grew to
-  about 730 tokens, minibatches went from 141 decisions to 34, under a token weighting fitted when attention paired every
-  token, while the learner used little of its memory (the user saw 8 of the card's 12 GB in use).  I stopped it at
-  iteration 18 (set aside as `ppo-pairs-18`).  Now a graph shape narrower than the widest goes before the next capture, and
-  the budget counts tokens linearly, with 200 more a decision; a minibatch that doesn't fit is split, and the budget shrinks
-  by a tenth once in an iteration and grows back when there's room (03-training.md, "PPO" and "Playing").  Restarted three
-  times for it: shrinking at every split (`ppo-shrink-4`), then 800 a decision, which planned big frames' minibatches too
-  big (`ppo-k800-7`, 145-222 decisions a second overall all the same), then at 04:07 as it is now.  Each minibatch's
-  memory is logged in `ppo/minibatches.jsonl`, to fit the 200 to.
-* The A/B (the user, 2026-11-12): 50 iterations of the pipeline's PPO with Adam on the actor (04:07-04:49), then 50 with
-  Muon on its hidden matrices (`--actor-muon-lr 1.3e-4`, `runs/full-2-actor-muon`).  Adam won: wins level (tests at 20
-  and 40: 16 of 128 against 14), Muon's KL an iteration twice Adam's and rising, its cloning loss higher, 10% slower
-  (03-training.md, "PPO").  Adam's arm went on as the real PPO stage from its iteration 51, with the budget starting at
-  100,000 (fitted on its 2,042 minibatches) and growing back on what the tensors held.
-* At about 100 decisions a second.  As the fade took the KL to the clone's weight to 0.094, PPO's KL an iteration rose to
-  0.052 by iteration 126, with 36% of ratios past 1 ± eps; tests at 100 and 120 won 8% and 9%, against 11-16% before.  I
-  stopped it at 127 (kept as `ppo-kl-127`).  The user chose: the actor's rate slows 1.5x after an iteration past twice
-  `--kl-target` 0.01 and comes back after one under half of it, and a rollback to iteration 80 (best test, 15.6%).
-  Resumed from 80 at 15:11 (`results/rollback_ppo.sh` cut the logs there).  The test at 100 won 11% (KL 0.012, the rate
-  unslowed).  From iteration 101 (15:30) it tests every 100 iterations, not 20 (the user): a test of 64 games took 220-460 s
-  with the learner waiting, 30-60% on top of 20 iterations.  `results/resume-full2.sh` passes `--eval-every 100`.
-* The sim changed under it twice (the user): projectiles and lead from iteration 296 (17:58), the rest of the tactical AI
-  from 562 (20:52).  Tests (64 1v1s): 11% at 100, 8% at 200, 6% at 300, 11% at 400, 3% at 500 and 600.  183 decisions a
-  second overall at 600.  Explained variance was 0.99-1.0 from about iteration 550: beta at
-  0.85 made the reward mostly the result, and the policy lost about 95% of its games.
-* So the critic now has the reward's terms apart, a head each (the user, 2026-11-12; 03-training.md, "Reward"):
-  `--terms result:1 score:0.5 economy:0.3 combat:0.3` in the pipeline, with `--critic-span 2`.  Built and tested, never
-  trained with: a resume onto other terms keeps the critic but its heads, which start afresh while the actor waits 10
-  iterations.
-* PPO kept getting worse: training games' 1v1 wins fell from 16% (iterations 100-199) to 5% (600-699), team games' from
-  39% to 20%; tests won 0% at 700 and 5% at 800 and 900.  It steepened as the KL to the clone and the cloning loss faded to
-  nothing by 500.  It finished its 4M decisions at iteration 971 (2026-11-13 00:06) on the old critic.  The user
-  judged that PPO isn't working, and asked first for Zero-K's whole end of a game in the sim (above).
-
-## Variety (2026-11-10 and 11): built, tested, not yet trained on
-
-The user asked for it before the next whole run.  All of it is in the tree and described in `docs/learned-policy/`:
-
-* **Teams**: the sim, the scripts and the recorder take up to 8 teams in alliances (libzksim ABI 25, libzkscripts ABI 12 then,
-  libzkrecord ABI 2, clone data version 7).  A 1v1 plays bit for bit as it did.  Allies share income, overdrive and overflow.
-* **Kinds of game**: `SimEnv`, the recorder, the clone eval, the trainer and the pipeline all take `--kinds` (default
-  `1v1:0.5 teams:0.2 ffa:0.2 chicken:0.1`), `--slots`, `--test-kinds` and `--chicken-difficulties`.  The policy plays team 0
-  and scripts play its allies and enemies (in self-play, since 2026-11-16, it plays every team).  The headline test stays
-  a 1v1.
-* **Maps**: each pool map's `modes` say what it plays (`tools/map_modes.py`); 18 Violet Rampart maps come from a port of
-  the map's own generator (`tools/map_rampart.py`).  The pool is 404 maps since 2026-11-11, when 89 of the install's were
-  added: 381 play 1v1s, 332 teams, 64 free-for-alls, 5 chickens only.  THISspace and ZeroWars play nothing, and a map
-  made for chickens plays only them (the user).  01-simulator.md, "Data", lists what's not in the pool and why.
-* **Start points**: where a box's start point is ground the commander can't stand on (Esker Creek, Pools of Ilys, Acidic
-  Quarry: a ridge only spiders climb), the start is the nearest place in the box with room, as Zero-K does.  A commander
-  started on one never moved.
-* **Chicken defense** runs inside the sim (`sim/src/chickens.cpp`, a port of `unit_spawner.lua` at Zero-K's timings), with
-  Zero-K's reveal rule and its rule for what keeps a team in the game (`sim/data/rules.json`).  The army script has a
-  posture for it.  Four scripted players won at Very Easy and Easy, 1 game in 6 at Normal, none at Hard.
-* **Longer games**: the limit is 80 minutes (it was 20).  The reward has a small zero-sum term for winning sooner
-  (`--speed-weight` 0.1), and the lead rule (2.5x the value) is drawn per game: 90% of PPO's games at iteration 0, none
-  from 100 (`--lead-fade`); tests and recordings keep it, frame collection has it off.
-* **Caps**: a frame gives the policy 1,280 unit tokens, 512 of them controllable, and 512 wrecks (`FEATURE_VERSION` 8).
-* **Air transports** (the user, 2026-11-11; `FEATURE_VERSION` 9, raw frame schema 5):
-  * the sim has the Charon and the Hercules (`sim/src/transport.cpp`): one unit each, by its weight class; LOAD takes one
-    of its own, or anyone's that stands still in sight; UNLOAD sets it down; DROP lets it fall, hurt by its fall (a Jack
-    about a tenth of its health, an Ogre a fifth).  01-simulator.md, "Transports";
-  * the policy has the three kinds (24 in all, 20 in the sim's games), two flags on a unit (129 numbers), and aircraft
-    among its controllable units, which they weren't.  02-policy.md, "Kinds";
-  * the army script keeps a wing (`Seat::lifts`): a plant that can make transports makes one for every two assaults or
-    riots it could carry, up to 4 of a kind; they take the dearest to the enemy's dearest building the wing's metal
-    covers, drop what loses 15% or less to the fall and set the rest down, and each landed unit attacks that building,
-    then the next near it.  None in chicken games.  The scripts have no third factory, so a strider hub and a Hercules
-    never meet in their games.
-* **Frames**: army games of every kind, and hand-built scenarios with allies, several enemies and chickens
-  (`frame_data.ScenarioEnv`).
-* **Building placement** follows the engine: the footprint's rectangle on ground level enough for the def, in the opening,
-  the scripts (Python and C++), scenarios and the policy's builds (01-simulator.md, "Where a building can go").
-* **Replays** are format 3 (teams, alliances, pages), and the viewer shows any number of teams.
-
-**My choices the user hasn't confirmed** (each a constant, easy to change): the scenario kinds' weights (40% 1v1s, 20%
-each of the rest) and their chicken numbers; a scenario team's 480 units at most; chicken difficulty drawn evenly from
-Very Easy, Easy and Normal, not set from the measurement above; chicken games drawn on team maps too, as Zero-K lists only
-two maps for chickens; the reward zero-sum over alliances; the speed term unfaded by beta.  From the transports and the
-maps (2026-11-11): aircraft controllable by the policy (one line in `featurize_kernels.select`); the wing's numbers in
-`sim/scripts/src/army.cpp` (a transport for every 2 loads, 4 of a kind at most, a drop at 15% loss or less, 45 s of
-waiting for the rest of the wing); and Zero-K's "special" mark counting as no kind of game, which makes Requiem Outpost
-a chicken map.
-
-## Invalid since 2026-11-10 (FEATURE_VERSION 7, now 10)
-
-The id tables were resized for free-for-all (version 7: `featurize.MAX_PLAYERS` 64, `MAX_ALLY_TEAMS` 8), then the caps were
-raised (version 8), then air transports came (version 9, 2026-11-11), then the DPS sectors were made even and the frame put
-over 80 minutes (version 10, the user, 2026-11-13).  Nothing was trained at 7, 8 or 10.  So:
-
-* **no encoder or actor loads**: `runs/full-2`'s (trained at 9: its encoder, clone, DAgger rounds and PPO) and
-  `runs/grpo-trial`'s, `runs/full-1`'s, `runs/encoder-big`, every clone, `spo-1`.  The GRPO trial's PPO arm runs from a copy
-  of the code at 9 (`grpo-trial/code`);
-* frame pools were stored featurized, so none is left (`frames/pool4` and `pool5` are deleted; `full-1/frames` is rejected).
-
-The recorded games (`clone/army-6`, its `z.npz`) are raw and still read (data version 6).  But they're 1v1s by the scripts as
-they were before the economy change, so the next run records anew.  `policy_latent.ENCODER` still names `encoder-big`: every
-tool that loads an actor needs `--encoder`.
+* **Nothing remembered** (2026-11-18): the ones under `rdnn-3` above, the site's status first.
+* **`production_lead`**: its name; the rate over one step of the env (3 s) and the cap of 30 on each team's rate, not on
+  the lead or an average; a player's rate in a team game; the 10 minutes' average and the weight 0.3, as the other
+  leads'.
+* **The area mex**: the reserved kind 15 and not a 25th; its middle one of a BUILD's places and not a free point; the
+  radii the group head's 10 (60 to 2,250 elmos); a unit an action, so no "centre of selected units"; two units of an
+  alliance don't go to one spot; a unit 300 elmos or more from its spot when someone else takes it goes to the next;
+  a cloak's order doesn't end an area.  Between two extractors the unit stands for up to a step (3 s).
+* **The RDNN** (docs/model.md has each): relu and not tanh; no noise on the state; eta 1 and the rates' spread at first;
+  the recurrent weights' own Adam; the vector not LayerNormed and added in three places, the memory tokens gone; the
+  actor's start at 0.15 of the schedule; the critics' rate unchanged; 1,024 units.
+* **The recurrent runs**: the GRU's sizes (1,024, 4 memory tokens, 1 block, 2 plan layers); the critics two layers of
+  256, detached from the memory; no script games in training and the lead rule on throughout; 96 games; a seat's
+  objective at sigma 0.3, a quarter of games with an exploratory term at weight 1, the five classes and their caps (10,
+  30, 10, 4, 8), the critics not told the draws; the leads as terms of their own, averaged over 10 minutes, their
+  scales (20 extractors or idle fighters a player, 5 constructors) and weights 0.3.
+* **The kinds of game** (2026-11-10 and 11): the scenario kinds' weights (40% 1v1s, 20% each of the rest) and their
+  chicken numbers; a scenario team's 480 units at most; chicken difficulty drawn evenly from Very Easy, Easy and Normal;
+  chicken games drawn on team maps too; the reward zero-sum over alliances; the speed term unfaded by beta; aircraft
+  controllable by the policy; the wing's numbers in `sim/scripts/src/army.cpp`; Zero-K's "special" mark counting as no
+  kind of game, which makes Requiem Outpost a chicken map; the share of other kinds split by `--kinds`' weights.
 
 ## Environment
 
@@ -1077,28 +300,24 @@ tool that loads an actor needs `--encoder`.
 * **Read-only sources**: `../RecoilEngine` (CircuitAI under `AI/Skirmish/CircuitAI`), `../Zero-K`, `../ControllerAI`.
 * **Windows Python 3.13** runs the bot (`pip install requests websockets orjson numpy numba`).  Without numba, featurize runs in
   plain Python, about 50x slower, and says so on import.
-* **WSL (Ubuntu)** runs the sim and training: `~/zkml/bin/python` (PyTorch, RTX 4070, pytest-xdist), with pytest in
-  `~/zksim/pt`.  So `PYTHONPATH=$HOME/zksim/pt:bots`.
+* **WSL (Ubuntu)** runs the sim and training: `~/zkml/bin/python` (PyTorch, RTX 4070 of 12.3 GB, pytest-xdist), with
+  pytest in `~/zksim/pt`.  So `PYTHONPATH=$HOME/zksim/pt:bots`.  WSL has 40 GB, Windows 48.
 * **The sim's libraries**: `cmake -S sim -B ~/zksim/build && cmake --build ~/zksim/build -j8`.  That builds `libzksim.so`,
-  `libzkscripts.so`, `libzkrecord.so` and `libzkpolicy.so` (`ZKSIM_LIB` and `ZKPOLICY_LIB` override).  The recorder needs `libzstd-dev`.  Rebuild after any change
-  under `sim/`.
+  `libzkscripts.so`, `libzkrecord.so` and `libzkpolicy.so` (`ZKSIM_LIB` and `ZKPOLICY_LIB` override).  The recorder needs
+  `libzstd-dev`.  Rebuild after any change under `sim/`.  `bots/zkbot/data/policy_table.bin` is written by
+  `python sim/py/zkpolicy.py table`.
 * **`sim/data/rules.json`** is made by `tools/sim_rules.py`, which needs `lupa`.  It's only in `~/zksim/agent-maps-lupa`
   (add it to `PYTHONPATH`), not in `~/zkml`.
 * **`sim/data/maps`** is gitignored: after a pull, `python tools/sim_data.py maps`.
-* **Data on D:**, outside git, under `/mnt/d/zk-learned` (174 GB free on 2026-11-10):
+* **Data on D:**, outside git, under `/mnt/d/zk-learned` (81 GB free on 2026-11-18):
 
   | Path | What |
   |---|---|
   | `maps/` | the map pool: 204 real (18 of them Violet Rampart) and 200 made-up maps, 31 held out, each with its `modes`.  It loads through the map cache in 27 s, to 1.4 GB of a process's own memory (01-simulator.md, "The map cache") |
-  | `maps-old/` | the pool's old Violet Rampart map, set aside |
-  | `clone/army-6` | what was cloned: 83,820 script 1v1s with variants, 300.6M decisions, 105 GB, data version 6, with `z.npz` and `sides.npz`.  By the scripts before the economy change |
-  | `clone/army-6-test` | about 1,000 games of the same, for `check` and smoke runs |
-  | `evals/` | the six closed-loop evals of `clone-7`, `clone-8` and `clone-7s` |
-  | `frames/` | encoder frames: only `smoke-run` now (`pool4` and `pool5` deleted) |
-  | `runs/full-1` | the first whole pipeline run: its frames (51 GB), encoder, clone, DAgger games (530 MB) and rounds, evals, PPO (1.4 GB), replays.  None of it loads since feature version 7 |
-  | `runs/` | every other training run; none of their encoders or actors load.  `ppo-rate`, `ppo-profile`, `ppo-aligned` and `ppo-collectors-*` are scratch timing runs |
-  | `dashboard-demo/` | a made-up run directory: earlier runs' logs and 10 replays, for working on the dashboard |
-  | `dashboard-cache/` | the dashboard's map pictures and icons, made once |
+  | `clone/army-8` | 175 GB: about 8,800 script games of every kind, 100M decisions, recorded 2026-11-13 for `full-3` |
+  | `runs/` | the runs above (`rdnn-3`, `rdnn-2`, `rdnn-1`, `gru-1`, `full-4`, `full-3`, `full-2`, `grpo-trial`); the rest is older runs that don't load, and scratch |
+  | `parity/` | `tools/policy_parity.py`'s results |
+  | `dashboard-cache/`, `dashboard-demo/` | the dashboard's map pictures and icons, made once; a made-up run directory for working on the dashboard |
 
 ## Layout
 
@@ -1110,8 +329,9 @@ tool that loads an actor needs `--encoder`.
     group orders.
   * Unit data: `units.py`, `catalog.py`, `data/*.json`, rebuilt by `tools/extract_weapons.py`, `extract_abilities.py` and
     `dump_defs.py`.  Terrain: `terrain.py`, `hazards.py`, `mapdata.py`.
-* **`sim/`**: the C++ simulator (`src/`), the economy and army scripts (`scripts/`), the recorder (`record/`), their ctypes
-  bindings (`py/`, and `tools/policy_scripts_cpp.py` for the scripts), data (`data/`) and tests (`tests/`).
+* **`sim/`**: the C++ simulator (`src/`), the economy and army scripts (`scripts/`), the recorder (`record/`), the type
+  table, featurizer and actions in C++ (`policy/`: libzkpolicy), their ctypes bindings (`py/`, and
+  `tools/policy_scripts_cpp.py` for the scripts), data (`data/`) and tests (`tests/`).
 * **`tools/`**:
   * the sim's data and checks against the engine: `sim_data.py`, `sim_rules.py`, `sim_engine.py`, `sim_battery.py`,
     `sim_batch_bench.py`, `map_gen.py`, `map_modes.py`, `map_rampart.py`;
@@ -1119,10 +339,18 @@ tool that loads an actor needs `--encoder`.
     `policy_mix.py`, `policy_script.py`);
   * frames and the encoder: `frame_world.py`, `frame_data.py`, `frame_model.py`, `frame_vae.py`;
   * the policy: `policy_model.py`, `policy_latent.py`, `policy_clone_data.py`, `policy_clone_train.py`, `policy_clone_eval.py`,
-    `policy_train.py`, `policy_pipeline.py`, `policy_golden.py`;
-  * PPO's play: `policy_graphs.py` (each round as a CUDA graph), `policy_collectors.py` (collector processes);
+    `policy_train.py`, `policy_pipeline.py`, `policy_golden.py`, `policy_parity.py`;
+  * the trainer's play: `policy_graphs.py` (each round as a CUDA graph), `policy_collectors.py` (collector processes);
   * the run's dashboard: `policy_dashboard.py` (server), `dashboard/` (page, replay viewer), `policy_replay.py` (test games
     kept for it).
+* **`results/`** (never committed; on this machine only): the runs' launch files and helpers.  For the run going:
+  `start-rdnn.sh HOURS` (from nothing, with its guard, memory log, watchdog and dashboard), `launch-rdnn.sh` (the
+  trainer's flags, each a variable with a default), `rdnn-status.sh` and `rdnn_terms.py N` (no torch: safe beside it),
+  `stop-rdnn.sh`, `resume-rdnn.sh` (reads the run's `end`), `kill-rdnn.sh`, `rdnn-alive.sh`, `rdnn-dump.sh` (py-spy, as
+  root), `check-rdnn.sh NAME N` (a copy of the last checkpoint carried on N iterations by the launch file as it is),
+  `paired_tests.py`, `compare_tests.py`, `replay_summary.py`, `inspect_rdnn.py`, `rdnn_check.py`, `profile-run.sh`,
+  `mem-guard.sh`, and `run-tests.sh` (the suite; it refuses beside a trainer).  The GRU run's are the same under `gru`
+  names.  `edit_*.py` there are edits that made the code, as scripts.
 * **Tests**: `tests/policy/`, `tests/test_*.py`, `sim/tests/`, run as `pytest.ini` says.  None needs the engine.
 * **Engine games**: `zk-startup.ps1`, `zk-maps.ps1`, `maps.md`, `README.md`.
 
@@ -1132,33 +360,25 @@ In WSL, from `/mnt/c/Users/Thoma/Documents/sources/zk-ArenaAI`, with `PYTHONPATH
 
     ~/zkml/bin/python -m pytest -q                     # about a minute, on 8 processes (pytest.ini); all pass
     ~/zkml/bin/python -m pytest -q -n 0 tests/policy/test_train.py     # one process: for a debugger, or to time a test
+    bash results/start-rdnn.sh 24                      # a run from nothing as rdnn-3 is; first give results/*rdnn* a new directory's name
+    bash results/rdnn-status.sh                        # where the run going stands; no torch
+    bash results/stop-rdnn.sh; bash results/resume-rdnn.sh     # stop it and wait; carry it on to its end (every game anew)
     ~/zkml/bin/python tools/policy_pipeline.py --root /mnt/d/zk-learned/runs/NAME --train-encoder \
         --data /mnt/d/zk-learned/clone/NEW [--dry-run]
-        # everything, stage by stage; the same command again carries on.  A `stop` file in ROOT halts it after the running stage.
-        # --data with no recording in it is recorded first (the `record` stage); without --data it clones army-6, the old scripts' 1v1s.
-        # While it runs: the dashboard at http://localhost:8765 (log, results, replays)
+        # the cloning pipeline, stage by stage; the same command again carries on.  A `stop` file in ROOT halts it after
+        # the running stage.  --data with no recording in it is recorded first
     ~/zkml/bin/python tools/policy_dashboard.py --root /mnt/d/zk-learned/runs/NAME     # the dashboard alone, during a run or after
     ~/zkml/bin/python tools/policy_replay.py demo --out DIR     # replays of the army scripts' games, for the viewer
-    ~/zkml/bin/python tools/policy_replay.py repair DIR...      # replays written before format 2, with the right units' names
-    ~/zkml/bin/python tools/policy_clone_train.py --data /mnt/d/zk-learned/clone/army-6 --maps /mnt/d/zk-learned/maps \
-        --run /mnt/d/zk-learned/runs/NAME --decide-every 6 --samples 8 --accumulate 8 --lr 6e-4 --muon-lr 0.008 --workers 15 \
-        --steps 10000 --z --z-dropout 0.2 --economy-weight 2.5 --finish-winners 0.1 --encoder ENCODER/vae-last.pt
-    ~/zkml/bin/python tools/policy_clone_eval.py --actor RUN/actor.pt --maps /mnt/d/zk-learned/maps --games 64 --workers 12 \
-        --z variant --encoder ENCODER/vae-last.pt --out RESULT.json   # against the army script; --record DIR keeps its games
+    ~/zkml/bin/python tools/policy_parity.py check              # the C++ featurizer and actions against the Python
 
-Recording, `check` and `zindex` are in 03-training.md, "Script data"; PPO's flags in "PPO", and how it plays (aligned
-decisions, graphs, `--collectors N`, `--concurrent`) in "Playing".  A `stop` file in a PPO run's directory ends it at its next
-report, and the same command resumes it.
+Recording, cloning and the clone's eval are in 03-training.md ("Script data", "Cloning"); the trainer's flags in "PPO",
+and how it plays in "Playing".  A `stop` file in a trainer's run directory ends it at its next report, and the same
+command resumes it.
 
-`--encoder` is needed by every tool that loads an actor until `policy_latent.ENCODER` names a new encoder: its default is
-`encoder-big`, which no longer loads.
-
-**The tests** (850 pass, 3 of them need CUDA and are skipped without it): `pytest.ini` runs them on 8 processes, a file's tests in
-one process so that what they share is made once, and `tests/policy/conftest.py` keeps each process's maths to one thread.
-That took the suite from 211 s to about 60 (2026-11-11), with the slowest learning runs cut down and those of paths the
-pipeline doesn't use removed: the variational encoder's fits, checkpoints from before feature version 7, the trainer's
-in-process concurrent collection.  `--durations=20` shows what's slow; most of what's left is each process importing torch
-and the tools (about 15 s).
+**The tests** (850 pass, 3 of them need CUDA and are skipped without it): `pytest.ini` runs them on 8 processes, a file's
+tests in one process so that what they share is made once, and `tests/policy/conftest.py` keeps each process's maths to
+one thread.  About 60 s, most of it each process importing torch and the tools; `--durations=20` shows what's slow.  The
+user wants the suite lean: no redundant, sure-to-pass or slow tests.
 
 In the engine (Windows), recording raw frames from a game: `$env:ZKBOT_FLAGS='rawframe'`, then
 `.\zk-startup.ps1 ControllerAI CircuitAI:Normal -Headless -Map 'TitanDuel 2.2' -NoDownload -Client 'python bots\zkbot\main.py {team}'`.
@@ -1166,88 +386,57 @@ README.md has the rules for engine games: headless at max speed, windowed only w
 
 ## Next
 
-0. **The run from nothing with an RDNN and nothing remembered among the tokens**, `rdnn-3` (the section of that name
-   above), is going till 2026-11-19 05:23 (a check of it every hour is scheduled in the session that started it:
-   `results/rdnn-status.sh`): read its tests (250 and on) against its own iteration 0's and against `rdnn-2`'s at 250,
-   and report to the user.  No change in the middle of it unless the user says.  Open, put to the user: a site's
-   status still says "enemy" of a spot from an extractor only remembered.  The GRU run's tests, and `rdnn-1`'s at 0
-   and 250, were against the script that stood several extractors on a spot: to set a run beside them, test its
-   checkpoints anew.  If it
-   learns no better than the GRU run, the next thing to try is the GRU with the memory told as a vector and the same
-   rates, which separates the vector and the rate from the RDNN; and the check's missing arms (above).  The GRU run
-   was committed and pushed on `gru-memory` at about 20:00 on 2026-11-17 (the user says when); the RDNN and what's
-   written since aren't.  Still open
-   from the self-play run, mine, put to the user and not answered: find why the clone stops expanding.  Held out, `full-4`'s clone gets the kind right for
-   83% of the script's builds (97-100% for fight, move, produce, assist) and a whole build (type, place, offset) costs 7.5
-   nats against 0.3-2.4 for the rest (`clone/log.jsonl`); split that by type, place and offset, and by what's built
-   (extractors and energy against defences, whose rules look back 3-5 minutes, past the actor's 36 s).  If it's what the
-   actor can't see: memory in the features or older frames in the window before a GRU, and the encoder unfrozen for 1,000
-   cloning steps against frozen.  For RL: PPO with the per-term critic, a few maps with the lead rule on, a paired test
-   against the DAgger actor.
-1. **GRPO from branched games** (the user, 2026-11-13, after `full-2`'s PPO got worse), in place of PPO's critic: a game
-   copies in the sim and the scripts (libzksim ABI 26, libzkscripts ABI 13) and in `SimEnv` (01-simulator.md, "The batch"),
-   and `policy_train.py --group 8` trains by GRPO (03-training.md, "GRPO from branched games").  **The trial**
-   (`/mnt/d/zk-learned/runs/grpo-trial`, at FEATURE_VERSION 9), from `full-2`'s DAgger actor, which won 9.4% of 64 1v1s on
-   the sim as it is now: GRPO won 14.1%, 15.6% and 14.1% at iterations 25, 50 and 75, PPO 6.2%, 7.8% and 20.3%.  The user
-   stopped it at PPO's 75th, its results not needed.  At 64 games a test it says no more than that neither fell; GRPO
-   played 1.5-2.5x as fast (no critic).  But GRPO's orders swung from FIGHT to MOVE at iterations 72-79 (03-training.md,
-   "It broke at the end"): the per-minibatch scaling in `_update_loss` and the average over a decision's actions the likely
-   causes.  Fixed (the user, 2026-11-13, after a survey of GRPO's variants), with reward-to-go within a stretch, each term
-   over its spread, and an optimizer step over whole groups (03-training.md, "Advantages", "The update").  Before `full-3`
-   reaches GRPO, nothing to do: it starts with them, 16 optimizer steps an iteration of 16,384 (`--group-step` 1,024).
-   Watch its `kl` (the trial's was 0.001-0.01 an iteration) and the share of MOVE orders on the dashboard.  Since
-   `full-3`, the changes from the review of arXiv 2508.08221 (the user, 2026-11-14): built and tested, for `full-4`'s GRPO
-   (above).  Judge it by `eval_fight_score_change` and its `_se`, not the win rate alone.
-2. **The bot's inference in C++** (02-policy.md, "Deployment"; the nets in ONNX not for now, the user, 2026-11-13).
-   Built and checked, not yet used: `libzkpolicy` (`sim/policy/`, `zkpolicy.h`, binding `sim/py/zkpolicy.py`,
-   table file `bots/zkbot/data/policy_table.bin`, written by `python sim/py/zkpolicy.py table`) has the type table, the
-   featurizer and the actions.
-   * Parity: bit for bit with the Python over 49,451 frames of the four kinds (`tools/policy_parity.py`, results in
-     `/mnt/d/zk-learned/parity/`).  Speed: 1.13 ms a frame against numba's 2.13, and 0.19 ms on 16 threads.
-   * The RL trainer's featurizing goes through it since 2026-11-18 (`policy_train.py --featurize-threads`, in `rdnn-1`
-     from iteration 219: "RL from nothing with an RDNN" above).  Next: cloning's samples and frame data, and the
-     orders' encoding and decoding through it; then the map bundle.
-   * What it found in the Python is fixed on both sides, the user asked (2026-11-13): the DPS sectors even and the frame
-     over 80 minutes (`FEATURE_VERSION` 10), a Lobster's throw by its real name (it threw at its own feet when a training
-     game dropped its name), decode's fine point in float64 as encode's, and encode's last order whole.  Parity held after
-     (`/mnt/d/zk-learned/parity/check-fv10.json`), and again with no remembered building among the tokens (2026-11-18,
-     `check-noghost.json`: 49,451 frames, no mismatch).  Left: the bits match on glibc's libm only, so the bot on Windows
-     will need the same.
-3. **`runs/full-3`** is the next whole run (above), started 2026-11-13 21:44.
-4. **PPO's speed**: with concurrent collectors, training was longer than collecting, and in `full-2` fell to 70 decisions a
-   second as frames grew.  A step takes about 0.5 s whatever its size, so with minibatches as big as memory allows
-   (2026-11-12) collecting (about 150 a second in `full-2`) should be the limit; check it in `metrics.jsonl`'s `train_rate`
-   and `collect_rate`.  In a round's replay the decision itself (encoder, time transformer, critic: 41 ms at 64 decisions) is the bigger part; a
-   step is about 1 ms of small kernels, which fusing (`torch.compile` of a step, now the shapes are fixed) could shrink.
-5. **The stall in expansion** survived DAgger.  Whether PPO's economy share (the policy running its own economy in more games)
-   moves the extractor count is the thing to watch in its tests.
-6. **The engine hand-off**:
-   * the rest of the bot's inference in C++ (item 2), with the nets in onnxruntime, nothing to install (the user, 2026-11-12);
-   * decoded orders sent as commands;
-   * the opening and the economy script in the engine;
-   * the checks listed in 02-policy.md, "Not yet checked live".
-7. **The user's open questions** (`docs/model.md`, "Open questions").
+0. **`rdnn-3`** is going till 2026-11-19 05:23, a check of it every hour scheduled in the session that started it: read
+   its tests (500 and on) against its own iteration 0's, report to the user, change nothing in the middle unless the
+   user says.  Open, put to the user: a site's status still says "enemy" of a spot from an extractor only remembered.
+1. **If it learns no better than `gru-1`**: the GRU with the memory told as a vector and the same rates, which separates
+   the vector and the rates from the RDNN; and the missing arms of the paper's task ("Earlier runs", `rdnn-1`).
+2. **To set a run beside the older ones**, test their checkpoints anew against the script as it is (`gru-1` and
+   `rdnn-1` keep one every 20 iterations, none of iteration 0); it needs the card, so no run going.
+3. **Why the clone stops expanding** (mine, put to the user and not answered).  Held out, `full-4`'s clone gets the
+   kind right for 83% of the script's builds (97-100% for fight, move, produce, assist), and a whole build (type,
+   place, offset) costs 7.5 nats against 0.3-2.4 for the rest (`clone/log.jsonl`): split that by type, place and
+   offset, and by what's built.  A clone would also meet real site statuses only in play (recordings read every spot
+   free).
+4. **The bot's inference in C++** (02-policy.md, "Deployment"; the nets in onnxruntime, nothing to install, the user).
+   Built: libzkpolicy has the type table, the featurizer and the actions, bit for bit with the Python over 49,451
+   frames of the four kinds, and the RL trainer featurizes through it (`--featurize-threads`).  Next: cloning's samples
+   and frame data and the orders' encoding and decoding through it, then the map bundle.  The bits match on glibc's
+   libm only, so the bot on Windows will need the same.
+5. **The engine hand-off**: the rest of item 4; decoded orders sent as commands; the opening and the economy script in
+   the engine; the checks listed in 02-policy.md, "Not yet checked live".
+6. **The user's open questions** (`docs/model.md`, "Open questions").
 
 ## Traps
 
-* **Leftover build directories**: `~/zksim/build` is the one in use (libzksim ABI 31 and libzkpolicy ABI 4 since
-  2026-11-18, libzkscripts ABI 17 since the Urchin, 2026-11-16; libzkrecord ABI 2).  One built before that needs rebuilding.  The `build-*` and `agent*` directories beside it are leftovers of comparisons and of agents' tree
-  copies, safe to delete, except `agent-maps-lupa` (above).
-* **A site's status** is free in the sim's own records (`batch.frame`, a recording): `SimEnv.frame` fills it since
-  2026-11-18 (`site_status`), a seat's sites its own copy, made once a step.  And the sim builds an extractor wherever
-  it's told and pays each one on a spot: whoever places one keeps off a held spot itself (01-simulator.md, "Known
-  gaps", "Extractors on one spot").
+* **Nothing with torch beside a running stage**: no pytest, smoke run or measurement, on the CPU or the card.  The memory
+  guard killed `full-3` and `full-4` that way, and three torch processes on the card left no room for a fourth's CUDA
+  context.  A change is made and tested in a tree copy (its sim tests run without torch), then applied with the run
+  stopped.  A check run must end inside the watchdog's 25 minutes, or it takes that trainer for the run's.
+* **A launch file that's running**: bash reads a script as it goes, so an edit to `results/launch-*.sh` while its run is
+  going is run from wherever bash had got to when the trainer ends; any script overwritten while a shell was still in
+  it ran the new file's lines from the old one's place.  Stop the run (`results/stop-rdnn.sh` waits for the launch file
+  too), then edit.  The Python is safe to edit beside a run only in that its modules are loaded already.
+* **A restart starts every game anew**, so a run's games are young again for an hour and the KL bursts 10 to 14
+  iterations after.  If libzksim changed, the map cache is made again first (about 2 minutes before the trainer's first
+  line).  A copy carried on needs `--decisions` past the checkpoint's, or it ends at once.
+* **Memory**: check `wsl free -g` before a launch.  Never run two jobs that load the map pool at once.  Every GPU trainer caps
+  itself at a share of the card (`--gpu-memory`, `--gpu-share`): past the card, the Windows driver spills into system
+  RAM instead of failing, and at about 11.3 GB of the 12.3 a process stalls.  With collectors, the learner's cap leaves
+  each `--collector-gb` plus about 0.4 GB of CUDA's own.  The learner's first training step of the windowed actor on the
+  CPU grows to 23 GB (dense attention with a mask); on the card it doesn't.
+* **Leftover build directories**: `~/zksim/build` is the one in use.  The `build-*` and `agent*` directories beside it are
+  leftovers of comparisons and of agents' tree copies, safe to delete, except `agent-maps-lupa` (above).  Another agent
+  changes the sim and the scripts at times (the user): a long run plays the build it starts with.
+* **A site's status** is free in the sim's own records (`batch.frame`, a recording): `SimEnv.frame` fills it.  And the sim
+  builds an extractor wherever it's told and pays each one on a spot: whoever places one keeps off a held spot itself.
 * **The map cache** (`~/zksim/map-cache`, 6.1 GB; `ZKSIM_MAP_CACHE` moves it, empty turns it off): `load_pool` makes a
   map's file again when the map file or libzksim changes.  A change to what's kept, or to how `zksim.Map` makes what it gives
   the sim, needs `zksim.MAP_CACHE_VERSION` raised, or the old files are read.  The tests keep theirs in pytest's temporary
   directory (`tests/policy/conftest.py`).
-* **Memory**: check `wsl free -g` before a launch.  Never run two jobs that load the map pool at once.  Every GPU trainer caps
-  itself at 85% of the card (`--gpu-memory`): past the card, the Windows driver spills into system RAM instead of failing.
-  With collectors, the learner's cap leaves each `--collector-gb` plus about 0.4 GB of CUDA's own.
 * **Forking with torch**: a child forked after the parent ran a parallel CPU op hangs at its first one (OpenMP), so collectors
   set one thread first.  A parent that has started CUDA can't fork children that use it: the trainer forks its collectors
-  before the learner touches the GPU, and the tests of them run the trainer in a fresh process (in the test process, with
-  every earlier test's threads behind it, a collector sometimes hung).
+  before the learner touches the GPU, and the tests of them run the trainer in a fresh process.
 * **Pinned memory in WSL**: a collector's 20 MB `cuMemHostAlloc` failed as out of memory with 7 GB of the card free.  The
   graphs' inputs aren't pinned.
 * **`pkill -f` / `pgrep -f` from `wsl bash -c '...'`** match that shell too, whose command line holds the pattern.  Write the
@@ -1255,21 +444,15 @@ README.md has the rules for engine games: headless at max speed, windowed only w
 * **A background process started by `wsl bash -lc 'nohup X &'`** dies when that call returns.  `setsid nohup X > LOG 2>&1 <
   /dev/null &` outlives it.
 * **A `$` in `wsl bash -c '...'`** is taken by the shell wsl starts first, where the variable isn't set: `F=x; grep y $F`
-  reads stdin, and a `$(...)` runs once, before the loop it's in.  Put it in a script file (`results/wait-lines.sh`).
-* **A trainer started through `sudo -u` from a root shell** (to profile it in one script) died at its first training
-  step with "CUDA driver error: unknown error", twice: that environment hasn't `/usr/lib/wsl/lib` on its path
-  (`nvidia-smi` wasn't found either).  Start it as the user, and attach py-spy as root from another call
-  (2026-11-17).  A check run must also end inside the watchdog's 25 minutes, or it takes that trainer for the run's.
-* **`NAME` in WSL** is the PC's name, set for every shell: a launch script that reads `${NAME:-...}` gets it (a run started
-  in `full-4/DESKTOP-DS1JCNE`, 2026-11-16).  `results/launch-selfplay-test.sh` reads `RUN_NAME`.
-* **A launch file that's running**: bash reads a script as it goes, so an edit to `results/launch-*.sh` while its run is
-  going is run from wherever bash had got to when the trainer ends.  Any script: one overwritten while a shell was
-  still in it ran the new file's lines from the old one's place (2026-11-17).  And three torch processes on the card
-  left no room for a fourth's CUDA context (`cuDevicePrimaryCtxRetain`: out of memory), which failed tests.  Stop the run (`results/stop-gru.sh` waits for the
-  launch file too), then edit.  The Python is safe to edit beside a run only in that its modules are loaded already; a
-  change is better made and tested in a copy (`~/zksim/agent-objectives` was one, its sim tests run without torch).
+  reads stdin, and a `$(...)` runs once, before the loop it's in.  Put it in a script file.
+* **A trainer started through `sudo -u` from a root shell** died at its first training step with "CUDA driver error:
+  unknown error": that environment hasn't `/usr/lib/wsl/lib` on its path.  Start it as the user, and attach py-spy as
+  root from another call.
+* **`NAME` in WSL** is the PC's name, set for every shell: a launch script that reads `${NAME:-...}` gets it.  The launch
+  files read `RUN_NAME`.
 * **The dashboard's port**: a standalone `policy_dashboard.py` left on 8765 makes the pipeline run without its own (it says so
   and carries on).  Stop it before a launch, or give the pipeline another `--port`.
+* **The pipeline plans a `frames` stage** whenever a run's `frames/manifest.json` is missing: keep it when deleting frames.
 * **Engine games**: never start one, or kill engine processes, while the user is playing.  Check
   `tasklist | grep -i "spring\|zero-k"` first.
 * **`set_settings`** at game start can make the engine exit, so the host sends it after frame 2.  A sync-mode client that stops
