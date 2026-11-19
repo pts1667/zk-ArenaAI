@@ -322,6 +322,17 @@ In a 1v1, for side A against side B at decision t:
   can end (01-simulator.md, "The game in the sim") goes from 90% at iteration 0 to none from iteration 100, linear
   between, so that the policy learns to finish games.  Tests keep the rule in every game.  `metrics.jsonl` has
   `lead_share` and `lead_rule_games`.
+* **And it waits for the draws to go** (`--lead-draws SHARE`, off by default; the user, 2026-11-19: "The winning through
+  2.5x metal advantage should be disabled until the policy stops drawing in at least 80% of games"): no training game
+  has the rule until fewer than this share of them end undecided at the 80-minute limit, and from then on
+  `--lead-fade`'s share has it, for good (`Learner.follow_draws`, `lead_open`, both kept in a checkpoint).  Counted by
+  seat over the last 800 whose game ended, or whose alliance went out (`DRAW_WINDOW`), chicken games apart, where
+  lasting to the limit is the players' draw and no lead ends a game; nothing is said before the window is full, since
+  a run's first ends are all decided ones: a drawn game takes a dozen stretches to reach the limit.  Under GRPO a
+  group's 8 copies of a game end as 16 seats.  A game draws whether it has the rule when it starts, so the rule comes
+  in as games end.  Mine: the window and that it waits to be full; that it's for good; that tests keep the rule (they
+  stay the same games as earlier runs').  `metrics.jsonl` has `draw_share`, `draw_window`, `lead_open`, and
+  `ended_seats` and `drawn_seats` an iteration.
 * **Discounting**: gamma is 1 and GAE lambda 0.95.  With gamma below 1 the sum of potential changes would stop meaning "who's
   ahead".  Returns are bounded, so there's no reward or value normalisation; advantages are normalised per minibatch.
 * **The terms apart** (`--terms`; the user, 2026-11-12, after Pluto's and AlphaStar's several value heads): by default the
@@ -354,8 +365,13 @@ In a 1v1, for side A against side B at decision t:
     * `production_lead` (the user, 2026-11-18: "the lead of average metal spent in factories (i.e. on units), capping
       at 30 - e.g. (metal spent in factories/units assisting factories on our side minus enemy side)"): the metal a
       second a team's builders put into units that move over the step just taken (`ZK_STATS` `[11]`: a factory's work
-      and what helps it), no more a team than 30, over 30.  Mine: the cap on each team's rate a step, not on the lead
-      or on an average; a player's rate in a team game; the 10 minutes' average and the weight 0.3, as the others'.
+      and what helps it), no more a team than half its metal income then (`PRODUCTION_SHARE`; the user, 2026-11-19:
+      "capped to around half of the side's income"; till then no more than 30), over 30.  So a team gains nothing here
+      by putting more than half of what it earns into units, the rest being its economy's, and more income raises what
+      can count.  Mine: the cap on each team's rate a step, not on the lead or on an average; the income the frame's
+      own (extractors, reclaim and what's shared, at that step); 30 kept as the lead that is 1, so the term is smaller
+      than it was (two teams at 10 and 6 of income differ by 2 of 30); a player's rate in a team game; the 10
+      minutes' average and the weight 0.3, as the others'.
 
     Counted from each team's own units every step, only where a run's terms hold one (`SimEnv.count_leads`: about 2 ms
     a step of 48 games).  Under GRPO each is judged as the economy is, on its change from the level when the decision

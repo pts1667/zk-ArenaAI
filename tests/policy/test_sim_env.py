@@ -133,7 +133,8 @@ def test_the_rewards_terms_are_zero_sum_and_the_economy_a_discounted_average_who
     the income balance a step and its whole level at the end; the result pays the win and the speed term.  The leads are
     paid as the economy is, of what each team has: 6 extractors and one half built, worth a tenth of one, against 2; one
     idle raider against none, a penalty; a constructor and one half built against 6, of which one a team counts in the
-    first 2 minutes, 2 in the next 2 and 5 from 8; and 42 metal a second put into units, of which 30 count, against 10."""
+    first 2 minutes, 2 in the next 2 and 5 from 8; and 42 metal a second put into units against 10, of which half a team's
+    income counts, 7.5 against 2.5."""
     env = _env_with_values(16000.0, 6000.0, units=8)
     env.speed_weight, env.count_leads = 0.1, True
     held = env.batch.step
@@ -165,7 +166,7 @@ def test_the_rewards_terms_are_zero_sum_and_the_economy_a_discounted_average_who
 
     def leads(most: float) -> np.ndarray:        # with `most` constructors a team counting
         return np.array([(6.0 + part - 2.0) / se.EXTRACTOR_LEAD, -1.0 / se.IDLE_LEAD, (min(1.0 + part, most) - min(6.0, most)) / se.CONSTRUCTORS,
-                         (se.PRODUCTION_LEAD - 10.0) / se.PRODUCTION_LEAD])
+                         se.PRODUCTION_SHARE * (15.0 - 5.0) / se.PRODUCTION_LEAD])
     at = [names.index(name) for name in se.LEAD_TERMS]
     assert gamma == pytest.approx(math.exp(-0.5 / se.TERM_HORIZONS["economy"]))     # a decision is 15 frames
     for _ in range(se.EARLY_END_DECISIONS):
@@ -846,10 +847,13 @@ def test_a_chicken_game_is_lost_when_its_players_are_out_and_drawn_at_the_time_l
     assert env.decisions[0] == (1 if out else 6) and env.ended[0]["how"] == ("eliminated" if out else "limit")
 
 
-def test_an_area_mex_is_built_a_spot_at_a_time_from_the_nearest_to_the_unit_and_ends_with_its_spots_or_at_another_order():
+def test_an_area_mex_is_built_a_spot_at_a_time_from_the_nearest_to_the_unit_and_sticks_till_its_spots_end_or_its_cancelled():
     """rf.AREA_MEX, from the choices to the sim: a commander told one round itself is legal for it and for nothing that can't
     build an extractor; decoded, it's an order with the place and the radius; the env sends the unit to the free spot nearest
-    it, then on, till every free spot in the radius has an extractor and none outside it; and a move order ends one."""
+    it, then on, till every free spot in the radius has an extractor and none outside it.  On its way the unit is on a build,
+    which sticks: it's offered the cancel alone, in C++ as in Python, and no group order reaches it; the cancel ends the area
+    and leaves it no order.  An order that does reach it (a script's) ends an area too."""
+    import zkpolicy as zp
     from zkbot.policy import actions, groups as gr
 
     env = se.SimEnv(1, 5, ["mirror"], threads=1, decide_every=6)      # the policy on both sides: no one attacks
@@ -915,6 +919,35 @@ def test_an_area_mex_is_built_a_spot_at_a_time_from_the_nearest_to_the_unit_and_
     rows = np.array([(-2, zksim.ORDER_BUILD, going[0], going[1], env.extractor_type), (-3, zksim.ORDER_BUILD, going[0], going[1], env.extractor_type)], zksim.ORDER_DTYPE)
     placed = env._placed(0, rows)
     assert len({(float(r["x"]), float(r["z"])) for r in placed} | {tuple(going)}) == 3
+    env.give_orders(0, orders)
+    env.step(0.0)
+    assert list(env.areas[0]) == [uid]
+    # Past the 3 s in which nothing may be told it, a unit on a build is offered the cancel and nothing else; where the
+    # cancel is no kind, every order as before.
+    for _ in range(6):
+        env.step(0.0)
+    f, bundle = env.frame(0), env.bundle_of(0)
+    t = fz.featurize(f, bundle, env.table, enabled_kinds=se.KINDS, economy=True)
+    i = int(np.flatnonzero(t.uids[:t.controllable] == uid)[0])
+    assert set(np.flatnonzero(t.kind_mask[i]).tolist()) == {rf.KEEP, rf.CANCEL_BUILD} and t.kind_mask[:, rf.CANCEL_BUILD].sum() == 1
+    assert np.array_equal(zp.featurize(f, bundle, env.table, enabled_kinds=se.KINDS, economy=True).kind_mask, t.kind_mask)
+    before_it = fz.featurize(f, bundle, env.table, enabled_kinds=tuple(k for k in se.KINDS if k != rf.CANCEL_BUILD), economy=True)
+    assert before_it.kind_mask[i, rf.MOVE] and not before_it.kind_mask[i, rf.CANCEL_BUILD]
+    # A group order round a raider that takes in the commander goes to the raiders and leaves the commander to its build.
+    own = f.units[(f.units["player"] == 0) & (f.units["flags"] & rf.IDLE != 0)]
+    me = f.units[f.units["uid"] == uid][0]
+    raider = own[int(np.argmin(np.hypot(own["x"] - me["x"], own["z"] - me["z"])))]
+    assert np.hypot(raider["x"] - me["x"], raider["z"] - me["z"]) < gr.GROUP_RADII[-1]
+    env.give_orders(0, [actions.Order(int(raider["uid"]), rf.FIGHT, float(me["x"]), float(me["z"]), radius=gr.GROUP_RADII[-1], roles=gr.choosable())])
+    env.step(0.0)
+    told = env.frame(0).units
+    told = told[told["player"] == 0]
+    assert told["ord_kind"][told["uid"] == uid][0] == rf.BUILD and (told["ord_kind"] == rf.FIGHT).sum() >= 2 and list(env.areas[0]) == [uid]
+    # The cancel: the area is gone, and the unit stands with no order.
+    env.give_orders(0, [actions.Order(uid, rf.CANCEL_BUILD)])
+    env.step(0.0)
+    me = env.frame(0).units[env.frame(0).units["uid"] == uid][0]
+    assert 0 not in env.areas and me["ord_kind"] == -1 and me["flags"] & rf.IDLE
     env.give_orders(0, orders)
     env.step(0.0)
     assert list(env.areas[0]) == [uid]

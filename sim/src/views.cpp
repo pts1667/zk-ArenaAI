@@ -272,7 +272,9 @@ int World::emit_view(int viewer, UnitRecord* out, int cap, float* glob, int comm
         if (!(d.flags & ZK_U_MOBILE) && build[i] < 1.0f) ++unfinished;
         if (order_done && (d.flags & ZK_U_MOBILE) && d.build_speed > 0.0f && build[i] >= 1.0f) ++idle_builders;
         UnitRecord& r = common(u, KNOW_LOS, flags);
-        if (mem_kind[i] >= 0) {
+        // An attack whose target is dead is over, and leaves no order here, before the unit's own update has ended it (end_attack).
+        const bool attack_over = order[i] == ZK_ORDER_ATTACK && order_target[i] >= 0 && !alive[size_t(order_target[i])];
+        if (mem_kind[i] >= 0 && !(attack_over && mem_kind[i] == ZK_ORDER_ATTACK)) {
             r.ord_kind = int8_t(mem_kind[i]);
             r.ord_age = float(frame - mem_frame[i]);
             r.ord_x = mem_x[i];

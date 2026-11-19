@@ -26,12 +26,12 @@ BEING_BUILT, CLOAKED, PARALYZED, IN_LOS, IDLE, TYPE_KNOWN, DAMAGED, RESERVED, JU
 CARRIED, LOADED = 1024, 2048
 KNOW_LOS, KNOW_RADAR, KNOW_MEMORY, KNOW_HIDDEN = 0, 1, 2, 3
 KEEP, MOVE, FIGHT, ATTACK_UNIT, ATTACK_GROUND, STOP, MANUAL_FIRE, JUMP, CLOAK_ON, CLOAK_OFF = range(10)
-BUILD, ASSIST, REPAIR, RECLAIM, PRODUCE, AREA_MEX = range(10, 16)
+BUILD, ASSIST, CANCEL_BUILD, RECLAIM, PRODUCE, AREA_MEX = range(10, 16)
 THROW, PUSH, PULL, PLACE_BEACON, WAIT_AT_BEACON = range(16, 21)
 LOAD, UNLOAD, DROP = range(21, 24)
 ORDER_SLOTS, KIND_COUNT = 16, 24
 _MIRRORED = ("BEING_BUILT CLOAKED PARALYZED IN_LOS IDLE TYPE_KNOWN DAMAGED RESERVED JUMP_READY PULLING CARRIED LOADED KNOW_LOS KNOW_RADAR KNOW_MEMORY "
-             "KNOW_HIDDEN KEEP MOVE FIGHT ATTACK_UNIT ATTACK_GROUND STOP MANUAL_FIRE JUMP CLOAK_ON CLOAK_OFF BUILD ASSIST REPAIR RECLAIM "
+             "KNOW_HIDDEN KEEP MOVE FIGHT ATTACK_UNIT ATTACK_GROUND STOP MANUAL_FIRE JUMP CLOAK_ON CLOAK_OFF BUILD ASSIST CANCEL_BUILD RECLAIM "
              "PRODUCE AREA_MEX THROW PUSH PULL PLACE_BEACON WAIT_AT_BEACON LOAD UNLOAD DROP ORDER_SLOTS KIND_COUNT").split()
 _CHANGED = [name for name in _MIRRORED if globals()[name] != getattr(rf, name)]
 if _CHANGED:
@@ -545,8 +545,13 @@ def masks(units, rows, region, targets, foes, beacons, features, locked, c, tf, 
         u = units[i]
         me = rows[i]
         flags = u["flags"]
-        free = not locked[i]
         mobile, armed = tb[me, B_MOBILE], tb[me, B_ARMED]
+        # A build sticks (the user, 2026-11-19).  A unit is on one while its record's order is a BUILD and it isn't idle: on
+        # its way to it or at it, an area mex's among them.  It's offered nothing that would take it off, only the cancel,
+        # which no other unit is offered.  Where the cancel is no kind at all (`enabled`: cloning, the runs before), any
+        # order cuts a build short as it always did.  What stands still is never idle by its flag, and is left as it was.
+        building = enabled[CANCEL_BUILD] and mobile and u["ord_kind"] == BUILD and (flags & IDLE) == 0
+        free = not locked[i] and not building
         flies = tb[me, B_AIR]
         cls = np.int64(-1) if flies else np.int64(move_class[me])
         here = np.int64(region[i])
@@ -668,6 +673,7 @@ def masks(units, rows, region, targets, foes, beacons, features, locked, c, tf, 
             makes = makes or ptr_produce[i, k]
         kind[i, PRODUCE] = free and tb[me, B_PRODUCES] and makes
         kind[i, BUILD] = free and tb[me, B_BUILDS]          # there's always a place: beside itself
+        kind[i, CANCEL_BUILD] = building and not locked[i]  # not in the 3 s after it was told to build, as nothing is
         kind[i, AREA_MEX] = free and tb[me, B_AREA_MEX]     # the same places; whether a free spot is in reach of one isn't asked
         kind[i, ASSIST] = free and any3
         kind[i, RECLAIM] = free and tb[me, B_CONSTRUCTOR] and features > 0      # any feature token: it walks there

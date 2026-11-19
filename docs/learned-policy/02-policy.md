@@ -31,8 +31,8 @@ reads).  It holds only what a player can know and the live bot can supply: no fa
 * Units, enemies in sight and radar blips each carry `defId`, `allyTeam`, `pos`, `vel`, health, build progress, cloaked and
   paralysed.  A blip carries `defId` only while its type is known.
 * Idle units come from the UNIT_IDLE events (topic 7) since the last decision.
-* Order memory is what the bot told its units.  A blip's top speed is taken over 2 s.  Remembered structures are kept by the
-  host.
+* Order memory is what the bot told its units, but for an attack on a unit that's over (the unit idle since), which leaves
+  none, as in the sim.  A blip's top speed is taken over 2 s.  Remembered structures are kept by the host.
 * ControllerAI doesn't send a unit's player yet, only its allyteam, so a hostile unit's player falls back to its allyteam.  That's
   exact in a 1v1.  `springai::Unit::GetTeam()` exists if it's wanted.
 * The static bundle must be built from the heights after water is set.  This matched the archive on TitanDuel; it hasn't been
@@ -78,7 +78,17 @@ numba, giving the same tensors to the bit as the numpy it replaced.  Without num
     ATTACK_UNIT being at a foe in sight (a missile's at one in sight or on radar).  What looks like it in a replay: an
     attack on a building stands once the building is out of sight, as the engine's does (`World::target_lost`: only a
     target that moves is given up), a unit's record keeps the last order it was told until the next, and the viewer
-    draws that order to wherever its target really is.  None of that is changed.
+    draws that order to wherever its target really is.
+  * **An attack that's over leaves no order** (the user, 2026-11-19: raiders stood "stuck" where their target had left
+    the radar, reading as busy).  The sim gave such an attack up within 2 s, and the unit's frame said idle from then
+    (the flag, and `idle_lead`'s count: checked by a probe); but its record kept ATTACK_UNIT and its target, as it
+    keeps every order, so the nets' order memory and the viewer went on saying "attacking".  Now the order's end (the
+    target dead, or one that moves out of sight and radar for 4 updates, or a bomber's ammunition spent) clears it
+    from the record: `World::end_attack`; `rawframe.from_host` the same on the live side, of an idle unit whose last
+    order was an attack.  Every other order stays till the next, and an attack on a building out of sight still
+    stands.  A stop leaves none either (2026-11-19): it's what the policy's cancel of a build is ("A build sticks").
+    So whether a unit is doing anything is its idle flag, not its record: a build that's done is still the record's
+    order.
 * **Names**: an exact vocabulary of catalog names plus an unknown row.  For the actor, 30% of the vocabulary reads as unknown
   in each game, so it learns to go by stats too.  The frozen encoder always gets the true names.
 * **Normalisation is fixed**: positions over map size, velocities over the unit's catalog speed, log1p for costs, and constants
@@ -126,7 +136,7 @@ Sumo), constructors, and the commander once the opening is over (`featurize._sel
 
 ### Kinds
 
-24 kinds (`rawframe.KIND_COUNT`).  The sim obeys the 21 in `policy_sim_env.KINDS`, keep among them.  The engine commands are
+24 kinds (`rawframe.KIND_COUNT`).  The sim obeys the 22 in `policy_sim_env.KINDS`, keep among them.  The engine commands are
 where each would go once the bot sends commands: none is sent yet, and those marked "unverified" haven't been tried in a game.
 
 | Kind | Chooses | Engine command | Legal when |
@@ -142,7 +152,7 @@ where each would go once the bot sends commands: none is sent yet, and those mar
 | 8, 9 CLOAK_ON / OFF | | custom 37382, state 1 / 0 (unverified) | can cloak; the one it isn't |
 | 10 BUILD | type, place, offset | `build` | a constructor or the commander, with an option it builds |
 | 11 ASSIST | one of our units being built, or a factory | `guard` | a target of that kind in reach |
-| 12 REPAIR | | `repair` | not in the sim |
+| 12 CANCEL_BUILD | | `stop` | a unit on a build, past its commit lock ("A build sticks", below); no other unit |
 | 13 RECLAIM | a wreck | `reclaim` | a constructor with a wreck in sight |
 | 14 PRODUCE | type | `build` on the factory or silo | it makes something other than what it's making now |
 | 15 AREA_MEX | place, radius | a `build` of an extractor on each spot, queued (Zero-K's area mex is a widget's) | a constructor or the commander with an extractor among what it builds |
@@ -161,6 +171,30 @@ ways.
 
 **Commit lock**: a unit told something in the last 3 s (`COMMIT_DECISIONS` slots) can't be an anchor, unless it was damaged, its
 target was lost, or it's idle.  This keeps orders steady.
+
+**A build sticks** (the user, 2026-11-19: "make builds stick, but also add a 'cancel build' order as well.  On 'cancel
+build', the builder's order(s) are explicitly canceled").  A unit is on a build while its record's order is a BUILD and
+it isn't idle: on its way to one or at it, an area mex's among them.
+
+* **It can be picked for one thing, CANCEL_BUILD** (`featurize_kernels.masks`, the same in libzkpolicy), and no other
+  unit can be told that.  The cancel is the sim's stop: the unit's order ends, its area mex with it, and its record
+  holds no order (`World::order_unit`), so it stands idle and free at the next decision.
+* **No group order of the policy's reaches it** (`SimEnv._spare_builds`): a group that would have taken it goes as the
+  same order to each of the others it selects.
+* **An untrained actor seldom cancels**: to pick a unit on a build is to cancel, so its score as an anchor starts 3
+  nats under another unit's (`policy_model.CANCEL_START`; mine, not the user's).  Without that a build would be
+  cancelled as often as any order used to cut one short.
+* **Only where the cancel is among the kinds** (`policy_sim_env.KINDS` has it; cloning's and those of the runs till
+  `rdnn-5` haven't, and `SimEnv.builds_stick` is off for them): elsewhere any order to a unit on a build ends it, as
+  before.  The kind was the one kept in reserve for a repair, so no tensor or head changed shape and a saved actor
+  loads.
+* **What doesn't stick**: what stands still (never idle by its flag); an order the scripts or the opening give; and
+  the step between two extractors of an area mex, when the unit stands idle and may be told anything (which ends the
+  area).  In the 3 s after a build order nothing may be told the unit, the cancel neither.
+* **Why**: at `rdnn-5`'s iteration 100 the policy's next order to a unit it had told to build came while it was still
+  on the build 53% of the time, a median 21 s in, and a team that could build won no more than one that couldn't.
+  Under this rule, with the same weights, 17% of builds end by a cancel and a team has 9.3 extractors at 20 minutes
+  for 4.7 (docs/training_logs.md, "The checks after it").
 
 ### Where an action points
 
@@ -183,7 +217,8 @@ target was lost, or it's idle.  This keeps orders steady.
     is sent to the free spot in the area nearest it, then, once it stands idle, to the one nearest it then, till none
     is left.  A spot is free if no extractor the seat knows of holds it (`site_status`) and no other unit of its
     alliance on an area mex is going to it.  One whose spot is taken while it's still 300 elmos away goes to the next.
-    Any other order to the unit ends its area (not a cloak's), as does one the sim gives it for a group.
+    Any other order that reaches the unit ends its area (not a cloak's): of the policy's own that can only be the
+    cancel ("A build sticks"), of a script's any, and one the sim gives it for a group.
   * A unit on an area mex shows the BUILD it's on: no frame has an order of kind 15, whose slot in a token's order
     memory says whether the unit is pulling.
   * Between two extractors the unit stands for up to one step of the env (3 s in training), where a game's queue would

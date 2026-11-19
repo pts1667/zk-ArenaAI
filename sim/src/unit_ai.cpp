@@ -270,6 +270,14 @@ bool World::target_lost(int u, int t) {
     return --a.lost_timer <= 0;
 }
 
+// An attack order that's over, its target dead or given up: the unit has no order, and its record says none.  A record keeps
+// every other order till the next, and this one went on pointing at what the unit had lost: a raider standing where its
+// target left the radar read as told to attack, to the nets and in a replay (the user, 2026-11-19).
+void World::end_attack(int u) {
+    order[size_t(u)] = ZK_ORDER_NONE;
+    if (mem_kind[size_t(u)] == ZK_ORDER_ATTACK) mem_kind[size_t(u)] = -1;
+}
+
 void World::chase(int u, int t, int until) {
     UnitAI& a = ai[size_t(u)];
     a.chasing = t;
@@ -346,7 +354,7 @@ void World::run_commands(int u) {
     int& o = order[size_t(u)];
     if (o == ZK_ORDER_ATTACK) {
         const int t = order_target[size_t(u)];
-        if (t < 0 || !alive[size_t(t)] || target_lost(u, t)) o = ZK_ORDER_NONE;
+        if (t < 0 || !alive[size_t(t)] || target_lost(u, t)) end_attack(u);
     }
     if (o == ZK_ORDER_FIGHT && a.chasing < 0) fight_step(u);
     const bool empty = o == ZK_ORDER_NONE && a.chasing < 0 && !a.dodging;

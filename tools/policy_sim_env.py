@@ -23,7 +23,7 @@ import json
 import math
 import pathlib
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 
@@ -42,7 +42,7 @@ import policy_variants as pv  # noqa: E402
 
 KINDS = (rf.KEEP, rf.MOVE, rf.FIGHT, rf.ATTACK_UNIT, rf.MANUAL_FIRE, rf.JUMP, rf.CLOAK_ON, rf.CLOAK_OFF,
          rf.PRODUCE, rf.THROW, rf.PUSH, rf.PULL, rf.PLACE_BEACON, rf.WAIT_AT_BEACON, rf.BUILD, rf.ASSIST, rf.RECLAIM,
-         rf.LOAD, rf.UNLOAD, rf.DROP, rf.AREA_MEX)
+         rf.LOAD, rf.UNLOAD, rf.DROP, rf.AREA_MEX, rf.CANCEL_BUILD)
 # An area mex (rf.AREA_MEX; the user, 2026-11-18) is the env's to carry out, a BUILD at a time (SimEnv._area_builds): a unit
 # still this far from the spot it's going to when someone else takes the spot is sent to the next.
 AREA_RETARGET = 300.0               # elmos: past any constructor's reach, so not one that has begun the extractor itself
@@ -106,14 +106,17 @@ MADE_ROLES = ("raid", "scout", "riot", "skirm", "assault", "arty", "snipe", "aa"
 #   more a team than 1 at the game's start and 1 more every CONSTRUCTOR_EVERY seconds up to CONSTRUCTORS, over CONSTRUCTORS;
 # * "production_lead" (the user, 2026-11-18): the metal a second a team's builders put into units, which is what its
 #   factories and whatever helps them spend (zksim's SPENT_STAT), over the step just taken and no more a team than
-#   PRODUCTION_LEAD, over PRODUCTION_LEAD.  Its average over time is the term, as every lead's is (LEVEL_TERMS).
+#   PRODUCTION_SHARE of its metal income then (the user, 2026-11-19: "capped to around half of the side's income", so
+#   that the rest of what it earns is worth nothing here and can go to its economy; it was no more than
+#   PRODUCTION_LEAD), over PRODUCTION_LEAD.  Its average over time is the term, as every lead's is (LEVEL_TERMS).
 LEAD_TERMS = ("extractor_lead", "idle_lead", "constructor_lead", "production_lead")
 BUILD_RAMP = 0.2                    # of an extractor or a constructor: what one being built counts, times its build progress
 EXTRACTOR_LEAD = 20.0               # extractors a player: the lead that is 1
 IDLE_LEAD = 20.0                    # idle fighters a player: the lead that is -1
 CONSTRUCTORS = 5.0                  # constructors a team: no more count from 8 minutes, and the lead that is 1
 CONSTRUCTOR_EVERY = 120.0           # seconds of game: how often one more constructor counts, from 1
-PRODUCTION_LEAD = 30.0              # metal a second a team puts into units: no more counts, and the lead that is 1
+PRODUCTION_LEAD = 30.0              # metal a second a team puts into units: the lead that is 1
+PRODUCTION_SHARE = 0.5              # of a team's metal income: no more of what it puts into units counts
 TERMS = ("blend", "result", "score", "economy", "combat", "map", "experience") + MADE_TERMS + LEAD_TERMS
 # The terms that are a balance's change a step as "combat" is, closer to the decisions (the user, 2026-11-15): `_balances`.
 # "extractors", the finished extractors' balance, was one of them till "extractor_lead" took its place (the user, 2026-11-17).
@@ -320,7 +323,7 @@ def sim_orders(orders: list) -> np.ndarray:
     """The policy's orders as the sim's.  Its kinds up to PRODUCE have the same numbers; a thrower's fire at the ground, and a switch's target, are the sim's own.
     A group order is its unit's, followed by a groups.GROUP_MARK record with the radius as x and the roles as target, as the scripts record theirs:
     `split_groups` makes the sim's group orders of them.  An AREA_MEX is no order of the sim's: SimEnv takes those first
-    (`_take_areas`), and one left here is dropped."""
+    (`_take_areas`), and one left here is dropped.  A CANCEL_BUILD is the sim's stop."""
     table, cat = tables.table(), catalog()
     orders = [o for o in orders if o.kind != rf.AREA_MEX]
     out = np.zeros(len(orders) + sum(o.radius > 0.0 for o in orders), zksim.ORDER_DTYPE)
@@ -337,6 +340,8 @@ def sim_orders(orders: list) -> np.ndarray:
             kind = zksim.ORDER_WAIT_AT_BEACON
         elif kind in _TRANSPORT_ORDERS:
             kind = _TRANSPORT_ORDERS[kind]
+        elif kind == rf.CANCEL_BUILD:       # a stop: the unit's order ends, and its record holds none (World::order_unit)
+            kind, target = zksim.ORDER_NONE, -1
         elif kind == rf.PRODUCE or kind == rf.BUILD:
             target = cat.index.get(table.names[target], -1)
         out[i] = (o.uid, kind, o.x, o.z, target)
@@ -690,6 +695,10 @@ class SimEnv:
         # The units on an area mex, by game and then uid: [team, x, z, radius, spot x, spot z], the spot that of the extractor
         # it's on (NaN before its first), and the sim's type an area mex builds.
         self.areas: dict[int, dict[int, list]] = {}
+        # A build sticks (the user, 2026-11-19): the featurizer offers a unit on one nothing but the cancel
+        # (featurize_kernels.masks), and here no group order of the policy's reaches one (`_spare_builds`).  Off for a
+        # policy that has no cancel among its kinds, whose orders cut a build short as they always did.
+        self.builds_stick = True
         built = np.flatnonzero(self.extractor_row & (self.eco_data.catalog_row[:n] >= 0))
         self.extractor_type = int(self.eco_data.catalog_row[built[0]]) if len(built) else -1
         self.fighter_row = np.asarray(t.mobile, bool)[:n] & np.asarray(t.combat, bool)[:n] & ~np.asarray(t.builder, bool)[:n]
@@ -1119,6 +1128,28 @@ class SimEnv:
                     spots.append(at)
         return rows[keep]
 
+    def _spare_builds(self, seat: int, orders: list) -> list:
+        """The policy's orders with no group order reaching a unit on a build (`builds_stick`): one whose record's order is a
+        BUILD and that isn't idle, as featurize_kernels.masks has it.  A group that would have taken such a unit goes instead
+        as the same order to each of the others it selects (groups.expand, as the sim selects them), which is all the sim
+        makes of a group order."""
+        if not self.builds_stick or not any(o.radius > 0.0 and o.kind in groups.GROUP_KINDS for o in orders):
+            return orders
+        units = self.frame(seat).units
+        own = units[units["player"] == self.team_of(seat)]
+        on_build = (own["ord_kind"] == rf.BUILD) & ((own["flags"] & rf.IDLE) == 0)
+        if not on_build.any():
+            return orders
+        rows = self.table.rows(own["def_id"])
+        out = []
+        for o in orders:
+            members = groups.expand(int(o.uid), int(o.roles), float(o.radius), own, rows) if o.radius > 0.0 and o.kind in groups.GROUP_KINDS else None
+            if members is None or not (members & on_build).any():
+                out.append(o)
+                continue
+            out.extend(replace(o, uid=int(uid), radius=0.0, roles=0) for uid in own["uid"][members & ~on_build])
+        return out
+
     def _take_areas(self, g: int, team: int, orders: list) -> list:
         """The policy's orders without its AREA_MEX ones, which are kept (`areas`) for `_area_builds` to carry out.  Any other
         order to a unit on an area mex ends it, but for a cloak's, which leaves what a unit is doing as it is."""
@@ -1266,7 +1297,7 @@ class SimEnv:
         BUILD_RAMP x its build progress, so that starting one and building it on are worth something before it's done; its
         finished fighters that stand idle (the sim's flag: one that moves, its order done); and its constructors, counted as
         the extractors, up to what counts at the game's time (CONSTRUCTOR_EVERY); and the metal a second it put into units
-        over the step just taken (`spent_rate`), up to PRODUCTION_LEAD.  Nothing for the chickens.
+        over the step just taken (`spent_rate`), up to PRODUCTION_SHARE of its metal income now.  Nothing for the chickens.
         Every team's records at once, as wide as the longest: it's after every step of the sim, and a loop over the teams
         was 6% of a collector's time (py-spy, 2026-11-17)."""
         out = np.zeros((self.count, self.slots, len(LEAD_TERMS)))
@@ -1287,7 +1318,8 @@ class SimEnv:
         out[:, :teams, 1] = summed(((flags & rf.IDLE) != 0) & ~building & self.fighter_row[rows])
         most = np.minimum(1.0 + np.floor(self.decisions * self.seconds_a_step / CONSTRUCTOR_EVERY), CONSTRUCTORS)
         out[:, :teams, 2] = np.minimum(summed(np.where(constructors, np.where(building, BUILD_RAMP * built, 1.0), 0.0)), most[:, None])
-        out[:, :teams, 3] = np.where(playing, np.minimum(self.spent_rate[:, :teams], PRODUCTION_LEAD), 0.0)
+        income = self.batch.globs[:, :teams, rf.G["metal_income"]].astype(np.float64)
+        out[:, :teams, 3] = np.where(playing, np.minimum(self.spent_rate[:, :teams], PRODUCTION_SHARE * income), 0.0)
         return out
 
     def _leads(self) -> np.ndarray:
@@ -1338,7 +1370,7 @@ class SimEnv:
                 policy = self._is_policy(seat)
                 part = None
                 if orders is not None:
-                    part, grouped = split_groups(self._placed(seat, sim_orders(self._take_areas(g, team, orders))))
+                    part, grouped = split_groups(self._placed(seat, sim_orders(self._take_areas(g, team, self._spare_builds(seat, orders)))))
                     policy_groups[g].append(grouped)
                 elif not policy:
                     flags[seat] = 1         # policy_scripts_cpp.SEAT_ARMY

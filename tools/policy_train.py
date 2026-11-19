@@ -156,6 +156,10 @@ class Config:
     # The share of training games, by iteration, that a lead can end (policy_sim_env.lead_share), linear between and the last
     # after: 90% at first, none from iteration 100, so the policy learns to finish games (the user, 2026-11-10).  Tests keep it.
     lead_fade: tuple[tuple[int, float], ...] = ((0, 0.9), (100, 0.0))
+    # No lead rule in a training game until fewer than this share of them end undecided at the time limit (the user,
+    # 2026-11-19: "disabled until the policy stops drawing in at least 80% of games"); from then on `lead_fade`'s share, for
+    # good.  Counted over the last DRAW_WINDOW seats whose game ended, chicken games apart (Learner.follow_draws).  0: off.
+    lead_draws: float = 0.0
     # The kinds of game played and how likely each is (policy_sim_env.GAME_KINDS), and the slots a game: 0 for what the biggest of
     # them needs, 2 for 1v1s alone.  The headline test stays a 1v1 against the script, so that runs stay comparable; `test_kinds`
     # adds a test of each of those kinds, the policy on team 0 and the scripts on every other (the user, 2026-11-10).
@@ -248,6 +252,10 @@ class Config:
 MUON_DECAY = 0.01           # the critic's Muon's weight decay (--critic-muon-lr), as cloning's
 RESIGN_THRESHOLDS = (-0.95, -0.9, -0.85, -0.8, -0.75, -0.7, -0.6, -0.5)    # Config.resign's candidates, of the critic's result
 RESIGN_WINDOW = 500         # the played-out games it's chosen from, the latest
+# Config.lead_draws: the seats whose game ended that it goes by, and it says nothing till it has them all.  A game takes a
+# dozen stretches to reach the time limit and what ends sooner is decided, so the first ends of a run are no draws: a group
+# gives 16 seats at the limit, and this many don't come before the first games have had the time to get there.
+DRAW_WINDOW = 800
 HOPELESS = (-0.8, -0.9)     # the critic's result under which a branch's end is logged as hopeless (Learner.bootstrap)
 # What a decision costs in training's memory beside its tokens, in tokens.  On full-2's first segments (2026-11-12), a decision
 # of 165-237 tokens took 14.1-16.7 MiB whether 32 or 384 were trained together, the critic about 14 KiB a token of it; but in
@@ -575,6 +583,8 @@ class Learner:
             raise ValueError("--resign reads the critic's result: it needs --group, --bootstrap and the result term")
         self.lineages: collections.deque = collections.deque(maxlen=RESIGN_WINDOW)     # played-out games: (least value, not lost)
         self.resign_at: float | None = None
+        self.draws: collections.deque = collections.deque(maxlen=DRAW_WINDOW)      # seats whose game ended: 1 undecided at the limit
+        self.lead_open = False                      # Config.lead_draws: the draws have fallen under it, and the lead rule is on
         self.end_stats: dict[str, float] = {}       # bootstrapped GRPO's ends, this iteration's
         # The iteration from which the actor learns too (Config.critic_rewarm).
         self.warm_until = cfg.critic_warmup if self.critic is not None else 0
@@ -833,7 +843,10 @@ class Learner:
 
     @property
     def lead_share(self) -> float:
-        """The share of the training games starting now that a lead can end (Config.lead_fade)."""
+        """The share of the training games starting now that a lead can end (Config.lead_fade), and none while they still
+        mostly end in draws (Config.lead_draws)."""
+        if self.cfg.lead_draws > 0.0 and not self.lead_open:
+            return 0.0
         return fade_share(self.iteration, self.cfg.lead_fade)
 
     @property
@@ -1078,6 +1091,15 @@ class Learner:
         out["resigning"] = float(self.resign_at is not None)
         return out
 
+    def follow_draws(self, drawn: int, ended: int) -> dict[str, float]:
+        """A collection's seats whose game ended, and how many of them undecided at the time limit, into the window; and the
+        lead rule on, for good, once the window is full and fewer than Config.lead_draws of it are draws.  Returns its metrics."""
+        self.draws.extend([1.0] * drawn + [0.0] * (ended - drawn))
+        share = float(np.mean(self.draws)) if self.draws else 1.0
+        if not self.lead_open and len(self.draws) == DRAW_WINDOW and share < self.cfg.lead_draws:
+            self.lead_open = True
+        return {"draw_share": share, "draw_window": len(self.draws), "lead_open": float(self.lead_open)}
+
     @torch.no_grad()
     def values_of(self, frames: list[tuple[rf.Frame, bd.Bundle, np.ndarray]], kept: list[np.ndarray | None] | None = None) -> list[np.ndarray]:
         """The critic's value of each (frame, bundle, names), by term.  kept: what each frame's seat kept before it
@@ -1207,7 +1229,8 @@ class Learner:
                     "size": asdict(self.actor.size),
                     "iteration": self.iteration, "decisions": self.decisions, "entropy_coef": self.entropy_coef, "lr_scale": self.lr_scale,
                     "terms": list(self.term_names), "warm_until": self.warm_until,
-                    "lineages": [list(r) for r in self.lineages], "resign_at": self.resign_at}, temp)
+                    "lineages": [list(r) for r in self.lineages], "resign_at": self.resign_at,
+                    "draws": list(self.draws), "lead_open": self.lead_open}, temp)
         os.replace(temp, directory / name)
         marker = self.run / "latest.json.tmp"
         marker.write_text(json.dumps({"checkpoint": f"ckpt/{name}", "iteration": self.iteration, "decisions": self.decisions}))
@@ -1254,6 +1277,8 @@ class Learner:
         self.lr_scale = state.get("lr_scale", 1.0)
         self.lineages.extend(tuple(r) for r in state.get("lineages", ()))
         self.resign_at = state.get("resign_at")
+        self.draws.extend(state.get("draws", ()))
+        self.lead_open = bool(state.get("lead_open", False))
         return True
 
 
@@ -1500,6 +1525,9 @@ class Collector:
             tally.wins.setdefault(mode if kind == "1v1" else f"{mode}_{kind}", []).append(won)
             if "lead_rule" in facts:
                 tally.lead_rule.append(float(facts["lead_rule"]))
+            if kind != "chicken":       # where the players draw by lasting, and no lead ends a game
+                tally.ended += 1
+                tally.drawn += won == 0.5
             self.won[seat] = won
             out.append(seat)
         return out
@@ -1811,6 +1839,8 @@ class Tally:
     terms: tuple[str, ...] = ("blend",)
     groups: dict[str, float] = field(default_factory=dict)  # GRPO's sums (GroupCollector._judge)
     lineages: list = field(default_factory=list)            # games played out (GroupCollector._branch, Config.resign)
+    ended: int = 0                  # the policy's seats whose game ended, or whose alliance went out, chicken games apart
+    drawn: int = 0                  # those of them undecided at the time limit (Config.lead_draws)
 
     @staticmethod
     def empty(terms: tuple[str, ...]) -> "Tally":
@@ -1834,7 +1864,8 @@ class Tally:
         return Tally(sum(t.stored for t in tallies), sum(t.masked_out for t in tallies), sum(t.actions for t in tallies),
                      sum(t.bonus for t in tallies), np.sum([t.kind_counts for t in tallies], 0), wins,
                      np.concatenate([t.values for t in tallies]), np.concatenate([t.returns for t in tallies]), graphs,
-                     [x for t in tallies for x in t.lead_rule], tallies[0].terms, groups, [x for t in tallies for x in t.lineages])
+                     [x for t in tallies for x in t.lead_rule], tallies[0].terms, groups, [x for t in tallies for x in t.lineages],
+                     sum(t.ended for t in tallies), sum(t.drawn for t in tallies))
 
     def metrics(self) -> dict[str, float]:
         """The first term's explained variance and returns' range without a suffix, as with one term; with more, each term's too.
@@ -1867,6 +1898,8 @@ class Tally:
             metrics["lineages"] = list(self.lineages)
         if self.lead_rule:      # of the training games that ended, the share a lead could have ended: lead_share, as drawn
             metrics["lead_rule_games"] = float(np.mean(self.lead_rule))
+        if self.ended:
+            metrics["ended_seats"], metrics["drawn_seats"] = int(self.ended), int(self.drawn)
         metrics.update(self.graphs)
         if self.graphs.get("graph_replays"):
             metrics["graph_steps_a_round"] = self.graphs["graph_steps"] / self.graphs["graph_replays"]
@@ -2012,9 +2045,10 @@ _MAP_POOLS: dict = {}
 
 def make_sim(games: int, seed: int, modes: list[str] | None = None, decide_every: int = 1, maps: str = "", variants: bool = False,
              advise: bool = False, income_weight: float = 0.0, fine_sim: bool = False, threads: int = 16, speed_weight: float = 0.0,
-             kinds: dict[str, float] | None = None, slots: int = 0, difficulties: dict[str, float] | None = None):
+             kinds: dict[str, float] | None = None, slots: int = 0, difficulties: dict[str, float] | None = None, builds_stick: bool = True):
     """maps: a map pool, loaded once and shared, its held-out maps left out; "" for the five training maps.  threads: the sim's
     and the C++ scripts' each.  The lead rule is on in every game (lead_share 1): the trainer lowers it for its own games.
+    builds_stick: SimEnv's, off for an actor without the cancel among its kinds (Config.enabled_kinds).
     kinds, slots, difficulties: policy_sim_env.SimEnv's kinds, teams (0: what the kinds need) and chicken difficulties; 1v1s and
     the default difficulties if None."""
     import policy_sim_env
@@ -2032,6 +2066,7 @@ def make_sim(games: int, seed: int, modes: list[str] | None = None, decide_every
     env = policy_sim_env.SimEnv(games, seed, modes or ["fight"], threads=threads, decide_every=1 if fine_sim else decide_every, maps=pool,
                                 weights=weights, variants=variants, teams=slots or None, kinds=kinds, difficulties=difficulties or None)
     env.advise, env.income_weight, env.speed_weight = advise, income_weight, speed_weight
+    env.builds_stick = builds_stick
     env.act_every = decide_every if fine_sim else 1
     env.align = env.act_every > 1           # every seat decides on the same slots: one forward pass a decision (SimEnv.align)
     return env
@@ -2157,6 +2192,8 @@ def train(cfg: Config, run: pathlib.Path, make_env, device: str = "cuda") -> Non
         lineages = metrics.pop("lineages", [])
         if cfg.resign:
             metrics.update(learner.follow_resignation(lineages))
+        if cfg.lead_draws > 0.0:
+            metrics.update(learner.follow_draws(metrics.get("drawn_seats", 0), metrics.get("ended_seats", 0)))
         metrics.update(learner.train(segments, rng, between=ahead.tick if ahead else None))
         if ahead:
             ahead.tick(force=True)
@@ -2418,6 +2455,9 @@ def main() -> None:
     ap.add_argument("--lead-fade", nargs="+", default=[f"{i}:{s:g}" for i, s in Config.lead_fade], metavar="ITERATION:SHARE",
                     help="the share of training games a lead can end, by iteration, as --kl-fade; tests keep it in every game "
                          "(default: %(default)s)")
+    ap.add_argument("--lead-draws", type=float, default=Config.lead_draws, metavar="SHARE",
+                    help="no lead rule in a training game until fewer than this share of them end undecided at the time limit; "
+                         "then --lead-fade's, for good (0: --lead-fade's from the start)")
     ap.add_argument("--diversity", type=float, default=Config.diversity)
     ap.add_argument("--fine-sim", action="store_true", help="the sim steps every slot, the policy decides every --decide-every")
     ap.add_argument("--objective-sigma", type=float, default=Config.objective_sigma,
@@ -2472,7 +2512,7 @@ def main() -> None:
                  decide_every=args.decide_every, hours=args.hours, eval_every=args.eval_every, gpu_runs=args.gpu_runs, gpu_share=args.gpu_share, empty_cache=args.empty_cache,
                  latent_encoder=args.latent_encoder, enabled_kinds=policy_sim_env.KINDS,     # what the sim obeys
                  init=args.init, size=args.size, maps=args.maps, variants=args.variants, lr_start=args.lr_start, lr_end=args.lr_end, kl_target=args.kl_target, lr_scale_start=args.lr_scale_start, recurrent_lr=args.recurrent_lr, compile_memory=args.compile_memory, critic_lr=args.critic_lr, critic_muon_lr=args.critic_muon_lr, actor_muon_lr=args.actor_muon_lr,
-                 critic_bins=args.critic_bins, critic_span=args.critic_span, entropy_floor=args.entropy_floor, critic_warmup=args.critic_warmup, critic_size=args.critic_size, kl_start=args.kl_start, **fades,
+                 critic_bins=args.critic_bins, critic_span=args.critic_span, entropy_floor=args.entropy_floor, critic_warmup=args.critic_warmup, critic_size=args.critic_size, kl_start=args.kl_start, lead_draws=args.lead_draws, **fades,
                  clone_weight=args.clone_weight, economy_start=args.economy_start, economy_end=args.economy_end,
                  income_weight=args.income_weight, speed_weight=args.speed_weight, diversity=args.diversity, fine_sim=args.fine_sim, z=args.z,
                  objective_sigma=args.objective_sigma, explore_share=args.explore_share, explore_weight=args.explore_weight,
@@ -2487,7 +2527,8 @@ def main() -> None:
         cfg.enabled_kinds = tuple(int(k) for k in args.action_kinds.split(","))
     run = pathlib.Path(args.run)
     make_env = functools.partial(make_sim, decide_every=cfg.decide_every, maps=cfg.maps, variants=cfg.variants, advise=cfg.clone_weight > 0,
-                                 income_weight=cfg.income_weight, fine_sim=cfg.fine_sim, speed_weight=cfg.speed_weight)
+                                 income_weight=cfg.income_weight, fine_sim=cfg.fine_sim, speed_weight=cfg.speed_weight,
+                                 builds_stick=rf.CANCEL_BUILD in cfg.enabled_kinds)
     if args.save_forever:
         _save_forever(cfg, run)
     elif args.check_kill:

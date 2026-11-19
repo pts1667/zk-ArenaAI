@@ -607,6 +607,26 @@ def test_an_attack_order_at_what_cant_be_seen_lapses_short_of_a_bomb_reaching_it
     assert s.alive and s.z - Z < 160.0      # Sight is 240.  A game's stopped after 73.
 
 
+def test_an_attack_whose_target_leaves_the_radar_is_over_and_the_frame_has_no_order_left():
+    """The unit stops where it is, idle, and its record says no order: one that kept the attack read as told to attack, to
+    the nets and in a replay, for as long as it stood there (the user, 2026-11-19)."""
+    from zkbot.policy import rawframe
+    w = world()
+    a = w.add(RAIDER, 0, 1000.0, 1000.0)
+    t = w.add(RAIDER, 1, 2800.0, 1000.0)
+    dish = w.add("staticradar", 0, 900.0, 1000.0)
+    w.step(1)
+    w.attack(a, t)
+    seconds(w, 3.0)
+    r = {int(u["uid"]): u for u in w.view(0).units}[a]
+    assert r["ord_kind"] == rawframe.ATTACK_UNIT and r["ord_target"] == t and not r["flags"] & rawframe.IDLE
+    w.kill(dish)
+    seconds(w, 4.0)
+    r = {int(u["uid"]): u for u in w.view(0).units}[a]
+    assert w.get(t).alive and w.get(a).x < 2000.0
+    assert r["flags"] & rawframe.IDLE and r["ord_kind"] == -1 and r["ord_target"] == -1
+
+
 @pytest.mark.parametrize("fire_at_will", (False, True))
 def test_a_bomb_on_a_fight_order_doesnt_chase(fire_at_will):
     w = world()

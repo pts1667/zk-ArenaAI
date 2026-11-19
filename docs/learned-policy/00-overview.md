@@ -12,6 +12,7 @@ current state and next steps.  This folder is the reference: what's there and wh
 | [../model.md](../model.md) | The network: the frozen frame encoder, the time transformer, and actions chosen one after another |
 | [03-training.md](03-training.md) | Data, the encoder's training, cloning, DAgger, PPO, the pipeline that runs them, what each measured, and the dead ends |
 | [04-literature.md](04-literature.md) | A literature review: what was taken from it, and what's left |
+| [../training_logs.md](../training_logs.md) | The dated record: every training run, its tests, what was seen in it, and the hourly checks of the run going |
 
 ## The pipeline
 

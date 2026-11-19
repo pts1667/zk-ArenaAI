@@ -36,7 +36,10 @@ _SITE_STATUS = {"free": SITE_FREE, "ours": SITE_OURS, "enemy": SITE_ENEMY, "buil
 
 # Order kinds: 02-policy.md, "Kinds".
 KEEP, MOVE, FIGHT, ATTACK_UNIT, ATTACK_GROUND, STOP, MANUAL_FIRE, JUMP, CLOAK_ON, CLOAK_OFF = range(10)
-BUILD, ASSIST, REPAIR, RECLAIM, PRODUCE, AREA_MEX = range(10, 16)
+BUILD, ASSIST, CANCEL_BUILD, RECLAIM, PRODUCE, AREA_MEX = range(10, 16)
+# CANCEL_BUILD (the user, 2026-11-19; the kind kept in reserve till then, once meant for a repair) is an action's alone too: a
+# unit on a build stays on it, offered nothing else, till it's over or it's told this, which leaves it with no order at all
+# (featurize_kernels.masks; 02-policy.md, "A build sticks").  No unit's `ord_kind` is it.
 # AREA_MEX (the user, 2026-11-18; the kind kept in reserve till then) is an action's alone: extractors on the free metal spots
 # within a radius of a place, the nearest to the unit first.  No unit's `ord_kind` is it: one on an area mex shows the BUILD it's
 # on, and a token's order memory uses that slot for something else (featurize_kernels: whether it's pulling).
@@ -174,7 +177,9 @@ def from_host(host: Any, obs: dict[str, Any], memory: LiveMemory, region_of: Any
         if _jump_charged(host, uid, raw):
             flags |= JUMP_READY
         _record(rec, uid, KNOW_LOS, (int(raw.get("team", me[0])), int(raw.get("allyTeam", me[1]))), raw, flags)
-        if order is not None:
+        # An attack on a unit that's over (the unit idle since: its target dead, or off the radar) leaves no order, as in the
+        # sim (World::end_attack): every other order stays till the next.
+        if order is not None and not (flags & IDLE and order[0] == "attack"):
             rec["ord_kind"] = _ORDER_KIND.get(order[0], -1)
             rec["ord_x"], rec["ord_z"] = float(order[1]), float(order[2])
             rec["ord_target"] = -1 if order[3] is None else int(order[3])

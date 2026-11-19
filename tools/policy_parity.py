@@ -311,7 +311,7 @@ def check_file(job: tuple[str, str, int]) -> dict:
 def rf_name(kind: int) -> str:
     import policy_clone_data as cd
     names = {rf.THROW: "throw", rf.PUSH: "push", rf.PULL: "pull", rf.PLACE_BEACON: "place_beacon", rf.WAIT_AT_BEACON: "wait_at_beacon",
-             rf.REPAIR: "repair"}
+             rf.CANCEL_BUILD: "cancel_build"}
     return names.get(int(kind)) or cd.rf_name(int(kind))
 
 

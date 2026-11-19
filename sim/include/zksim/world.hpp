@@ -720,6 +720,7 @@ private:
     int closest_target(int u, float cx, float cz, float radius) const;
     int nearest_seen_enemy(int u, float radius) const;
     bool target_lost(int u, int t);
+    void end_attack(int u);
     void chase(int u, int t, int until);
     bool chase_is_over(int u);
     void fight_step(int u);

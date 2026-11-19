@@ -29,6 +29,10 @@ NAME_DIM = 16
 ID_DIM = 8                   # each of ally team and player
 DONE_START = 3.0             # an untrained actor's first action is done more often than not, unless it has 20 units or more
 ALONE_START = 2.0            # an untrained group head mostly sends orders alone
+# A unit on a build can be told one thing, to cancel it (rf.CANCEL_BUILD), so to pick it is to cancel: an untrained actor
+# picks one this many nats less than another unit, or a build would be cancelled as often as any order used to cut one short
+# (at rdnn-5's iteration 100 the policy's next order to a builder came a median 21 to 39 s after its build order).  Mine.
+CANCEL_START = 3.0
 ROUTE_SCALE_START = -3.0     # softplus gives 0.05 nats per walking second: near regions first, and a far one is still sampled
 HEAD_GAIN = 0.01             # an untrained head's weights: it says only what its bias says
 KINDS_WITH_REGION, KINDS_WITH_FINE = fz.KINDS_WITH_REGION, fz.KINDS_WITH_FINE

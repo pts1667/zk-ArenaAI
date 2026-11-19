@@ -644,8 +644,8 @@ def test_a_frame_remembers_orders_idleness_and_damage():
     for _ in range(30):
         w.step(3)
         r = records(w.view(0))
-    assert r[idle]["flags"] & rawframe.IDLE
-    assert r[a]["flags"] & rawframe.IDLE
+    assert r[idle]["flags"] & rawframe.IDLE and r[idle]["ord_kind"] == -1      # an attack that's over leaves no order
+    assert r[a]["flags"] & rawframe.IDLE and r[a]["ord_kind"] == rawframe.FIGHT
     # Damage shows once, the decision after it happened.
     w3 = scripted_world(CAT, FLAT)
     target = w3.add("cloakassault", 0, 500.0, 500.0)

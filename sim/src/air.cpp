@@ -178,7 +178,7 @@ void World::used_ammo(int u) {
     AirState& a = air[size_t(u)];
     if (type_of(u).ammo <= 0 || --a.ammo > 0) return;
     a.pad = -1;
-    if (order[size_t(u)] == ZK_ORDER_ATTACK) order[size_t(u)] = ZK_ORDER_NONE;
+    if (order[size_t(u)] == ZK_ORDER_ATTACK) end_attack(u);
     ai[size_t(u)].chasing = -1;
 }
 

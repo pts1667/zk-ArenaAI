@@ -319,7 +319,9 @@ void World::order_unit(int u, int kind, float gx, float gz, int target) {
     }
     // The net has kinds for what it can tell a unit to do, and these aren't among them: it sees a unit going somewhere.
     const bool goes = kind == ZK_ORDER_PLACE_BEACON || kind == ZK_ORDER_WAIT_AT_BEACON || kind == ZK_ORDER_LOAD || kind == ZK_ORDER_UNLOAD;
-    mem_kind[size_t(u)] = goes ? int(ZK_ORDER_MOVE) : kind;
+    // A stop is the end of what it was doing and no order of its own: it leaves none in the record, as an attack that's
+    // over leaves none (end_attack).  It's what the policy's cancel of a build is (the user, 2026-11-19).
+    mem_kind[size_t(u)] = kind == ZK_ORDER_NONE ? -1 : goes ? int(ZK_ORDER_MOVE) : kind;
     mem_frame[size_t(u)] = frame;
     // A build's target is a type, an assist's is one of ours and a reclaim's is a feature: none is what the net means by an aim.
     mem_target[size_t(u)] = kind == ZK_ORDER_BUILD || kind == ZK_ORDER_ASSIST || kind == ZK_ORDER_RECLAIM || kind == ZK_ORDER_WAIT_AT_BEACON || kind == ZK_ORDER_LOAD ? -1 : target;

@@ -160,6 +160,24 @@ def test_a_lead_can_end_nine_in_ten_training_games_at_first_and_none_from_iterat
         learner.iteration = held
 
 
+def test_no_lead_ends_a_training_game_while_they_mostly_draw_and_then_it_does_for_good(learner):
+    """Config.lead_draws: nothing till the window of ended seats is full, and the rule on once fewer than that share are draws."""
+    held = learner.cfg
+    try:
+        learner.cfg = replace(held, lead_draws=0.8, lead_fade=((0, 1.0),))
+        learner.follow_draws(0, pt.DRAW_WINDOW - 1)             # the first ends of a run are decided: not yet a window's worth
+        assert learner.lead_share == 0.0
+        assert learner.follow_draws(pt.DRAW_WINDOW, pt.DRAW_WINDOW)["draw_share"] == 1.0 and learner.lead_share == 0.0
+        learner.follow_draws(0, pt.DRAW_WINDOW // 5)            # 80% of them draws still
+        assert learner.lead_share == 0.0
+        assert learner.follow_draws(0, 1)["lead_open"] == 1.0 and learner.lead_share == 1.0
+        learner.follow_draws(pt.DRAW_WINDOW, pt.DRAW_WINDOW)    # all draws again: it stays
+        assert learner.lead_share == 1.0
+    finally:
+        learner.cfg, learner.lead_open = held, False
+        learner.draws.clear()
+
+
 # A run of the actor on latents ---------------------------------------------------------------------------------------------------------------------------------------
 
 

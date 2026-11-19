@@ -515,7 +515,8 @@ free-for-alls (the padding costs about 90 MB at 64 games, and no speed).  A seat
 * **End**: one alliance left; or the lead rule; or the time limit at 80 minutes (the user, 2026-11-10; it was 20).  A chicken
   game ends when the queen dies (the players win), when the players are out, or at the limit (a draw).
 * **The lead rule**: from 2 minutes, an alliance at 2.5x the value of all the others together, and 10,000 metal ahead, has
-  won.  Each game draws whether it has the rule (`lead_share`): PPO fades the share (03-training.md, "Reward"), tests,
+  won.  Each game draws whether it has the rule (`lead_share`): PPO fades the share, and can keep it at none while
+  training games still mostly end in draws (03-training.md, "Reward": `--lead-fade`, `--lead-draws`), tests,
   recordings and evals keep it in every game, frame collection in none, and chicken games never have it.  It rarely fires in
   a big free-for-all.
 * **Every team** plays the opening script, and its constructors run the economy script.  Its fighters and factories are run

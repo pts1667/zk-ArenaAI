@@ -831,6 +831,7 @@ class LatentActor(nn.Module):
         """h: B x K x D, slots from `plan`; taken: B x K x C, the units actions before each picked.  Returns float32 B x K x (1 + C):
         done, then each controllable unit, those that may not be picked (nothing to tell them, or picked already) taken out."""
         score = (self.q_anchor(h) @ ctx.anchor_keys.transpose(1, 2)).float() / math.sqrt(self.d)
+        score = score - pm.CANCEL_START * b.kind_mask[:, None, :, rf.CANCEL_BUILD]      # a unit on a build: to pick it is to cancel
         score = score.masked_fill(~(pm.anchors_legal(b)[:, None] & ~taken), pm.ILLEGAL)
         return torch.cat((self.head_done(h).float(), score), -1)
 

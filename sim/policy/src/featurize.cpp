@@ -618,8 +618,10 @@ void masks(const Table& T, const Bundle& B, int64_t c, int64_t n_features, const
         const UnitRecord& u = units[i];
         const int64_t me = rows[i];
         const uint16_t flags = u.flags;
-        const bool free = !s.locked[i];
         const bool mobile = T.bv(me, B_MOBILE), armed = T.bv(me, B_ARMED), flies = T.bv(me, B_AIR);
+        // A build sticks (featurize_kernels.masks): a unit on one is offered only the cancel, where the cancel is a kind.
+        const bool building = enabled[CANCEL_BUILD] && mobile && u.ord_kind == BUILD && (flags & zk::UF_IDLE) == 0;
+        const bool free = !s.locked[i] && !building;
         const int64_t cls = flies ? -1 : int64_t(T.move_class[me]);
         const int64_t here = s.region[i];
         uint8_t* pr = ptr_region + i * R;
@@ -765,6 +767,7 @@ void masks(const Table& T, const Bundle& B, int64_t c, int64_t n_features, const
         for (int64_t k = 0; k < Tn; ++k) makes = makes || pp[k];
         km[PRODUCE] = free && T.bv(me, B_PRODUCES) && makes;
         km[BUILD] = free && T.bv(me, B_BUILDS);
+        km[CANCEL_BUILD] = building && !s.locked[i];
         km[AREA_MEX] = free && T.bv(me, B_AREA_MEX);
         km[ASSIST] = free && any3;
         km[RECLAIM] = free && T.bv(me, B_CONSTRUCTOR) && n_features > 0;
