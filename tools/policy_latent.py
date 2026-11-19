@@ -95,7 +95,10 @@ class Size:
     memory: what steps that state: "gru" (`nn.GRUCell`) or "rdnn" (`RDNNCell`, whose state is its units' rates and then their
     pools, so `gru` is twice its units).
     memory_as: how the rest reads the state: "tokens", `MEMORY_TOKENS` of the frame, or "vector", one vector added to what
-    reads the frame (the module's notes)."""
+    reads the frame (the module's notes).
+    coder: the order autoencoder's file (order_vae.py), for an actor that chooses its code and reads no unit
+    (policy_code.CodeActor, which `make` then gives): `layers` blocks among the frame's latents, `plan_layers` in which the
+    code's queries read them, and the memory as here."""
     d: int = 256
     heads: int = 8
     layers: int = 4
@@ -104,6 +107,7 @@ class Size:
     gru: int = 0                # none in any actor before 2026-11-17, the same
     memory: str = "gru"         # the GRU itself in every actor with one before the RDNN, the same
     memory_as: str = "tokens"   # tokens in every actor with a memory before 2026-11-17 21:00, the same
+    coder: str = ""             # none in any actor before 2026-11-19, the same
 
 
 SIZE = Size()               # the user's, 2026-11-09: about 10M trained parameters (it was d 128, 4 heads, 2 and 2: 1.9M)
@@ -112,7 +116,10 @@ WIDE = Size(384, 12, 4, 4, 2)   # the user's, 2026-11-14: 1.5x as wide, and two 
 GRU = Size(256, 8, 1, 2, 0, 1024)   # the user's, 2026-11-17: a GRU for memory and a plan of half the depth, for RL from nothing
 # The user's, 2026-11-17: as GRU, with an RDNN of 1,024 units in the GRU's place (arXiv 2608.01947), its state told as a vector.
 RDNN = Size(256, 8, 1, 2, 0, 2048, "rdnn", "vector")
-SIZES = {"default": SIZE, "small": SMALL, "wide": WIDE, "gru": GRU, "rdnn": RDNN}
+# The user's, 2026-11-19: as RDNN, choosing the order autoencoder's code and reading no unit (policy_code.py).
+ORDER_CODER = "/mnt/d/zk-learned/orders/vae-3/order-vae.pt"
+CODE_SIZE = Size(256, 8, 1, 2, 0, 2048, "rdnn", "vector", ORDER_CODER)
+SIZES = {"default": SIZE, "small": SMALL, "wide": WIDE, "gru": GRU, "rdnn": RDNN, "code": CODE_SIZE}
 
 
 RDNN_RATE = -2.2            # an RDNNCell's rates at first, before the sigmoid: a tenth of the way to its drive a decision (the paper's; their spread of 1 is mine)
@@ -887,7 +894,12 @@ class LatentActor(nn.Module):
 
 
 def make(vocabulary: int, encoder_path: str | pathlib.Path, decide_every: int = 1, size: Size = SIZE) -> LatentActor:
-    return LatentActor(vocabulary, LatentEncoder(load_vae(pathlib.Path(encoder_path))), window_frames(decide_every), size)
+    """The actor of a size on a frame encoder's file; with an order autoencoder (Size.coder), a policy_code.CodeActor."""
+    encoder = LatentEncoder(load_vae(pathlib.Path(encoder_path)))
+    if size.coder:
+        import policy_code      # which imports this
+        return policy_code.CodeActor(encoder, size)
+    return LatentActor(vocabulary, encoder, window_frames(decide_every), size)
 
 
 def compile_for_cloning(actor: LatentActor, mode: str, flex: bool = True) -> None:
@@ -913,7 +925,8 @@ def compile_for_cloning(actor: LatentActor, mode: str, flex: bool = True) -> Non
         actor.sequence = torch.compile(actor.sequence, mode=mode, dynamic=False)
 
 
-ANSWERS = ("head_kind", "head_done", "head_ordered", "fine1", "offset1", "group1", "roles1", "z_in")   # z_in: zero at first, Muon would jump it
+# z_in: zero at first, Muon would jump it; code_mean (policy_code.CodeActor's): the same
+ANSWERS = ("head_kind", "head_done", "head_ordered", "fine1", "offset1", "group1", "roles1", "z_in", "code_mean")
 
 
 def answers(name: str, layer: nn.Linear) -> bool:

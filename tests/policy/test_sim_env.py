@@ -911,14 +911,20 @@ def test_an_area_mex_is_built_a_spot_at_a_time_from_the_nearest_to_the_unit_and_
     # Another, wider, and then a move: the area is gone and the unit is on the move.
     orders, uid, inside, _ = area(gr.GROUP_RADII[-1])
     assert len(inside) >= 2
-    # Two plain builds of an extractor told to one point in one decision go to two spots, and neither to the one a unit on an
-    # area mex is on its way to.
+    # Two plain builds of an extractor told to two points in one decision go to two spots, and neither to the one a unit on an
+    # area mex is on its way to.  Told to one point they build one, on one spot (the user, 2026-11-19).
     env.give_orders(0, orders)
     env.step(0.0)
     going = env.areas[0][uid][4:]
-    rows = np.array([(-2, zksim.ORDER_BUILD, going[0], going[1], env.extractor_type), (-3, zksim.ORDER_BUILD, going[0], going[1], env.extractor_type)], zksim.ORDER_DTYPE)
-    placed = env._placed(0, rows)
-    assert len({(float(r["x"]), float(r["z"])) for r in placed} | {tuple(going)}) == 3
+
+    def spots(shift: float) -> set:
+        rows = np.array([(-2, zksim.ORDER_BUILD, going[0], going[1], env.extractor_type),
+                         (-3, zksim.ORDER_BUILD, going[0] + shift, going[1], env.extractor_type)], zksim.ORDER_DTYPE)
+        placed = env._placed(0, rows)
+        assert len(placed) == 2
+        return {(float(r["x"]), float(r["z"])) for r in placed}
+    assert len(spots(8.0) | {tuple(going)}) == 3
+    assert len(spots(0.0)) == 1 and tuple(going) not in spots(0.0)
     env.give_orders(0, orders)
     env.step(0.0)
     assert list(env.areas[0]) == [uid]

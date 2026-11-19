@@ -12,6 +12,8 @@ current state and next steps.  This folder is the reference: what's there and wh
 | [../model.md](../model.md) | The network: the frozen frame encoder, the time transformer, and actions chosen one after another |
 | [03-training.md](03-training.md) | Data, the encoder's training, cloning, DAgger, PPO, the pipeline that runs them, what each measured, and the dead ends |
 | [04-literature.md](04-literature.md) | A literature review: what was taken from it, and what's left |
+| [05-order-autoencoder.md](05-order-autoencoder.md) | The order autoencoder (the user, 2026-11-19): a side's commands at a decision to a small code and back, reading no frame, frozen; its data and checks; and the actor that chooses its code and reads no unit (`policy_train.py --size code`).  Built and checked by play, not run |
+| [06-select-then-command.md](06-select-then-command.md) | Orders as a player gives them (the user, 2026-11-19): a command selects units by roles, a circle and a portion and tells them one thing, with places as coordinates; the sim's shared BUILD and area RECLAIM; the scripts played through commands |
 | [../training_logs.md](../training_logs.md) | The dated record: every training run, its tests, what was seen in it, and the hourly checks of the run going |
 
 ## The pipeline

@@ -54,8 +54,12 @@ import torch
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT / "bots"))
+import policy_code  # noqa: E402
 import policy_model as pm  # noqa: E402
 from zkbot.policy import actions as act, featurize as fz  # noqa: E402
+
+# What an actor that chooses a code says of each slot in whole numbers (order_vae.OrderVAE.say), in the order a pass gives them.
+SAID_INTS = ("present", "roles", "radius", "portion", "kind", "type", "extent")
 
 # Each step at most half as big again as the one before it.
 LADDER = (1, 2, 4, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024, 1536, 2048)
@@ -138,6 +142,15 @@ class _Shape:
             self.z[:n].copy_(z)
 
 
+def _sums(widths: list[int]) -> list[int]:
+    """Where each of these columns ends, laid side by side."""
+    out, at = [], 0
+    for w in widths:
+        at += w
+        out.append(at)
+    return out
+
+
 class Graphs:
     """`policy_train.Player._forward` as CUDA graphs, for a CUDA actor and critic (or no critic)."""
 
@@ -146,6 +159,8 @@ class Graphs:
         again and goes as soon as a wider one is needed: what's kept is each level's widest at the rows it has had, with z and
         without (a bootstrap or a test without it), the ones played longest ago going first."""
         self.actor, self.critic, self.slots, self.keep = actor, critic, slots, keep
+        # An actor that chooses a code (policy_code.CodeActor): a pass is one graph, `_head_code`, with no steps to cut.
+        self.coded = isinstance(actor, policy_code.CodeActor)
         self.cuts = tuple(c for c in cuts if 0 < c < slots) + (slots,)
         self.device = next(actor.parameters()).device
         self.pool = torch.cuda.graph_pool_handle()
@@ -182,6 +197,32 @@ class Graphs:
         value = self.critic(b) if self.critic is not None else torch.zeros(len(shape.history), 1, device=self.device)
         return ctx, s, (new_history, new_seen, keep["latents"], value)
 
+    def _head_code(self, shape: _Shape):
+        """A whole pass of an actor that chooses a code: the decision, the code drawn, what the frozen decoder says of it and
+        what's kept, gathered as the tail gathers the other's."""
+        b = shape.batch
+        mean, new_history, new_seen, keep = self.actor.decide(b, shape.history, shape.seen, shape.z)
+        code, logp = self.actor.sample(mean)
+        new_history = self.actor.acted(code, new_history)
+        said = self.actor.say(code)
+        value = self.critic(b) if self.critic is not None else torch.zeros(len(shape.history), 1, device=self.device)
+        ints = torch.stack([said[f].long() for f in SAID_INTS], 1)
+        floats = torch.cat((logp[:, None].float(), value.float(), code.float().flatten(1), said["centre"].float().flatten(1),
+                            said["place"].float().flatten(1), keep["latents"].float().flatten(1)), 1)
+        return None, None, (ints, floats, new_history.float(), new_seen.float())
+
+    def _code_out(self, ints, floats, n: int) -> tuple[dict, object]:
+        """`_head_code`'s numbers as Player._forward gives a pass of such an actor: its outputs by name, and the values."""
+        slots, terms = ints.shape[2], self.critic.terms if self.critic is not None else 1
+        cuts = [1, terms, self.actor.code, 2 * slots, 2 * slots]
+        logp, value, code, centre, place, latents = (floats[:, a:b] for a, b in zip([0, *_sums(cuts)], [*_sums(cuts), floats.shape[1]]))
+        out = {"say_" + f: ints[:, i] for i, f in enumerate(SAID_INTS)}
+        out["say_present"] = out["say_present"] != 0
+        out.update(say_centre=centre.reshape(n, slots, 2), say_place=place.reshape(n, slots, 2), logp=logp,
+                   code=code.reshape(n, self.actor.codes, self.actor.latent),
+                   latents=latents.reshape(n, self.actor.encoder.tokens, self.actor.encoder.latent))
+        return out, value
+
     def _tail(self, shape: _Shape) -> tuple[torch.Tensor, ...]:
         new_history, new_seen, latents, value = shape.decided
         a = shape.sampling.actions()
@@ -196,7 +237,8 @@ class Graphs:
         shape = _Shape(nb, (len(nb.glob_x), *history.shape[1:]), None if z is None else z.shape[1], self.device)
         shape.load(nb, history, seen, z)
         # The first warm-up also makes cuBLAS's workspaces, and kind_in's tables.
-        shape.head, (shape.ctx, shape.sampling, shape.decided) = self._capture(lambda: self._head(shape), 2 if not self.captured else 1)
+        head = self._head_code if self.coded else self._head
+        shape.head, (shape.ctx, shape.sampling, shape.decided) = self._capture(lambda: head(shape), 2 if not self.captured else 1)
         self.captured += 1
         return shape
 
@@ -250,6 +292,10 @@ class Graphs:
             self.shapes.move_to_end(key)
             shape.load(nb, history, seen, z)
         shape.head.replay()
+        if self.coded:
+            self.replays += 1
+            ints, floats, new_history, new_seen = shape.decided
+            return *self._code_out(ints[:n].cpu().numpy(), floats[:n].cpu().numpy(), n), new_history[:n].clone(), new_seen[:n].clone()
         steps = self.cuts[0]
         for i in range(len(self.cuts) - 1):
             if not bool(shape.sampling.going[:n].any()):

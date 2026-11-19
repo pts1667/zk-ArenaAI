@@ -37,14 +37,17 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT / "bots"))
 sys.path.insert(0, str(ROOT / "sim" / "py"))
+import order_vae  # noqa: E402
+import policy_code  # noqa: E402
 import policy_graphs  # noqa: E402
 import policy_latent  # noqa: E402
 import policy_model as pm  # noqa: E402
 import zkpolicy  # noqa: E402  (the library itself is loaded when first used)
-from zkbot.policy import actions as act, bundle as bd, featurize as fz, rawframe as rf, tables  # noqa: E402
+from zkbot.policy import actions as act, bundle as bd, featurize as fz, rawframe as rf, selections as sel, tables  # noqa: E402
 
 torch.backends.cuda.matmul.allow_tf32 = True
 HEADS = ("anchor", "kind", "region", "enemy", "fine", "produce", "place", "offset", "wreck", "group", "roles")
+CODE_HEADS = ("code",)      # of an actor that chooses a code (policy_code.CodeActor): its one distribution
 NAME_DROPOUT = 0.3
 ENTROPY_FLOOR = 0.3         # of a head's maximum
 ENTROPY_BASE = 0.01
@@ -127,6 +130,12 @@ class Config:
     # PPO from a cloned actor (04-literature.md P7, C6, C7).
     init: str = ""                  # a cloning checkpoint (policy_clone_train's actor.pt): the actor starts as it, at its size
     size: str = "default"           # without one, a new actor's (policy_latent.SIZES): "gru" has a GRU for memory, "rdnn" an RDNN in its place
+    # With --size code (the user, 2026-11-19): the order autoencoder whose code the actor chooses (order_vae.py); "": the size's.
+    order_coder: str = ""
+    # With --size code: the least spread of the code's Gaussian by iteration, linear between and the last after, as kl_fade (the
+    # user, 2026-11-19, of a least of 0.1, at which a place a code says is 220 elmos off, and 70 at 0.03: "Start with 0.1,
+    # decreasing to 0.03 as the training run continues").  The default is policy_code.LOG_STD_LEAST's 0.1 throughout.
+    spread_floor: tuple[tuple[int, float], ...] = ((0, 0.1),)
     maps: str = ""                  # a map pool (tools/map_gen.py), its held-out maps left out; "" for the five training maps
     variants: bool = False          # each side's army script draws its knobs (policy_variants.py)
     critic_bins: int = 0            # above 0, the critic's value is a distribution over this many, trained by HL-Gauss
@@ -355,6 +364,8 @@ class Step:
     ret: np.ndarray | float = 0.0
     advantage: float = 0.0              # the terms' advantages weighed together (Learner.weigh)
     latents: np.ndarray | None = None   # tokens x latent: this frame's, as the actor read it
+    code: np.ndarray | None = None      # K x latent: the code drawn, of an actor that chooses one (policy_code.CodeActor); its
+                                        # action fields are then empty, and its logp the code's, one number
     label: dict | None = None           # what the scripts advised here, as slots (actions.SLOT_FIELDS), when they advise
     labelled: np.ndarray | None = None  # which controllable units the advice told something
     z: np.ndarray | None = None         # the side's strategy as the actor was told it (Config.z), the same all game
@@ -503,6 +514,7 @@ class Player:
         # Its own: an autocast object keeps state between enter and exit, and two threads may each be inside one.
         self.autocast = torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda")
         self.device = device
+        self.coded = isinstance(actor, policy_code.CodeActor)
         self.graphs = policy_graphs.Graphs(actor, critic) if graphs and str(device).startswith("cuda") else None
 
     def _features(self, items: list[tuple[rf.Frame, bd.Bundle, np.ndarray]]) -> list[fz.Tensors]:
@@ -516,6 +528,16 @@ class Player:
         if self.graphs is not None:
             return self.graphs.forward(items, history, seen, z)
         b = pm.collate(items).to(self.device)
+        if self.coded:
+            with self.autocast:
+                mean, new_history, new_seen, keep = self.actor.decide(b, history, seen, z)
+                code, logp = self.actor.sample(mean)
+                new_history = self.actor.acted(code, new_history)
+                said = self.actor.say(code)
+                value = self.critic(b) if self.critic is not None else torch.zeros(len(items), 1, device=self.device)
+            out = {"code": code.cpu().numpy(), "logp": logp[:, None].cpu().numpy(), "latents": keep["latents"].cpu().numpy(),
+                   **{"say_" + k: v.cpu().numpy() for k, v in said.items()}}
+            return out, value.float().cpu().numpy(), new_history.float(), new_seen.float()
         with self.autocast:
             ctx, new_history, new_seen, keep = self.actor.decide(b, history, seen, z)
             a = pm.sample_actions(self.actor, b, ctx)
@@ -558,7 +580,16 @@ class Learner:
         if cfg.init:
             state = torch.load(cfg.init, map_location="cpu", weights_only=False)
             size = policy_latent.Size(**state["size"])
+        if cfg.order_coder and size.coder:
+            size = policy_latent.Size(**{**asdict(size), "coder": cfg.order_coder})
         self.actor = policy_latent.make(self.vocabulary, cfg.latent_encoder, cfg.decide_every, size).to(device)
+        # An actor that chooses a code (policy_code.CodeActor): a decision is one code with one probability, and its update
+        # reads no frame (`_loss_code`).
+        self.coded = isinstance(self.actor, policy_code.CodeActor)
+        self.heads = CODE_HEADS if self.coded else HEADS
+        if self.coded and (cfg.clone_weight > 0.0 or cfg.kl_start or not (cfg.group and (cfg.critic_size == "memory" or not cfg.bootstrap))):
+            raise ValueError("--size code learns by GRPO (--group), its critic the memory's (--critic-size memory) or none, "
+                             "with no clone to learn from or stay near")
         self.reference = None           # the clone as it was, frozen, for the KL to it
         if state is not None:
             missing, unexpected = self.actor.load_state_dict(state["actor"], strict=False)
@@ -618,7 +649,7 @@ class Learner:
         self.economy_share = cfg.economy_start
         self.decisions = 0
         self.iteration = 0
-        self.entropy_coef = {h: self.entropy_base for h in HEADS}
+        self.entropy_coef = {h: self.entropy_base for h in self.heads}
         self.token_budget = cfg.token_budget        # SPLIT_SHRINK, BUDGET_GROW
         self.lr_scale = cfg.lr_scale_start          # the actor's rate's share of its schedule's (Config.kl_target)
         self.actions_scale = 1.0                    # GRPO: the iteration's mean actions a decision, done included (_update_loss)
@@ -630,6 +661,7 @@ class Learner:
         self.graphs = cfg.graphs and not cfg.concurrent
         self.player = Player(self.actor, None if cfg.group else self.critic, workers, device, self.graphs)     # GRPO plays no critic
         self.ema = self.frozen_player(workers, self.graphs) if cfg.ema > 0.0 else None
+        self.set_floor()
         if device == "cuda":
             # It empties its cache at this limit, and fails rather than spills.
             card = torch.cuda.mem_get_info()[1]
@@ -665,6 +697,19 @@ class Learner:
         for mine, theirs in self._pairs(player):
             for a, b in zip(theirs.parameters(), mine.parameters()):
                 a.copy_(b)
+        if self.coded:
+            player.actor.log_std_least.copy_(self.actor.log_std_least)
+
+    @torch.no_grad()
+    def set_floor(self) -> None:
+        """The least spread of a code's Gaussian at this iteration (Config.spread_floor), for the actor and for the average of
+        its weights that plays the tests, which is of what's trained and so hasn't it.  The collectors get it with the weights."""
+        if not self.coded:
+            return
+        least = math.log(fade_share(self.iteration, self.cfg.spread_floor))
+        for player in (self.player, self.ema):
+            if player is not None:
+                player.actor.log_std_least.fill_(least)
 
     @torch.no_grad()
     def ema_step(self) -> None:
@@ -685,6 +730,8 @@ class Learner:
         Token groups pad separately, so each is tracked on its own."""
         units = np.array([max(min(len(s.frame.units), UNIT_TOKENS) + min(len(s.frame.sites), fz.CAP_SITES) + min(len(s.frame.features), fz.CAP_FEATURES) for s in seg.steps) for seg in segments])
         regions = np.array([seg.bundle.regions for seg in segments])
+        if self.coded:      # a decision is its frame's latents, whatever the frame held
+            units, regions = np.full(len(segments), self.actor.encoder.tokens), np.zeros(len(segments), np.int64)
         lengths = np.array([len(seg.steps) for seg in segments])
         order = np.argsort((units + regions) * rng.uniform(0.85, 1.15, len(segments)))
         batches, current = [], []
@@ -712,11 +759,48 @@ class Learner:
         """The next minibatch's decisions asked of the data workers while the GPU is on this one's: `_loss` waited on them for a
         fifth of a minibatch's time, the GPU with nothing of the learner's to do (py-spy, 2026-11-16).  `_loss` takes them when
         it's handed these same segments; a minibatch done again in parts is asked for then."""
-        if self.workers.pool is not None:
+        if self.workers.pool is not None and not self.coded:     # a code's update reads no frame
             self.ahead[tuple(map(id, batch))] = self._featurize(batch)
+
+    def _loss_code(self, batch: list[Segment], eps: float, note) -> torch.Tensor:
+        """`_loss` for an actor that chooses a code (policy_code.CodeActor).  No frame is featurized: a decision is its frame's
+        latents as it was played with, its seat's memory and the code drawn.  The frozen decoder isn't run, a code's
+        probability having nothing to do with what it says."""
+        device = self.device
+        steps = [step for seg in batch for step in seg.steps]
+        lengths = [len(seg.steps) for seg in batch]
+        latents = np.zeros((len(batch), max(lengths), *steps[0].latents.shape), np.float32)
+        codes = np.zeros((len(batch), max(lengths), *steps[0].code.shape), np.float32)
+        for i, seg in enumerate(batch):
+            latents[i, :len(seg.steps)] = [s.latents for s in seg.steps]
+            codes[i, :len(seg.steps)] = [s.code for s in seg.steps]
+        history = torch.as_tensor(np.stack([seg.history for seg in batch]), device=device)
+        latents, codes = torch.as_tensor(latents, device=device), torch.as_tensor(codes, device=device)
+        z = None if steps[0].z is None else torch.as_tensor(np.stack([seg.steps[0].z for seg in batch]), device=device)
+        drawn = torch.as_tensor(np.stack([s.code for s in steps]), device=device)
+        old = torch.as_tensor(np.stack([s.logp for s in steps]), dtype=torch.float32, device=device).view(-1, 1)
+        with self.autocast:
+            kept: dict = {}
+            mean = self.actor.segments(history, latents, lengths, codes, z, keep=kept)
+            logp = self.actor.log_prob(mean, drawn)[:, None]
+            state = kept["memory"][1].detach().abs()
+            note("state_abs", float(state.mean()))
+            note("state_max", float(state.max()))
+            value = self.critic(*(t.detach() for t in kept["memory"]), logits=True) if self.critic is not None else None
+        with torch.no_grad():
+            spread = self.actor.log_std().exp()
+            note("code_spread", float(spread.mean()))
+            note("code_spread_min", float(spread.min()))
+            note("code_spread_floor", float(self.actor.log_std_least.exp()))
+            note("code_mean_abs", float(mean.abs().mean()))
+        everyone = torch.ones_like(old)
+        entropy = {"code": (self.actor.entropy() * everyone, everyone)}
+        return self._update_loss(steps, old, everyone, logp, entropy, value, eps, note)
 
     def _loss(self, batch: list[Segment], eps: float, note) -> torch.Tensor:
         """Every decision of each segment in one forward pass, from the latents it was played with."""
+        if self.coded:
+            return self._loss_code(batch, eps, note)
         device = self.device
         steps = [step for seg in batch for step in seg.steps]
         ahead = self.ahead.pop(tuple(map(id, batch)), None)
@@ -767,13 +851,16 @@ class Learner:
                 clone = -(w * lab_logp).sum() / w.sum().clamp_min(1.0)
                 extra = extra + clone_weight * clone
                 note("loss_clone", float(clone.detach()))
-        return self._update_loss(steps, a, logp, entropy, value, eps, note) + extra
+        return self._update_loss(steps, a.logp, pm.chosen(a).float(), logp, entropy, value, eps, note) + extra
 
-    def _update_loss(self, steps: list[Step], a: pm.Actions, logp: torch.Tensor, entropy: dict, value: torch.Tensor | None, eps: float, note) -> torch.Tensor:
+    def _update_loss(self, steps: list[Step], old: torch.Tensor, weights: torch.Tensor, logp: torch.Tensor, entropy: dict, value: torch.Tensor | None,
+                     eps: float, note) -> torch.Tensor:
         """Simple Policy Optimization's policy loss (Xie et al., docs/research/simple-policy-optimization.md), with the value and
         entropy terms.  Each action's own ratio r scores r A - |A| (r - 1)^2 / (2 eps): greatest at r = 1 + sign(A) eps, and
         pulling every ratio back toward that, where PPO's clip left those past it with no gradient.  Averaged over the
-        decision's actions, done included; one advantage a decision."""
+        decision's actions, done included; one advantage a decision.
+        old, weights, logp: decisions x actions, each action's log-probability as it was played, whether it was chosen, and
+        its log-probability now.  A decision that's one code (`_loss_code`) has one action."""
         cfg, device = self.cfg, self.device
         decisions = len(steps)
         advantages = np.array([s.advantage for s in steps], np.float32)
@@ -785,8 +872,6 @@ class Learner:
             adv = torch.as_tensor(advantages, device=device)
         else:
             adv = torch.as_tensor((advantages - advantages.mean()) / (float(advantages.std()) + 1e-6), device=device)
-        old = a.logp
-        weights = pm.chosen(a).float()
         ratio = (logp - old).clamp(-20.0, 20.0).exp()
         per_action = -spo_objective(ratio, adv[:, None], eps, cfg.spo_bound if cfg.group else 0.0)
         count = weights.sum(-1)
@@ -822,7 +907,7 @@ class Learner:
                 for name, x in zip(self.term_names, per_term.detach().tolist()):
                     note(f"loss_value_{name}", x)
         entropy_loss = torch.zeros((), device=device)
-        for h in HEADS:
+        for h in self.heads:
             e, mask = entropy[h]
             total, n = (e * mask).sum(), float(mask.sum())
             entropy_loss = entropy_loss + self.entropy_coef[h] * total / max(n, 1.0)
@@ -938,6 +1023,7 @@ class Learner:
         p = self.progress
         eps = cfg.epsilon_start + (cfg.epsilon_end - cfg.epsilon_start) * p
         self.set_rates()
+        self.set_floor()
         self.shrunk = False
         totals: dict[str, float] = {}
         counts: dict[str, float] = {}
@@ -1024,7 +1110,7 @@ class Learner:
             scales = self.weigh_groups(segments)
         else:           # the collector gave each step its advantage (GroupCollector._judge)
             scales = np.ones(1)
-        self.actions_scale = float(np.mean([1 + int((s.anchor[:-1] >= 0).sum()) for s in steps])) if steps else 1.0
+        self.actions_scale = float(np.mean([1 + int((s.anchor[:-1] >= 0).sum()) for s in steps])) if steps and not self.coded else 1.0
         return scales
 
     def bootstrap(self, segments: list[Segment]) -> None:
@@ -1198,7 +1284,10 @@ class Learner:
             self.lr_scale = min(1.0, self.lr_scale * KL_SLOW)
 
     def adjust_entropy(self, metrics: dict[str, float]) -> None:
-        """Keeps each head above a share of its maximum, so none collapses."""
+        """Keeps each head above a share of its maximum, so none collapses.  A code's spread has its own floor
+        (policy_code.LOG_STD_LEAST)."""
+        if self.coded:
+            return
         maxima = {"anchor": math.log(4.0), "kind": math.log(4.0), "region": math.log(4.0), "enemy": math.log(8.0), "fine": math.log(fz.FINE_OPTIONS), "produce": math.log(4.0),
                   "place": math.log(8.0), "offset": math.log(fz.PLACE_OFFSETS), "wreck": math.log(4.0), "group": math.log(4.0), "roles": math.log(2.0)}
         for h in HEADS:
@@ -1273,12 +1362,13 @@ class Learner:
         self.iteration, self.decisions = state["iteration"], state["decisions"]
         self.warm_until = self.iteration + self.cfg.critic_rewarm if fresh else state.get("warm_until", self.cfg.critic_warmup)
         # With no floor (Config.entropy_floor 0) no bonus rises above the base, which may have changed since.
-        self.entropy_coef = state["entropy_coef"] if self.cfg.entropy_floor > 0.0 else {h: self.entropy_base for h in HEADS}
+        self.entropy_coef = state["entropy_coef"] if self.cfg.entropy_floor > 0.0 else {h: self.entropy_base for h in self.heads}
         self.lr_scale = state.get("lr_scale", 1.0)
         self.lineages.extend(tuple(r) for r in state.get("lineages", ()))
         self.resign_at = state.get("resign_at")
         self.draws.extend(state.get("draws", ()))
         self.lead_open = bool(state.get("lead_open", False))
+        self.set_floor()
         return True
 
 
@@ -1385,6 +1475,23 @@ def _z_tensor(z: np.ndarray | None, device: str) -> torch.Tensor | None:
     return None if z is None else torch.as_tensor(z, device=device)
 
 
+NO_ACTIONS = np.zeros(0, np.int64)      # a step's action fields, of an actor that chooses a code
+
+
+def said_commands(out: dict) -> list[np.ndarray] | None:
+    """Each seat's commands (selections.COMMAND_DTYPE) in what a pass of an actor that chooses a code gave; None of another's."""
+    return order_vae.to_commands({f: out["say_" + f] for f in order_vae.FIELDS}) if "code" in out else None
+
+
+def decision_orders(out: dict, k: int, t: fz.Tensors, bundle: bd.Bundle, commands: list[np.ndarray] | None) -> list:
+    """Seat k's orders in what a pass gave (`Player.act`): its commands carried out on its frame (`said_commands`), or its
+    actions decoded."""
+    x, z = act.world_positions(t, bundle)
+    if commands is not None:
+        return sel.decode(commands[k], t, bundle, x, z)
+    return act.decode(act.to_decision(act.Slots(*(out[h][k] for h in act.SLOT_FIELDS)), t.controllable), t, bundle, x, z)
+
+
 def _stored_actions(steps: list[Step], device: str) -> pm.Actions:
     """The actions the decisions were played with, and their log-probabilities then."""
     return pm.actions_from({f: np.stack([getattr(s, f) for s in steps]) for f in act.SLOT_FIELDS + ("logp",)}, device)
@@ -1481,22 +1588,30 @@ class Collector:
         # itself the policy has every player's seat of a game, 2 to 8 of them.
         items, out, value, new_history, new_seen = self.player.act(frames, seats.history[index], seats.seen[index], _z_tensor(told, learner.device),
                                                                    rows=env.count * cfg.pass_seats)
+        commands = said_commands(out)
         for k, seat in enumerate(acting):
             t = items[k]
             raw = frames[k][0]
-            step = Step(rf.Frame(raw.units.copy(), raw.sites.copy(), raw.glob.copy(), raw.features.copy()),
-                        *(out[h][k].copy() for h in act.SLOT_FIELDS + ("logp",)), value[k].copy())
+            kept = rf.Frame(raw.units.copy(), raw.sites.copy(), raw.glob.copy(), raw.features.copy())
+            tr = current[seat]
+            orders = decision_orders(out, k, t, tr.bundle, commands)
+            if commands is not None:
+                # Counted by command, and the units they told: a command no unit could obey is counted too.
+                step = Step(kept, *(NO_ACTIONS,) * len(act.SLOT_FIELDS), out["logp"][k].copy(), value[k].copy(), code=out["code"][k].copy())
+                tally.kind_counts += np.bincount(commands[k]["kind"], minlength=rf.KIND_COUNT)
+                tally.actions += len(commands[k])
+                tally.add("orders", len(orders))
+            else:
+                step = Step(kept, *(out[h][k].copy() for h in act.SLOT_FIELDS + ("logp",)), value[k].copy())
+                picked = step.anchor >= 0
+                tally.masked_out += int((~t.kind_mask[step.anchor[picked], step.kind[picked]]).sum())
+                tally.kind_counts += np.bincount(step.kind[picked], minlength=rf.KIND_COUNT)
+                tally.actions += int(picked.sum())
             step.z = None if told is None else told[k]
-            picked = step.anchor >= 0
-            tally.masked_out += int((~t.kind_mask[step.anchor[picked], step.kind[picked]]).sum())
-            tally.kind_counts += np.bincount(step.kind[picked], minlength=rf.KIND_COUNT)
-            tally.actions += int(picked.sum())
             if "latents" in out:
                 step.latents = out["latents"][k].copy()
-            tr = current[seat]
             tr.steps.append(step)
-            x, z = act.world_positions(t, tr.bundle)
-            env.give_orders(seat, act.decode(act.to_decision(act.Slots(*(getattr(step, h) for h in act.SLOT_FIELDS)), t.controllable), t, tr.bundle, x, z))
+            env.give_orders(seat, orders)
             # A segment ends here: the next one starts from what the actor keeps now.
             if len(tr.steps) - tr.segment_start == cfg.segment:
                 _cut(tr, self._segments_of(seat), new_history[k], new_seen[k])
@@ -1880,6 +1995,8 @@ class Tally:
             metrics.update({f"explained_variance{suffix}": 1.0 - float(np.var(r - v)) / max(float(np.var(r)), 1e-8),
                             f"return_min{suffix}": float(r.min()), f"return_max{suffix}": float(r.max())})
         g = self.groups
+        if "orders" in g:       # an actor that chooses a code: the units its commands told, where actions_a_decision is its commands
+            metrics["orders_a_decision"] = g["orders"] / max(stored, 1)
         if g:
             metrics.update(branches=g.get("branches", 0), branches_dropped=g.get("dropped", 0), new_games=g.get("new_games", 0),
                            resigned=g.get("resigned", 0))
@@ -1958,12 +2075,9 @@ def evaluate(learner: Learner, make_env, opponent: str, games: int, seed: int, r
             index = torch.as_tensor(acting, device=learner.device)
             told = _z_tensor(seat_z(env, acting, learner.cfg.z), learner.device)
             items, out, _, new_history, new_seen = player.act(frames, seats.history[index], seats.seen[index], told)
+            commands = said_commands(out)
             for k, seat in enumerate(acting):
-                t = items[k]
-                d = act.to_decision(act.Slots(*(out[h][k] for h in act.SLOT_FIELDS)), t.controllable)
-                b = env.bundle_of(seat)
-                x, z = act.world_positions(t, b)
-                env.give_orders(seat, act.decode(d, t, b, x, z))
+                env.give_orders(seat, decision_orders(out, k, items[k], env.bundle_of(seat), commands))
             seats.history[index] = new_history
             seats.seen[index] = new_seen
             env.step(1.0)
@@ -2280,7 +2394,7 @@ def grad_check(cfg: Config, run: pathlib.Path, make_env, decisions: int, splits:
     workers = DataWorkers(cfg.data_workers, env.bundles(), cfg.enabled_kinds)
     learner = Learner(cfg, run, workers, device)
     learner.resume()
-    learner.entropy_coef = {h: 0.0 for h in HEADS}
+    learner.entropy_coef = {h: 0.0 for h in learner.heads}
     learner.economy_share = cfg.economy_start + (cfg.economy_end - cfg.economy_start) * learner.progress
     set_games(env, learner.games)
     rng = np.random.default_rng(cfg.seed)
@@ -2361,6 +2475,11 @@ def main() -> None:
     ap.add_argument("--eval-every", type=int, default=Config.eval_every, help="iterations between tests against the script")
     ap.add_argument("--latent-encoder", default=Config.latent_encoder, help="the trained frame encoder whose latents the actor reads")
     ap.add_argument("--action-kinds", help="action kinds to allow, such as 0,3: a test of one head with nothing else to fall back on")
+    ap.add_argument("--order-coder", default=Config.order_coder,
+                    help="with --size code: the order autoencoder whose code the actor chooses (order_vae.py); without, the size's own")
+    ap.add_argument("--spread-floor", nargs="+", default=[f"{i}:{s:g}" for i, s in Config.spread_floor], metavar="ITERATION:SPREAD",
+                    help="with --size code: the least spread of the code's Gaussian, by iteration, as --kl-fade; 0:0.1 8000:0.03 "
+                         "falls from a tenth of the unit Gaussian's to 0.03 over 8,000 iterations (default: %(default)s)")
     ap.add_argument("--kinds", nargs="+", default=[f"{k}:{w:g}" for k, w in Config.kinds], metavar="KIND:WEIGHT",
                     help="kinds of game and how likely each, among 1v1, teams, ffa and chicken, as 1v1:0.5 teams:0.2 ffa:0.2 chicken:0.1 "
                          "(default: %(default)s)")
@@ -2489,10 +2608,12 @@ def main() -> None:
     if not 0.0 <= args.self_play <= 1.0:
         ap.error("--self-play is a share of the games, 0 to 1")
     fades = {}
-    for name in ("kl_fade", "clone_fade", "lead_fade", "kinds_ramp"):
+    for name in ("kl_fade", "clone_fade", "lead_fade", "kinds_ramp", "spread_floor"):
         fade = fades[name] = tuple((int(i), float(s)) for i, s in (point.split(":") for point in getattr(args, name)))
         if any(a[0] >= b[0] for a, b in zip(fade, fade[1:])):
             ap.error(f"--{name.replace('_', '-')}'s iterations must rise")
+    if any(not 0.0 < s <= 1.0 for _, s in fades["spread_floor"]):
+        ap.error("--spread-floor's spreads are shares of the unit Gaussian's, above 0 and 1 at most")
     import policy_sim_env
     try:
         kinds = policy_sim_env.parse_kinds(args.kinds)
@@ -2511,6 +2632,7 @@ def main() -> None:
                  segment=args.segment, token_budget=args.token_budget, data_workers=args.workers, featurize_threads=args.featurize_threads, concurrent=args.concurrent,
                  decide_every=args.decide_every, hours=args.hours, eval_every=args.eval_every, gpu_runs=args.gpu_runs, gpu_share=args.gpu_share, empty_cache=args.empty_cache,
                  latent_encoder=args.latent_encoder, enabled_kinds=policy_sim_env.KINDS,     # what the sim obeys
+                 order_coder=args.order_coder,
                  init=args.init, size=args.size, maps=args.maps, variants=args.variants, lr_start=args.lr_start, lr_end=args.lr_end, kl_target=args.kl_target, lr_scale_start=args.lr_scale_start, recurrent_lr=args.recurrent_lr, compile_memory=args.compile_memory, critic_lr=args.critic_lr, critic_muon_lr=args.critic_muon_lr, actor_muon_lr=args.actor_muon_lr,
                  critic_bins=args.critic_bins, critic_span=args.critic_span, entropy_floor=args.entropy_floor, critic_warmup=args.critic_warmup, critic_size=args.critic_size, kl_start=args.kl_start, lead_draws=args.lead_draws, **fades,
                  clone_weight=args.clone_weight, economy_start=args.economy_start, economy_end=args.economy_end,

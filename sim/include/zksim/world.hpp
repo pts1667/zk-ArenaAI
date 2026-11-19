@@ -442,6 +442,7 @@ struct World {
     Purse purses[ZK_MAX_TEAMS];           // per team
     std::vector<MetalSpot> spots;
     std::vector<int> work_on;             // the frame this builder or factory has started and is on, or -1
+    std::vector<float> reclaim_radius;    // of a reclaim order's area, round goal_x, goal_z; order_target is the feature it's on now
     std::vector<int> produces;            // the type this factory repeats, or -1
     std::vector<float> extracts;          // metal per second once finished: what it makes, and what its spot gives it
     std::vector<float> overdrive;         // extra metal per second, as of the last update
@@ -698,6 +699,8 @@ private:
     void remove_wreck(int id);
     void index_wrecks();
     void reclaim_step(int u);
+    int wreck_in_area(int u, float mx, float mz, float radius) const;
+    int frame_to_join(int u, int t) const;
     bool pay_energy(int team, float amount);
     void pay_upkeep();
     void update_cloak();

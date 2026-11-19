@@ -8,7 +8,8 @@
 extern "C" {
 #endif
 
-#define ZK_ABI_VERSION 31
+#define ZK_ABI_VERSION 32
+#define ZK_RECLAIM_RADIUS 32.0f   /* elmos: the least area a reclaim order has, and all one round a feature has */
 #define ZK_WARD_TARGETS 4
 #define ZK_MAX_MOUNTS 8
 #define ZK_MAX_TEAMS 8     /* players in a game, and so allyteams too */
@@ -234,9 +235,14 @@ enum { ZK_BEHAVIOUR_ADVANCE = 0, ZK_BEHAVIOUR_HOLD = 1, ZK_BEHAVIOUR_ORDERS = 2,
 enum { ZK_ORDER_NONE = 0, ZK_ORDER_MOVE = 1, ZK_ORDER_FIGHT = 2, ZK_ORDER_ATTACK = 3, ZK_ORDER_MANUAL_FIRE = 6,
        ZK_ORDER_JUMP = 7,       /* x, z: walks into range and goes when charged.  The order ends when it lands there. */
        ZK_ORDER_CLOAK_ON = 8, ZK_ORDER_CLOAK_OFF = 9,   /* Both a unit's own cloak and its area cloak.  Leave other orders alone. */
-       ZK_ORDER_BUILD = 10,     /* target: the type to place at x, z.  The order ends when it's finished or lost. */
+       ZK_ORDER_BUILD = 10,     /* target: the type to place at x, z.  Where an unfinished one of that type and its allyteam stands
+                                   already it works on that one, so several told to build one thing build one.  The order ends when
+                                   it's finished or lost. */
        ZK_ORDER_ASSIST = 11,    /* target: a unit of its allyteam.  A factory is helped with whatever it's building, until told otherwise. */
-       ZK_ORDER_RECLAIM = 13,   /* target: a feature's id.  The order ends when it's all taken or gone. */
+       ZK_ORDER_RECLAIM = 13,   /* An area: it takes what lies in it, the nearest to itself first, and the order ends when nothing is
+                                   left there.  target >= 0: a feature's id, and the area is ZK_RECLAIM_RADIUS round that feature: it
+                                   and what lies on it.  target < 0: the area is round x, z, -target elmos and ZK_RECLAIM_RADIUS at
+                                   least; with nothing in it the order isn't taken. */
        ZK_ORDER_PRODUCE = 14,   /* target: the type a factory builds over and over, or -1 to stop.  Leaves other orders alone. */
        ZK_ORDER_MOVE_STATE = 15, ZK_ORDER_FIRE_STATE = 16,    /* target: the state.  Leave other orders alone. */
        ZK_ORDER_UNIT_AI = 17,    /* target: 0 turns off the tactical AI, as a player can, and 1 back on */

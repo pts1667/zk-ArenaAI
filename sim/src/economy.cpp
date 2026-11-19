@@ -327,16 +327,24 @@ void World::run_builder(int u) {
         const auto& d = cat->types[size_t(t)];
         if (work_on[i] < 0) {
             if (!within(u, goal_x[i], goal_z[i], reach_of(u, d.footprint_radius))) return;
-            Purse& p = purses[team[i]];
-            const float centre_x = map->width() * 0.5f, centre_z = map->depth() * 0.5f;
-            const float head = std::atan2(centre_x - goal_x[i], centre_z - goal_z[i]);
-            const int f = place_frame(t, team[i], goal_x[i], goal_z[i], head);
-            if ((d.flags & ZK_U_PLOPPABLE) && p.free_factory) {
-                p.free_factory = false;
-                build[size_t(f)] = 1.0f;
-                hp[size_t(f)] = d.hp;
-                order[i] = ZK_ORDER_NONE;
-                return;
+            // Several told to build one thing build one, as in the game: the first there places it and the rest work on it
+            // (the user, 2026-11-19).  From then its place is the frame's.
+            int f = frame_to_join(u, t);
+            if (f >= 0) {
+                goal_x[i] = x[size_t(f)];
+                goal_z[i] = z[size_t(f)];
+            } else {
+                Purse& p = purses[team[i]];
+                const float centre_x = map->width() * 0.5f, centre_z = map->depth() * 0.5f;
+                const float head = std::atan2(centre_x - goal_x[i], centre_z - goal_z[i]);
+                f = place_frame(t, team[i], goal_x[i], goal_z[i], head);
+                if ((d.flags & ZK_U_PLOPPABLE) && p.free_factory) {
+                    p.free_factory = false;
+                    build[size_t(f)] = 1.0f;
+                    hp[size_t(f)] = d.hp;
+                    order[i] = ZK_ORDER_NONE;
+                    return;
+                }
             }
             work_on[i] = f;
         }
@@ -364,6 +372,22 @@ void World::run_builder(int u) {
             show_for_action(u);
         }
     }
+}
+
+// The unfinished frame of type t and u's allyteam that stands where u's BUILD would place one: its middle within the type's
+// footprint of the order's place, the nearest to it.  -1 for none.
+int World::frame_to_join(int u, int t) const {
+    const size_t i = size_t(u);
+    const float reach = cat->types[size_t(t)].footprint_radius;
+    int best = -1;
+    float nearest_d = 0.0f;
+    for (const int f : live) {
+        const size_t k = size_t(f);
+        if (type[k] != t || !alive[k] || side[k] != side[i] || build[k] >= 1.0f) continue;
+        const float d = std::hypot(x[k] - goal_x[i], z[k] - goal_z[i]);
+        if (d <= reach && (best < 0 || d < nearest_d)) best = f, nearest_d = d;
+    }
+    return best;
 }
 
 // A factory plate builds only while a finished factory of its type and allyteam is within its build range, and not stunned or

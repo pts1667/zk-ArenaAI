@@ -16,7 +16,7 @@ This builds three libraries in `~/zksim/build` (`ZKSIM_LIB` overrides where they
 
 | Library | What | Python side |
 |---|---|---|
-| `libzksim.so` | the sim (`sim/src`, `sim/include/zksim`, C ABI in `capi.h`, ABI 31) | `sim/py/zksim.py` (`Batch`), `sim/py/zknav.py` (routes) |
+| `libzksim.so` | the sim (`sim/src`, `sim/include/zksim`, C ABI in `capi.h`, ABI 32) | `sim/py/zksim.py` (`Batch`), `sim/py/zknav.py` (routes) |
 | `libzkscripts.so` | the army and economy scripts (`sim/scripts`, `zkscripts.h`, ABI 17) | `tools/policy_scripts_cpp.py` |
 | `libzkrecord.so` | the game recorder (`sim/record`, `zkrecord.h`, ABI 2), needs `libzstd-dev` | `sim/py/zkrecord.py` |
 
@@ -410,8 +410,16 @@ A world runs the economy only if `zk_world_economy` turns it on.  Fight replays 
 * **Caretakers** (`staticcon`): an idle one helps the nearest factory of its side in its reach (500) that's building, else the
   nearest frame of its side, as Zero-K's default widget has it patrol (`unit_auto_patrol_nanos.lua`; `World::run_caretaker`).
   It needs no orders, so a policy that can't give them one still gets its use.  There's no repair or reclaim for it to do.
-* **Reclaim** runs at the builder's reclaim speed in metal a second and is paid as income.  **Upkeep** (radars, jammers, area
+* **Reclaim** runs at the builder's reclaim speed in metal a second and is paid as income.  The order is an area's (the user,
+  2026-11-19; ABI 32; `World::reclaim_step`, `wreck_in_area`): the unit takes what lies in it, the nearest to itself first, and
+  the order ends when nothing's left there.  Named by a feature's id, as the scripts name theirs, the area is 32 elmos round
+  that feature (`ZK_RECLAIM_RADIUS`): it, and what lies on it.  Named by a place, the order's `target` is minus the radius
+  (`zksim.reclaim_area`), and with nothing in the area the order isn't taken.  **Upkeep** (radars, jammers, area
   cloak) is paid in energy once a second.  **Stockpile** pays for both resources as it goes.
+* **Several told to build one thing build one** (the user, 2026-11-19; ABI 32; `World::run_builder`, `frame_to_join`): a BUILD
+  that arrives where an unfinished frame of its type and allyteam stands, its middle within the type's footprint of the
+  order's place, works on that frame, as the game's build order does.  Before, each constructor placed a frame of its own.
+  A finished one there is no frame to join, nor is another allyteam's.
 * **Regeneration** (`unit_regeneration.lua`): `idle_regen` health a second, once `idleTime` has passed since the last hit.  It's
   the only healing; there's no repair.
 * **Solars** close for 120 frames after a hit: no energy, armoured to a third.

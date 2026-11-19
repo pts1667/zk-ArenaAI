@@ -823,6 +823,23 @@ def test_a_build_takes_its_build_time_and_costs_its_price():
     assert world.get(commander).order == zksim.ORDER_NONE
 
 
+def test_two_told_to_build_one_thing_build_one_between_them():
+    world = _economy(metal=1000.0, energy=1000.0)
+    first, second = world.add(COMMANDER, 0, 1000.0, 900.0), world.add(COMMANDER, 0, 1000.0, 1100.0)
+    world.build(first, "staticmex", 1000.0, 1000.0)
+    world.build(second, "staticmex", 1004.0, 1000.0)        # the same spot, as two orders of one selection are
+    world.step(1)
+    ticks = 1 + _ticks_until_built(world, second + 1)
+    assert abs(ticks / TICKS_PER_SECOND - 4.25) < 0.34, ticks          # 85 at twice build speed 10
+    world.step(2)
+    assert world.count() == 3 and world.get(first).order == world.get(second).order == zksim.ORDER_NONE
+    # One on the spot that's finished is no frame to join, nor is the other side's.
+    world.build(first, "staticmex", 1000.0, 1000.0)
+    world.build(world.add(COMMANDER, 1, 1000.0, 950.0), "staticmex", 1000.0, 1000.0)
+    world.step(3)
+    assert world.count() == 6
+
+
 def test_a_frame_gains_health_as_it_builds():
     world = _economy()
     commander = world.add(COMMANDER, 0, 1000.0, 900.0)
@@ -1362,6 +1379,20 @@ def test_a_builder_walks_to_a_wreck():
     assert world.resources(0)["metal"] == 0.0
     world.step(60 * SECOND)
     assert world.resources(0)["metal"] == pytest.approx(10.0, abs=0.01) and world.get(con).x < 1500.0 - _type(CON)["build_range"] / 2
+
+
+def test_a_reclaim_takes_an_area_the_nearest_first_and_round_a_feature_a_small_one():
+    world = _economy(metal=0.0)
+    con = world.add(CON, 0, 1000.0, 1000.0)
+    one = [world.add_feature(x, 1000.0, 5.0) for x in (1050.0, 1070.0, 1150.0, 1400.0)][0]
+    world.reclaim(con, one)                                 # the area round a feature: it, and the one that lies on it
+    world.step(5 * SECOND)
+    assert world.get(con).order == zksim.ORDER_NONE and world.resources(0)["metal"] == pytest.approx(10.0, abs=0.01)
+    world.reclaim_area(con, 1000.0, 300.0, 100.0)           # nothing in it: no order
+    assert world.get(con).order == zksim.ORDER_NONE
+    world.reclaim_area(con, 1100.0, 1000.0, 120.0)          # the third is in it, and the fourth isn't
+    world.step(20 * SECOND)
+    assert world.get(con).order == zksim.ORDER_NONE and world.resources(0)["metal"] == pytest.approx(15.0, abs=0.01)
 
 
 def test_either_side_may_take_a_wreck_and_a_factory_or_a_fighter_may_not():

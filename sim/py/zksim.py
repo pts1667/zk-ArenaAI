@@ -21,7 +21,8 @@ sys.path.insert(0, str(ROOT / "py"))
 sys.path.insert(0, str(ROOT.parent / "bots"))
 import zknav  # noqa: E402
 from zkbot.policy import rawframe  # noqa: E402
-ABI_VERSION = 31
+ABI_VERSION = 32
+RECLAIM_RADIUS = 32.0       # capi.h ZK_RECLAIM_RADIUS
 WARD_TARGETS = 4
 MAX_MOUNTS = 8
 MAX_TEAMS = 8                       # players in a game, and so allyteams too
@@ -737,6 +738,9 @@ class World:
     def reclaim(self, unit: int, feature: int) -> None:
         _lib.zk_world_order(self.handle, unit, ORDER_RECLAIM, 0.0, 0.0, feature)
 
+    def reclaim_area(self, unit: int, x: float, z: float, radius: float) -> None:
+        _lib.zk_world_order(self.handle, unit, ORDER_RECLAIM, x, z, reclaim_area(radius))
+
     def cloak(self, unit: int, on: bool) -> None:
         _lib.zk_world_order(self.handle, unit, ORDER_CLOAK_ON if on else ORDER_CLOAK_OFF, 0.0, 0.0, -1)
 
@@ -789,6 +793,11 @@ class World:
         state = UnitState()
         _lib.zk_world_get(self.handle, unit, ct.byref(state))
         return state
+
+
+def reclaim_area(radius: float) -> int:
+    """An ORDER_RECLAIM's target for the area of this radius round its x, z (capi.h): whole elmos, and RECLAIM_RADIUS at least."""
+    return -max(1, round(radius))
 
 
 ORDER_DTYPE = np.dtype([("unit", "i4"), ("kind", "i4"), ("x", "f4"), ("z", "f4"), ("target", "i4")], align=True)

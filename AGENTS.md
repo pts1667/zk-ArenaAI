@@ -8,6 +8,7 @@ The current state only, kept small (the user, 2026-11-19).  Elsewhere:
 * **`docs/training_logs.md`**: every run, its tests and what was seen in it, each hourly check of the run going, the
   dated changes to the sim and the features, and my choices the user hasn't confirmed.  Anything dated goes there.
 * **`docs/learned-policy/`** (start at `00-overview.md`) and **`docs/model.md`**: how everything works, with its numbers.
+  `06-select-then-command.md` and `05-order-autoencoder.md` there are what's been built since `rdnn-5`.
 
 ## Goal and status
 
@@ -24,7 +25,7 @@ RL from nothing, against itself, with a recurrent memory.
 * **In the sim** (01-simulator.md) every team plays a scripted opening; the C++ economy script or the policy runs its
   constructors, and the C++ army script or the policy the rest.  Four kinds of game (1v1s, team games of 2 to 4 a side,
   free-for-alls of 3 to 8, chicken defense), each on the pool maps that hold it (404 maps, 31 held out), for up to 80
-  minutes.  The libraries: libzksim ABI 31, libzkscripts 17, libzkrecord 2, libzkpolicy 4.
+  minutes.  The libraries: libzksim ABI 32, libzkscripts 17, libzkrecord 2, libzkpolicy 4.
 * **A test compares only with tests on the same sim and script.**  Against the script as it is since 2026-11-18:
   `rdnn-1`'s test at 500 and all of `rdnn-2`'s to `rdnn-5`'s.  Every earlier one was against a richer script.
 * **Since 2026-11-18** (the user; the log, "What changed under the runs"): one extractor a spot in the scripts and the
@@ -40,6 +41,19 @@ RL from nothing, against itself, with a recurrent memory.
   order and its area mex; no group order of the policy's reaches it; and an untrained actor picks such a unit 3 nats
   less (`CANCEL_START`, mine).  Only where the cancel is among the kinds: `policy_sim_env.KINDS` has it, a saved
   run's own list hasn't.  02-policy.md, "A build sticks".
+* **Since 2026-11-19, later still** (the user; no run has had any of it; the log, "After `rdnn-5`"):
+  * *In the sim* (libzksim ABI 32; 01-simulator.md, "Economy"): several told to BUILD one type at one point build one
+    thing between them (`World::frame_to_join`, `SimEnv._placed`), and a RECLAIM is an area's: 32 elmos round a
+    feature named, or a radius round a place (`zksim.reclaim_area`).
+  * *Orders as commands* (`bots/zkbot/policy/selections.py`; 06-select-then-command.md): a decision is up to 16
+    commands, each selecting units by roles, a circle and a portion of it and telling them one of 21 kinds, with
+    places as fractions of the map.  Nothing in one points into a frame.
+  * *The order autoencoder* (`tools/order_vae.py`; 05-order-autoencoder.md): a decision's commands to 128 numbers and
+    back.  It reads no frame, is trained on the scripts' commands with plausible made-up ones mixed in, and is then
+    frozen.  What it says is plausible too: roles that can be told the kind, a type they make (`selections.able`).
+  * *The actor that chooses its code* (`tools/policy_code.py`, `policy_train.py --size code`; docs/model.md, "An
+    actor that chooses a code"): the frame's latents, the RDNN and a Gaussian over the code.  It reads no unit, and
+    its update featurizes no frame.
 * **The actor** (`tools/policy_latent.py`, `policy_train.py --size rdnn`; docs/model.md, "An RDNN in the GRU's place"):
   `full-4`'s frozen frame encoder, then a recurrent divisive normalization network of 1,024 units (arXiv 2608.01947)
   whose state is all a seat keeps, told to the rest as one vector.  It decides every 3 s, as actions one after another:
@@ -85,16 +99,39 @@ check and what was seen.
 * **The user's answer for the builds** (2026-11-19): a build that sticks, and a cancel ("Goal and status", "Since
   2026-11-19, after `rdnn-5`").  With it and the same weights at 100, a team that builds had 8.4 extractors for 3.0,
   +0.58 of weighted return (+3.6 SE) and more value (+2.8 SE), and won 45 and lost 31 (+1.6 SE: not shown); 17% of
-  its builds ended by a cancel.  No run has trained by it.  **Not answered**: what a BUILD offers early (its type is
-  still any structure), or the economy script's advice for a while; and the fighters: an order for a new unit without
-  the policy's turn, more actions a decision, or the group orders kept.
+  its builds ended by a cancel.  No run has trained by it.
+* **The user's answer for the rest** (2026-11-19): orders as a player gives them, select then command; an autoencoder
+  of a decision's commands, frozen; and an actor that chooses its code and reads no unit ("Goal and status"; 06 and
+  05).  Built and checked by play, not run (the log, "After `rdnn-5`"):
+  * *The scripts play as well in commands*: 62 won, 64 lost of 128 1v1s against themselves, for 67 and 57 with their
+    orders left as they are.
+  * *The first autoencoder's 64 numbers held four commands*: through its code the scripts won 32 and lost 89, its
+    made-up commands (any roles, any type) came back in part, and codes drawn at random said nothing 72% of the time.
+  * *The user's choices after it and a second* (2026-11-19: "1. vae-2 2. bigger code should be fine 3. either is fine
+    4. commands should be plausible/valid"): the second's stronger pull to the Gaussian and few emptied decisions, a
+    bigger code, the actor's start either way (the unit Gaussian, as built), and made-up commands some unit could obey.
+  * *`vae-3`, the one in use* (128 numbers, mine; `policy_latent.ORDER_CODER`): the scripts' decisions of up to 8
+    commands (90% of them) come back right in everything 96 to 99.6% of the time, those of 9 or more 5%; a made-up
+    decision's roles 82% and its type 95%.  **Through its code the scripts won 60 and lost 62.**  A fourth with 256
+    numbers, trained as long, gave back less.
+  * *An untrained actor on it* says 1.7 to 2.1 commands a decision, all plausible, and 0.5 to 0.6 units a decision
+    obey one (the trainer's smoke: 2,000 decisions a second, four times `rdnn-5`'s).
+  * *A place is only as near as the actor's spread lets it be*: a code off by 0.3 keeps its kinds, roles and types
+    (97%, 94%, 90%) and puts its places 650 elmos off; by 0.1, 220; by 0.03, 70.  So the spread's least falls over a
+    run (the user, 2026-11-19: "Start with 0.1, decreasing to 0.03 as the training run continues"):
+    `--spread-floor ITERATION:SPREAD ...`, which `start-code.sh HOURS` gives as `0:0.1 N:0.03`, N at 350 iterations
+    an hour (mine).
 * **To carry it on, or start another, on the user's word only**: `results/resume-rdnn.sh END` (it reads the run's
   `end`, 2026-11-20 01:55, starts every game anew and no watcher; carried on, it would play by the new rule, its
   kinds being the code's), or a new directory's name in `results/*rdnn*` and
-  `results/start-rdnn.sh HOURS`.  A run has an hourly check by a cron job in the session that starts it
-  (`results/rdnn-status.sh`, `results/rdnn_terms.py N`, no torch; a report to the user and a line in the log), a
-  watchdog (`results/rdnn-watchdog.sh`: 25 minutes without a report, 3 restarts at most), and no change in the middle
-  of it: not the memory, the segment, the rates, the terms or the code.
+  `results/start-rdnn.sh HOURS`.  For the code actor: `results/start-code.sh HOURS` starts
+  `/mnt/d/zk-learned/runs/code-1` (`results/launch-code.sh` has the trainer's flags, `rdnn-5`'s with `--size code`;
+  `CODER` gives another autoencoder), with `code-status.sh`, `code_terms.py N`, `stop-code.sh`, `resume-code.sh`,
+  `kill-code.sh` and its watchdog and memory log, each the `rdnn` run's under a `code` name; none has been used on a
+  run.  A run has an hourly check by a cron job in the session that starts it (`results/rdnn-status.sh` or
+  `code-status.sh`, `results/rdnn_terms.py N` or `code_terms.py N`, no torch; a report to the user and a line in the
+  log), a watchdog (25 minutes without a report, 3 restarts at most), and no change in the middle of it: not the
+  memory, the segment, the rates, the terms or the code.
 * **From the user**: a small memory state early is no fault ("The fading memory is to be expected early on; most games
   end early and there's not much to remember"), and no KL guard on the recurrent weights.
 
@@ -109,6 +146,10 @@ check and what was seen.
   scripts before one extractor a spot, and their frames read every spot free.
 * A run carried on with other reward terms keeps the critics of those it had, by name; the new ones start from nothing
   while the actor waits 10 iterations.
+* **The order autoencoder** (`/mnt/d/zk-learned/orders/vae-3/order-vae.pt`, `policy_latent.ORDER_CODER`) is of the
+  commands as they are: `order_vae.load` refuses a file made for other kinds, roles or radii (`selections.KINDS`,
+  `groups.roles`, `selections.RADII`).  A `--size code` checkpoint holds its weights and names its path
+  (`Size.coder`; `--order-coder` gives another).
 
 ## Environment
 
@@ -130,6 +171,9 @@ check and what was seen.
   * `maps/`: the pool of 204 real (18 of them Violet Rampart) and 200 made-up maps, 31 held out, each with its `modes`.
     It loads through the map cache in 27 s, to 1.4 GB of a process's own memory (01-simulator.md, "The map cache");
   * `clone/army-8`: 175 GB, about 8,800 script games of every kind, 100M decisions, recorded 2026-11-13;
+  * `orders/`: `commands-1` (68 MB: 1.5M decisions of the scripts' commands in games of every kind, recorded
+    2026-11-19) and the order autoencoders trained on it: `vae-3`, the one in use, and `vae-1`, `vae-2` and `vae-4`,
+    kept for the comparison in 05;
   * `runs/`: `rdnn-5`, `rdnn-4`, `rdnn-3`, `rdnn-2`, `rdnn-1`, `gru-1`, `full-4`, `full-3`, `full-2`, `grpo-trial`; the rest is older runs
     that don't load, and scratch;
   * `parity/` (`tools/policy_parity.py`'s results), `dashboard-cache/` and `dashboard-demo/` (the dashboard's map
@@ -139,14 +183,16 @@ check and what was seen.
 
 * **`bots/zkbot/`**, the engine side: `main.py` drives `host.py`, which runs `policy/runtime.py` once a decision.
   `policy/` has the raw frame schema (`rawframe.py`, which also generates `sim/include/zksim/rawframe.hpp` via
-  `tools/policy_schema.py`), the map bundle, type tables, featurizer, actions and group orders.
+  `tools/policy_schema.py`), the map bundle, type tables, featurizer, actions, group orders and orders as commands
+  (`selections.py`).
 * **`sim/`**: the C++ simulator (`src/`), the economy and army scripts (`scripts/`), the recorder (`record/`), the type
   table, featurizer and actions in C++ (`policy/`: libzkpolicy), their ctypes bindings (`py/`, and
   `tools/policy_scripts_cpp.py` for the scripts), data (`data/`) and tests (`tests/`).
 * **`tools/`**: the sim's data and checks against the engine (`sim_*.py`, `map_*.py`); the sim as a game
   (`policy_sim_env.py`, `policy_opening.py`); frames and the encoder (`frame_*.py`); the policy (`policy_model.py`,
-  `policy_latent.py`, `policy_clone_*.py`, `policy_train.py`, `policy_pipeline.py`, `policy_parity.py`); the trainer's
-  play (`policy_graphs.py`, `policy_collectors.py`); the dashboard (`policy_dashboard.py`, `dashboard/`,
+  `policy_latent.py`, `policy_code.py`, `policy_clone_*.py`, `policy_train.py`, `policy_pipeline.py`,
+  `policy_parity.py`); the scripts' commands recorded and their autoencoder (`order_data.py`, `order_vae.py`); the
+  trainer's play (`policy_graphs.py`, `policy_collectors.py`); the dashboard (`policy_dashboard.py`, `dashboard/`,
   `policy_replay.py`).
 * **`results/`** (never committed; on this machine only): the runs' launch files and helpers.  For the `rdnn` runs:
   `start-rdnn.sh HOURS` (from nothing, with its guard, memory log, watchdog and dashboard), `launch-rdnn.sh` (the
@@ -155,7 +201,11 @@ check and what was seen.
   the last checkpoint carried on N iterations), `paired_tests.py`, `compare_tests.py`, `replay_summary.py`,
   `inspect_rdnn.py`, and `run-tests.sh` (the suite; it refuses beside a trainer).  The GRU run's are the same under
   `gru` names.  `checks/` has the checks of a checkpoint by play made after `rdnn-5` (`checks/run.sh` runs one and
-  lists them; they load torch and the map pool).
+  lists them; they load torch and the map pool), and `checks/language_check.py`, the scripts played through commands
+  or the autoencoder.  For the code actor: `order-data.sh`, `order-vae.sh` and `order-vae-eval.sh` (record the
+  scripts' commands, train the autoencoder, measure it), `launch-code.sh` (`rdnn-5`'s flags with `--size code`),
+  `smoke-code.sh N` (N iterations of it in a scratch directory), and the run's helpers under `code` names
+  (`start-code.sh HOURS`, `code-status.sh`, `stop-code.sh`, `resume-code.sh`, `kill-code.sh`, the watchdog).
 * **Tests**: `tests/policy/`, `tests/test_*.py`, `sim/tests/`, run as `pytest.ini` says.  None needs the engine.
 * **Engine games**: `zk-startup.ps1`, `zk-maps.ps1`, `maps.md`, `README.md`.
 
@@ -169,6 +219,12 @@ In WSL, from `/mnt/c/Users/Thoma/Documents/sources/zk-ArenaAI`, with `PYTHONPATH
     bash results/rdnn-status.sh                        # where the run going, or the last, stands; no torch
     bash results/checks/run.sh fighter_check.py RUN CKPT:fight     # a checkpoint checked by play (torch)
     bash results/stop-rdnn.sh; bash results/resume-rdnn.sh     # stop it and wait; carry it on to its end (every game anew)
+    bash results/order-data.sh OUT DECISIONS           # the scripts' games played in commands, each look's kept (the map pool)
+    bash results/order-vae.sh DATA OUT                 # the order autoencoder trained on them (the card; half an hour)
+    bash results/checks/run.sh language_check.py RUN 128 coded 7 CODER    # the scripts through the autoencoder, against the scripts
+    bash results/smoke-code.sh 3                       # the code actor's trainer for 3 iterations (the pool and the card)
+    bash results/start-code.sh 24                      # a run of the code actor from nothing, as code-1 (on the user's word)
+    bash results/code-status.sh                        # where it stands; no torch
     ~/zkml/bin/python tools/policy_pipeline.py --root /mnt/d/zk-learned/runs/NAME --train-encoder \
         --data /mnt/d/zk-learned/clone/NEW [--dry-run]
         # the cloning pipeline, stage by stage; the same command again carries on.  A `stop` file in ROOT halts it after
@@ -181,7 +237,7 @@ Recording, cloning and the clone's eval are in 03-training.md ("Script data", "C
 and how it plays in "Playing".  A `stop` file in a trainer's run directory ends it at its next report, and the same
 command resumes it.
 
-**The tests** (852 pass, 3 of them need CUDA and are skipped without it) run on 8 processes, a file's tests in one
+**The tests** (859 pass, 4 of them need CUDA and are skipped without it) run on 8 processes, a file's tests in one
 process, in about 60 s; `--durations=20` shows what's slow.  The user wants the suite lean: no redundant, sure-to-pass
 or slow tests.
 
@@ -191,9 +247,10 @@ README.md has the rules for engine games: headless at max speed, windowed only w
 
 ## Next
 
-0. **What to change before the next run**, which the user decides from the checks after `rdnn-5` (above; the log
-   has the list put to them).  Also open, put to the user: a site's status still says "enemy" of a spot from an
-   extractor only remembered.
+0. **A run of the code actor, on the user's word**: `bash results/start-code.sh HOURS` (as `code-1`, on `vae-3`, with
+   `rdnn-5`'s flags and the spread's least falling from 0.1 to 0.03), then the hourly check.  What they chose before it
+   is done (05-order-autoencoder.md, "Decided, and what's open").  Open, put to the user: a site's status still says
+   "enemy" of a spot from an extractor only remembered.
 1. **If the `rdnn` runs learn no better than `gru-1`**: the GRU with the memory told as a vector and the same rates,
    which separates the vector and the rates from the RDNN; and the missing arms of the paper's task (the log,
    `rdnn-1`).
@@ -264,4 +321,9 @@ README.md has the rules for engine games: headless at max speed, windowed only w
 * **Line endings**: several files are CRLF; edit them without changing that.  `git status` inside WSL shows files as
   modified that aren't: use Windows git.
 * **Adding maps to the pool** needs the engine (`sim_engine.py facts` starts it six times a map): 01-simulator.md, "Data".
+* **A new tool on the card** caps itself before anything else and sends nothing through a net in one great batch
+  (`order_vae.cap_card`, `CHUNK`): on 2026-11-19 `order_vae.py eval` put 100,000 decisions through at once, the card
+  spilled and the machine's memory filled.  The same for a timing or a scratch script.
+* **An order autoencoder's file and the commands go together**: a change to `selections.KINDS`, the roles or `RADII`
+  makes every saved one unreadable (`order_vae.load` says so), and every `--size code` checkpoint with it.
 * **Never committed**: `results/` and `.vscode/`.

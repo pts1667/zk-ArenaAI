@@ -90,8 +90,10 @@ void World::hurt_wrecks(const zk_weapon_rec& w, float px, float pz, float power)
 // CFeature::AddBuildPower with reclaimMethod 0: gradual, and several builders add up.  It's paid as income, and what storage can't hold is lost with the rest of it.
 void World::reclaim_step(int u) {
     const size_t i = size_t(u);
+    // Its order is an area's (capi.h ZK_ORDER_RECLAIM): with the one it was on gone, by whoever's work, it goes to the next.
+    if (!wreck_exists(order_target[i])) order_target[i] = wreck_in_area(u, goal_x[i], goal_z[i], reclaim_radius[i]);
     const int id = order_target[i];
-    if (!wreck_exists(id)) {
+    if (id < 0) {
         order[i] = ZK_ORDER_NONE;
         return;
     }
@@ -103,8 +105,22 @@ void World::reclaim_step(int u) {
     wreck.left -= taken;
     if (wreck.left <= 0.0f) {
         remove_wreck(id);
-        order[i] = ZK_ORDER_NONE;
+        order_target[i] = wreck_in_area(u, goal_x[i], goal_z[i], reclaim_radius[i]);
+        if (order_target[i] < 0) order[i] = ZK_ORDER_NONE;
     }
+}
+
+// What a reclaim order's area still holds, the nearest to the unit: its middle within `radius` of mx, mz.  -1 for nothing.
+int World::wreck_in_area(int u, float mx, float mz, float radius) const {
+    int best = -1;
+    float nearest_d = 0.0f;
+    for (const int id : live_wrecks) {
+        const Wreck& wreck = wrecks[size_t(id)];
+        if (std::hypot(wreck.x - mx, wreck.z - mz) > radius) continue;
+        const float d = std::hypot(wreck.x - x[size_t(u)], wreck.z - z[size_t(u)]);
+        if (best < 0 || d < nearest_d) best = id, nearest_d = d;
+    }
+    return best;
 }
 
 }  // namespace zk

@@ -136,6 +136,7 @@ int World::add(int t, int owner, float px, float pz, float head, float hp_frac, 
     burn_team.push_back(-1);
     damage_mult.push_back(1.0f);
     work_on.push_back(-1);
+    reclaim_radius.push_back(0.0f);
     produces.push_back(-1);
     extracts.push_back(d.metal_make + (d.extract_mult > 0.0f ? d.extract_mult * spot_income(px, pz) : 0.0f));
     overdrive.push_back(0.0f);
@@ -298,6 +299,19 @@ void World::order_unit(int u, int kind, float gx, float gz, int target) {
     // An ally's frame or factory can be helped, as in the game, and no enemy's.
     if (kind == ZK_ORDER_ASSIST && target >= 0 && target < count() && side[size_t(target)] != side[size_t(u)]) return;
     if (kind == ZK_ORDER_RECLAIM && (d.reclaim_speed <= 0.0f || (d.flags & ZK_U_FACTORY))) return;
+    if (kind == ZK_ORDER_RECLAIM) {
+        // An area (capi.h; the user, 2026-11-19).  Round a feature it's that feature's place; one that's gone ends the order at
+        // its first step, as it did.  Round a place, what it goes to first is chosen now, and with nothing there it isn't taken.
+        const float radius = std::max(target < 0 ? float(-target) : 0.0f, ZK_RECLAIM_RADIUS);
+        if (wreck_exists(target)) {
+            gx = wrecks[size_t(target)].x;
+            gz = wrecks[size_t(target)].z;
+        } else if (target < 0) {
+            target = wreck_in_area(u, gx, gz, radius);
+            if (target < 0) return;
+        }
+        reclaim_radius[size_t(u)] = radius;
+    }
     if (!(d.flags & ZK_U_FACTORY)) work_on[size_t(u)] = -1;
     // Thrown, it's only falling, and does what it was told once it's down.
     jump[size_t(u)].stranded = jump[size_t(u)].busy && jump[size_t(u)].thrown_by < 0 && kind != ZK_ORDER_JUMP;

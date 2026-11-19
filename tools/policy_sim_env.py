@@ -323,10 +323,11 @@ def sim_orders(orders: list) -> np.ndarray:
     """The policy's orders as the sim's.  Its kinds up to PRODUCE have the same numbers; a thrower's fire at the ground, and a switch's target, are the sim's own.
     A group order is its unit's, followed by a groups.GROUP_MARK record with the radius as x and the roles as target, as the scripts record theirs:
     `split_groups` makes the sim's group orders of them.  An AREA_MEX is no order of the sim's: SimEnv takes those first
-    (`_take_areas`), and one left here is dropped.  A CANCEL_BUILD is the sim's stop."""
+    (`_take_areas`), and one left here is dropped.  A CANCEL_BUILD is the sim's stop.  A RECLAIM with no feature named is an
+    area's, round its x, z, its radius the area's (capi.h ZK_ORDER_RECLAIM) and no group's."""
     table, cat = tables.table(), catalog()
     orders = [o for o in orders if o.kind != rf.AREA_MEX]
-    out = np.zeros(len(orders) + sum(o.radius > 0.0 for o in orders), zksim.ORDER_DTYPE)
+    out = np.zeros(len(orders) + sum(o.radius > 0.0 and o.kind != rf.RECLAIM for o in orders), zksim.ORDER_DTYPE)
     i = 0
     for o in orders:
         kind, target = o.kind, o.target
@@ -344,9 +345,11 @@ def sim_orders(orders: list) -> np.ndarray:
             kind, target = zksim.ORDER_NONE, -1
         elif kind == rf.PRODUCE or kind == rf.BUILD:
             target = cat.index.get(table.names[target], -1)
+        elif kind == rf.RECLAIM and target < 0:
+            target = zksim.reclaim_area(o.radius)
         out[i] = (o.uid, kind, o.x, o.z, target)
         i += 1
-        if o.radius > 0.0:
+        if o.radius > 0.0 and o.kind != rf.RECLAIM:
             out[i] = (o.uid, groups.GROUP_MARK, o.radius, 0.0, o.roles)
             i += 1
     return out
@@ -606,6 +609,10 @@ class SimEnv:
         # Whether the C++ army script sends what it can as group orders (capi.h zk_group_rec), which play exactly as the same orders
         # sent unit by unit.  They're in army_orders, as the policy would give them (policy_orders).
         self.group_orders = True
+        # A check's: for a policy's seat the scripts advise, what this makes of their advice is carried out, in the step the
+        # advice is for.  (seat, the advice as policy_orders gives it) -> the policy's orders.  So the scripts can be played
+        # through another way of saying their orders (zkbot.policy.selections), against themselves as they are.
+        self.through = None
         # Every team of every game, as its alliance goes out or the game ends (`_game_facts`, with "game", and "kind": who played
         # it), for a measurement to take and clear.
         self.outcomes: list[dict] = []
@@ -1109,23 +1116,29 @@ class SimEnv:
         return ground.site(rng, footing, x, z, taken)
 
     def _placed(self, seat: int, rows: np.ndarray) -> np.ndarray:
-        """The policy's BUILD orders put where they fit (`place_build`), and those that fit nowhere dropped.  rows: `sim_orders`'."""
+        """The policy's BUILD orders put where they fit (`place_build`), and those that fit nowhere dropped.  rows: `sim_orders`'.
+        One type told to one point by several is one building, which they build between them (the sim's ZK_ORDER_BUILD; the
+        user, 2026-11-19): they're given the one place."""
         build = np.flatnonzero(rows["kind"] == zksim.ORDER_BUILD)
         if not len(build):
             return rows
         keep = np.ones(len(rows), bool)
         names = catalog().units
         spots: list[tuple[float, float]] = []       # this decision's extractors: one a spot
+        same: dict[tuple[int, float, float], tuple[float, float] | None] = {}
         for i in build:
             target = int(rows["target"][i])
-            row = -1 if target < 0 else self.table.names.index(names[target]["name"])
-            at = None if row < 0 else self.place_build(seat, row, float(rows["x"][i]), float(rows["z"][i]), int(rows["unit"][i]), tuple(spots))
+            asked = (target, float(rows["x"][i]), float(rows["z"][i]))
+            if asked not in same:
+                row = -1 if target < 0 else self.table.names.index(names[target]["name"])
+                at = same[asked] = None if row < 0 else self.place_build(seat, row, asked[1], asked[2], int(rows["unit"][i]), tuple(spots))
+                if at is not None and self.eco_data.extractor[row]:
+                    spots.append(at)
+            at = same[asked]
             if at is None:
                 keep[i] = False
             else:
                 rows["x"][i], rows["z"][i] = at
-                if self.eco_data.extractor[row]:
-                    spots.append(at)
         return rows[keep]
 
     def _spare_builds(self, seat: int, orders: list) -> list:
@@ -1397,11 +1410,33 @@ class SimEnv:
         self.script_record = {int(s): army[army_offsets[s]:army_offsets[s + 1]] for s in np.flatnonzero(flags & 1)}
         self.army_orders = (army, army_offsets)
         self.eco_orders = self.cpp.eco_orders(self.count)
+        if self.through is not None:
+            orders, offsets = self._through(orders, offsets, flags, policy_groups)
         if any(len(p) for parts in policy_groups for p in parts):      # the policy's group orders join the scripts'
             whole = [np.concatenate([groups[group_offsets[g]:group_offsets[g + 1]], *policy_groups[g]]) for g in range(self.count)]
             groups = np.concatenate(whole)
             group_offsets = np.concatenate(([0], np.cumsum([len(w) for w in whole]))).astype(np.int32)
         return orders, offsets, groups, group_offsets
+
+    def _through(self, orders: np.ndarray, offsets: np.ndarray, flags: np.ndarray, policy_groups: list) -> tuple[np.ndarray, np.ndarray]:
+        """`through`: every game's orders with, for each policy seat the scripts advised, what `through` makes of the advice
+        (the army script's, then the economy script's), after the game's others."""
+        (army, ao), (eco, eo) = self.army_orders, self.eco_orders
+        parts, counts = [], []
+        for g in range(self.count):
+            mine = [orders[offsets[g]:offsets[g + 1]]]
+            for team in range(int(self.n_teams[g])):
+                seat = g * self.slots + team
+                if not flags[seat] & 6:         # policy_scripts_cpp.SEAT_ARMY_LABEL, SEAT_ECO_LABEL
+                    continue
+                advice = np.concatenate((army[ao[seat]:ao[seat + 1]], eco[eo[seat]:eo[seat + 1]]))
+                if len(advice):
+                    part, grouped = split_groups(self._placed(seat, sim_orders(self.through(seat, policy_orders(advice)))))
+                    mine.append(part)
+                    policy_groups[g].append(grouped)
+            parts.extend(mine)
+            counts.append(sum(len(p) for p in mine))
+        return np.concatenate(parts), np.concatenate(([0], np.cumsum(counts))).astype(np.int32)
 
     def step(self, progress: float) -> None:
         if self.cpp is not None:

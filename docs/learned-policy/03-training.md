@@ -637,6 +637,14 @@ every seat that decides.
     frames don't pad to the widest frame of the run (2 to 6 times their tokens), with fewer rows a pass the wider the
     class (the same time a pass and more passes a round: 98 decisions a second collecting against 147); and no stops among
     the action steps.  More rows a pass is what's left, and a collector's memory limits it.
+* **With the actor that chooses a code** (`--size code`, with `--order-coder` for another autoencoder than the size's;
+  the user, 2026-11-19; 05-order-autoencoder.md, "The actor"): the same trainer, but a decision is one code with one
+  probability, its update featurizes no frame (`Learner._loss_code`), and a collector's pass is one graph.  It needs
+  `--group` and `--critic-size memory` (or no critic).  `--spread-floor ITERATION:SPREAD ...` is the least spread of
+  the code's Gaussian by iteration, linear between and the last after (the user, 2026-11-19: "Start with 0.1,
+  decreasing to 0.03 as the training run continues"; `Learner.set_floor`; 0.1 throughout by default).  In its smokes of three iterations with `rdnn-5`'s flags on the
+  pool, 2,000 to 2,300 decisions a second overall by the third (collecting about 2,000, training about 5,000), where
+  `rdnn-5` made 520.
 * **With the actor with a GRU** (`--size gru`, docs/model.md; the user asked for its throughput checked, 2026-11-17; RL from
   nothing in self-play 1v1s on the five training maps, bootstrapped with `--critic-size memory`, its first iterations, where
   frames are small).  Decisions a second overall, the mean of iterations 4 to 12:

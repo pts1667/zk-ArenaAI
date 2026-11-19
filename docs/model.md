@@ -581,6 +581,39 @@ RL and nothing of this size, and that's what the run `rdnn-1` is for.
   The first checks `run` against its steps, whole and a chunk at a time.  `results/rdnn_check.py` trains it and a GRU
   on the paper's first task with the gradient cut at 16.
 
+## An actor that chooses a code (`Size.coder`)
+
+The user's, 2026-11-19: "Go straight to the autoencoder and remove unit cross-attention from the policy."
+`policy_train.py --size code` (`policy_latent.CODE_SIZE`; `tools/policy_code.py`, `CodeActor`) is the RDNN actor above
+with everything between the memory and the orders taken out: no unit, region or site is read, there's no anchor, no plan
+of actions and no head.  docs/learned-policy/05-order-autoencoder.md has it whole, with the order autoencoder it stands
+on and its checks; 06-select-then-command.md has the commands a code stands for.
+
+```mermaid
+flowchart LR
+    LAT["frame latents (64 x 32)<br/>frozen encoder"] --> FR["1 block among them"] --> Q["8 code queries<br/>read them in 2 blocks"]
+    LAT --> MEM["RDNN, 1,024"]
+    LAST["the last code"] --> MEM
+    MEM -- "its vector" --> Q
+    Q --> G["mean (8 x 16),<br/>a learnt spread a number"]
+    G -- "sample" --> CODE(["the code"])
+    CODE --> DEC["order autoencoder's decoder<br/>(frozen)"] --> CMD["up to 16 commands:<br/>select, then command"]
+    CODE --> LAST
+```
+
+* **What's the same**: the frozen frame encoder, the frame's latents with the objective a seat is told added, the block
+  among them, the RDNN and how it's stepped and trained, its state told as one vector, the critics of the memory.
+* **What a decision is**: one draw from a Gaussian over the code's 128 numbers (`vae-3`'s 8 tokens of 16; the user,
+  2026-11-19: "bigger code should be fine", of the first's 64).  The mean is the queries' last layer, zero at first; the
+  spread is the actor's own, 1 at first, never more, and no less than a least that the trainer lowers as a run goes on
+  (`--spread-floor`; the user: "Start with 0.1, decreasing to 0.03 as the training run continues").  The frozen decoder
+  says the code's commands, every head's likeliest that's plausible, and `selections.decode` carries them out on the
+  frame.
+* **What the memory is told was done**: the code, through a linear layer, where it was the actions' vectors averaged.
+* **6,414,992 trained parameters** (the RDNN actor: 9,871,219): the RDNN 2.6M, the queries' two blocks 1.6M, the
+  memory's reading of the latents 1.0M, the block among the latents 0.8M.  Frozen beside them: the frame encoder's
+  2,893,776 and the order autoencoder's 3,283,489.
+
 ## Open questions (the user's)
 
 * **Memory**: full attention over all past frames, through summary tokens, in place of the 9 s window.

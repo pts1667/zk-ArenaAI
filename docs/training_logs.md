@@ -21,6 +21,158 @@ iteration 0's (`results/paired_tests.py`); the score is `eval_fight_score`.
   `rdnn-1`'s iteration 364 was against a richer script.  Against the script as it is: `rdnn-1`'s test at 500, and all of
   `rdnn-2`'s, `rdnn-3`'s, `rdnn-4`'s and `rdnn-5`'s.
 
+## After `rdnn-5`: orders as commands, an autoencoder of them, and an actor that chooses its code (2026-11-19; no run)
+
+**Built and checked by play; no run has trained by any of it.**  The user's answer to what `rdnn-5`'s checks left open
+(below, "The checks after it": the fighters waiting for their turn, a BUILD's blind choice), over that afternoon:
+
+* "Starcraft's Pluto includes player-like unit selection before issuing group commands.  I think this is feasible and
+  likely to be more efficient."  And of the orders that take one unit: "I think all the single-unit orders can be made
+  to work with multiple units.  OK, write it up."
+* "Proceed with the BUILD change.  Additionally, make RECLAIM an area reclaim order (default to a small radius to
+  ensure compatibility).  The circle select could have a 'portion' parameter, to select say QUARTER, HALF or FULL.
+  The orders autoencoder shouldn't have access to the frame's latent tokens (risk of representation collapse).  Rather
+  than selecting or positional orders based on region, consider a spatial encoding or finer subregions.  Go straight
+  to the autoencoder and remove unit cross-attention from the policy."
+* While it was being built: "The training data for the autoencoder should also include randomly/synthetically
+  generated actions to ensure coverage of cases/orders not seen in the script."
+
+What each is and how it works: docs/learned-policy/06-select-then-command.md (the commands, the sim's two changes) and
+05-order-autoencoder.md (the autoencoder, its data, the actor).  Here, what was measured.
+
+### The scripts through commands (before any autoencoder)
+
+`results/checks/language_check.py`, 128 1v1s, seed 7, `rdnn-5`'s flags with a build that sticks: team 0 a seat the
+scripts only advise, what's carried out being their advice said as commands and read back; team 1 the scripts as they
+are.
+
+| | The advice as it is | As commands and back |
+|---|---|---|
+| team 0 won, lost, drew | 67, 57, 4 | 62, 64, 2 |
+| its games' result (a draw half) | 0.539 ± 0.044 | 0.492 ± 0.044 |
+
+Level within what 128 games show (-0.047 ± 0.062), not shown the same.  Of the 1.82M units the scripts told something
+at a look, 71% were told the same by the commands; a quarter of the commands were past the 16 a decision, all in the 3%
+of looks with 20 or more; 10% of the orders couldn't be said (4.6% to units the side's frame doesn't give it to command,
+5.4% whose own command picked another or wasn't obeyed: not looked into).  A look is one command 28% of the time and 8
+or fewer 90%.  Two faults of mine the check caught on the way: every MOVE and FIGHT read back at the map's corner
+(team 0 then won 9 of 128), and a wide circle claiming units that had an order of their own that look.
+
+### The recording and the autoencoder
+
+* **`/mnt/d/zk-learned/orders/commands-1`** (`results/order-data.sh`; 19 minutes on 8 processes, 68 MB): 1,500,022
+  decisions of the scripts' games played in commands, every kind of game on the pool's training maps, 5,564,234
+  commands, 3.7 a decision.  Counted in one of its 8 parts: 29% of decisions are one command, 77% four or fewer, 3%
+  the full 16; of the commands, FIGHT 56%, ASSIST 14%, PRODUCE 9%, BUILD 8%, MOVE 6%, RECLAIM 4%; 62% select one unit;
+  82 sets of roles, ten of them 96% of the commands; 104 types.  In these games, with their bigger armies, a third of
+  the commands were past the 16 and 21% of the scripts' orders were to units past the 512 a side commands.
+* **`/mnt/d/zk-learned/orders/vae-1`** (`results/order-vae.sh`; 16,000 steps in 26 minutes, 3.3M parameters), three in
+  ten of its training decisions not the scripts' own (half wholly made up, half a script's with three in ten of its
+  commands swapped).  From a code's mean, held out: the scripts' decisions come back whole 77% of the time (kind 97%,
+  roles 88%, type 87%, a place within 15 elmos at the median); a made-up decision of a few commands keeps its count,
+  kinds, radii and places (25 elmos) but its set of roles 18% of the time and its type 39%; sixteen made-up commands
+  don't fit.  05, "What it gives back", has the tables.
+* **Two things in it that a run would meet** (05, the last two tables there):
+  * a code is 174 nats from the unit Gaussian, and one that's off by a spread of 1 says another decision (the count
+    right 18%, the kind 56%, places 1,300 elmos off); at 0.3 the count and kinds mostly hold (78%, 83%) and places are
+    450 elmos off; at 0.1 places are 150 off;
+  * zero says nothing: codes drawn round zero at a spread of 1 say nothing 72% of the time and 0.46 commands a
+    decision; at 0.3, nothing 99% of the time.
+
+### The scripts through the code, and codes drawn at random
+
+The same 128 games (`language_check.py ... coded` and `prior`), with `vae-1`:
+
+| | Team 0 won, lost, drew | Its games' result | The tests' score |
+|---|---|---|---|
+| The scripts' commands to their code's mean and back | 32, 89, 7 | 0.277 ± 0.044 | 0.361 ± 0.025 |
+| A code drawn from the unit Gaussian at each look | 1, 126, 1 | 0.012 ± 0.044 | 0.165 ± 0.007 |
+
+* **The scripts lose through the code what they kept through commands** (62 wins): 29% of the units they told were told
+  the same by what the code said, for 71%.  By a decision's length, held out: with 1 to 4 commands (76% of decisions)
+  97 to 99% come back right in everything, a place within 8 elmos; with 5 to 8, 18%; with 9 or more, 1 to 3%.  The code
+  holds four commands, and the scripts' armies are told a unit a command.
+* **Random codes hardly play**: their 88,681 commands gave 12,656 orders, a unit obeying one command in seven; a random
+  command's roles and kind seldom go together.  The score 0.165 is roughly beside the 0.144 to 0.151 of the runs from
+  nothing at iteration 0 (other games of the same kind).
+
+**A second autoencoder, `vae-2`** (`--beta 0.1 --empty 0.02`, trained beside those checks; mine, to see what the two
+faults were worth): the scripts' decisions back whole 74.7% for 77.0%, from 86 nats for 174; codes round zero at a
+spread of 1 say nothing 5% of the time for 72%, and 1.9 commands a decision for 0.46; a code off by 0.3 keeps its kinds
+and types 93% and 75% for 83% and 46%, and puts its places 630 elmos off for 440; a made-up command's set of roles
+comes back 6% for 18%.  I'd take it for a run.  It hasn't been played through.
+
+**The machine's memory, at about 14:20.**  The user stopped an eval of mine: "Memory was at 100%, GPU memory was leaking
+into shared memory."  `order_vae.py eval`, written that hour with no cap, sent 100,000 decisions through the net in one
+batch on the card (and a timing of mine had tried a batch of 8,192: 13.5 GB, 14 s a step).  Now `order_vae.cap_card`
+holds the tool to 6 GB of the card, so it fails and doesn't spill, and nothing goes through in more than 4,096 at a
+time: the same eval held 1.35 GB.
+
+
+### The actor and the trainer
+
+`tools/policy_code.py`, `policy_train.py --size code`: `rdnn-5`'s actor with everything between the memory and the
+orders gone, 6.38M trained parameters for 9.87M.  A decision is one draw from a Gaussian over the code; the update
+reads the frame's latents, the memory and the code, and featurizes nothing.  Tests: the suite, 859 with
+`tests/policy/test_code_actor.py`'s two (played through the trainer's path with each code as likely in training as when
+drawn, and the pass as a CUDA graph) and `test_selections.py`'s three.
+
+**A smoke of the trainer** (`results/smoke-code.sh 3`, at 14:32, on `vae-2`, `rdnn-5`'s flags with `--size code`, in
+`/mnt/d/zk-learned/runs/code-smoke`, since deleted): three iterations in 82 s with the start, no error, `masked_out` 0.
+By the third: 2,340 decisions a second overall (collect 2,160, train 4,910; `rdnn-5`: 520), the learner 1.3 GB of the
+card and a collector 0.27 of its 2.0, a minibatch about 530 decisions, 115 graphs captured.  The actor waits out the
+critics' 10 iterations, so `kl` and `ratio_deviation_max` were 0: play and training agree on each code's probability
+through the collectors' graphs.  Untrained it said 1.8 to 2.3 commands a decision and 0.4 to 0.5 units a decision
+obeyed one (`actions_a_decision`, `orders_a_decision`); `state_abs` 0.21 to 0.27.  Nothing in it says whether it
+learns.
+
+### The user's choices, and the autoencoder after them
+
+Put to the user after the checks above: which autoencoder, what to do about decisions longer than four commands, where
+the actor starts, what a made-up command is, and a run.  Their answer: "1. vae-2 2. bigger code should be fine 3. either
+is fine 4. commands should be plausible/valid".
+
+* **Plausible commands** (`selections.able`, `order_vae.made_up`, `OrderVAE.say`).  By the type table, a role can be
+  told a kind if some type of it ever can, and can make a type if one of its types builds or produces it.  A made-up
+  command's roles are drawn among those its kind is for and its type among what they make, and the decoder says only
+  such: the likeliest roles that can, the likeliest type they make.  All 60,738 of the scripts' held-out commands looked
+  at are plausible by it.
+* **`vae-3`** (`--beta 0.1 --empty 0.02 --codes 8`: `vae-2`'s settings, 128 numbers, plausible made-up commands; 32
+  minutes).  From a code's mean, held out: the scripts' decisions right in everything 89.3% (`vae-2`: 74.7%), kind
+  99.0%, roles 96.3%, type 95.7%, a place within 11 elmos.  By length: 99.6% of decisions of one command, 98.8% of 2 to
+  4, 95.6% of 5 to 8 (`vae-1`: 18.4%), 5% of 9 and more, where two commands in three are right.  A made-up decision of
+  a few commands comes back whole 64% of the time, its roles 82% and its type 95% (6 to 18% and 22 to 39% before).
+  Codes round zero at a spread of 1 say nothing 1.5% of the time and 1.7 commands a decision.  A code off by 0.3 keeps
+  its kinds 97.5%, roles 94%, types 90%, and puts its places 650 elmos off; by 0.1, 220 to 230; by 0.03, 70.
+* **The scripts through its code** (`language_check.py ... coded`, the same 128 games): 60 won, 62 lost, 6 drawn, 0.492
+  ± 0.044, the tests' score 0.495 ± 0.028.  Level with commands alone (62, 64, 2), where `vae-1`'s 64 numbers lost 32
+  to 89.  38% of the units the scripts told were told the same by what the code said (commands alone 71%, `vae-1`
+  29%), and 7% of looks had 20 commands or more for 3%: what differs is in the long looks, and it didn't cost games.
+* **`vae-4`** (`--codes 16`, 256 numbers, all else as `vae-3`; 31 minutes; mine, to see whether the longest decisions
+  would fit): worse than `vae-3` throughout.  Decisions right in everything 79.4%, those of 5 to 8 commands 30.9%, of 9
+  and more 0.5 to 3%; a code off by 0.3 keeps its kinds 92%, roles 85%, types 74%.  It left more of its code at the
+  Gaussian (the encoder's own spread 0.88 for 0.74).  Not looked into, and not played.
+* **Taken: `vae-3`** (`policy_latent.ORDER_CODER`, `launch-code.sh`'s `CODER`, and `order_vae.py`'s defaults).  The
+  actor has 6,414,992 trained parameters with it.  Where the actor starts is as it was built, the unit Gaussian.
+* **A smoke of the trainer on it** (`results/smoke-code.sh 3`, at 15:52): three iterations in 78 s, no error,
+  `masked_out` 0, `kl` and `ratio_deviation_max` 0.  2,020 to 2,120 decisions a second overall in the second and third
+  (collect 1,800 to 1,920, train 3,280 to 5,120), the learner 1.34 GB and a collector 0.27 to 0.31, a minibatch about
+  515 decisions.  Untrained: 1.7 to 2.1 commands a decision, 0.5 to 0.6 units a decision told (0.4 to 0.5 on `vae-2`,
+  before the commands were plausible): most of what keeps a command from being obeyed is the frame's.
+* **The actor's least spread**, put to the user (0.1 as built, at which a place is 220 elmos off; 70 at 0.03).  Their
+  answer: "Start with 0.1, decreasing to 0.03 as the training run continues."  Built as `--spread-floor
+  ITERATION:SPREAD ...` (`Config.spread_floor`, `Learner.set_floor`, the actor's `log_std_least`): linear between its
+  points by iteration, as the trainer's other ramps, for the learner, the collectors (with the weights) and the
+  average that plays the tests.  `results/start-code.sh HOURS` gives a run `0:0.1 N:0.03`, N its hours at 350
+  iterations an hour (mine: the smoke's 2,000 decisions a second, less its tests; 8,400 for 24 hours).  A smoke with
+  `0:0.1 4:0.03` (at 16:05): `code_spread_floor` 0.1, 0.0825 and 0.065 in its three iterations, no error, the
+  collectors' weights as sent.
+* **The helpers for a run** (`results/start-code.sh HOURS`, `code-status.sh`, `code_terms.py`, `stop-code.sh`,
+  `resume-code.sh`, `kill-code.sh`, the watchdog and the memory log): the `rdnn` run's, for
+  `/mnt/d/zk-learned/runs/code-1` and `launch-code.sh`; `rdnn_status.py` has two lines for a code actor (its Gaussian;
+  commands and units told a decision).  Read on the smoke's directory; no run has used them.
+* The suite: 859 pass.
+
 ## `rdnn-5`: `rdnn-4` again with one game in five kept clear of the lead rule (2026-11-19 01:55 to 08:54, stopped by the user for checks)
 
 **Stopped at iteration 769** (13.21M decisions, `ppo/ckpt/it-000769.pt`) at 08:53:37, seven hours in, by the user ("OK- stop
@@ -202,7 +354,22 @@ actor learns there; and why 2.5 times the income buys no more army.
 **Put to the user, 2026-11-19** (what to change is theirs).  Their answer to the first, that afternoon: "I think I
 have a solution: make builds stick, but also add a 'cancel build' order as well.  On 'cancel build', the builder's
 order(s) are explicitly canceled."  It's made ("What changed under the runs", "A build sticks"; "Under the new rule"
-below).  The other three aren't answered.
+below).  The other three aren't answered as put.  Later that day the user proposed something wider in their place: "I
+think a transformer-based autoencoder for a frame's orders (for one side) would show improvements and simplify the RL
+training process given that its parameters are frozen when training the policy; proceed with documenting the proposed
+architecture."  Documented then, and built since ("After `rdnn-5`", above): docs/learned-policy/05-order-autoencoder.md.  (I had answered a first question
+on it, "Would a small autoencoder for frame actions perform better?", with doubt: the scripts' games are all it could
+learn from, the clone of them topped out at 8 to 17% of tests, and a decision is mostly keep.  Those are in the
+document, under "What it can't do, and what may go wrong".)
+
+And after it, for the fighters: "Starcraft's Pluto includes player-like unit selection before issuing group commands.
+I think this is feasible and likely to be more efficient.  As an example (in token form): `<latent tokens>
+<SELECT_CIRCLE CENTRE=(x,z) RADIUS=r TYPE=combat> <ATTACK_MOVE AT=(x,z)> <END_FRAME_ORDERS>`.  Could this work?"  I
+said it could, and that I'd take it before the autoencoder: today's group order is the same parts in another order,
+optional, and round a unit (a group took in 2.4 units at 140).  Of the orders that need one unit, the user: "I think all
+the single-unit orders can be made to work with multiple units.  OK, write it up."  Documented then, and built since:
+docs/learned-policy/06-select-then-command.md.  Pluto's own selection, by its README, is its own action round a unit it
+points at, kept between its steps of 6 frames; here the selection and its command are one action in a decision.
 
 1. *A build that sticks*: a unit on a BUILD or an area mex isn't offered for an order until it's over, to a limit (the
    commit lock, lengthened for these; the featurizer in Python and C++).  It's what the last check tried from outside.
@@ -766,6 +933,14 @@ A line or two each, from 2026-11-18 05:23; the times are local.
   picking a unit on a build starts 3 nats down (`policy_model.CANCEL_START`).  02-policy.md, "A build sticks".
   Checked: the suite (the area mex's test has the rule, the group order and the cancel), and libzkpolicy against the
   Python on the corpus's 49,451 frames, no mismatch (`/mnt/d/zk-learned/parity/check-sticky.json`).
+* **Several told to build one thing build one, and a RECLAIM is an area's** (the user, 2026-11-19; libzksim ABI 32; no
+  run has had either).  A BUILD that arrives where an unfinished frame of its type and allyteam stands, within the
+  type's footprint of the order's place, works on that frame (`World::frame_to_join`), and BUILDs of one type told to
+  one point in a decision are given one place, an extractor's spot among them (`SimEnv._placed`): before, each
+  constructor placed its own, and two extractors told to one point went to two spots.  A RECLAIM takes what lies in
+  its area, the nearest to the unit first, and ends when nothing's left: 32 elmos round a feature named
+  (`ZK_RECLAIM_RADIUS`, mine), which is how the scripts and the old actor name theirs, or a radius round a place
+  (`zksim.reclaim_area`).  Before, it was the one feature.  01-simulator.md, "Economy".
 * **`production_lead`'s cap is half a team's metal income** (the user, 2026-11-19; from `rdnn-4`), where it was 30 metal
   a second: `policy_sim_env.PRODUCTION_SHARE`.  The term's numbers before and after don't compare.
 * **The lead rule can wait for the draws to go** (the user, 2026-11-19; `--lead-draws`, `rdnn-4` at 0.8):
@@ -775,6 +950,27 @@ A line or two each, from 2026-11-18 05:23; the times are local.
 ## My choices the user hasn't confirmed
 
 Each is a constant or a flag, easy to change.
+
+* **In what was built after `rdnn-5`** (2026-11-19; docs/learned-policy/06-select-then-command.md and
+  05-order-autoencoder.md, each ending with a list for the user to decide).  The user's: selection before a command,
+  every order working on several units, the portion, the shared BUILD, the area RECLAIM, places as coordinates, the
+  autoencoder frozen and reading no frame, made-up decisions in its data, a policy that reads no unit.  Mine:
+  * **in a command**: the roles as its type, any set of the table's 19; 11 radii, the first "the nearest one"; a
+    selection that's never empty (the nearest of the roles when the circle has none); a unit that obeyed in no later
+    selection; one target for a command that's aimed (whoever's nearest its place), and one transport for a LOAD; a
+    MOVE or FIGHT going wherever it's told; 16 commands a decision; 32 elmos as the least area;
+  * **in putting the scripts' orders into commands**: the halving of a group that no circle takes exactly, and a
+    circle allowed to take in units already on that very order;
+  * **in the autoencoder**: a nat for a place 1% of the map off; width 192 and 3 blocks each way; three in ten made up,
+    half wholly and half a script's with three in ten of its commands swapped; a made-up command's kind any of the 21
+    alike.  The user's since ("The user's choices, and the autoencoder after them"): the pull of 0.1 and a fiftieth of
+    decisions emptied (`vae-2`'s), a bigger code, plausible commands.  Mine in those: the code's 128 numbers as 8
+    tokens of 16; what's plausible taken role by role from the type table; the decoder held to it as well as the data;
+  * **in the actor**: one spread a number, the same at every decision, 1 at most; its least from 0.1 to 0.03 over the
+    run is the user's, and that it falls by iteration, evenly, over 350 iterations an hour of the run's hours is mine;
+    the mean zero at first ("either is fine", the user, of this or a start cloned from the
+    scripts' codes); the memory told the code through a linear layer; the KL estimated from the codes drawn; the token
+    budget counting a decision as its 64 latents.
 
 * **A build that sticks** (2026-11-19; the user's are the sticking and the cancel):
   * **the start against a cancel**, 3 nats on the choice of unit (`CANCEL_START`).  To pick a unit on a build is to
