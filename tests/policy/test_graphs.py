@@ -67,6 +67,12 @@ def test_a_pass_is_of_one_level_of_frame_size_and_at_most_the_rows_it_is_given()
     # A wide pass costs by its rows and holds memory by them: it has fewer.
     assert [pg.rows_at(u) for u in (64, 256, 512, 1024, 1536)] == [64, 64, 32, 16, 16]
     assert [len(p) for p in pg.Graphs.passes([small] * 70 + [big] * 70, 64)] == [64, 6, 32, 32, 6]
+    # An actor that chooses a code plays wider passes, and a level's few go up into the next level's where that saves a pass
+    # for little padding: 3 small frames into the 2 of level 512's, not 70 into its 70, which would make a pass more.
+    wide = {"most": pg.CODE_ROWS, "merge": pg.MERGE_TOKENS}
+    assert pg.Graphs.passes([small, big, small, small, big], **wide) == [[0, 1, 2, 3, 4]]
+    assert [len(p) for p in pg.Graphs.passes([small] * 70 + [big] * 70, 96, **wide)] == [70, 32, 32, 6]
+    assert [len(p) for p in pg.Graphs.passes([small] * 130, **wide)] == [128, 2]
     assert [pg.level(n) for n in (1, 64, 65, 1024, 1025, 1292)] == [64, 64, 128, 1024, 1536, 1536]
 
 

@@ -331,12 +331,14 @@ def test_grpo_judges_each_branch_of_a_copied_game_against_the_other_and_trains_w
         opened.setdefault((self.env.slot, seat % self.env.slots), []).append((self.env.frame(seat).units.copy(), self.current[seat].history.copy()))
 
     monkeypatch.setattr(pt.GroupCollector, "_open", spy)
-    real_terms = env.reward_terms
+    real_terms = env.seats_terms
 
-    def terms(seat, names, b):      # each branch's income balance and lead in extractors steady, at levels of its own
-        return np.where(np.isin(names, ("income", "extractor_level")), float(seat), real_terms(seat, names, b))
+    def terms(names, b):        # each branch's income balance and lead in extractors steady, at levels of its own: its seat's number
+        out = real_terms(names, b)
+        out[:, np.isin(names, ("income", "extractor_level"))] = np.arange(len(out))[:, None]
+        return out
 
-    monkeypatch.setattr(env, "reward_terms", terms)
+    monkeypatch.setattr(env, "seats_terms", terms)
     segments, tally = pt.GroupCollector(learner, env, np.random.default_rng(1)).collect_tally(40)
     assert tally.stored == sum(len(seg.steps) for seg in segments) >= 40 and tally.groups["branches"] >= 4
     moments: dict[tuple[int, int], list[np.ndarray]] = {}
@@ -395,7 +397,8 @@ def test_grpo_against_itself_judges_each_side_against_the_same_side_of_the_other
     learner = pt.Learner(cfg, tmp_path, pt.DataWorkers(0, env.bundles(), cfg.enabled_kinds), "cpu")
     pt.set_games(env, learner.games)
     # Each copy's score at a level of its own, one side's what the other's isn't.
-    monkeypatch.setattr(env, "reward_terms", lambda seat, names, b: np.full(len(names), (1.0 - 2.0 * env.team_of(seat)) * (1.0 + env.game_of(seat))))
+    seats = np.arange(env.seat_count)
+    monkeypatch.setattr(env, "seats_terms", lambda names, b: np.repeat(((1.0 - 2.0 * (seats % env.slots)) * (1.0 + seats // env.slots))[:, None], len(names), 1))
     segments, tally = pt.GroupCollector(learner, env, np.random.default_rng(1)).collect_tally(40)
     assert set(env.mode) == {"mirror"} and tally.groups["branches"] >= 4
     moments: dict[int, dict[int, list[float]]] = {}

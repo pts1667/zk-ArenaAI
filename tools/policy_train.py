@@ -132,10 +132,14 @@ class Config:
     size: str = "default"           # without one, a new actor's (policy_latent.SIZES): "gru" has a GRU for memory, "rdnn" an RDNN in its place
     # With --size code (the user, 2026-11-19): the order autoencoder whose code the actor chooses (order_vae.py); "": the size's.
     order_coder: str = ""
-    # With --size code: the least spread of the code's Gaussian by iteration, linear between and the last after, as kl_fade (the
+    # With --size code: the least spread of the code's Gaussian, linear between its points and the last after, as kl_fade (the
     # user, 2026-11-19, of a least of 0.1, at which a place a code says is 220 elmos off, and 70 at 0.03: "Start with 0.1,
     # decreasing to 0.03 as the training run continues").  The default is policy_code.LOG_STD_LEAST's 0.1 throughout.
-    spread_floor: tuple[tuple[int, float], ...] = ((0, 0.1),)
+    spread_floor: tuple[tuple[float, float], ...] = ((0, 0.1),)
+    # When the run began, in seconds of the epoch: `spread_floor`'s points are then hours since, by the clock, a stop and what's
+    # carried on after it included, as a run's end is (results/start-code.sh).  0: its points are iterations.  A run's
+    # iterations an hour aren't known when it starts: they fall by half as its games grow old.
+    spread_floor_began: float = 0.0
     maps: str = ""                  # a map pool (tools/map_gen.py), its held-out maps left out; "" for the five training maps
     variants: bool = False          # each side's army script draws its knobs (policy_variants.py)
     critic_bins: int = 0            # above 0, the critic's value is a distribution over this many, trained by HL-Gauss
@@ -306,7 +310,7 @@ def collector_bytes(cfg: "Config") -> float:
 def padded_tokens(batch: list["Segment"]) -> int:
     """A minibatch's padded tokens a decision, as `Learner._minibatches` counts them (DECISION_TOKENS aside)."""
     units = max(min(len(s.frame.units), UNIT_TOKENS) + min(len(s.frame.sites), fz.CAP_SITES) + min(len(s.frame.features), fz.CAP_FEATURES)
-                for seg in batch for s in seg.steps)
+                if s.frame is not None else 0 for seg in batch for s in seg.steps)
     return units + max(seg.bundle.regions for seg in batch) + 2
 
 
@@ -346,7 +350,7 @@ def beta(progress: float) -> float:
 @dataclass
 class Step:
     """A decision as it was played.  Its actions, one entry each, in the order they were chosen (actions.Slots)."""
-    frame: rf.Frame
+    frame: rf.Frame | None      # None for an actor that chooses a code: its update reads the latents, and no frame
     anchor: np.ndarray
     kind: np.ndarray
     enemy: np.ndarray
@@ -552,12 +556,13 @@ class Player:
         """Forward passes for many games, as few as fit the memory.  Returns tensors, numpy actions, values and the new state.
         z: each seat's strategy (policy_latent.Z_DIM), or None.  rows: the most seats a graph's pass takes (0: all of them).
         As graphs, the seats of a level of frame size go together (policy_graphs.Graphs.passes), so small frames don't pad to
-        the widest; what comes back is in the seats' order all the same."""
+        the widest, an actor that chooses a code in fewer, wider passes (Graphs.wide); what comes back is in the seats' order
+        all the same."""
         items = self._features(frames)
         if self.graphs is None:
             passes = [list(range(len(items))[s]) for s in _act_slices(items)]
         else:
-            passes = self.graphs.passes(items, rows) or [[]]
+            passes = self.graphs.passes(items, rows, **self.graphs.wide) or [[]]
         parts = []
         for seats in passes:
             at = slice(seats[0], seats[-1] + 1) if seats and seats[-1] - seats[0] + 1 == len(seats) else torch.as_tensor(seats, dtype=torch.long, device=history.device)
@@ -706,7 +711,8 @@ class Learner:
         its weights that plays the tests, which is of what's trained and so hasn't it.  The collectors get it with the weights."""
         if not self.coded:
             return
-        least = math.log(fade_share(self.iteration, self.cfg.spread_floor))
+        began = self.cfg.spread_floor_began
+        least = math.log(fade_share((time.time() - began) / 3600.0 if began else self.iteration, self.cfg.spread_floor))
         for player in (self.player, self.ema):
             if player is not None:
                 player.actor.log_std_least.fill_(least)
@@ -728,10 +734,11 @@ class Learner:
         minibatch isn't all from one stage of the game, and the minibatches then go in random order.  The budget counts a
         decision's padded tokens and `DECISION_TOKENS`: a small frame batched with a big map's costs as much as the big map's.
         Token groups pad separately, so each is tracked on its own."""
-        units = np.array([max(min(len(s.frame.units), UNIT_TOKENS) + min(len(s.frame.sites), fz.CAP_SITES) + min(len(s.frame.features), fz.CAP_FEATURES) for s in seg.steps) for seg in segments])
-        regions = np.array([seg.bundle.regions for seg in segments])
         if self.coded:      # a decision is its frame's latents, whatever the frame held
             units, regions = np.full(len(segments), self.actor.encoder.tokens), np.zeros(len(segments), np.int64)
+        else:
+            units = np.array([max(min(len(s.frame.units), UNIT_TOKENS) + min(len(s.frame.sites), fz.CAP_SITES) + min(len(s.frame.features), fz.CAP_FEATURES) for s in seg.steps) for seg in segments])
+            regions = np.array([seg.bundle.regions for seg in segments])
         lengths = np.array([len(seg.steps) for seg in segments])
         order = np.argsort((units + regions) * rng.uniform(0.85, 1.15, len(segments)))
         batches, current = [], []
@@ -1592,16 +1599,17 @@ class Collector:
         for k, seat in enumerate(acting):
             t = items[k]
             raw = frames[k][0]
-            kept = rf.Frame(raw.units.copy(), raw.sites.copy(), raw.glob.copy(), raw.features.copy())
             tr = current[seat]
             orders = decision_orders(out, k, t, tr.bundle, commands)
             if commands is not None:
-                # Counted by command, and the units they told: a command no unit could obey is counted too.
-                step = Step(kept, *(NO_ACTIONS,) * len(act.SLOT_FIELDS), out["logp"][k].copy(), value[k].copy(), code=out["code"][k].copy())
+                # Counted by command, and the units they told: a command no unit could obey is counted too.  No frame is
+                # kept: the update reads none, and a round's frames were most of what a collector sent back.
+                step = Step(None, *(NO_ACTIONS,) * len(act.SLOT_FIELDS), out["logp"][k].copy(), value[k].copy(), code=out["code"][k].copy())
                 tally.kind_counts += np.bincount(commands[k]["kind"], minlength=rf.KIND_COUNT)
                 tally.actions += len(commands[k])
                 tally.add("orders", len(orders))
             else:
+                kept = rf.Frame(raw.units.copy(), raw.sites.copy(), raw.glob.copy(), raw.features.copy())
                 step = Step(kept, *(out[h][k].copy() for h in act.SLOT_FIELDS + ("logp",)), value[k].copy())
                 picked = step.anchor >= 0
                 tally.masked_out += int((~t.kind_mask[step.anchor[picked], step.kind[picked]]).sum())
@@ -1785,19 +1793,26 @@ class GroupCollector(Collector):
                     self._branch(int(k))
             acting = env.policy_seats_to_act()
             items = self._act(acting) if acting else []
+            levels = env.seats_terms(self.level_names, b) if acting and self.change else None
             for seat in acting:         # where each decision's branch stood: what comes after judges it (Config.reward_to_go)
                 step = self.current[seat].steps[-1]
                 step.slot, step.mark, step.counted = env.slot, self.score[seat].copy(), self.counted[seat]
                 if self.change:
                     step.level = np.zeros(len(self.terms))
-                    step.level[self.level_at] = env.reward_terms(seat, self.level_names, b)
+                    step.level[self.level_at] = levels[seat]
             env.step(progress)
             self.left -= 1
             self._advise(acting, items)
+            # Every seat's terms at once (SimEnv.seats_terms), and each count of steps' discounts once: after every step of
+            # the sim, a call a seat was 7% of a collector's time (py-spy, 2026-11-19).
+            terms, discounts = env.seats_terms(self.asked, b), {}
             for seat, tr in self.current.items():
                 if not tr.done:
-                    self.score[seat] += self.gammas ** self.counted[seat] * env.reward_terms(seat, self.asked, b)
-                    self.counted[seat] += 1
+                    n = self.counted[seat]
+                    if n not in discounts:
+                        discounts[n] = self.gammas ** n
+                    self.score[seat] += discounts[n] * terms[seat]
+                    self.counted[seat] = n + 1
             for seat in self._finished():
                 if seat in self.current:
                     self.current[seat].done = True
@@ -2473,13 +2488,18 @@ def main() -> None:
                     help="featurize in C++ (libzkpolicy) on this many threads in each collector and one in each data worker; 0: in Python")
     ap.add_argument("--hours", type=float, default=Config.hours, help="stop after this long as well as at --decisions")
     ap.add_argument("--eval-every", type=int, default=Config.eval_every, help="iterations between tests against the script")
+    ap.add_argument("--checkpoint-every", type=int, default=Config.checkpoint_every,
+                    help="iterations between checkpoints, each kept (ckpt/it-N.pt, about 0.3 GB)")
     ap.add_argument("--latent-encoder", default=Config.latent_encoder, help="the trained frame encoder whose latents the actor reads")
     ap.add_argument("--action-kinds", help="action kinds to allow, such as 0,3: a test of one head with nothing else to fall back on")
     ap.add_argument("--order-coder", default=Config.order_coder,
                     help="with --size code: the order autoencoder whose code the actor chooses (order_vae.py); without, the size's own")
     ap.add_argument("--spread-floor", nargs="+", default=[f"{i}:{s:g}" for i, s in Config.spread_floor], metavar="ITERATION:SPREAD",
-                    help="with --size code: the least spread of the code's Gaussian, by iteration, as --kl-fade; 0:0.1 8000:0.03 "
-                         "falls from a tenth of the unit Gaussian's to 0.03 over 8,000 iterations (default: %(default)s)")
+                    help="with --size code: the least spread of the code's Gaussian, by iteration, as --kl-fade, or by the hours "
+                         "since --spread-floor-began: 0:0.1 6:0.03 then falls from a tenth of the unit Gaussian's to 0.03 over "
+                         "a run's 6 hours (default: %(default)s)")
+    ap.add_argument("--spread-floor-began", type=float, default=Config.spread_floor_began, metavar="EPOCH",
+                    help="when the run began, in seconds of the epoch (date +%%s): --spread-floor's points are hours since; 0: iterations")
     ap.add_argument("--kinds", nargs="+", default=[f"{k}:{w:g}" for k, w in Config.kinds], metavar="KIND:WEIGHT",
                     help="kinds of game and how likely each, among 1v1, teams, ffa and chicken, as 1v1:0.5 teams:0.2 ffa:0.2 chicken:0.1 "
                          "(default: %(default)s)")
@@ -2609,7 +2629,8 @@ def main() -> None:
         ap.error("--self-play is a share of the games, 0 to 1")
     fades = {}
     for name in ("kl_fade", "clone_fade", "lead_fade", "kinds_ramp", "spread_floor"):
-        fade = fades[name] = tuple((int(i), float(s)) for i, s in (point.split(":") for point in getattr(args, name)))
+        at = float if name == "spread_floor" else int      # hours, with --spread-floor-began
+        fade = fades[name] = tuple((at(i), float(s)) for i, s in (point.split(":") for point in getattr(args, name)))
         if any(a[0] >= b[0] for a, b in zip(fade, fade[1:])):
             ap.error(f"--{name.replace('_', '-')}'s iterations must rise")
     if any(not 0.0 < s <= 1.0 for _, s in fades["spread_floor"]):
@@ -2630,7 +2651,7 @@ def main() -> None:
 
     cfg = Config(terms=terms, critic_rewarm=args.critic_rewarm, seed=args.seed, decisions=args.decisions, games=args.games, iteration=args.iteration, passes=args.passes, ema=args.ema,
                  segment=args.segment, token_budget=args.token_budget, data_workers=args.workers, featurize_threads=args.featurize_threads, concurrent=args.concurrent,
-                 decide_every=args.decide_every, hours=args.hours, eval_every=args.eval_every, gpu_runs=args.gpu_runs, gpu_share=args.gpu_share, empty_cache=args.empty_cache,
+                 decide_every=args.decide_every, hours=args.hours, eval_every=args.eval_every, checkpoint_every=args.checkpoint_every, spread_floor_began=args.spread_floor_began, gpu_runs=args.gpu_runs, gpu_share=args.gpu_share, empty_cache=args.empty_cache,
                  latent_encoder=args.latent_encoder, enabled_kinds=policy_sim_env.KINDS,     # what the sim obeys
                  order_coder=args.order_coder,
                  init=args.init, size=args.size, maps=args.maps, variants=args.variants, lr_start=args.lr_start, lr_end=args.lr_end, kl_target=args.kl_target, lr_scale_start=args.lr_scale_start, recurrent_lr=args.recurrent_lr, compile_memory=args.compile_memory, critic_lr=args.critic_lr, critic_muon_lr=args.critic_muon_lr, actor_muon_lr=args.actor_muon_lr,

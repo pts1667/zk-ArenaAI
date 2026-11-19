@@ -1252,22 +1252,21 @@ class SimEnv:
         self.step(0.0)
 
     def _by_alliance(self, per_team: np.ndarray) -> np.ndarray:
-        """games x slots: a per-team quantity summed over each alliance's teams."""
+        """games x slots: a per-team quantity summed over each alliance's teams, in the teams' order."""
         out = np.zeros(per_team.shape, per_team.dtype)
         for t in range(self.slots):
             a = self.ally[:, t]
             used = a >= 0
-            out[self._rows[used], a[used]] += per_team[used, t]
+            if used.all():
+                out[self._rows, a] += per_team[:, t]
+            elif used.any():        # most slots have no team in most games: a 1v1 has two of the eight
+                out[self._rows[used], a[used]] += per_team[used, t]
         return out
 
     def _others(self, v: np.ndarray, live: np.ndarray) -> np.ndarray:
         """games x slots: for each alliance, the total of the other live alliances' v."""
-        out = np.zeros_like(v)
-        for a in range(self.slots):
-            them = live.copy()
-            them[:, a] = False
-            out[:, a] = np.where(them, v, 0).sum(1)
-        return out
+        them = live[:, None, :] & ~np.eye(self.slots, dtype=bool)
+        return np.where(them, v[:, None, :], 0).sum(2).astype(v.dtype, copy=False)
 
     def _balance(self, per_team: np.ndarray, constant: float) -> np.ndarray:
         """games x slots, by alliance: each live alliance's total less the mean of the other live alliances', over all of theirs and
@@ -1305,21 +1304,28 @@ class SimEnv:
         experience = np.where(self.alive, trades - self._others(trades, self.alive) / n[:, None], 0)
         return np.stack((seen, experience), -1)
 
-    def _counted(self) -> np.ndarray:
-        """games x slots x LEAD_TERMS, by team, of its own units: its extractors, a finished one 1 and one being built
-        BUILD_RAMP x its build progress, so that starting one and building it on are worth something before it's done; its
-        finished fighters that stand idle (the sim's flag: one that moves, its order done); and its constructors, counted as
-        the extractors, up to what counts at the game's time (CONSTRUCTOR_EVERY); and the metal a second it put into units
-        over the step just taken (`spent_rate`), up to PRODUCTION_SHARE of its metal income now.  Nothing for the chickens.
-        Every team's records at once, as wide as the longest: it's after every step of the sim, and a loop over the teams
-        was 6% of a collector's time (py-spy, 2026-11-17)."""
-        out = np.zeros((self.count, self.slots, len(LEAD_TERMS)))
-        out[:, :, 0] = self.batch.stats[:, :, EXTRACTORS_STAT]
+    def _own(self) -> tuple:
+        """Every playing team's own units at once, the chickens' aside: how many teams the records are read to, the records, and
+        each unit's game, team and place among its team's records, in that order.  Every team's records as wide as the
+        longest: it's after every step of the sim, and a loop over the teams was 6% of a collector's time (py-spy,
+        2026-11-17)."""
         teams = int(self.n_teams.max())
         sides, counts = np.arange(teams), self.batch.counts[:, :teams]
         u = self.batch.records[:, :teams, :max(int(counts.max()), 1)]
         playing = (sides < self.n_teams[:, None]) & (sides != self.chickens[:, None])
         g, side, k = np.nonzero((np.arange(u.shape[2]) < counts[:, :, None]) & (u["player"] == sides[:, None]) & playing[:, :, None])
+        return teams, playing, u, g, side, k
+
+    def _counted(self, own: tuple | None = None) -> np.ndarray:
+        """games x slots x LEAD_TERMS, by team, of its own units: its extractors, a finished one 1 and one being built
+        BUILD_RAMP x its build progress, so that starting one and building it on are worth something before it's done; its
+        finished fighters that stand idle (the sim's flag: one that moves, its order done); and its constructors, counted as
+        the extractors, up to what counts at the game's time (CONSTRUCTOR_EVERY); and the metal a second it put into units
+        over the step just taken (`spent_rate`), up to PRODUCTION_SHARE of its metal income now.  Nothing for the chickens.
+        own: `_own` as it is now, if the caller has it."""
+        out = np.zeros((self.count, self.slots, len(LEAD_TERMS)))
+        out[:, :, 0] = self.batch.stats[:, :, EXTRACTORS_STAT]
+        teams, playing, u, g, side, k = own or self._own()
         rows, flags, built = self.table.rows(u["def_id"][g, side, k]), u["flags"][g, side, k], u["build_frac"][g, side, k].astype(np.float64)
         building = (flags & rf.BEING_BUILT) != 0
         constructors = self.constructor_row[rows]
@@ -1335,13 +1341,13 @@ class SimEnv:
         out[:, :teams, 3] = np.where(playing, np.minimum(self.spent_rate[:, :teams], PRODUCTION_SHARE * income), 0.0)
         return out
 
-    def _leads(self) -> np.ndarray:
+    def _leads(self, own: tuple | None = None) -> np.ndarray:
         """games x slots x LEAD_TERMS, by alliance, each the level its term averages: a live alliance's count a player
         (`_counted` over its teams) less the mean of the other live alliances', over what makes a lead 1 and held to -1 to 1,
         the idle fighters' turned round; 0 for the rest.  Zero-sum over the live alliances where none is held, and at two
-        always."""
+        always.  own: `_own` as it is now, if the caller has it."""
         teams = np.maximum(self._by_alliance((self.ally >= 0).astype(np.float64)), 1.0)
-        counted = self._counted()
+        counted = self._counted(own)
         n = np.maximum(self.alive.sum(1) - 1, 1)[:, None]
         out = np.zeros((self.count, self.slots, len(LEAD_TERMS)))
         for i, scale in enumerate((EXTRACTOR_LEAD, -IDLE_LEAD, CONSTRUCTORS, PRODUCTION_LEAD)):
@@ -1487,12 +1493,12 @@ class SimEnv:
         share = (self.made[rows] + 1.0) / (self.made.sum() + n)
         return np.clip(np.log(1.0 / (n * share)) / np.log(n), 0.0, 1.0)
 
-    def _diversity(self) -> None:
+    def _diversity(self, own: tuple | None = None) -> None:
         """Pluto's diversity bonus, for the units the policy chooses to make: each unit a factory could make that a team finishes
         this decision is worth `diversity` x its type's `rarity`.  Rarity is counted over the policy's teams only; every team earns
         the bonus, and `reward` takes it zero-sum over the alliances.  A team's units at its first decision of a game, the
         commander's among them, count as made already.  With `count_made`, every unit a team finishes is counted for the
-        exploratory terms too (`_count_made`), a factory's or not."""
+        exploratory terms too (`_count_made`), a factory's or not.  own: `_own` as it is now, if the caller has it."""
         self.bonus[:] = 0.0
         self.made_delta[:] = 0.0
         if not self.diversity and not self.count_made:
@@ -1501,26 +1507,35 @@ class SimEnv:
         if self.slot % window:
             return
         self.made *= DIVERSITY_DECAY ** window
+        teams, _, u, g, side, k = own or self._own()
+        done = (u["flags"][g, side, k] & rf.BEING_BUILT) == 0
+        g, side, k = g[done], side[done], k[done]
+        uid = u["uid"][g, side, k].astype(np.int64)
+        ends = np.searchsorted(g * teams + side, np.arange(self.count * teams + 1))     # each team's are together, as its records have them
         counted = []        # the policy's new units, counted after every game's bonus: a game's mustn't depend on those before it
-        for g in range(self.count):
-            for side in range(int(self.n_teams[g])):
-                if side == self.chickens[g]:        # nothing they have is made in a factory
+        for game in range(self.count):
+            for team in range(int(self.n_teams[game])):
+                if team == self.chickens[game]:        # nothing they have is made in a factory
                     continue
-                u = self.batch.records[g, side, :int(self.batch.counts[g, side])]
-                done = u["uid"][(u["player"] == side) & ((u["flags"] & rf.BEING_BUILT) == 0)].astype(np.int64)
-                known = self.known[g][side]
-                self.known[g][side] = np.union1d(done, known) if known is not None else np.unique(done)
+                at = slice(ends[game * teams + team], ends[game * teams + team + 1])
+                mine, known = uid[at], self.known[game][team]
                 if known is None:
+                    self.known[game][team] = np.unique(mine)
                     continue
-                fresh = np.isin(u["uid"], done[~np.isin(done, known)]) & (u["player"] == side)
-                rows = self.table.rows(u["def_id"][fresh])
-                if self.count_made and len(rows):
-                    self._count_made(g, side, rows)
+                # Few decisions finish a unit: a team with none new sorts nothing and keeps what it had (a union and two
+                # searches of every team's units each time were 7% of a collector's time: py-spy, 2026-11-19).
+                new = known[np.minimum(np.searchsorted(known, mine), len(known) - 1)] != mine if len(known) else np.ones(len(mine), bool)
+                if not new.any():
+                    continue
+                self.known[game][team] = np.union1d(mine[new], known)
+                rows = self.table.rows(u["def_id"][game, team, k[at][new]])
+                if self.count_made:
+                    self._count_made(game, team, rows)
                 rows = rows[self.makeable[rows]]
                 if not len(rows):
                     continue
-                self.bonus[g, side] = self.diversity * float(self.rarity(rows).sum())
-                if self._is_policy(g * self.slots + side):
+                self.bonus[game, team] = self.diversity * float(self.rarity(rows).sum())
+                if self._is_policy(game * self.slots + team):
                     counted.append(rows)
         for rows in counted:
             np.add.at(self.made, rows, 1.0)
@@ -1546,15 +1561,16 @@ class SimEnv:
         spent = self.batch.stats[:, :, SPENT_STAT].astype(np.float64)
         self.spent_rate = (spent - self.last_spent) / self.seconds_a_step
         self.last_spent = spent
+        own = self._own() if self.count_leads else None        # the leads and the diversity bonus read the same units
         if self.count_leads:
-            self.lead_now = self._leads()
+            self.lead_now = self._leads(own)
         combat = self._combat()
         self.combat_delta = combat - self.last_combat
         self.last_combat = combat
         balances = self._balances()
         self.balance_delta = balances - self.last_balances
         self.last_balances = balances
-        self._diversity()
+        self._diversity(own)
         self.done, self._replace = [], []
         self.result[:] = 0.0
         self.paid[:] = 0.0
@@ -1691,7 +1707,7 @@ class SimEnv:
         "combat", the damage balance's change (`_combat`); "map" and "experience", their balances' changes
         (`_balances`); "income" and LEAD_LEVELS, those levels themselves (LEVEL_TERMS), for GRPO's mean of one over a branch
         and for what it was when a decision was taken.  MADE_TERMS are the seat's team's own, of what it finished this
-        decision (`_count_made`): no balance, so not zero-sum."""
+        decision (`_count_made`): no balance, so not zero-sum.  `seats_terms` is every seat's at once."""
         out = np.zeros(len(names))
         view = self._view(seat)
         if view is None:
@@ -1721,6 +1737,61 @@ class SimEnv:
                 raise ValueError(f"no reward term {name!r}: {TERMS}")
             out[i] = sign * v
         return out
+
+    def seats_terms(self, names: tuple[str, ...], beta: float) -> np.ndarray:
+        """seats x names: `reward_terms` of every seat at once, to the bit.  A collector asks after every step of the sim, and
+        a call a seat was 7% of its time (py-spy, 2026-11-19)."""
+        slots, rows = self.slots, self._rows[:, None]
+        two = (self.n_allies == 2)[:, None]
+        team_a = np.maximum(self.ally, 0)
+        valid = (self.ally >= 0) & (two | self.paying[rows, team_a])       # `_view`: a seat with a reward,
+        a = np.where(two, 0, team_a)                                        # the alliance whose balances it reads,
+        sign = np.where(two & (self.ally != 0), -1.0, 1.0)                  # and the sign it reads them with
+        out = np.zeros((self.count, slots, len(names)))
+        shaped: dict[bool, np.ndarray] = {}
+
+        def shape(income: bool) -> np.ndarray:      # `_shaped`, by alliance
+            if income not in shaped:
+                bonus = self._by_alliance(self.bonus)
+                # The others whose bonus an alliance's is less: at two alliances the other one, else those paying.
+                b = np.arange(slots)
+                them = np.where(two[:, :, None], b == 1 - b[:, None], self.paying[:, None, :] & (b != b[:, None]))
+                others = np.zeros((self.count, slots))
+                for other in range(slots):      # one after another, as `_shaped` sums them
+                    others += np.where(them[:, :, other], bonus[:, other, None], 0.0)
+                div = bonus - others / np.maximum(them.sum(2), 1)
+                shaped[income] = self.delta + div + (self.income_weight * self.income_delta if income else 0.0)
+            return shaped[income]
+        ended = np.zeros(self.count, bool)
+        ended[self._replace] = True
+        ended = ended[:, None] | ~self.alive
+        for i, name in enumerate(names):
+            if name in MADE_TERMS:      # the team's own
+                out[:, :, i] = np.where(valid, self.made_delta[:, :, MADE_TERMS.index(name)], 0.0)
+                continue
+            if name == "blend":
+                v = (1.0 - beta) * shape(True) + beta * self.paid
+                if self.speed_weight:
+                    v = v + self.speed_weight * self.speed_paid
+            elif name == "result":
+                v = self.paid + self.speed_weight * self.speed_paid
+            elif name == "score":
+                v = shape(False)
+            elif name in LEVEL_TERMS or name == "income" or name in LEAD_LEVELS:
+                level = LEVEL_TERMS.get(name, name)
+                if level != "income" and not self.count_leads:
+                    raise ValueError("the leads aren't counted: set count_leads before the games begin")
+                v = self.income_now if level == "income" else self.lead_now[:, :, LEAD_LEVELS.index(level)]
+                if name in LEVEL_TERMS:     # in the level's own precision, as a number times one of its is
+                    v = v * np.where(ended, 1.0, 1.0 - self.term_gamma(name)).astype(v.dtype)
+            elif name == "combat":
+                v = self.combat_delta
+            elif name in BALANCE_TERMS:
+                v = self.balance_delta[:, :, BALANCE_TERMS.index(name)]
+            else:
+                raise ValueError(f"no reward term {name!r}: {TERMS}")
+            out[:, :, i] = np.where(valid, sign * v[rows, a], 0.0)
+        return out.reshape(self.count * slots, len(names))
 
     def _level(self, name: str, g: int, a: int) -> float:
         """A level term's level (LEVEL_TERMS' values) for game g's alliance a at the step just taken."""

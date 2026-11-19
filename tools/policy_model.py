@@ -144,11 +144,13 @@ def widths(items: list[fz.Tensors]) -> dict[str, int]:
             "h": max(max(len(t.hidden_x) for t in items), 1), "p": max(max(len(t.place_tokens) + len(t.site_x) for t in items), 1)}
 
 
-def collate(items: list[fz.Tensors], regions: int = 0, sizes: dict[str, int] | None = None, rows: int = 0) -> Batch:
+def collate(items: list[fz.Tensors], regions: int = 0, sizes: dict[str, int] | None = None, rows: int = 0, frame_only: bool = False) -> Batch:
     """regions: pad to at least this many, so batches of one map's decisions line up.  sizes: pad each group to at least these
     `WIDTHS`; rows: pad to this many decisions, the rest no frame at all (masked out but for the global token).  Padding changes
     nothing a decision's own outputs are, as every reader masks it: a CUDA graph of a fixed shape plays any batch that fits
-    (policy_graphs.py)."""
+    (policy_graphs.py).  frame_only: only what a frame encoder reads (frame_model.FrameEncoder.tokens), the rest None, for a
+    pass that reads nothing else of a frame: the hidden units' tokens, which pad to their cap, and the action tables are
+    most of a small frame's batch."""
     b = max(len(items), rows)
     w = widths(items)
     w["r"] = max(w["r"], regions)
@@ -176,6 +178,19 @@ def collate(items: list[fz.Tensors], regions: int = 0, sizes: dict[str, int] | N
     tok_kind[:, -2] = fz.TK_GLOBAL
     tok_kind[:, -1] = fz.TK_MEMORY_STATE
     true_name = np.zeros((b, u), np.int64)
+    for i, t in enumerate(items):
+        nu, nr, ns, nf = len(t.unit_x), len(t.reg_x), len(t.site_x), len(t.feat_x)
+        unit_x[i, :nu], unit_name[i, :nu], unit_mask[i, :nu] = t.unit_x, t.unit_name, True
+        true_name[i, :nu] = t.unit_name if t.true_name is None else t.true_name
+        unit_ally[i, :nu], unit_player[i, :nu] = t.unit_ally, t.unit_player
+        reg_x[i, :nr], reg_mask[i, :nr] = t.reg_x, True
+        site_x[i, :ns], site_mask[i, :ns] = t.site_x, True
+        feat_x[i, :nf], feat_mask[i, :nf] = t.feat_x, True
+        glob_x[i] = t.glob_x
+        tok_kind[i, :nu] = t.tok_kind[:nu]
+    if frame_only:
+        return Batch(unit_x, unit_name, unit_mask, reg_x, reg_mask, site_x, site_mask, feat_x, feat_mask, glob_x, tok_kind, *(None,) * 14,
+                     unit_ally, unit_player, None, None, true_name)
     key_mask = np.zeros((b, n), bool)
     key_mask[:, -2:] = True
     ctrl_mask = np.zeros((b, c), bool)
@@ -196,16 +211,7 @@ def collate(items: list[fz.Tensors], regions: int = 0, sizes: dict[str, int] | N
     hidden_ally = np.zeros((b, h), np.int64)
     hidden_player = np.zeros((b, h), np.int64)
     for i, t in enumerate(items):
-        nu, nr, ns, nc, ne = len(t.unit_x), len(t.reg_x), len(t.site_x), t.controllable, len(t.enemy_tokens)
-        unit_x[i, :nu], unit_name[i, :nu], unit_mask[i, :nu] = t.unit_x, t.unit_name, True
-        true_name[i, :nu] = t.unit_name if t.true_name is None else t.true_name
-        unit_ally[i, :nu], unit_player[i, :nu] = t.unit_ally, t.unit_player
-        reg_x[i, :nr], reg_mask[i, :nr] = t.reg_x, True
-        site_x[i, :ns], site_mask[i, :ns] = t.site_x, True
-        nf = len(t.feat_x)
-        feat_x[i, :nf], feat_mask[i, :nf] = t.feat_x, True
-        glob_x[i] = t.glob_x
-        tok_kind[i, :nu] = t.tok_kind[:nu]
+        nu, nr, ns, nf, nc, ne = len(t.unit_x), len(t.reg_x), len(t.site_x), len(t.feat_x), t.controllable, len(t.enemy_tokens)
         key_mask[i, np.concatenate((np.arange(nu), u + np.arange(nr), u + r + np.arange(ns), u + r + s + np.arange(nf), [u + r + s + f]))] = True
         ctrl_mask[i, :nc] = True
         kind_mask[i, :nc] = t.kind_mask

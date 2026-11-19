@@ -201,6 +201,13 @@ def test_copy_game_knows_every_field_a_game_has():
     assert not by_game, f"by game or seat, and not in SimEnv's registry: {by_game}"
 
 
+def _every_seat(env, names: tuple[str, ...]) -> None:
+    """`seats_terms`, which a collector asks after every step, is every seat's `reward_terms` to the bit."""
+    every = env.seats_terms(names, 0.3)
+    for seat in range(env.seat_count):
+        assert np.array_equal(every[seat], env.reward_terms(seat, names, 0.3)), seat
+
+
 def test_a_copied_game_plays_on_as_its_original_given_the_same_orders():
     """SimEnv.copy_game two minutes in, the policy's seat building its own economy on the scripts' advice: given the same orders,
     the copy's frames, stats and rewards are its original's to the bit, step after step."""
@@ -222,6 +229,7 @@ def test_a_copied_game_plays_on_as_its_original_given_the_same_orders():
                     assert n == env.batch.counts[1, team] and env.batch.records[0, team, :n].tobytes() == env.batch.records[1, team, :n].tobytes()
                 assert np.array_equal(env.batch.stats[0], env.batch.stats[1]) and np.array_equal(env.batch.globs[0], env.batch.globs[1])
                 assert np.array_equal(env.reward_terms(0, terms, 0.5), env.reward_terms(env.slots, terms, 0.5))
+                _every_seat(env, ("blend", "income") + terms + se.LEAD_LEVELS)
             assert not env.finished_seats(), "a game ended: too soon for this test"
 
     play(240, compare=False)
@@ -693,6 +701,7 @@ def test_every_team_of_an_alliance_gets_its_alliances_reward_and_the_two_allianc
         for g in range(2):
             r = [env.reward(g * env.slots + t, 0.3) for t in range(4)]
             assert r[0] == r[1] == -r[2] == -r[3]
+        _every_seat(env, ("blend", "result", "score", "economy", "combat", "map", "experience"))
         env.finished_seats()
 
 
@@ -718,10 +727,13 @@ def test_in_a_free_for_all_an_alliance_out_is_paid_its_loss_at_once_and_the_surv
     assert env.reward(A - 1, 1.0) == pytest.approx(-(1.0 + 0.1 * left) / (A - 1))
     assert env.outcome[0, A - 1] == -1.0 / (A - 1) and env.ended[A - 1]["result"] == "lost" and env.ended[A - 1]["how"] == "eliminated"
     paid += env.paid[0, :A] + 0.1 * env.speed_paid[0, :A]
+    names = ("blend", "result", "score", "economy", "combat", "map", "experience", "income") + se.MADE_TERMS
+    _every_seat(env, names)
     env.finished_seats()
     assert env.policy_seats_to_act() == list(range(A - 1))
     for _ in range(3):
         env.step(0.0)
+        _every_seat(env, names)
         assert env.reward(A - 1, 1.0) == 0.0 and not env.done
         assert sum(env.reward(t, 0.0) for t in range(A - 1)) == pytest.approx(0.0, abs=1e-9)
         env.finished_seats()
@@ -729,6 +741,7 @@ def test_in_a_free_for_all_an_alliance_out_is_paid_its_loss_at_once_and_the_surv
     env.step(0.0)
     paid += env.paid[0, :A] + 0.1 * env.speed_paid[0, :A]
     assert env._replace == [0] and env.result[0] == 1.0 and env.outcome[0, :A].tolist() == [1.0] + [-1.0 / (A - 1)] * (A - 1)
+    _every_seat(env, names)
     assert sorted(s for s, _, _ in env.done) == list(range(A - 1)) and env.ended[0]["result"] == "won"
     assert paid.sum() == pytest.approx(0.0, abs=1e-12) and paid[0] > 1.0
 

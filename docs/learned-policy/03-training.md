@@ -640,11 +640,13 @@ every seat that decides.
 * **With the actor that chooses a code** (`--size code`, with `--order-coder` for another autoencoder than the size's;
   the user, 2026-11-19; 05-order-autoencoder.md, "The actor"): the same trainer, but a decision is one code with one
   probability, its update featurizes no frame (`Learner._loss_code`), and a collector's pass is one graph.  It needs
-  `--group` and `--critic-size memory` (or no critic).  `--spread-floor ITERATION:SPREAD ...` is the least spread of
-  the code's Gaussian by iteration, linear between and the last after (the user, 2026-11-19: "Start with 0.1,
-  decreasing to 0.03 as the training run continues"; `Learner.set_floor`; 0.1 throughout by default).  In its smokes of three iterations with `rdnn-5`'s flags on the
+  `--group` and `--critic-size memory` (or no critic).  `--spread-floor AT:SPREAD ...` is the least spread of the
+  code's Gaussian, linear between its points and the last after (the user, 2026-11-19: "Start with 0.1, decreasing to
+  0.03 as the training run continues"; `Learner.set_floor`; 0.1 throughout by default): by iteration, or with
+  `--spread-floor-began EPOCH` by the hours since the run began, which is how `results/start-code.sh` gives it.  In its smokes of three iterations with `rdnn-5`'s flags on the
   pool, 2,000 to 2,300 decisions a second overall by the third (collecting about 2,000, training about 5,000), where
-  `rdnn-5` made 520.
+  `rdnn-5`'s third made 1,040; by iterations 8 to 12 of `code-1`, 1,040 to 1,290 for `rdnn-5`'s 890.  Collecting is
+  what takes the time.
 * **With the actor with a GRU** (`--size gru`, docs/model.md; the user asked for its throughput checked, 2026-11-17; RL from
   nothing in self-play 1v1s on the five training maps, bootstrapped with `--critic-size memory`, its first iterations, where
   frames are small).  Decisions a second overall, the mean of iterations 4 to 12:
@@ -709,6 +711,25 @@ every seat that decides.
   * `test_a_pass_is_of_one_level_of_frame_size_and_at_most_the_rows_it_is_given` and, on CUDA,
     `test_as_graphs_frames_go_by_level_and_come_back_in_their_seats_order`: frames of two levels in passes of 2 come back
     in the seats' order, each as its own forward pass gives it (without the reordering it fails).
+* **An actor that chooses a code plays lighter** (2026-11-19; the log, "A faster collector").  Its pass is the frozen
+  encoder, the memory, the code and what the decoder says of it: one graph, no steps.
+  * *Only what the encoder reads goes to the card* (`policy_model.collate(frame_only=True)`, `Graphs.frame_only`, where
+    no critic plays): the units', regions', sites' and features' tokens and the global.  The hidden units' tokens, padded
+    to their cap of 256 a row, and the action tables aren't made or copied; at a small frame they were most of a pass's
+    bytes, and putting a pass together and loading it a fifth of a collector's time.
+  * *Wider passes* (`CODE_ROWS`, `MERGE_TOKENS`, `Graphs.wide`): up to 128 rows, and a level's few go up into the next
+    level's pass where that saves a pass for no more than 4,096 unit tokens of padding.  Alone it changed nothing
+    measured: a pass's cost was its bytes.
+  * *A step keeps no frame* (`Step.frame` None): the update reads the latents, and the frames were most of what a
+    collector sent back.
+* **After every step of the sim** a group collector reads every seat's terms at once (`SimEnv.seats_terms`, the same
+  numbers as `reward_terms` to the bit), and the env's count of finished units sorts nothing for a team with none
+  new: a call a seat and a sort a team were 14% of a collector's time.
+* **How many collectors**: with the code actor and 96 games, from one checkpoint at the same iterations, 1,920
+  decisions a second overall with 2 collectors, 2,640 with 4 and 3,060 with 6, the card 57% busy and the CPUs 56% idle
+  at 6, where the learner trains at 4,200.  A collector's process costs the card 0.4 GB before its cap, so
+  `--collector-gb` falls as they go up (0.8 at 6, with `--gpu-share 0.76`); and the games a collector have to be whole
+  groups (`--group`), so 96 games go into 2, 3, 4, 6 or 12 collectors.
 
 ### GRPO from branched games (`--group`)
 

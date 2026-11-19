@@ -21,7 +21,187 @@ iteration 0's (`results/paired_tests.py`); the score is `eval_fight_score`.
   `rdnn-1`'s iteration 364 was against a richer script.  Against the script as it is: `rdnn-1`'s test at 500, and all of
   `rdnn-2`'s, `rdnn-3`'s, `rdnn-4`'s and `rdnn-5`'s.
 
-## After `rdnn-5`: orders as commands, an autoencoder of them, and an actor that chooses its code (2026-11-19; no run)
+## `code-2`: `code-1` again with 6 collectors and the faster collector (2026-11-19 18:17 to 2026-11-20 00:17; going)
+
+The user, 2026-11-19, as the collector was being made faster ("A faster collector", below): "When that is all done, stop
+the current training run and start a new one, from iteration 0, with 4 collectors for a 6-hour trial run.  parameters
+should include `--economy-start 1 --economy-end 1` as usual"; then, the check with 4 in: "OK, since 4 collectors was
+fine memory-wise try 6-8 collectors.  If all looks fine, then start the 6-hour training run."; and with 6 checked and
+8 begun: "Actually, skip 8 collectors.  If 6 hours looks fine proceed with the training run.  Whilst that is ongoing,
+commit+push your changes".
+
+**What it is**: `code-1`'s flags (`results/launch-code.sh`: the code actor on `vae-3`, from nothing, against itself,
+`--economy-start 1 --economy-end 1`, the spread's least from 0.1 to 0.03 by the run's clock) with `--collectors 6`, 16
+of the 96 games each, on the collector as it is now.  Everything under `/mnt/d/zk-learned/runs/code-2`; started by
+`results/start-code.sh 6` at 18:17.  Mine in it:
+
+* **6 of the 6 to 8**: 96 games go into 6 collectors' groups of 8 and not into 8's, which would have needed 128
+  games, a second change; the check of 8 on 128 was killed as it began, on the user's word.
+* **`--collector-gb 0.8 --gpu-share 0.76`**: a collector's process costs the card 0.4 GB before its cap, so six caps of
+  2.0 don't fit; a collector of 16 games held 0.25 GB in the check and the learner 1.35, which this leaves 2.0.
+* **A checkpoint every 50 iterations**, not 20: one is 0.39 GB, D: had 44 GB free, and at 2.5 times `code-1`'s
+  iterations an hour every 20 would not fit.  The tests are every 250, so each tested iteration has one.
+
+### Its tests
+
+* **Iteration 0** (18:17; the test took 16 s, its games over six collectors): no win of 128, the score 0.155 ± 0.003, an
+  income share of 0.287, 2.2 extractors at 6 minutes for the script's 10.3.  An untrained actor, as `code-1`'s 0.163
+  was: the two differ by their draws.
+
+### The hourly checks
+
+A cron job in the session that started it (at about 45 minutes past) runs `results/code-status.sh` and
+`results/code_terms.py 5`, and adds a line here.
+
+* **18:19, iteration 9**: running, 10 trainer processes, the guard, the dashboard, the memory log and the watchdog up.
+  2,650 decisions a second overall so far (collect 3,350, train 3,780).  1.8 commands a decision and 0.69 units told;
+  the spread 1, its least 0.1.  The learner 1.35 GB of the card and a collector 0.23 of its 0.8, the card 4.9 GB in
+  all and 57% busy; WSL has 26 GB to spare, the CPUs 58% idle.
+
+## A faster collector (2026-11-19, between `code-1` and `code-2`)
+
+The user, of `code-1` at 1,250 decisions a second with its learner waiting 10 s of every 14 (`code-1`, 17:15, has the
+profile): "Is there any way to get the collection rate to match the training rate (~5000 decisions/sec)?"  I put three
+things to them, more collectors (1), fewer and bigger passes (2), and the Python after each step of the sim with what a
+collector sends back (3); they said "Proceed with 2 and 3", then asked for the collectors too (`code-2`).
+
+**What changed**, all of it the collector's own work, none of it what a game or a reward is:
+
+* **Every seat's reward terms at once** (`SimEnv.seats_terms`, which `GroupCollector` asks after every step of the
+  sim where it asked `reward_terms` a seat at a time), each count of steps' discounts made once.
+* **The finished units' bookkeeping** (`SimEnv._diversity`): a team with no unit newly finished sorts nothing and
+  keeps what it had, where every team's units were sorted and searched each decision; it and the leads read the
+  teams' units once (`_own`); and the alliances' sums skip the slots with no team (`_by_alliance`, `_others`).
+* **A code's step keeps no frame** (`Step.frame` is None): the update reads its latents, and a round's frames were
+  most of what a collector pickled back.
+* **A code's pass takes to the card only what the frame encoder reads** (`policy_model.collate(frame_only=True)`,
+  `Graphs.frame_only`).  A batch's hidden units pad to their cap, 256 tokens a row, for a critic that sees through the
+  fog, and its action tables are a row for every controllable unit: at a small frame they were most of the bytes a
+  pass put together and copied, and the code actor's pass reads none of them.  Not asked for: found in the profile
+  of the first version, below.
+* **Wider passes for a code** (`policy_graphs.CODE_ROWS`, `MERGE_TOKENS`, `CODE_KEEP`; `Graphs.passes`): up to 128
+  rows, and a level's few go up into the next level's pass where that saves a pass for no more than 4,096 unit tokens
+  of padding.  The numbers are mine and unmeasured apart: with the rest of the first version it changed nothing I
+  could measure.
+
+**That the numbers are the same**: `results/faster/env_ab.py` plays 3,000 steps of 16 games (1v1s, team games and
+chicken games on the training maps, games ending at a short limit and starting anew, a diversity bonus that pays) in
+the tree before and the tree after: every step's terms for every seat, leads, bonus, counts of what was made, deltas
+and what was paid are the same to the bit, as are `seats_terms` and `reward_terms` seat by seat.  The tests say the
+last in a 1v1 with the leads, a team game and a free-for-all with an alliance out
+(`tests/policy/test_sim_env.py`, `_every_seat`); two GRPO tests that stood their own numbers in for `reward_terms`
+now stand them in for `seats_terms`.  The suite passes (859).
+
+**What it's worth**, by `code-1`'s last checkpoint (iteration 252) carried on with every game anew
+(`results/faster/check-code.sh`), each line the mean of iterations 255 to 261 or 263; two such runs play different
+games within a few iterations, so a few percent between them is nothing:
+
+| | Decisions a second overall | collecting | A collector's seconds an iteration |
+|---|---|---|---|
+| the collector as it was, 2 collectors | 1,480 | 1,660 | 10.4 |
+| the first version, 2 (all but the frame-only pass) | 1,640 | 1,670 | 10.6 |
+| as it is now, 2 | 1,920 | 2,010 | 8.6 |
+| as it is now, 4 (24 games each) | 2,640 | 2,700 | 6.7 |
+| as it is now, 6 (16 games each) | 3,060 | 3,160 | 5.9 |
+
+* *The first version collected no faster.*  It was 17% ahead for three iterations and level after
+  (1,685 decisions a collector second for 1,689), its passes a third fewer (386 an iteration for 530); what it gained
+  overall was the learner's wait for a smaller pickle.  A profile of one of its collectors
+  (`results/faster/spy-one.sh`) had the terms at 2% for 7% and the Python after a step at 11% for 17%, but 13% in
+  loading a pass's batch and 7% in putting it together: the bytes, not the passes.  With only the encoder's fields
+  sent, a collector second made 2,048 decisions (+21%).
+* *With 6 collectors* a collector held 0.25 GB of the card (0.35 with 4) and the learner 1.35, the card 4.1 GB in all
+  and 57% busy, WSL 12 GB used of 39, the CPUs 56% idle.  Collecting is then 5.9 s an iteration for training's 4.3.
+* *In the env alone* (`env_ab.py`, 48 1v1s): a step and its terms 6.1 ms before and 4.2 after.
+
+**Mine, and wrong on the way**: I told the user changes 2 and 3 might give 1.5 times a collector; they gave 1.2, most
+of it from what I hadn't proposed.  An edit script meant for the tree copy ran once in the repo, beside `code-1`
+(`tools/policy_sim_env.py`; put back at once from the copy's base, its hash HEAD's; the run's modules were loaded
+already).  And the check of 8 collectors had started when the user said to skip it, and was killed.
+
+**The tools** are under `results/faster/` (never committed): the scripts that made each change in a tree
+(`fast_*.py`), the copy and its tests with torch stubbed out beside a run (`tree-fast.sh`, `fast-test.sh`), the env
+before and after (`env_ab.sh`), the checks (`check-code.sh TREE NAME N`, `check_compare.py`, `check_work.py`) and
+the profile (`spy-one.sh` as root, `profile_report.py`).
+
+## `code-1`: a 6-hour trial of the actor that chooses a code (2026-11-19 16:38 to 17:46, stopped by the user at iteration 252)
+
+The user, 2026-11-19 at about 16:20, with `vae-3` taken, the spread's least on a schedule and the suite passing: "OK,
+commit+push then start a 6-hour trial run."  Committed and pushed as `d6488c9`; then `results/start-code.sh 6`,
+everything under `/mnt/d/zk-learned/runs/code-1`.
+
+**What it is**: `rdnn-5`'s flags (`results/launch-code.sh`) with `--size code` on `vae-3`: from nothing, against itself,
+the policy running its own economy, bootstrapped GRPO with the memory's critics, 2 collectors of 48 games on the pool,
+a checkpoint every 20 iterations and a test every 250.  Its sim is libzksim ABI 32 (several build one thing, a reclaim
+is an area's) with a build that sticks, neither of which a run has had.  What it's about is in "After `rdnn-5`",
+below.  Its spread's least falls from 0.1 at 16:38 to 0.03 at 22:38, by the clock (`--spread-floor 0:0.1 6:0.03
+--spread-floor-began`, from the run's `spread-floor` and `begin` files).
+
+**Started twice.**  First at 16:28, with the spread's least by iteration, `0:0.1 2100:0.03`: six hours at 350
+iterations an hour, my estimate from the smoke's 2,000 decisions a second.  Its first 15 iterations showed the
+estimate wrong: 1,850 to 1,970 decisions a second in iterations 2 and 3, then 1,040 to 1,290 by 8 to 12 and falling,
+as its games grew old.  `rdnn-5` went the same way (1,040 to 1,130 in its iterations 2 and 3, 890 at 8 to 20, 600 to
+670 at 40 to 100, 520 over its seven hours).  At that, I took six hours for 800 to 1,100 iterations and the least to
+end near 0.07, not the 0.03 the user asked for.  (It has held at 1,200 to 1,300 since iteration 20, which is 1,500
+iterations in six hours and a least of 0.05 at the end: the second estimate was out too, the other way.)  So I stopped it at iteration 15 (16:33), deleted it, and made the
+schedule the run's clock's: `--spread-floor`'s points are hours since `--spread-floor-began` when that's given
+(`Learner.set_floor`; `start-code.sh` writes the run's `begin`, `launch-code.sh` reads it, so a run carried on is where
+its hours put it).  The code actor's two tests and the suite (859) pass with it, and a smoke told it began three hours
+ago read a least of 0.065.  Started again at 16:38.  Mine, all of it; not committed: `--spread-floor-began` and
+`--checkpoint-every` (tools/policy_train.py, the test), added after `d6488c9`.
+
+**The rate isn't four times `rdnn-5`'s**, as I had written here, in 05 and to the user from the smokes: that set a
+smoke's first three iterations beside `rdnn-5`'s seven hours.  At the same iterations it's 1.8 times at 2 and 3, 1.3
+times at 8 to 12, and 1.7 to 2 times from 20 to 136 (1,190 to 1,300 decisions a second overall for 610 to 760).  The
+update is quick (3.6 s an iteration); collecting is what takes the time (12 to 13 s by the two collectors).
+
+### Its tests
+
+* **Iteration 0** (16:38; the test took 34 s): 1 win of 128, the score 0.163 ± 0.006, an income share of 0.29, 2.6
+  extractors at 6 minutes for the script's 10.3.  Beside `rdnn-5`'s iteration 0 in the same games, on the sim before
+  ABI 32: the score 0.144 there (+0.019 ± 0.004), 3.3 extractors at 3 minutes for 2.3.  It's where codes drawn at
+  random stood in the check by play (0.165).
+* **Iteration 250** (17:46; 46 s): 1 win of 128, the score 0.164 ± 0.006, +0.001 ± 0.003 on iteration 0's in the same
+  games (+0.3 SE), an income share of 0.286, 2.2 extractors at 6 minutes for the script's 10.4 (-0.31 ± 0.16 on its
+  own).  Nothing learnt by the rule.  `rdnn-5` had 0.160 at 250, from 0.144.
+
+### The hourly checks
+
+A cron job in the session that started it (at about 54 minutes past) runs `results/code-status.sh` and
+`results/code_terms.py 5`, and adds a line here.
+
+* **16:40, iteration 5**: running, 6 trainer processes, the guard, the dashboard, the memory log and the watchdog up.
+  1,520 decisions a second overall so far (collect 1,730, train 4,180).  1.8 commands a decision and 0.59 units told;
+  the spread 1, its least 0.1.  The learner 1.34 GB of the card and a collector 0.37 of its 2.0; WSL has 23 GB free.
+* **17:15, iteration 136, and where a collector's time goes** (the user: "The training run is now restricted by the
+  collection rate at ~1250 decisions/sec.  Is there any way to get the collection rate to match the training rate
+  (~5000 decisions/sec)?").  1,230 decisions a second overall, collecting at 1,370 and training at 4,620: the learner
+  trains an iteration in 3.6 s and waits 10.  The spread 0.996 (its least number 0.977), the floor 0.093, the mean's
+  size 0.019, the KL 0.001, the rate's scale 1.0; 1.9 commands a decision and 0.78 units told.
+  * *The machine is mostly idle*: 16 logical CPUs (8 cores) 75 to 80% idle, the card 33% busy, 28 GB of WSL's memory
+    free.  A collector is one Python thread at 100% with helpers (160% of a CPU), 2.7 GB of its own memory and 0.77 GB
+    of the card.
+  * *A collector's main thread, 30 s of py-spy* (`wsl -u root`, 50 samples a second; no torch):
+
+    | Share | What |
+    |---|---|
+    | 32% | the policy's pass (`Graphs.forward`): 14% the replay and reading it back, 10% loading the pass's frames into the graph's tensors, 6% putting them together |
+    | 30% | `SimEnv.step`: 8% the C++ sim, 17% what's done in Python after it (the leads 4%, diversity 2%, the rest), 6% the scripts |
+    | 9% | the frames: `SimEnv.frame` 3%, featurizing 6% |
+    | 8% | what the code says, and `selections.decode` (3%) |
+    | 7% | the round's own bookkeeping (`collect_tally`) |
+    | 5% | pickling the segments back to the learner |
+
+    A pass is small: about 640 of them an iteration between the two collectors, 25 rows each of the 96 a pass could
+    hold.  Its cost is the pass's, not the card's.
+* **17:46, iteration 252: stopped** (`results/stop-code.sh`, its watchdog and memory log first), on the user's word,
+  once its test at 250 was in: for the collector's tests and checks, which need the card, and `code-2`.  At the stop:
+  1,220 decisions a second over its last 50 iterations; the spread 0.995, its least number 0.978, the floor 0.087, the
+  mean's size 0.021; 1.7 commands a decision and 0.74 units told; the KL 0.001; the critics' explained variance 0.57
+  for the result and 0.8 to 0.86 for the economy and the leads; 10% of ended seats in draws, the lead rule on.  No
+  traceback, fallback or split in its 68 minutes.  Its last checkpoint is `ppo/ckpt/it-000252.pt`.
+
+## After `rdnn-5`: orders as commands, an autoencoder of them, and an actor that chooses its code (2026-11-19; before `code-1`)
 
 **Built and checked by play; no run has trained by any of it.**  The user's answer to what `rdnn-5`'s checks left open
 (below, "The checks after it": the fighters waiting for their turn, a BUILD's blind choice), over that afternoon:
@@ -966,8 +1146,12 @@ Each is a constant or a flag, easy to change.
     alike.  The user's since ("The user's choices, and the autoencoder after them"): the pull of 0.1 and a fiftieth of
     decisions emptied (`vae-2`'s), a bigger code, plausible commands.  Mine in those: the code's 128 numbers as 8
     tokens of 16; what's plausible taken role by role from the type table; the decoder held to it as well as the data;
+  * **in the collector** ("A faster collector"): a code's pass 128 rows at most, a level's few into the next level's
+    for 4,096 unit tokens of padding a pass saved, 20 shapes kept; only the encoder's fields sent, where no critic
+    plays; and for `code-2` 6 of the 6 to 8 collectors, their 0.8 GB and the trainer's 0.76 of the card, and a
+    checkpoint every 50 iterations;
   * **in the actor**: one spread a number, the same at every decision, 1 at most; its least from 0.1 to 0.03 over the
-    run is the user's, and that it falls by iteration, evenly, over 350 iterations an hour of the run's hours is mine;
+    run is the user's, and that it falls evenly, by the run's clock, is mine (`code-1`);
     the mean zero at first ("either is fine", the user, of this or a start cloned from the
     scripts' codes); the memory told the code through a linear layer; the KL estimated from the codes drawn; the token
     budget counting a decision as its 64 latents.

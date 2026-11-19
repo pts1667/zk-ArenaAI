@@ -2,6 +2,7 @@
 and learnt from its frames' latents alone; and its pass as a CUDA graph."""
 from __future__ import annotations
 
+import time
 from dataclasses import replace
 
 import numpy as np
@@ -72,7 +73,8 @@ def test_an_actor_that_chooses_a_code_plays_its_commands_and_learns_from_latents
     before = actor.code_mean.weight.detach().clone()
     metrics = learner.train(segments, np.random.default_rng(0))
     assert metrics["loss_value"] > 0.0 and "entropy_code" in metrics and not torch.equal(before, actor.code_mean.weight)
-    # The spread's least falls by iteration (Config.spread_floor), for the tests' average of the weights too.
+    # The spread's least falls by iteration (Config.spread_floor), for the tests' average of the weights too; or by the hours
+    # since the run began, when it's told that.
     with torch.no_grad():
         actor.code_log_std.fill_(-9.0)
     for iteration, least in ((0, 0.1), (1, 0.065), (5, 0.03)):
@@ -80,6 +82,9 @@ def test_an_actor_that_chooses_a_code_plays_its_commands_and_learns_from_latents
         learner.set_floor()
         assert float(actor.log_std().detach().exp().max()) == pytest.approx(least) == float(learner.ema.actor.log_std_least.exp())
     learner.iteration = 0
+    learner.cfg = replace(cfg, spread_floor_began=time.time() - 3600.0)
+    learner.set_floor()
+    assert float(actor.log_std_least.exp()) == pytest.approx(0.065, abs=1e-3)
     with pytest.raises(ValueError, match="GRPO"):
         pt.Learner(replace(cfg, group=0, bootstrap=False, critic_size="default"), tmp_path, learner.workers, "cpu")
 

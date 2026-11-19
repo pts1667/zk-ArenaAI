@@ -287,10 +287,13 @@ flowchart LR
   Gaussian the autoencoder was pulled towards (`LOG_STD_MOST`).  Under GRPO it has no entropy bonus, as the old heads
   had none, so what holds it up is its least.
 * **Its least falls as a run goes on** (the user, 2026-11-19, told that a place is 220 elmos off at a spread of 0.1 and
-  70 at 0.03: "Start with 0.1, decreasing to 0.03 as the training run continues").  `--spread-floor ITERATION:SPREAD
-  ...` gives it by iteration, linear between its points and the last after, as the trainer's other ramps; the default
-  is 0.1 throughout.  `results/start-code.sh HOURS` writes `0:0.1 N:0.03` for the run, N its hours at 350 iterations
-  an hour (mine: the smoke's 2,000 decisions a second, less its tests): 8,400 for 24 hours.  It's a buffer of the
+  70 at 0.03: "Start with 0.1, decreasing to 0.03 as the training run continues").  `--spread-floor AT:SPREAD ...`
+  gives it, linear between its points and the last after, as the trainer's other ramps; the default is 0.1 throughout.
+  Its points are iterations, or, with `--spread-floor-began EPOCH`, hours since the run began, by the clock: a run's
+  end is by the clock, and its iterations an hour aren't known when it starts (they fall by half as its games grow
+  old; a first start of `code-1` had the least by iteration and an estimate two to three times out).
+  `results/start-code.sh HOURS` writes the run's `begin` and `0:0.1 HOURS:0.03`, and `launch-code.sh` reads them, so a
+  run carried on is where its hours put it.  It's a buffer of the
   actor's (`CodeActor.log_std_least`), which the learner sets each iteration (`Learner.set_floor`) for itself and for
   the average of its weights that plays the tests; the collectors get it with the weights, and a checkpoint keeps it.
   A spread under its least is read as the least and still learns its way back.  `code_spread_floor` in a run's
@@ -326,9 +329,12 @@ two collectors of 48 games on the pool, into a scratch directory):
 
 * **It runs**: three iterations of 16,384 decisions in 78 s, the start included, with no error and nothing chosen
   outside its mask.
-* **About four times `rdnn-5`'s rate**: 2,020 to 2,120 decisions a second overall in the second and third iterations
-  (collecting at 1,800 to 1,920, training at 3,280 to 5,120), where `rdnn-5` made 13.2M in 7 hours, 520 a second.  A
-  pass has no actions to step through and the update no frame to featurize.
+* **Faster than `rdnn-5`, not by much**: 2,020 to 2,120 decisions a second overall in the second and third iterations
+  (collecting at 1,800 to 1,920, training at 3,280 to 5,120), where `rdnn-5`'s own second and third made 1,040 to
+  1,130.  A run's rate falls as its games grow old: `code-1`'s iterations 8 to 12 made 1,040 to 1,290, `rdnn-5`'s 890,
+  and `rdnn-5` made 520 over its seven hours.  (This page first set the smoke beside that 520 and said four times.)
+  The update is the quick part, 4 s an iteration with no frame to featurize; collecting is the sim and the frames,
+  which the two actors share.
 * **Little of the card**: the learner held 1.34 GB and a collector 0.27 to 0.31 of its 2.0.  A minibatch was about 515
   decisions.
 * **Play and training agree on a code's probability** through the collectors' graphs: with the actor waiting out the
@@ -372,13 +378,13 @@ The user, 2026-11-19, to the five things put to them after `vae-1` and `vae-2`: 
 
 And of the spread's least, put to them after `vae-3` (a place is 220 elmos off at 0.1, 68 at 0.03; a lower least lets
 a policy mean a place, and lets it stop trying things): "Start with 0.1, decreasing to 0.03 as the training run
-continues."  Built ("The actor"); that it falls by iteration, evenly, and over 350 iterations an hour of the run is
-mine.
+continues."  Built ("The actor"); that it falls evenly, by the run's clock, is mine.
 
 Open:
 
-1. **A run**: `results/start-code.sh HOURS` (`launch-code.sh` is `rdnn-5`'s flags with `--size code`), with
-   `code-status.sh`, `stop-code.sh`, `resume-code.sh` and the watchdog as the `rdnn` runs had.
+1. **A longer run**, after `code-1`, the 6-hour trial of 2026-11-19 (the log): `results/start-code.sh HOURS`
+   (`launch-code.sh` is `rdnn-5`'s flags with `--size code`), with `code-status.sh`, `stop-code.sh`, `resume-code.sh`
+   and the watchdog as the `rdnn` runs had.
 
 ## Order of work
 
@@ -386,7 +392,7 @@ Open:
 2. ~~The recorder, the autoencoder and its checks~~.
 3. ~~The actor with a code head, the trainer's update for it, and play through the decoder~~.
 4. ~~The user's choices after the first two autoencoders: `vae-3`~~.
-5. A run, on the user's word.
+5. `code-1`, a 6-hour trial (2026-11-19; the log), then a longer run on the user's word.
 6. The decoder and `selections.decode` in the bot's C++ (02-policy.md, "Deployment").
 
 ## Where the idea is from

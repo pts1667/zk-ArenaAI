@@ -69,6 +69,14 @@ LEVELS = (64, 128, 256, 512, 1024)      # unit tokens: frames of up to each are 
 ROWS = (16, 32, 64)             # the rows a pass is padded to; past the last, `bucket`.  Few: every level has a shape for each
 LEVEL_TOKENS = 16384            # the unit tokens a pass has at most, rows times its level (but ROWS[0] rows at least): `rows_at`
 KEEP = 16                       # shapes held: more than the levels have at the rows `rows_at` allows, so none goes while it's in use
+# An actor that chooses a code (policy_code.CodeActor) plays a round in fewer, wider passes.  Its pass is one graph with no
+# steps, and a collector's thread spent a third of its time on passes of 25 rows, four a round of 96 seats, the card a third
+# busy (py-spy on code-1, 2026-11-19): each pass costs the thread its own time, whatever it holds.  So a pass has up to
+# CODE_ROWS rows, a round of 48 1v1s' seats in one, and a level's frames go up into the next level's pass where that saves a
+# pass for no more than MERGE_TOKENS unit tokens of padding (`Graphs.passes`); and it holds the shapes that makes.
+CODE_ROWS = 128
+MERGE_TOKENS = 4096
+CODE_KEEP = 20
 assert set(LEVELS) <= set(LADDER)       # so that a level holds the bucket of whatever is no more than its unit tokens
 
 
@@ -86,11 +94,12 @@ def level(units: int) -> int:
     return next((w for w in LEVELS if w >= units), bucket(units))
 
 
-def rows_at(units: int) -> int:
-    """The most rows a pass of this level has.  A wide pass costs by its rows (at the caps 34 ms for 16 and 122 for 64, where
-    a narrow one is 8 and 14), so cutting it into several costs no time, and a shape's memory, held as long as the shape, is
-    its rows times its widths: 64 rows at 1,024 unit tokens held 0.84 GB, 16 held 0.06 (results/collector_levels.py)."""
-    return max(ROWS[0], min(ROWS[-1], LEVEL_TOKENS // units))
+def rows_at(units: int, most: int = ROWS[-1]) -> int:
+    """The most rows a pass of this level has, `most` at most.  A wide pass costs by its rows (at the caps 34 ms for 16 and
+    122 for 64, where a narrow one is 8 and 14), so cutting it into several costs no time, and a shape's memory, held as long
+    as the shape, is its rows times its widths: 64 rows at 1,024 unit tokens held 0.84 GB, 16 held 0.06
+    (results/collector_levels.py)."""
+    return max(ROWS[0], min(most, LEVEL_TOKENS // units))
 
 
 def padded(widths: dict[str, int], rows: int) -> tuple[int, dict[str, int]]:
@@ -154,13 +163,21 @@ def _sums(widths: list[int]) -> list[int]:
 class Graphs:
     """`policy_train.Player._forward` as CUDA graphs, for a CUDA actor and critic (or no critic)."""
 
-    def __init__(self, actor, critic, slots: int = act.SLOTS, keep: int = KEEP, cuts: tuple[int, ...] = CUTS):
-        """keep: the most shapes held.  As a level's widths only grow, a shape narrower than its level's widest is never played
-        again and goes as soon as a wider one is needed: what's kept is each level's widest at the rows it has had, with z and
-        without (a bootstrap or a test without it), the ones played longest ago going first."""
-        self.actor, self.critic, self.slots, self.keep = actor, critic, slots, keep
+    def __init__(self, actor, critic, slots: int = act.SLOTS, keep: int | None = None, cuts: tuple[int, ...] = CUTS):
+        """keep: the most shapes held (KEEP, or CODE_KEEP for an actor that chooses a code).  As a level's widths only grow, a
+        shape narrower than its level's widest is never played again and goes as soon as a wider one is needed: what's kept is
+        each level's widest at the rows it has had, with z and without (a bootstrap or a test without it), the ones played
+        longest ago going first."""
+        self.actor, self.critic, self.slots = actor, critic, slots
         # An actor that chooses a code (policy_code.CodeActor): a pass is one graph, `_head_code`, with no steps to cut.
         self.coded = isinstance(actor, policy_code.CodeActor)
+        self.keep = keep or (CODE_KEEP if self.coded else KEEP)
+        # How its rounds go into passes (`passes`): wider, and a level's few with the next level's.
+        self.wide = {"most": CODE_ROWS, "merge": MERGE_TOKENS} if self.coded else {}
+        # Its pass reads a frame through the frozen encoder alone (a critic here would read the rest), so only what that
+        # reads goes to the card (policy_model.collate): a batch's hidden units, padded to their cap of 256 a row, and its
+        # action tables were most of what a pass put together and copied, a fifth of a collector's time.
+        self.frame_only = self.coded and critic is None
         self.cuts = tuple(c for c in cuts if 0 < c < slots) + (slots,)
         self.device = next(actor.parameters()).device
         self.pool = torch.cuda.graph_pool_handle()
@@ -256,14 +273,24 @@ class Graphs:
         return graph
 
     @staticmethod
-    def passes(items: list[fz.Tensors], rows: int = 0) -> list[list[int]]:
+    def passes(items: list[fz.Tensors], rows: int = 0, most: int = ROWS[-1], merge: int = 0) -> list[list[int]]:
         """Which of these go in which pass: those of one level together, lowest first, `rows` at most a pass (0: however many)
-        and no more than the level's (`rows_at`)."""
+        and no more than the level's (`rows_at`, of `most`).  merge: a level's go up into the next level's passes where that
+        makes fewer passes, for no more than this many unit tokens of padding a pass saved (their rows times the levels'
+        difference); 0 keeps every level apart."""
         levels: dict[int, list[int]] = {}
         for i, t in enumerate(items):
             levels.setdefault(level(max(len(t.unit_x), t.controllable, 1)), []).append(i)
-        return [found[at:at + step] for units, found in sorted(levels.items())
-                for step in [min(rows or len(found), rows_at(units))] for at in range(0, len(found), step)]
+        cap = lambda units: min(rows or len(items), rows_at(units, most))       # noqa: E731
+        groups: list[tuple[int, list[int]]] = []
+        for units, found in sorted(levels.items()):
+            if merge and groups:
+                below, low = groups[-1]
+                saved = -(-len(low) // cap(below)) + -(-len(found) // cap(units)) - -(-(len(low) + len(found)) // cap(units))
+                if saved > 0 and len(low) * (units - below) <= merge * saved:
+                    found = sorted(groups.pop()[1] + found)
+            groups.append((units, found))
+        return [found[at:at + step] for units, found in groups for step in [cap(units)] for at in range(0, len(found), step)]
 
     @torch.no_grad()
     def forward(self, items: list[fz.Tensors], history: torch.Tensor, seen: torch.Tensor, z: torch.Tensor | None = None):
@@ -273,7 +300,7 @@ class Graphs:
         rows, sizes = padded(pm.widths(items), n)
         mine = self.widest.setdefault(sizes["u"], {})
         mine.update({k: max(v, mine.get(k, 0)) for k, v in sizes.items()})
-        nb = pm.collate(items, sizes=mine, rows=rows)
+        nb = pm.collate(items, sizes=mine, rows=rows, frame_only=self.frame_only)
         key = (z is None, *(None if v is None else v.shape for v in vars(nb).values()))
         shape = self.shapes.get(key)
         if shape is None:
