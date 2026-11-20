@@ -173,6 +173,13 @@ appears they don't do much".
   for six, which would take most of the Python after a step with it and moves when a game's end and the lead rule are
   looked at; units at rest left out of the AI and the firing.
 
+### Line endings
+
+The user, 2026-11-20: "add a .gitattributes with `* text=auto eol=lf` and an .editorconfig with `end_of_line = lf`,
+renormalize line endings and commit+push."  The index had LF in every text file already (`core.autocrlf` is true
+here); 60 working files had CRLF or a mix and were rewritten with LF, `zk-startup.cmd` among them (three lines, no
+labels: not run since).  A file checked out now comes back LF, and WSL's git reports what Windows' does.
+
 ### The old data on D:
 
 The user: "What from D:\\zk-learned is safe to delete (to free up space)?", then "OK, delete the ~300gb of old data."

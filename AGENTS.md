@@ -444,15 +444,14 @@ README.md has the rules for engine games: headless at max speed, windowed only w
 * **A unit's `ord_kind`** is the last order it was given, and stays when that's over (but an attack's, and after a
   stop).  Whether it's doing anything is its IDLE flag: a count of units "with an order" by the record is wrong, as
   two of mine were on 2026-11-19.
-* **Line endings**: several files are CRLF; edit them without changing that.  `git status` inside WSL shows files as
-  modified that aren't: use Windows git.
+* **Line endings** are LF in every text file since 2026-11-20 (the user: `.gitattributes` with `* text=auto eol=lf`,
+  `.editorconfig` with `end_of_line = lf`), whatever `core.autocrlf` says: a checkout gives LF, and WSL's git and
+  Windows' agree on what's modified.  A tool that writes a file on Windows writes it with `newline="\n"`.
 * **Adding maps to the pool** needs the engine (`sim_engine.py facts` starts it six times a map): 01-simulator.md, "Data".
 * **A collector's rate goes by what the actor does.**  One whose army moves makes a third of the decisions a second of
   one whose codes are random by iteration 10, the sim's step being over half its time then: a change to the collectors
   is measured by `results/faster/bench-clone.sh` and its `collector_cpu_ms`, not by an untrained actor's smoke, and two
   such runs are within 3% of each other.
-* **An undo is an edit back**: `git checkout` of a file gives it CRLF here (`core.autocrlf`), as on 2026-11-19 and again
-  on 2026-11-20.
 * **A smoke's rate isn't a run's.**  A run's decisions a second fall by half over its first 40 iterations, as its games
   grow old (`rdnn-5`: 1,100 at iterations 2 and 3, 890 at 8 to 20, 520 over seven hours).  Set two actors side by side
   at the same iterations, and plan nothing by a run's iterations an hour before it has run: on 2026-11-19 a smoke's
@@ -466,8 +465,7 @@ README.md has the rules for engine games: headless at max speed, windowed only w
   percent between their rates is nothing.  Set them side by side over the same iterations, and read a profile
   (`results/faster/spy-one.sh`) for what a change did.
 * **An edit script goes to the tree it's meant for.**  On 2026-11-19 one meant for a copy ran in the repo, beside a
-  run; `git checkout` then gave the file CRLF (`core.autocrlf` is true and most files are LF in the tree).  The ones in
-  `results/faster/` refuse outside a scratch copy unless told `--repo`.
+  run.  The ones in `results/faster/` refuse outside a scratch copy unless told `--repo`.
 * **A new tool on the card** caps itself before anything else and sends nothing through a net in one great batch
   (`order_vae.cap_card`, `CHUNK`): on 2026-11-19 `order_vae.py eval` put 100,000 decisions through at once, the card
   spilled and the machine's memory filled.  The same for a timing or a scratch script.
