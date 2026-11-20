@@ -3,6 +3,7 @@
 // fire (unit_impulsefloat_toggle.lua with LuaRules/Configs/float_defs.lua and the units' scripts).
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 #include "zksim/world.hpp"
 
@@ -19,10 +20,21 @@ constexpr int FLOAT_EVERY = 16, FLOAT_ORDER_PHASE = 12, FLOAT_STUN_PHASE = 4;
 
 // The engine's pos.y: on the ground or the sea bed, riding the water (GroundMoveType::GetGroundHeight, StaticMoveType), wherever
 // it has floated to, or in the air, which is over the water for what flies or is carried.
+// The ground's height under a unit, kept while the unit is where it was, to the bit.  Read anew for every unit every tick it
+// was a place in the map's heights that nothing had just read: 5% of a step's time on a map with water (2026-11-20).
+float World::ground_under(int u) const {
+    const size_t i = size_t(u);
+    if (ground_kept.size() <= i) ground_kept.resize(size_t(count()));
+    Ground& kept = ground_kept[i];
+    const float ux = x[i], uz = z[i];
+    if (!kept.read || std::memcmp(&ux, &kept.x, sizeof ux) != 0 || std::memcmp(&uz, &kept.z, sizeof uz) != 0) kept = {ux, uz, map->height_at(ux, uz), true};
+    return kept.y;
+}
+
 float World::base_y(int u) const {
     const size_t i = size_t(u);
     if (floating[i]) return float_y[i];
-    const float g = map->height_at(x[i], z[i]);
+    const float g = ground_under(u);
     if (carrier[i] >= 0) return std::max(g, 0.0f) + flight_height(u) + carried_altitude(u);
     return std::max(g, type_of(u).water_y) + flight_height(u) + jump_altitude(u);
 }

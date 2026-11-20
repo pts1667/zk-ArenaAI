@@ -23,6 +23,10 @@ constexpr float SEPARATION_SHARE = 0.5f;
 // tolerance"); past it they're pushed clear of each other, as before.  Pushed for any overlap at all, the units of a standing
 // crowd shuffled for good: two in five of those separate looked at were moved every tick, nearly all by under an elmo.
 constexpr float SEPARATION_SLACK = 5.0f;
+// Units are pushed apart every second tick, a third of a second apart (the user, 2026-11-20, of "the separation every second
+// or third tick": "Proceed"; the second is mine).  Every tick it was a fifth of a step's time in a long game with an army
+// that moves.  What walks into another overlaps it for a tick longer before it's pushed.
+constexpr int SEPARATION_EVERY = 2;
 constexpr float MIN_TERRAIN_SPEED = 0.05f;    // a unit pushed onto a cliff can still walk off it
 constexpr int ROUTE_LOOKAHEAD = 4;            // segments ahead a unit looks for a clear line, to cut corners
 constexpr int STUCK_WINDOW_TICKS = 18;         // 3 s
@@ -76,6 +80,7 @@ bool line_free(const Map& m, int cls, float x0, float z0, float x1, float z1) {
 
 // The places, from `from` up to `to`, of those a unit at (ux, uz) with this footprint overlaps, and isn't right on top of: in
 // order, into `out`, which has room for them all.  Four at a time where the processor has it: the same sums, so the same answers.
+// Eight at a time (AVX2) was tried on 2026-11-20 and made a step 7 to 13% slower: a stretch is 10 to 20 places long.
 // The footprint is the caller's to shorten (SEPARATION_SLACK), so what it reaches with a small neighbour's may be nothing.
 int overlapping(const float* sx, const float* sz, const float* radius, int from, int to, float ux, float uz, float footprint, int* out) {
     int n = 0, i = from;
@@ -585,6 +590,8 @@ void World::separate() {
     for (const int o : sep_last)
         if (sep_seen[size_t(o)].pass != sep_pass) sep_stir[size_t(sep_seen[size_t(o)].cell)] = ++sep_stirs;
     sep_last.assign(cell_units.begin(), cell_units.end());
+    // Room for every place there is: a unit's stretches of the grid are apart, so it overlaps no more.
+    sep_hits.resize(slots);
     for (size_t k = 0, n = live.size(); k < n; ++k) {
         const int u = live[k];
         if (!alive[size_t(u)]) continue;
@@ -597,8 +604,8 @@ void World::separate() {
         SepRest& rest = sep_rest[size_t(u)];
         if (rest.since >= 0 && rest.type == int32_t(type[size_t(u)]) && same_bits(ux, rest.x) && same_bits(uz, rest.z)) {
             bool stirred = false;
-            for (int gz = b.z0; gz <= b.z1; ++gz)
-                for (int gx = b.x0; gx <= b.x1; ++gx) stirred = stirred || sep_stir[size_t(gz) * size_t(grid_cols) + size_t(gx)] > rest.since;
+            for (int gz = b.z0; gz <= b.z1 && !stirred; ++gz)
+                for (int gx = b.x0; gx <= b.x1 && !stirred; ++gx) stirred = sep_stir[size_t(gz) * size_t(grid_cols) + size_t(gx)] > rest.since;
             if (!stirred) continue;
         }
         // Left as it is, unless the turn ends with it moved.
@@ -609,7 +616,6 @@ void World::separate() {
                 const size_t row = size_t(s) * cells + size_t(gz) * size_t(grid_cols);
                 const int from = cell_start[row + size_t(b.x0)], to = cell_start[row + size_t(b.x1) + 1];
                 if (from == to) continue;
-                sep_hits.resize(size_t(hits + to - from));
                 const int found = overlapping(sep_x.data(), sep_z.data(), sep_radius.data(), from, to, ux, uz, d.footprint_radius - SEPARATION_SLACK,
                                               sep_hits.data() + hits);
                 if (found) hit_allies |= 1 << s;
@@ -669,7 +675,7 @@ void World::move_units() {
             else
                 move_one(u, move_plans[k]);
         }
-    {
+    if (tick_count % SEPARATION_EVERY == 0) {
         ZK_PROF(MOVE_SEPARATE);
         separate();
     }

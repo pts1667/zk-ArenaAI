@@ -72,8 +72,9 @@ RL from nothing, against itself, with a recurrent memory.
     `SimEnv.cover_every_step` for every step): the map term's change lands there.
   * *A tolerance in the separation* (`SEPARATION_SLACK`, `sim/src/movement.cpp`; 01-simulator.md, "Movement"): two
     units that overlap by 5 elmos or less are let be, where a standing crowd shuffled for good; and a unit the
-    separation would leave as it is has no turn in it, to the same numbers as with one.  **Every game plays
-    differently from before it.**
+    separation would leave as it is has no turn in it, to the same numbers as with one.  Later the same day, and not
+    committed: units are pushed apart every second tick (`SEPARATION_EVERY`).  **Every game plays differently from
+    before each.**
   * *Commands into orders in C++* (`zkp_decode_commands`, libzkpolicy ABI 5; `zkpolicy.decode_commands`):
     `selections.decode` bit for bit, which the trainer's collectors now call; the Python stays the reference.
 * **The actor** (`tools/policy_latent.py`, `policy_train.py --size rdnn`; docs/model.md, "An RDNN in the GRU's place"):
@@ -146,11 +147,28 @@ The log has the numbers, "After `code-2`".
     standing: two in five of its units were pushed to a new place every tick, nearly all by under an elmo.  With a
     tolerance (the user: "It should be fine to proceed with a ~5 elmo tolerance") it rests: 2,155 decisions a second
     collecting, 4.01 ms of CPU, and the sim's step 1.54 ms a seat's decision in games to 75 minutes for 1.74 (2.48
-    before the day's work).
+    before the day's work), by the build with the phase timers: a plain build's is 1.11.
   * *Cloned starts*: "skip and ignore cloned starts; it appears they don't do much".
+* **Movement, of which the user asked "Can that be further optimized?"** (2026-11-20; the log, "Movement, by a plain
+  build" and "The separation every second tick"; **not committed**: `sim/src/movement.cpp`, `water.cpp`, `world.cpp`,
+  `world.hpp`, `tests/policy/test_dashboard.py` and these docs).  Sampled on a plain build in games to 75 minutes it
+  was 37% of the sim's step, not the timed build's 57%: the separation 20%, a unit's move 11%, its plan 5%; then
+  firing 12%, the units' AI 15%, views and frames 16%, the grid 6%, the water 5%.  No line of it is over 3%.  Of the
+  three things I put to the user ("OK. Proceed with 1, 2 and 3."):
+  * *The separation every second tick* (the second rather than the third is mine): the step 0.49 ms a seat's decision
+    for 0.54 in games to 37 minutes.
+  * *Exact, outside movement*: the ground's height kept for a unit that hasn't moved (`World::ground_under`), and the
+    grid left as it is when no unit has come, gone or changed cell (`rebuild_grid`): 0.47 for 0.49, the same numbers
+    to the bit.
+  * *The units' data packed together*: not done.  I'd called it the only way to a large gain; fetching the next
+    units' scattered data ahead of the two movement loops, which is what packing would buy them, left the step at 0.46
+    ms.  Those loops aren't waiting on memory: they're a hundred small steps a unit.
+  Also kept, exact and about 2%: the hits' list sized once a pass, the look for a stir stopped at the first.  Taken
+  out: the overlap test eight at a time (AVX2), 7 to 13% slower.
 * **The collectors over the day** (`bench-clone.sh`: iterations 4 to 11, the frozen flat clone): 1,618 decisions a
   second collecting, then 1,850 (the coverage cheaper), 1,889 (the decoding in C++), 2,019 (the coverage once a
-  decision) and 2,155 (the tolerance).
+  decision), 2,155 (the tolerance) and 2,291 (the separation every second tick and the two exact savings; the
+  collectors' CPU 3.91 ms a decision for 4.01, inside what two runs differ by).
 
 ### Before it: `code-1`, stopped at iteration 252
 
@@ -320,7 +338,10 @@ defaults.  The log has its tests, every check and what was seen.
   flat clone frozen, its rates and CPU a decision), `sim-phases.sh` (the sim's step by phase, from a profiling build,
   while an actor plays), `lib-ab.sh keep`, then `lib-ab.sh STEPS` (a build of the tree against the one kept, every
   number), `build.sh` (the tree into `~/zksim/build`), `t2.sh [TESTS]` (that, then a few test files on one process),
-  `dash_seeds.py FIRST LAST` (how the dashboard tests' scripted game ends, seed by seed).  For the cloned start: `clone-record.sh OUT DECISIONS [ACTOR]`,
+  `dash_seeds.py FIRST LAST` (how the dashboard tests' scripted game ends, seed by seed), `sim-native.sh NAME ...` then
+  `native_report.py NAME [LINES] [FUNCTION]` and `native-lines.sh` (the sim's step by C++ function and line: py-spy's
+  native samples of a plain build with debug lines), `step-ab.sh ...` (the step timed on `build-ref` and `build-new`,
+  the same games on each).  For the cloned start: `clone-record.sh OUT DECISIONS [ACTOR]`,
   `clone-train.sh OUT DATA...` and `clone-test.sh NAME ACTOR [SPREAD]` (128 1v1s against the script).
 * **Tests**: `tests/policy/`, `tests/test_*.py`, `sim/tests/`, run as `pytest.ini` says.  None needs the engine.
 * **Engine games**: `zk-startup.ps1`, `zk-maps.ps1`, `maps.md`, `README.md`.
@@ -471,10 +492,18 @@ README.md has the rules for engine games: headless at max speed, windowed only w
   spilled and the machine's memory filled.  The same for a timing or a scratch script.
 * **An order autoencoder's file and the commands go together**: a change to `selections.KINDS`, the roles or `RADII`
   makes every saved one unreadable (`order_vae.load` says so), and every `--size code` checkpoint with it.
-* **Two dashboard tests pin a scripted game's end** (`SimEnv(1, 20, ["scripts"], units=6)`: won by team 0 at 3:55).  A
-  change to how the sim plays moves it: on 2026-11-20 seed 15's game went past the limit.  `results/faster/dash_seeds.py`
-  lists how each seed's ends.
+* **Two dashboard tests pin a scripted game's end** (`SimEnv(1, 16, ["scripts"], units=6)`: won by team 0 at 3:58).  A
+  change to how the sim plays moves it: twice on 2026-11-20 the seed's game went past the limit.
+  `results/faster/dash_seeds.py` lists how each seed's ends.
 * **A standing crowd isn't the same from tick to tick** unless something makes it so: before the separation's
   tolerance two in five of its units moved every tick.  Count what a cache would skip before building it
   (2026-11-20: the first skip there saved nothing).
+* **The build with the phase timers isn't the build in use**: three timers a unit a tick are 28% of its step (1.54 ms
+  a seat's decision for a plain build's 1.11 on the same games), nearly all of it counted as movement.  Its phases
+  compare with each other's before and after a change; for where the time goes, sample a plain build
+  (`results/faster/sim-native.sh`, at 100 samples a second: at 500 py-spy fell 700 s behind and the run took 40
+  minutes for 10), and time a change by `step-ab.sh`.
+* **A loop over the units isn't waiting on memory** on this machine (96 MB of cache): a game's units are a megabyte or
+  two, and fetching ahead in the movement loops changed nothing (2026-11-20).  Before moving data about for speed, try
+  `__builtin_prefetch` where it would be read: it changes no number and takes ten minutes.
 * **Never committed**: `results/` and `.vscode/`.

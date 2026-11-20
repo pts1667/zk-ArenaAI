@@ -483,6 +483,13 @@ struct World {
     // its speed up, and the frame it came above its float's wait height, or -1.
     bool has_water = false;
     std::vector<float> base_at;
+    // The ground's height under each unit as last read, and where the unit was then (water.cpp, ground_under).
+    struct Ground {
+        float x = 0.0f, z = 0.0f, y = 0.0f;
+        bool read = false;
+    };
+    mutable std::vector<Ground> ground_kept;
+    float ground_under(int u) const;
     std::vector<uint8_t> wet;
     std::vector<int> floaters;
     std::vector<uint8_t> floating, float_up;
@@ -533,6 +540,10 @@ struct World {
     // Each unit's place in cell_units, or -1 for what isn't in the grid; and separate()'s working, by that place: where each
     // unit is, its footprint, and how much of an overlap with it a neighbour takes.
     std::vector<int> grid_slot;
+    // Whether the grid has to be made whatever its units' cells (it never has been, or the teams have changed), and how many
+    // were living when it last was (world.cpp, rebuild_grid).
+    bool grid_stale = true;
+    size_t grid_live = 0;
     std::vector<float> sep_x, sep_z, sep_radius, sep_share;
     // What separate keeps from tick to tick, so that a unit its turn would leave as it is has no turn (movement.cpp).  By
     // unit: what its place in the grid said of it at the last pass that had it (sep_seen), and what it was when a turn last

@@ -173,6 +173,59 @@ appears they don't do much".
   for six, which would take most of the Python after a step with it and moves when a game's end and the lead rule are
   looked at; units at rest left out of the AI and the firing.
 
+### Movement, by a plain build
+
+The user, 2026-11-20: "I've noticed that most of the time spent in the sim is on movement logic. Can that be further
+optimized?"
+
+* **The timers were a quarter of the timed build's step.**  The same games to 75 minutes (the clone at 0.3), the
+  step timed from Python: 1.54 ms a seat's decision on the build with `-DZKSIM_PROFILE=ON`, 1.11 on a plain one.
+  Three of its timers run once a unit a tick, inside movement.  So every "ms a seat's decision" above is the timed
+  build's, and movement's 57% of it too.
+* **A plain build, sampled** (`results/faster/sim-native.sh`: the tree with `-O3 -ffp-contract=off -g`, py-spy's
+  native stacks; 10,765 samples in the sim's step, games to about 70 minutes; `native_report.py`): the separation
+  20.4% with what it calls (its own lines 12.0%, the overlap test 5.8%), a unit's move 10.7%, its plan 4.6%, and the
+  loop over them about 2%: movement 37%.  Firing 12.1%; the units' AI 8.9% and its tactics 5.8%; the views 4.9%, the
+  frames emitted 6.2% and the statistics 5.1%; the grid 6.0%; a unit's height for the water 5.0% and the loop round it
+  2.8%; the status 2.7%.  The largest line is 2.8% (the look for a stir in the separation), then 2.2% (whether a
+  unit is out of ammunition), 2.1% (the ground's height under a unit) and 2.1% (a unit's type): reads of a dozen
+  arrays a unit a tick, not arithmetic.
+* **Three things tried in the separation**, each the same numbers to the bit (`lib-ab.sh`), timed on the same games
+  (`step-ab.sh`): the overlap test eight at a time where the processor has AVX2, 0.59 ms a seat's decision for 0.55
+  in games to 37 minutes and 1.26 for 1.11 in games to 75 (a stretch it scans is 10 to 20 places long, and it's two
+  calls for one): taken out.  The hits' list sized once a pass, where it was resized for every stretch (1.2% of the
+  step and its zeroing), and the look for a stir stopped at the first: 0.54 for 0.55.  Kept.
+* **What would do more, none of it built**: the separation every second tick or every third, with the 15-frame
+  update (about 10% and 13% of the step; other numbers, and units walking into each other overlap for longer: the
+  user's to say); exact, outside movement: the ground's height kept for a unit that hasn't moved (most of 5% on a map
+  with water), the grid left as it is when no unit has changed cell, come or gone (6%, only while an army stands);
+  and the units' own numbers packed together, which is a rewrite of how the sim keeps a unit.
+
+### The separation every second tick, two exact savings, and no packing
+
+The user, 2026-11-20, of the three things above: "OK. Proceed with 1, 2 and 3."  Not committed.
+
+* **The separation every second tick** (`SEPARATION_EVERY`, `sim/src/movement.cpp`; no ABI change): on the ticks whose
+  count is even.  The second rather than the third is mine.  The sim's step, a plain build, games to 37 minutes, the
+  clone at 0.3 (`step-ab.sh`): 0.49 ms a seat's decision for 0.54.  Every game plays differently again: the two
+  dashboard tests pin seed 16's now, won at 3:58 (seed 20's went to the limit).
+* **The ground's height kept for a unit that hasn't moved** (`World::ground_under`, `ground_kept`; `base_y` asks it),
+  and **the grid left as it is** when no unit has come, gone or changed cell since it was made (`rebuild_grid`,
+  `grid_stale`, `grid_live`: each unit's key is worked out and set beside its last, and the counting and the fill are
+  skipped when all are the same; `set_teams` makes it stale).  Both the same numbers to the bit over 6,000 steps of 16
+  games (`lib-ab.sh`).  The step 0.47 ms for 0.49 with the clone at 0.3, and 0.43 for 0.45 at a spread of 1.0.
+* **In the trainer** (`bench-clone.sh`, iterations 4 to 11): 2,291 decisions a second collecting for 2,155, 2,253
+  overall for 1,959, the collectors' CPU 3.91 ms a decision for 4.01, which is inside what two runs differ by.  863
+  tests pass.
+* **The units' data packed together: not done.**  I'd put it to the user as the only way to a large gain, and it
+  would have been a rewrite of how the sim keeps a unit (123 vectors, 8,100 lines that index them).  First what it
+  would buy, tried the cheap way: the next units' scattered records (`jump`, `skid`, `ai`, `progress`, the weapons'
+  targets and cooldowns) fetched 8 units ahead in the two loops of `move_units`, which changes no number.  The step
+  0.46 ms a seat's decision with it and without (the loops' time 5.5 s of the run's both ways).  A game's units are
+  a megabyte or two (a `UnitAI` is 152 bytes, a `JumpState` 52; a type's record 548), which this machine's cache
+  holds: the loops are a hundred small steps a unit, not waits.  So I was wrong, and nothing was rewritten.  What a
+  collector reads that doesn't fit is the maps, under what walks.
+
 ### Line endings
 
 The user, 2026-11-20: "add a .gitattributes with `* text=auto eol=lf` and an .editorconfig with `end_of_line = lf`,
@@ -1481,7 +1534,9 @@ Each is a constant or a flag, easy to change.
     and that a game's first step works it out whatever the batch was told;
   * **the tolerance** (the user's, "~5 elmo"): 5.0 exactly, for a building as for a unit, and that past it two are
     pushed clear of each other rather than back to 5; the units left out of the separation on top of it;
-  * **the dashboard tests' game**: seed 20 for 15.
+  * **the dashboard tests' game**: seed 20 for 15, then 16;
+  * **the separation every second tick** (the user's, of "every second or third"): the second, on the even ticks;
+  * **the packing** (the user's: "Proceed"): not done, on the prefetch's showing (above).
 
 * **In what was built after `rdnn-5`** (2026-11-19; docs/learned-policy/06-select-then-command.md and
   05-order-autoencoder.md, each ending with a list for the user to decide).  The user's: selection before a command,

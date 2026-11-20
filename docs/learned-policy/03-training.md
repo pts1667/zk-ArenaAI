@@ -748,7 +748,8 @@ every seat that decides.
   of theirs; 5.1 ms over iterations 4 to 11), with an actor that plays.  By the end of that day: 4.0 ms and 2,155
   decisions a second collecting for 1,618, with the map's coverage cheaper and worked out once a decision, the
   commands decoded in C++, and a tolerance in the units' separation (01-simulator.md, "Movement"); the sim's step is
-  1.54 ms a seat's decision in games to 75 minutes.
+  1.54 ms a seat's decision in games to 75 minutes on the build with the phase timers, 1.11 on a plain one, where
+  movement is 37% of it (the separation 20%).
 
 ### GRPO from branched games (`--group`)
 

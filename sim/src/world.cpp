@@ -70,6 +70,7 @@ void World::set_teams(int n, const int32_t* ally_of_team) {
     sharing = false;
     for (int s = 0; s < n_allies; ++s) sharing = sharing || ally_size[s] > 1;
     cell_start.assign(size_t(n_allies) * grid_cells() + 1, 0);
+    grid_stale = true;
     // Anything already here goes with its team's new allyteam.
     for (int u = 0; u < count(); ++u) side[size_t(u)] = ally_of[team[size_t(u)]];
 }
@@ -478,29 +479,42 @@ void World::drop_the_dead() {
 
 void World::rebuild_grid() {
     const size_t cells = grid_cells();
-    std::fill(cell_start.begin(), cell_start.end(), 0);
-    unit_key.resize(size_t(count()));
-    // The living go on in handle order, and the dead leave the list for good.
+    unit_key.resize(size_t(count()), -2);
+    // The living go on in handle order, and the dead leave the list for good.  Each one's key first, and whether the grid
+    // would be any other than it is: it's made of the living in their order and their keys, so with no one come or gone and
+    // every key as it was, it's left alone (6% of a step's time, 2026-11-20: where an army stands, most ticks).
+    bool same = !grid_stale && live.size() == grid_live;
     size_t kept = 0, on_grid = 0;
     for (size_t k = 0; k < live.size(); ++k) {
         const int u = live[k];
-        if (!alive[size_t(u)]) continue;
-        live[kept++] = u;
-        // What a transport carries is off the grid: nothing that looks around a place finds it (transport.cpp).
-        if (carrier[size_t(u)] >= 0) {
-            unit_key[size_t(u)] = -1;
-            grid_slot[size_t(u)] = -1;
+        if (!alive[size_t(u)]) {
+            same = false;
             continue;
         }
-        ++on_grid;
-        int gx = int(x[size_t(u)] / GRID_CELL), gz = int(z[size_t(u)] / GRID_CELL);
-        gx = gx < 0 ? 0 : (gx >= grid_cols ? grid_cols - 1 : gx);
-        gz = gz < 0 ? 0 : (gz >= grid_rows ? grid_rows - 1 : gz);
-        const int key = int(size_t(side[size_t(u)]) * cells + size_t(gz) * size_t(grid_cols) + size_t(gx));
+        live[kept++] = u;
+        // What a transport carries is off the grid: nothing that looks around a place finds it (transport.cpp).
+        int key = -1;
+        if (carrier[size_t(u)] < 0) {
+            ++on_grid;
+            int gx = int(x[size_t(u)] / GRID_CELL), gz = int(z[size_t(u)] / GRID_CELL);
+            gx = gx < 0 ? 0 : (gx >= grid_cols ? grid_cols - 1 : gx);
+            gz = gz < 0 ? 0 : (gz >= grid_rows ? grid_rows - 1 : gz);
+            key = int(size_t(side[size_t(u)]) * cells + size_t(gz) * size_t(grid_cols) + size_t(gx));
+        }
+        same = same && key == unit_key[size_t(u)];
         unit_key[size_t(u)] = key;
-        ++cell_start[size_t(key)];
     }
     live.resize(kept);
+    if (same) return;
+    grid_stale = false;
+    grid_live = kept;
+    std::fill(cell_start.begin(), cell_start.end(), 0);
+    for (const int u : live) {
+        if (unit_key[size_t(u)] >= 0)
+            ++cell_start[size_t(unit_key[size_t(u)])];
+        else
+            grid_slot[size_t(u)] = -1;
+    }
     // Each key's end, then filled backwards so that each key's begin is left behind with its units in handle order.  The sum is
     // kept in a register: through memory, each add would wait on the store before it.
     int sum = 0;

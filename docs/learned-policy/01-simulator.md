@@ -144,7 +144,9 @@ Tags in this section: what's left out is listed under "Known gaps", and what was
   (`SEPARATION_SLACK`; the user, 2026-11-20), and past that are pushed clear of each other: pushed for any overlap at
   all, a standing crowd shuffled for good, two in five of its units moved every tick and nearly all by under an elmo.
   A unit the separation would leave as it is has no turn in it until it has moved or a unit of the grid cells it looks
-  through has (`World::separate`, `sep_rest`): the same numbers as giving each its turn, to the bit.  A unit stops up to about 50 elmos short of a move goal.
+  through has (`World::separate`, `sep_rest`): the same numbers as giving each its turn, to the bit.  Units are pushed
+  apart every second tick, a third of a second apart (`SEPARATION_EVERY`; the user, 2026-11-20): what walks into
+  another overlaps it for a tick longer.  A unit stops up to about 50 elmos short of a move goal.
 * **Re-ordering costs what it does in the engine.**  A plain move order stops the unit until its next slow update (every 15
   frames).  That includes an order given up to 2 frames before the update.  A fight order costs nothing.
 * **Routes are made at export, and nothing is pathfound at run time.**  Each `terrain.py` region is cut per move class into
@@ -960,6 +962,7 @@ What's left out on purpose, so it isn't mistaken for modelled:
   counting at 36 minutes, and the global time feature (frame / 36,000) reaches 4.0 at 80 minutes, where it was made for 20.
 * **Teams:** allies share income, overdrive and overflow only ("Economy"): units can't be given, and there's no pooled
   storage.
-* **Separation:** units overlap by up to 5 elmos ("Movement"), which hasn't been set beside the engine's own slack.
+* **Separation:** units overlap by up to 5 elmos and are pushed apart every second tick ("Movement"), neither of
+  which has been set beside the engine.
 * **Chicken defense:** the simplifications listed under it.  A chicken counts as costing 1 in the policy's type table, so
   probes of enemy value undercount them.
