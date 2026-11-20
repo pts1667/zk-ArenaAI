@@ -72,9 +72,8 @@ RL from nothing, against itself, with a recurrent memory.
     `SimEnv.cover_every_step` for every step): the map term's change lands there.
   * *A tolerance in the separation* (`SEPARATION_SLACK`, `sim/src/movement.cpp`; 01-simulator.md, "Movement"): two
     units that overlap by 5 elmos or less are let be, where a standing crowd shuffled for good; and a unit the
-    separation would leave as it is has no turn in it, to the same numbers as with one.  Later the same day, and not
-    committed: units are pushed apart every second tick (`SEPARATION_EVERY`).  **Every game plays differently from
-    before each.**
+    separation would leave as it is has no turn in it, to the same numbers as with one.  Later the same day: units
+    are pushed apart every second tick (`SEPARATION_EVERY`).  **Every game plays differently from before each.**
   * *Commands into orders in C++* (`zkp_decode_commands`, libzkpolicy ABI 5; `zkpolicy.decode_commands`):
     `selections.decode` bit for bit, which the trainer's collectors now call; the Python stays the reference.
 * **The actor** (`tools/policy_latent.py`, `policy_train.py --size rdnn`; docs/model.md, "An RDNN in the GRU's place"):
@@ -150,9 +149,8 @@ The log has the numbers, "After `code-2`".
     before the day's work), by the build with the phase timers: a plain build's is 1.11.
   * *Cloned starts*: "skip and ignore cloned starts; it appears they don't do much".
 * **Movement, of which the user asked "Can that be further optimized?"** (2026-11-20; the log, "Movement, by a plain
-  build" and "The separation every second tick"; **not committed**: `sim/src/movement.cpp`, `water.cpp`, `world.cpp`,
-  `world.hpp`, `tests/policy/test_dashboard.py` and these docs).  Sampled on a plain build in games to 75 minutes it
-  was 37% of the sim's step, not the timed build's 57%: the separation 20%, a unit's move 11%, its plan 5%; then
+  build" and "The separation every second tick"; committed as `b1709b5`).  Sampled on a plain build in games to 75
+  minutes it was 37% of the sim's step, not the timed build's 57%: the separation 20%, a unit's move 11%, its plan 5%; then
   firing 12%, the units' AI 15%, views and frames 16%, the grid 6%, the water 5%.  No line of it is over 3%.  Of the
   three things I put to the user ("OK. Proceed with 1, 2 and 3."):
   * *The separation every second tick* (the second rather than the third is mine): the step 0.49 ms a seat's decision

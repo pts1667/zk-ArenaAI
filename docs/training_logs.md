@@ -203,7 +203,8 @@ optimized?"
 
 ### The separation every second tick, two exact savings, and no packing
 
-The user, 2026-11-20, of the three things above: "OK. Proceed with 1, 2 and 3."  Not committed.
+The user, 2026-11-20, of the three things above: "OK. Proceed with 1, 2 and 3."  Committed as `b1709b5` (the user:
+"OK, commit+push for now").
 
 * **The separation every second tick** (`SEPARATION_EVERY`, `sim/src/movement.cpp`; no ABI change): on the ticks whose
   count is even.  The second rather than the third is mine.  The sim's step, a plain build, games to 37 minutes, the
