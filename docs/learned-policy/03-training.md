@@ -348,7 +348,8 @@ In a 1v1, for side A against side B at decision t:
   * Closer to the decisions (the user, 2026-11-15, after GRPO's gradient was found to be noise: "Signal or noise"), each
     the change of a balance a step as `combat` is, -1 to 1, zero-sum over the alliances (`SimEnv._balances`; libzksim ABI 27,
     01-simulator.md, "Teams and alliances"):
-    * `map`: the shares of the map in sight and in radar, summed, at two (A - B) / (A + B + 0.2);
+    * `map`: the shares of the map in sight and in radar, summed, at two (A - B) / (A + B + 0.2).  Since 2026-11-20
+      the shares are worked out at a decision's last step, where the term's change then lands (`SimEnv.cover_every_step`);
     * `experience`: the army's trades, x / (1 + x) for x the metal its damage cost the others over the metal put into it
       and 1000, less the others' mean.  The user's idea was each combat unit's damage over its cost, averaged; an average
       falls with every unit built and rises with every fresh one lost, so it's the army's whole.
@@ -643,7 +644,14 @@ every seat that decides.
   `--group` and `--critic-size memory` (or no critic).  `--spread-floor AT:SPREAD ...` is the least spread of the
   code's Gaussian, linear between its points and the last after (the user, 2026-11-19: "Start with 0.1, decreasing to
   0.03 as the training run continues"; `Learner.set_floor`; 0.1 throughout by default): by iteration, or with
-  `--spread-floor-began EPOCH` by the hours since the run began, which is how `results/start-code.sh` gives it.  In its smokes of three iterations with `rdnn-5`'s flags on the
+  `--spread-floor-began EPOCH` by the hours since the run began, which is how `results/start-code.sh` gives it.
+  `--spread-start` (0 to 1; 0: the actor's own) sets the spread a run begins at, after `--init` has loaded an actor:
+  a start's only, a run carried on has its checkpoint's (the user, 2026-11-20: "start the actor cloned, and start the
+  spread below 1"; `tools/policy_code_clone.py` makes such an actor: 05-order-autoencoder.md, "A cloned start").
+  `--critics NAME ...` gives critics to those terms alone (the user, 2026-11-20: "keep only the result and average
+  metal/value critics"; `Config.critics`; none named: every term).  A term without one is still a reward, and counts
+  for nothing past a branch's end where the others have their critic's value (`Learner.bootstrap`); it needs
+  `--group` and `--bootstrap`, and no `--resign`, and a checkpoint says which it had.  In its smokes of three iterations with `rdnn-5`'s flags on the
   pool, 2,000 to 2,300 decisions a second overall by the third (collecting about 2,000, training about 5,000), where
   `rdnn-5`'s third made 1,040; by iterations 8 to 12 of `code-1`, 1,040 to 1,290 for `rdnn-5`'s 890.  Collecting is
   what takes the time.
@@ -730,6 +738,17 @@ every seat that decides.
   at 6, where the learner trains at 4,200.  A collector's process costs the card 0.4 GB before its cap, so
   `--collector-gb` falls as they go up (0.8 at 6, with `--gpu-share 0.76`); and the games a collector have to be whole
   groups (`--group`), so 96 games go into 2, 3, 4, 6 or 12 collectors.
+* **That was with codes drawn at random, which move little.**  With an actor whose army moves (the flat clone, frozen:
+  `results/faster/bench-clone.sh`, 2026-11-20) the sim's step is 54% of a collector's main thread by iteration 10, the
+  pass 16%, the Python after a step 11%, the commands into orders 5% and the scripts 4%; the collectors make 3,200 to
+  3,800 decisions a second at iterations 1 to 3 and 1,000 to 1,300 at 10 and 11, as the games grow old and their
+  armies with them (the sim's step is 0.6 ms a seat's decision in games to 19 minutes, 2.5 in games to 75).  The cores
+  are busy then: `--sim-threads 4` for the default 2 a collector collected no faster and trained slower.  So a change
+  to the collectors is measured by the CPU they spend a decision (`collector_cpu_ms` in a run's metrics: every thread
+  of theirs; 5.1 ms over iterations 4 to 11), with an actor that plays.  By the end of that day: 4.0 ms and 2,155
+  decisions a second collecting for 1,618, with the map's coverage cheaper and worked out once a decision, the
+  commands decoded in C++, and a tolerance in the units' separation (01-simulator.md, "Movement"); the sim's step is
+  1.54 ms a seat's decision in games to 75 minutes.
 
 ### GRPO from branched games (`--group`)
 

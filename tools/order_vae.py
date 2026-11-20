@@ -261,29 +261,36 @@ class OrderVAE(nn.Module):
         return said
 
 
-def loss(model: OrderVAE, b: dict[str, torch.Tensor], beta: float, sample: bool = True) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+def reconstruction(model: OrderVAE, o: dict[str, torch.Tensor], b: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """What a decoding (`OrderVAE.decode`) is off from the decisions it should say (`to_arrays`, as tensors), by field, in nats a
+    decision: whether each slot has a command, and of those that should the fields their kind has, a place at
+    `Config.place_weight` a whole map off.  The autoencoder's own loss but for its pull to the Gaussian, and what an actor
+    cloned from the scripts learns its code by (policy_code_clone.py)."""
     cfg = model.cfg
-    mean, logvar = model.encode(b)
-    code = mean + torch.randn_like(mean) * (0.5 * logvar).exp() if sample else mean
-    o = model.decode(code)
     there = b["present"]
-    n = len(mean)
-    kinds = torch.as_tensor(sel.KINDS, device=mean.device)[b["kind"]]
-    placed = there & torch.isin(kinds, torch.as_tensor(sel.PLACED, device=mean.device))
+    n = len(there)
+    kinds = torch.as_tensor(sel.KINDS, device=there.device)[b["kind"]]
+    placed = there & torch.isin(kinds, torch.as_tensor(sel.PLACED, device=there.device))
     typed = there & (b["type"] < cfg.types)
     wide = there & (b["extent"] < len(sel.RADII))
 
     def ce(name: str, where: torch.Tensor) -> torch.Tensor:
-        return F.cross_entropy(o[name][where], b[name][where], reduction="sum") / n if where.any() else mean.sum() * 0.0
+        return F.cross_entropy(o[name][where], b[name][where], reduction="sum") / n if where.any() else o["present"].sum() * 0.0
 
-    parts = {"present": F.binary_cross_entropy_with_logits(o["present"], there.float(), reduction="sum") / n,
-             "roles": F.binary_cross_entropy_with_logits(o["roles"][there], model.role_hot(b["roles"])[there], reduction="sum") / n,
-             "radius": ce("radius", there), "portion": ce("portion", there), "kind": ce("kind", there), "type": ce("type", typed), "extent": ce("extent", wide),
-             "centre": cfg.place_weight * (o["centre"] - b["centre"]).abs()[there].sum() / n,
-             "place": cfg.place_weight * (o["place"] - b["place"]).abs()[placed].sum() / n,
-             "kl": 0.5 * (mean.pow(2) + logvar.exp() - 1.0 - logvar).sum() / n}
-    total = sum(v for k, v in parts.items() if k != "kl") + beta * parts["kl"]
-    return total, parts
+    return {"present": F.binary_cross_entropy_with_logits(o["present"], there.float(), reduction="sum") / n,
+            "roles": F.binary_cross_entropy_with_logits(o["roles"][there], model.role_hot(b["roles"])[there], reduction="sum") / n,
+            "radius": ce("radius", there), "portion": ce("portion", there), "kind": ce("kind", there), "type": ce("type", typed), "extent": ce("extent", wide),
+            "centre": cfg.place_weight * (o["centre"] - b["centre"]).abs()[there].sum() / n,
+            "place": cfg.place_weight * (o["place"] - b["place"]).abs()[placed].sum() / n}
+
+
+def loss(model: OrderVAE, b: dict[str, torch.Tensor], beta: float, sample: bool = True) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    mean, logvar = model.encode(b)
+    code = mean + torch.randn_like(mean) * (0.5 * logvar).exp() if sample else mean
+    parts = reconstruction(model, model.decode(code), b)
+    total = sum(parts.values())
+    parts["kl"] = 0.5 * (mean.pow(2) + logvar.exp() - 1.0 - logvar).sum() / len(mean)
+    return total + beta * parts["kl"], parts
 
 
 class Data:
@@ -341,21 +348,40 @@ def measure(model: OrderVAE, arrays: dict[str, np.ndarray], device: str, batch: 
     amp, model.amp = model.amp, False
     model.eval()
     n = min(len(arrays["present"]), most)
-    sums: dict[str, float] = {}
-    centre_err, place_err = [], []
-    kinds = torch.as_tensor(sel.KINDS, device=device)
+    tally = Agreement(model.cfg)
+    kl = 0.0
     for at in range(0, n, batch):
         index = np.arange(at, min(at + batch, n))
         b = Data.batch(arrays, index, device)
         mean, logvar = model.encode(b)
-        said = model.say(mean + noise * torch.randn_like(mean) if noise else mean)
-        size = torch.as_tensor(arrays["map"][index], device=device)[:, None, :]
+        tally.add(model.say(mean + noise * torch.randn_like(mean) if noise else mean), b, torch.as_tensor(arrays["map"][index], device=device))
+        kl += float((0.5 * (mean.pow(2) + logvar.exp() - 1.0 - logvar)).sum())
+    out = {**tally.rates(), "kl_nats": kl / max(tally.sums["decisions"], 1.0)}
+    model.train()
+    model.amp = amp
+    return out
+
+
+class Agreement:
+    """How far what's said (`OrderVAE.say`) agrees with the decisions it should say (`to_arrays`, as tensors), summed over
+    batches: by field, of the commands in both; a place's error in elmos, on each decision's own map."""
+
+    def __init__(self, cfg: Config):
+        self.cfg = cfg
+        self.sums: dict[str, float] = {}
+        self.centre_err: list[torch.Tensor] = []
+        self.place_err: list[torch.Tensor] = []
+
+    def add(self, said: dict[str, torch.Tensor], b: dict[str, torch.Tensor], size: torch.Tensor) -> None:
+        """size: each decision's map, its width and height in elmos."""
+        device = size.device
+        size = size[:, None, :]
         there = b["present"]
-        count_right = ((said["present"].long().cumprod(1).sum(1)) == there.sum(1))
         prefix = said["present"].long().cumprod(1).bool()
+        count_right = prefix.sum(1) == there.sum(1)
         both = there & prefix
-        placed = both & torch.isin(kinds[b["kind"]], torch.as_tensor(sel.PLACED, device=device))
-        typed, wide = both & (b["type"] < model.cfg.types), both & (b["extent"] < len(sel.RADII))
+        placed = both & torch.isin(torch.as_tensor(sel.KINDS, device=device)[b["kind"]], torch.as_tensor(sel.PLACED, device=device))
+        typed, wide = both & (b["type"] < self.cfg.types), both & (b["extent"] < len(sel.RADII))
         ce = ((said["centre"] - b["centre"]) * size).norm(dim=-1)
         pe = ((said["place"] - b["place"]) * size).norm(dim=-1)
         right = {"kind": said["kind"] == b["kind"], "roles": said["roles"] == b["roles"], "radius": said["radius"] == b["radius"],
@@ -363,30 +389,28 @@ def measure(model: OrderVAE, arrays: dict[str, np.ndarray], device: str, batch: 
         whole = both & right["kind"] & right["roles"] & right["radius"] & right["portion"] & (ce < 100.0) & (~placed | (pe < 100.0))
         whole &= ~typed | (said["type"] == b["type"])
         whole &= ~wide | (said["extent"] == b["extent"])
-        add = {"decisions": float(len(index)), "count right": float(count_right.sum()), "commands": float(there.sum()), "commands said": float(both.sum()),
-               "kl": float((0.5 * (mean.pow(2) + logvar.exp() - 1.0 - logvar)).sum()),
-               "type right": float((said["type"] == b["type"])[typed].sum()), "typed": float(typed.sum()),
+        add = {"decisions": float(len(there)), "count right": float(count_right.sum()), "commands": float(there.sum()), "commands said": float(both.sum()),
+               "said in all": float(prefix.sum()), "type right": float((said["type"] == b["type"])[typed].sum()), "typed": float(typed.sum()),
                "extent right": float((said["extent"] == b["extent"])[wide].sum()), "wide": float(wide.sum()),
                "commands whole": float(whole.sum()),
                "decisions whole": float((count_right & (whole | ~there).all(1)).sum())}
         add.update({f"{k} right": float(v[both].sum()) for k, v in right.items()})
         for k, v in add.items():
-            sums[k] = sums.get(k, 0.0) + v
-        centre_err.append(ce[both].float().cpu())
-        place_err.append(pe[placed].float().cpu())
-    ce, pe = torch.cat(centre_err), torch.cat(place_err)
-    c = max(sums["commands said"], 1.0)
-    out = {"count_right": sums["count right"] / sums["decisions"], "commands_said": sums["commands said"] / max(sums["commands"], 1.0),
-           "kind_right": sums["kind right"] / c, "roles_right": sums["roles right"] / c, "radius_right": sums["radius right"] / c,
-           "portion_right": sums["portion right"] / c, "type_right": sums["type right"] / max(sums["typed"], 1.0),
-           "extent_right": sums["extent right"] / max(sums["wide"], 1.0),
-           "centre_elmos_median": _quantile(ce, 0.5), "centre_elmos_p90": _quantile(ce, 0.9),
-           "place_elmos_median": _quantile(pe, 0.5), "place_elmos_p90": _quantile(pe, 0.9),
-           "commands_whole": sums["commands whole"] / max(sums["commands"], 1.0), "decisions_whole": sums["decisions whole"] / sums["decisions"],
-           "kl_nats": sums["kl"] / sums["decisions"]}
-    model.train()
-    model.amp = amp
-    return out
+            self.sums[k] = self.sums.get(k, 0.0) + v
+        self.centre_err.append(ce[both].float().cpu())
+        self.place_err.append(pe[placed].float().cpu())
+
+    def rates(self) -> dict[str, float]:
+        sums = self.sums
+        ce, pe = torch.cat(self.centre_err), torch.cat(self.place_err)
+        c = max(sums["commands said"], 1.0)
+        return {"count_right": sums["count right"] / sums["decisions"], "commands_said": sums["commands said"] / max(sums["commands"], 1.0),
+                "kind_right": sums["kind right"] / c, "roles_right": sums["roles right"] / c, "radius_right": sums["radius right"] / c,
+                "portion_right": sums["portion right"] / c, "type_right": sums["type right"] / max(sums["typed"], 1.0),
+                "extent_right": sums["extent right"] / max(sums["wide"], 1.0),
+                "centre_elmos_median": _quantile(ce, 0.5), "centre_elmos_p90": _quantile(ce, 0.9),
+                "place_elmos_median": _quantile(pe, 0.5), "place_elmos_p90": _quantile(pe, 0.9),
+                "commands_whole": sums["commands whole"] / max(sums["commands"], 1.0), "decisions_whole": sums["decisions whole"] / sums["decisions"]}
 
 
 @torch.no_grad()

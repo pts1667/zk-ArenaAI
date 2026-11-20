@@ -72,6 +72,7 @@ public:
     int slots = 2;                        // teams a game has room for in a step's arrays
     std::vector<int8_t> role_of_type;     // zk_batch_set_roles: each new game's
     bool reveal = true;                   // zk_batch_set_reveal: each new game's
+    bool cover = true;                    // zk_batch_set_cover: whether a step works the map's coverage out
 
     Batch(const Catalog* c, int n, int threads_, int teams) : cat(c), games(size_t(n)), slots(std::clamp(teams, 1, ZK_MAX_TEAMS)) {
         set_threads(threads_);
@@ -267,7 +268,7 @@ private:
             }
             {
                 ZK_PROF(STATS);
-                w.team_stats(t, a.stats + slot * ZK_STATS);
+                w.team_stats(t, a.stats + slot * ZK_STATS, first == t ? nullptr : a.stats + from * ZK_STATS, cover);
             }
             {
                 ZK_PROF(FEATURES);
@@ -702,6 +703,12 @@ void zk_batch_set_roles(void* batch, const int32_t* role_of_type, int n_types) {
     b->role_of_type.assign(role_of_type, role_of_type + n_types);
     for (auto& game : b->games)
         if (game.world) game.world->role_of_type = b->role_of_type;
+}
+
+void zk_batch_set_cover(void* batch, int on) {
+    auto* b = static_cast<Batch*>(batch);
+    b->wait();
+    b->cover = on != 0;
 }
 
 void zk_batch_set_reveal(void* batch, int on) {

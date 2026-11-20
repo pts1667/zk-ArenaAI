@@ -281,8 +281,21 @@ flowchart LR
   the memory as `--size rdnn` has it, and a code head.  The anchor, the plan, every head and the action tokens are
   gone.  What the memory is told of the last decision is its code.  6,414,992 trained parameters (`rdnn`: 9,871,219),
   2,625,536 of them the RDNN.
+* **Since 2026-11-20 the head reads the latents flat, with no attention** (the user, told the layers: "32 -> 256 linear
+  is too small", then "proceed with flat 2048 -> 312 (maybe a few more layers after to pad back to 4.7M)").  The
+  picture above is `--size code-256`, `code-1`'s and `code-2`'s.  `--size code` (`policy_latent.CODE_SIZE`,
+  `Size.reader` "flat") is: the 64 x 32 latents as one row of 2,048 through a linear layer to 312; the memory's vector
+  and what the seat is told (z) added; 5 layers, each x + W2 gelu(W1 LayerNorm(x)) with 1,248 in the middle
+  (`policy_code.Layer`); a LayerNorm and a linear layer to the 128 numbers of the mean.  8,656,576 trained parameters,
+  the reader 4.5M of them (5 layers and their widths are mine).  The frame encoder's 64 tokens come from 64 fixed
+  queries, so a token's place means the same from frame to frame, and the memory and the critics read them flat
+  already.  The memory, the Gaussian and the frozen decoder are as before.
+* **A critic for three terms** (the user, 2026-11-20: "keep only the result and average metal/value critics";
+  `--critics result score economy`): the other twelve terms stay as rewards, each counted over its branch's stretch
+  with nothing for what comes after (that they stay is mine).  03-training.md, "PPO".
 * **It starts as the unit Gaussian**: the mean's last layer is zero and the spread 1.  So an untrained policy plays the
-  last of the checks above, whatever the frame.
+  last of the checks above, whatever the frame.  `--spread-start` gives a run another spread to begin at, and `--init`
+  an actor to begin from ("A cloned start", below).
 * **The spread** is one number for each of the code's 128, the same at every decision, 1 at first and never wider: the
   Gaussian the autoencoder was pulled towards (`LOG_STD_MOST`).  Under GRPO it has no entropy bonus, as the old heads
   had none, so what holds it up is its least.
@@ -343,6 +356,43 @@ two collectors of 48 games on the pool, into a scratch directory):
   commands, ASSIST 12%, PRODUCE 10%, MOVE 8%, BUILD 7%, ATTACK_UNIT and RECLAIM 3% each, the rest about 1% each.
 
 Three iterations say nothing of whether it learns.
+
+## A cloned start (`tools/policy_code_clone.py`; 2026-11-20)
+
+`code-2`'s actor stayed the unit Gaussian for 45.8M decisions.  The user: "start the actor cloned, and start the spread
+below 1."
+
+* **`record`** plays the scripts' games through commands, as `order_data.py` does, in worker processes that each pass
+  the frames through the frozen encoder as the trainer's collectors do.  A decision kept is its frame's latents
+  (float16) and the commands the scripts' advice makes (`selections.encode`, a decision's first 16).  With `--actor`
+  that actor plays, at `--spread`, and the scripts only advise: the labels are then of the states the actor itself
+  reaches, and the code it played is kept for the memory.  `--modes mirror` records every team, `fight` the policy's
+  against the scripts.
+* **`train`** clones an actor on recordings: seats' games side by side, `--length` decisions of each a step, the
+  memory's state carried from step to step (`Streams`).  The loss is the frozen decoder's reconstruction of the advice
+  (`order_vae.reconstruction`: the nats of each field) from the actor's mean with noise of a uniform share of
+  `--spread`, so that what the mean says holds for a draw round it; and `--code-weight` (0.05) of the squared distance
+  to the advice's own code, the autoencoder's mean of it.  It saves the actor with its spread at `--spread` (0.3: a
+  code off by that keeps its kinds, roles and types).  `--init` goes on from an earlier actor.
+* **The trainer starts from it** with `--init OUT/actor.pt` (`INIT` in `launch-code.sh`), the critics from nothing.
+
+**What it gave** (the log, "After `code-2`", has all of it).  On a million decisions of the scripts' own games:
+
+| | By attention (`clone-1`) | Flat (`flat-scripts`) |
+|---|---|---|
+| Nats a decision, held out (in training, with the noise) | 144.4 (122) | 156.7 (135.7) |
+| of them the centres and the places | 56.3, 63.4 | 61.5, 66.8 |
+| The kind right, the roles, the type | 70%, 46%, 4% | 70%, 42%, 3% |
+| A centre's and a place's median distance, elmos | 631, 720 | 804, 844 |
+| Decisions right in everything | 12.7% | 6.6% |
+| By play: the score, extractors at 6 minutes (codes at random: 0.155, 2.2) | 0.157 to 0.162, 2.8 to 3.0 | 0.153 to 0.155, 2.0 |
+
+* **Neither plays better than codes drawn at random**, and `clone-1` the same at a spread of 0.1 and 0.01.  It says
+  FIGHT for 93% of its commands where the advice is 59% (BUILD 7%, ASSIST 14%, PRODUCE 8%).
+* **A cloned actor needs other rates than `launch-code.sh`'s**: at 2e-3 x 0.15 its first updates had a KL of 102 and
+  326.  Those are for an actor whose last layer starts at zero, where a step moves the mean little.
+* **Not tried**: a round of the clone's own play with the scripts advising, which labels an idle factory at every look
+  until it's told, where the scripts' own games show that order once.
 
 ## What it can't do, and what may go wrong
 

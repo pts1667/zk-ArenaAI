@@ -60,6 +60,9 @@ Each selected unit obeys if the command is legal for it by the frame's own masks
 otherwise keeps what it's doing, as a player's units ignore a command they haven't got.  So the commit lock and "a build
 sticks" hold with no rule of their own here: a unit on a build obeys only the cancel.
 
+The same in C++ since 2026-11-20 (`zkpolicy.decode_commands`, libzkpolicy's `zkp_decode_commands`), the same orders to
+the bit, for the trainer's collectors and the bot to come; the Python here is the reference.
+
 | Kind | What a selection of several does |
 |---|---|
 | MOVE, FIGHT | each goes to the place.  Where there's no way, as near as a straight line gets (the sim's, and what the scripts' own orders rely on) |

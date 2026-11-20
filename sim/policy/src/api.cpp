@@ -122,6 +122,13 @@ int64_t zkp_decode(const void* table, const void* bundle, const zkp_tensors* t, 
     return got;
 }
 
+int64_t zkp_decode_commands(const void* table, const void* bundle, const zkp_tensors* t, const void* commands, int64_t n, zkp_order* out) {
+    std::vector<Order> orders;
+    const int64_t got = decode_commands(*static_cast<const Table*>(table), *static_cast<const Bundle*>(bundle), view(t), commands, n, orders);
+    if (got > 0) std::memcpy(out, orders.data(), sizeof(Order) * size_t(got));
+    return got;
+}
+
 int64_t zkp_encode(const void* table, const void* bundle, const zkp_tensors* t, const zkp_order* orders, int64_t n, int64_t* decision) {
     return encode(*static_cast<const Table*>(table), view(t), *static_cast<const Bundle*>(bundle), reinterpret_cast<const Order*>(orders), n,
                   decision);

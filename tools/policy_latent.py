@@ -98,7 +98,9 @@ class Size:
     reads the frame (the module's notes).
     coder: the order autoencoder's file (order_vae.py), for an actor that chooses its code and reads no unit
     (policy_code.CodeActor, which `make` then gives): `layers` blocks among the frame's latents, `plan_layers` in which the
-    code's queries read them, and the memory as here."""
+    code's queries read them, and the memory as here.
+    reader: how that actor reads the frame's latents: "tokens", by attention as above, or "flat", all of them through one
+    linear layer and `layers` plain layers after it (policy_code.Layer), with no attention."""
     d: int = 256
     heads: int = 8
     layers: int = 4
@@ -108,6 +110,7 @@ class Size:
     memory: str = "gru"         # the GRU itself in every actor with one before the RDNN, the same
     memory_as: str = "tokens"   # tokens in every actor with a memory before 2026-11-17 21:00, the same
     coder: str = ""             # none in any actor before 2026-11-19, the same
+    reader: str = "tokens"      # by attention in every actor that chooses a code before 2026-11-20, the same
 
 
 SIZE = Size()               # the user's, 2026-11-09: about 10M trained parameters (it was d 128, 4 heads, 2 and 2: 1.9M)
@@ -116,10 +119,15 @@ WIDE = Size(384, 12, 4, 4, 2)   # the user's, 2026-11-14: 1.5x as wide, and two 
 GRU = Size(256, 8, 1, 2, 0, 1024)   # the user's, 2026-11-17: a GRU for memory and a plan of half the depth, for RL from nothing
 # The user's, 2026-11-17: as GRU, with an RDNN of 1,024 units in the GRU's place (arXiv 2608.01947), its state told as a vector.
 RDNN = Size(256, 8, 1, 2, 0, 2048, "rdnn", "vector")
-# The user's, 2026-11-19: as RDNN, choosing the order autoencoder's code and reading no unit (policy_code.py).
+# The user's, 2026-11-19: as RDNN, choosing the order autoencoder's code and reading no unit (policy_code.py).  code-1 and
+# code-2 had it, and "code-256" still names it.
 ORDER_CODER = "/mnt/d/zk-learned/orders/vae-3/order-vae.pt"
-CODE_SIZE = Size(256, 8, 1, 2, 0, 2048, "rdnn", "vector", ORDER_CODER)
-SIZES = {"default": SIZE, "small": SMALL, "wide": WIDE, "gru": GRU, "rdnn": RDNN, "code": CODE_SIZE}
+CODE_256 = Size(256, 8, 1, 2, 0, 2048, "rdnn", "vector", ORDER_CODER)
+# The user's, 2026-11-20, told its layers ("32 -> 256 linear is too small", then of reading the latents as tokens at
+# all): "proceed with flat 2048 -> 312 (maybe a few more layers after to pad back to 4.7M)".  The latents flat through a
+# linear layer to 312, then 5 plain layers (mine: the nearest to 4.7M, at 4.5M with the first), and no attention.
+CODE_SIZE = Size(312, 8, 5, 0, 0, 2048, "rdnn", "vector", ORDER_CODER, "flat")
+SIZES = {"default": SIZE, "small": SMALL, "wide": WIDE, "gru": GRU, "rdnn": RDNN, "code": CODE_SIZE, "code-256": CODE_256}
 
 
 RDNN_RATE = -2.2            # an RDNNCell's rates at first, before the sigmoid: a tenth of the way to its drive a decision (the paper's; their spread of 1 is mine)

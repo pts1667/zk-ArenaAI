@@ -21,7 +21,7 @@ sys.path.insert(0, str(ROOT / "py"))
 sys.path.insert(0, str(ROOT.parent / "bots"))
 import zknav  # noqa: E402
 from zkbot.policy import rawframe  # noqa: E402
-ABI_VERSION = 32
+ABI_VERSION = 33
 RECLAIM_RADIUS = 32.0       # capi.h ZK_RECLAIM_RADIUS
 WARD_TARGETS = 4
 MAX_MOUNTS = 8
@@ -211,6 +211,7 @@ def _load_library() -> ct.CDLL:
     lib.zk_world_chickens.argtypes = [vp, it, it]
     lib.zk_world_chicken_state.argtypes = [cvp, fp]
     lib.zk_batch_set_reveal.argtypes = [vp, it]
+    lib.zk_batch_set_cover.argtypes = [vp, it]
     lib.zk_batch_chickens.argtypes = [vp, it, it, it]
     lib.zk_batch_chicken_state.argtypes = [cvp, it, fp]
     lib.zk_batch_new.restype = vp
@@ -857,6 +858,11 @@ class Batch:
             _lib.zk_batch_chickens(self.handle, game, int(chickens[0]), _difficulty(chickens[1]))
         if sites is not None:
             self.sites[game] = sites
+
+    def set_cover(self, on: bool) -> None:
+        """Whether a step works out the map's coverage (`stats`' sight and radar shares) or gives them as they last were
+        (zk_batch_set_cover), from the next step on."""
+        _lib.zk_batch_set_cover(self.handle, int(on))
 
     def set_reveal(self, on: bool) -> None:
         """game_over.lua's reveal rule (World.set_reveal) in every game, now and after any reset."""

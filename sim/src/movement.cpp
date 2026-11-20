@@ -19,6 +19,10 @@ constexpr float LINE_STEP = WALK_LINE_STEP;
 constexpr float SLOW_TURN_ANGLE = PI * 0.5f;  // unitdefs_post.lua: turnInPlaceAngleLimit 90
 constexpr float SEPARATION_MARGIN = 64.0f;    // the largest footprint radius of a neighbour, near enough
 constexpr float SEPARATION_SHARE = 0.5f;
+// Two that overlap by this much or less are let be (the user, 2026-11-20: "It should be fine to proceed with a ~5 elmo
+// tolerance"); past it they're pushed clear of each other, as before.  Pushed for any overlap at all, the units of a standing
+// crowd shuffled for good: two in five of those separate looked at were moved every tick, nearly all by under an elmo.
+constexpr float SEPARATION_SLACK = 5.0f;
 constexpr float MIN_TERRAIN_SPEED = 0.05f;    // a unit pushed onto a cliff can still walk off it
 constexpr int ROUTE_LOOKAHEAD = 4;            // segments ahead a unit looks for a clear line, to cut corners
 constexpr int STUCK_WINDOW_TICKS = 18;         // 3 s
@@ -72,6 +76,7 @@ bool line_free(const Map& m, int cls, float x0, float z0, float x1, float z1) {
 
 // The places, from `from` up to `to`, of those a unit at (ux, uz) with this footprint overlaps, and isn't right on top of: in
 // order, into `out`, which has room for them all.  Four at a time where the processor has it: the same sums, so the same answers.
+// The footprint is the caller's to shorten (SEPARATION_SLACK), so what it reaches with a small neighbour's may be nothing.
 int overlapping(const float* sx, const float* sz, const float* radius, int from, int to, float ux, float uz, float footprint, int* out) {
     int n = 0, i = from;
 #ifdef __SSE2__
@@ -79,13 +84,13 @@ int overlapping(const float* sx, const float* sz, const float* radius, int from,
     for (; i + 4 <= to; i += 4) {
         const __m128 dx = _mm_sub_ps(vx, _mm_loadu_ps(sx + i)), dz = _mm_sub_ps(vz, _mm_loadu_ps(sz + i));
         const __m128 d2 = _mm_add_ps(_mm_mul_ps(dx, dx), _mm_mul_ps(dz, dz));
-        const __m128 reach = _mm_add_ps(vf, _mm_loadu_ps(radius + i));
+        const __m128 reach = _mm_max_ps(_mm_add_ps(vf, _mm_loadu_ps(radius + i)), _mm_setzero_ps());
         int hits = _mm_movemask_ps(_mm_and_ps(_mm_cmplt_ps(d2, _mm_mul_ps(reach, reach)), _mm_cmpge_ps(d2, least)));
         for (; hits; hits &= hits - 1) out[n++] = i + __builtin_ctz(unsigned(hits));
     }
 #endif
     for (; i < to; ++i) {
-        const float dx = ux - sx[i], dz = uz - sz[i], d2 = dx * dx + dz * dz, reach = footprint + radius[i];
+        const float dx = ux - sx[i], dz = uz - sz[i], d2 = dx * dx + dz * dz, reach = std::max(footprint + radius[i], 0.0f);
         if (d2 < reach * reach && d2 >= 0.0001f) out[n++] = i;
     }
     return n;
@@ -536,6 +541,23 @@ void World::separate() {
     sep_z.resize(slots);
     sep_radius.resize(slots);
     sep_share.resize(slots);
+    // Most units stand among units that stand, tick after tick, and a turn here leaves one as it is: it overlaps no one by
+    // more than is let be, or is pushed nowhere it can stand.  What a turn does goes by where the unit is, its type, and the
+    // units of the cells it looks through as they are when the turn comes.  So a unit left as it was has no turn until it
+    // has moved or one of those cells has stirred: a unit of the cell that's anywhere or anything it wasn't, has come, or
+    // has gone.  Each stir takes the next number, a cell keeps its last one's, and a unit that of the last before its turn.
+    // The same numbers as giving every unit its turn, to the bit (2026-11-20).
+    if (sep_seen.size() < size_t(count())) {
+        sep_seen.resize(size_t(count()));
+        sep_rest.resize(size_t(count()));
+    }
+    if (sep_stir.size() != cells) {
+        sep_stir.assign(cells, 0);
+        sep_last.clear();
+        for (SepSeen& seen : sep_seen) seen.pass = -1;
+        for (SepRest& rest : sep_rest) rest.since = -1;
+    }
+    ++sep_pass;
     for (size_t i = 0; i < slots; ++i) {
         const int o = cell_units[i];
         const auto& od = type_of(o);
@@ -544,16 +566,43 @@ void World::separate() {
         sep_z[i] = z[size_t(o)];
         sep_radius[i] = od.footprint_radius;
         sep_share[i] = (od.flags & ZK_U_MOBILE) ? SEPARATION_SHARE : 1.0f;
+        const int32_t cell = int32_t(size_t(unit_key[size_t(o)]) % cells);
+        SepSeen& seen = sep_seen[size_t(o)];
+        const bool was_here = seen.pass == sep_pass - 1;
+        if (!was_here || seen.cell != cell || !same_bits(seen.x, sep_x[i]) || !same_bits(seen.z, sep_z[i]) || !same_bits(seen.radius, sep_radius[i]) ||
+            !same_bits(seen.share, sep_share[i])) {
+            if (was_here && seen.cell != cell) sep_stir[size_t(seen.cell)] = ++sep_stirs;       // gone from that one
+            sep_stir[size_t(cell)] = ++sep_stirs;
+            seen.x = sep_x[i];
+            seen.z = sep_z[i];
+            seen.radius = sep_radius[i];
+            seen.share = sep_share[i];
+            seen.cell = cell;
+        }
+        seen.pass = sep_pass;
     }
+    // Those the last pass had and this one hasn't have gone from their cells: the dead, and what's been picked up.
+    for (const int o : sep_last)
+        if (sep_seen[size_t(o)].pass != sep_pass) sep_stir[size_t(sep_seen[size_t(o)].cell)] = ++sep_stirs;
+    sep_last.assign(cell_units.begin(), cell_units.end());
     for (size_t k = 0, n = live.size(); k < n; ++k) {
         const int u = live[k];
         if (!alive[size_t(u)]) continue;
         const auto& d = type_of(u);
         if (!(d.flags & ZK_U_MOBILE) || (d.flags & ZK_U_AIR) || jump[size_t(u)].flying || carrier[size_t(u)] >= 0) continue;
-        // Those it overlaps, of all in the cells round it: each allyteam's in each row of cells is one stretch of the grid.  The
-        // unit itself is no distance away, and goes with what's too near to tell a direction from.
+        // Those it overlaps by more than is let be, of all in the cells round it: each allyteam's in each row of cells is one
+        // stretch of the grid.  The unit itself is no distance away, and goes with what's too near to tell a direction from.
         const float ux = x[size_t(u)], uz = z[size_t(u)];
         const CellBox b = cell_box(ux, uz, d.footprint_radius + SEPARATION_MARGIN);
+        SepRest& rest = sep_rest[size_t(u)];
+        if (rest.since >= 0 && rest.type == int32_t(type[size_t(u)]) && same_bits(ux, rest.x) && same_bits(uz, rest.z)) {
+            bool stirred = false;
+            for (int gz = b.z0; gz <= b.z1; ++gz)
+                for (int gx = b.x0; gx <= b.x1; ++gx) stirred = stirred || sep_stir[size_t(gz) * size_t(grid_cols) + size_t(gx)] > rest.since;
+            if (!stirred) continue;
+        }
+        // Left as it is, unless the turn ends with it moved.
+        rest = {sep_stirs, ux, uz, int32_t(type[size_t(u)])};
         int hits = 0, hit_allies = 0;
         for (int gz = b.z0; gz <= b.z1; ++gz)
             for (int s = 0; s < n_allies; ++s) {
@@ -561,7 +610,8 @@ void World::separate() {
                 const int from = cell_start[row + size_t(b.x0)], to = cell_start[row + size_t(b.x1) + 1];
                 if (from == to) continue;
                 sep_hits.resize(size_t(hits + to - from));
-                const int found = overlapping(sep_x.data(), sep_z.data(), sep_radius.data(), from, to, ux, uz, d.footprint_radius, sep_hits.data() + hits);
+                const int found = overlapping(sep_x.data(), sep_z.data(), sep_radius.data(), from, to, ux, uz, d.footprint_radius - SEPARATION_SLACK,
+                                              sep_hits.data() + hits);
                 if (found) hit_allies |= 1 << s;
                 hits += found;
             }
@@ -588,13 +638,19 @@ void World::separate() {
         if (push_x == 0.0f && push_z == 0.0f) continue;
         const float nx = std::clamp(x[size_t(u)] + push_x, 0.0f, map->width() - 1.0f);
         const float nz = std::clamp(z[size_t(u)] + push_z, 0.0f, map->depth() - 1.0f);
+        // Pushed by less than its place can hold: where it is.
+        if (same_bits(nx, ux) && same_bits(nz, uz)) continue;
         if (d.move_class < 0 || Map::bit(map->stand_bits(d.move_class), size_t(map->cell_index(nx, nz)))) {
             x[size_t(u)] = nx;
             z[size_t(u)] = nz;
-            // Later units are pushed from where this one is now.
+            rest.since = -1;
+            // Later units are pushed from where this one is now: a stir in its cell.
             if (const int slot = grid_slot[size_t(u)]; slot >= 0) {
                 sep_x[size_t(slot)] = nx;
                 sep_z[size_t(slot)] = nz;
+                sep_stir[size_t(unit_key[size_t(u)]) % cells] = ++sep_stirs;
+                sep_seen[size_t(u)].x = nx;
+                sep_seen[size_t(u)].z = nz;
             }
         }
     }

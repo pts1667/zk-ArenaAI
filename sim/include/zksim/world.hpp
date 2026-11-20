@@ -534,6 +534,26 @@ struct World {
     // unit is, its footprint, and how much of an overlap with it a neighbour takes.
     std::vector<int> grid_slot;
     std::vector<float> sep_x, sep_z, sep_radius, sep_share;
+    // What separate keeps from tick to tick, so that a unit its turn would leave as it is has no turn (movement.cpp).  By
+    // unit: what its place in the grid said of it at the last pass that had it (sep_seen), and what it was when a turn last
+    // left it as it was, with the number of the last stir before that turn (sep_rest; since -1: its turn moved it).  By cell
+    // of the map: the number of its last stir (sep_stir), a stir being a unit of the cell that's anywhere or anything it
+    // wasn't, has come, or has gone; the numbers go up.  sep_last: the units of the last pass's grid.
+    struct SepSeen {
+        float x = NAN, z = NAN, radius = NAN, share = NAN;
+        int32_t cell = -1, pass = -1;
+    };
+    struct SepRest {
+        int64_t since = -1;
+        float x = NAN, z = NAN;
+        int32_t type = -1;
+    };
+    std::vector<SepSeen> sep_seen;
+    std::vector<SepRest> sep_rest;
+    std::vector<int64_t> sep_stir;
+    std::vector<int> sep_last;
+    int64_t sep_stirs = 0;
+    int32_t sep_pass = 0;
     size_t grid_cells() const { return size_t(grid_cols) * size_t(grid_rows); }
     std::vector<uint8_t> scratch_seen;     // per unit or wreck, for a sweep that marks what's in sight
     // What a tick settles for every unit before it lets any of them act, so that it's nothing to a unit which were made before it:
@@ -576,11 +596,26 @@ struct World {
     // comes after an allyteam's own units is the same for each of its teams, and is copied from it.
     int emit_view(int team, UnitRecord* out, int cap, float* glob, int commander, const float* base, const UnitRecord* ally_frame = nullptr,
                   int ally_count = 0);
-    void team_stats(int team, float* out) const;
+    // ally: the stats this call's world has just written for another team of the same allyteam, or none: its [7] and [8]
+    // are this team's too, and are copied.  fresh: whether [7] and [8] are worked out now (coverage) or are as they were
+    // last worked out (cover_kept): the first time they're worked out either way.
+    void team_stats(int team, float* out, const float* ally = nullptr, bool fresh = true) const;
+    mutable std::vector<float> cover_kept;      // by allyteam: its sight and its scan as last worked out
+    mutable std::vector<uint8_t> cover_have;    // ... and whether they have been
     // A mobile, armed unit that isn't a commander, a builder or a missile (capi.h ZK_STATS [9] and [10]).
     bool army(int u) const;
     // The share of the map allyteam s has in sight and in radar (capi.h ZK_STATS [7] and [8]).
     void coverage(int s, float& sight, float& scan) const;
+    // What coverage keeps of a unit between calls: where it stood and how far it saw when its rows were last worked out, and
+    // where those rows are in cover_runs (four numbers a row from r0 on: the first and last cell of the sight's run, then of
+    // the radar's; a last before its first for none).  Most units stand where they stood a step ago: the buildings, and
+    // whatever has nowhere to go.
+    struct Covered {
+        float x = NAN, z = NAN, los = 0.0f, radar = 0.0f;
+        int at = -1, r0 = 0, rows = 0, room = 0;
+    };
+    mutable std::vector<Covered> covered;       // by unit
+    mutable std::vector<int16_t> cover_runs;
     void rebuild_index() { rebuild_grid(); }
     const zk_type_rec& type_of(int u) const { return cat->types[size_t(type[size_t(u)])]; }
     // What's carried is stunned too, as in the engine (CUnit::SetStunned on loading): it does nothing until it's let go.

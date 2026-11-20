@@ -1,6 +1,6 @@
 # zk-ArenaAI, the learned policy: where it stands
 
-Updated 2026-11-19.  Branch `gru-memory`; `main` and `learned-policy-plan` are at `1d80deb`.  The user says when to
+Updated 2026-11-20.  Branch `gru-memory`; `main` and `learned-policy-plan` are at `1d80deb`.  The user says when to
 commit.  Repo: `C:/Users/Thoma/Documents/sources/zk-ArenaAI`.
 
 The current state only, kept small (the user, 2026-11-19).  Elsewhere:
@@ -20,14 +20,17 @@ RL from nothing, against itself, with a recurrent memory.
   rules bot that was there is at the tag `rules-bot-final` (local only).
 * **No policy beats the scripts.**  From nothing: `gru-1` won 3 of 128 1v1s against the script at iteration 1250 (the
   score 0.184 from 0.148), `rdnn-3` 1 of 128 at 1000 (0.166 from 0.151) and `rdnn-5` 2 of 128 at 750 (0.171 from
-  0.144), each with 2.5 to 3 extractors at 6 minutes for the script's 10 or 11.  From a clone: 8-17% of test games won
+  0.144), each with 2.5 to 3 extractors at 6 minutes for the script's 10 or 11; the actor that chooses a code none of
+  128 at 2250 (`code-2`: 0.153 from 0.155, no change in six hours).  From a clone: 8-17% of test games won
   after DAgger (`full-2` to `full-4`) with about half the script's extractors, and no RL stage moved that beyond noise.
 * **In the sim** (01-simulator.md) every team plays a scripted opening; the C++ economy script or the policy runs its
   constructors, and the C++ army script or the policy the rest.  Four kinds of game (1v1s, team games of 2 to 4 a side,
   free-for-alls of 3 to 8, chicken defense), each on the pool maps that hold it (404 maps, 31 held out), for up to 80
-  minutes.  The libraries: libzksim ABI 32, libzkscripts 17, libzkrecord 2, libzkpolicy 4.
+  minutes.  The libraries: libzksim ABI 33, libzkscripts 17, libzkrecord 2, libzkpolicy 5.
 * **A test compares only with tests on the same sim and script.**  Against the script as it is since 2026-11-18:
-  `rdnn-1`'s test at 500 and all of `rdnn-2`'s to `rdnn-5`'s.  Every earlier one was against a richer script.
+  `rdnn-1`'s test at 500 and all of `rdnn-2`'s to `rdnn-5`'s.  Every earlier one was against a richer script.  And
+  since 2026-11-20 the sim itself plays every game differently (a tolerance in the separation, below): no test has
+  been made on it as it is.
 * **Since 2026-11-18** (the user; the log, "What changed under the runs"): one extractor a spot in the scripts and the
   opening, and frames that say who holds each spot (`SimEnv.site_status`; 01-simulator.md, "Known gaps"); nothing a
   seat only remembers among what the nets read, the actor's own memory keeping what it saw (02-policy.md, "Nothing
@@ -54,6 +57,25 @@ RL from nothing, against itself, with a recurrent memory.
   * *The actor that chooses its code* (`tools/policy_code.py`, `policy_train.py --size code`; docs/model.md, "An
     actor that chooses a code"): the frame's latents, the RDNN and a Gaussian over the code.  It reads no unit, and
     its update featurizes no frame.
+* **Since 2026-11-20** (the user; no run has had any of it; the log, "After `code-2`"):
+  * *The code actor reads the latents flat* (`policy_latent.CODE_SIZE`, `Size.reader`): all 2,048 numbers through a
+    linear layer to 312, the memory's vector added, 5 plain layers and a linear layer to the code's mean; 8.66M
+    trained parameters.  `--size code-256` is the reader by attention, `code-1`'s and `code-2`'s.
+  * *Critics for the result, the value and the income alone* (`--critics result score economy`, the launch file's
+    default): the other twelve terms stay as rewards, each judged on its branch's stretch (that they stay is mine).
+  * *A cloned start* (`tools/policy_code_clone.py`; the trainer's `--init` and `--spread-start`): the scripts' advice
+    recorded with the frames' latents, and an actor cloned on it.  It plays like codes drawn at random, and its first
+    updates in the trainer burst ("Since it", below).  The user, after: "skip and ignore cloned starts; it appears
+    they don't do much".  The tool stays; nothing is planned on it.
+  * *The sim's map coverage* (`World::coverage`) costs half what it did, to the same numbers, and is worked out once a
+    decision, at its last step, where decisions are aligned (`zk_batch_set_cover`, libzksim ABI 33;
+    `SimEnv.cover_every_step` for every step): the map term's change lands there.
+  * *A tolerance in the separation* (`SEPARATION_SLACK`, `sim/src/movement.cpp`; 01-simulator.md, "Movement"): two
+    units that overlap by 5 elmos or less are let be, where a standing crowd shuffled for good; and a unit the
+    separation would leave as it is has no turn in it, to the same numbers as with one.  **Every game plays
+    differently from before it.**
+  * *Commands into orders in C++* (`zkp_decode_commands`, libzkpolicy ABI 5; `zkpolicy.decode_commands`):
+    `selections.decode` bit for bit, which the trainer's collectors now call; the Python stays the reference.
 * **The actor** (`tools/policy_latent.py`, `policy_train.py --size rdnn`; docs/model.md, "An RDNN in the GRU's place"):
   `full-4`'s frozen frame encoder, then a recurrent divisive normalization network of 1,024 units (arXiv 2608.01947)
   whose state is all a seat keeps, told to the rest as one vector.  It decides every 3 s, as actions one after another:
@@ -66,27 +88,69 @@ RL from nothing, against itself, with a recurrent memory.
   dashboard at `http://localhost:8765`) isn't the current path.  It last ran as `full-4`, whose encoder every run since
   reads.
 
-## A run is going: `code-2`, a 6-hour trial of the code actor with 6 collectors, to 2026-11-20 00:17
+## No run is going.  The last: `code-2`, six hours of the code actor with 6 collectors, to iteration 2368
 
 **`code-2`** (the user, 2026-11-19: "stop the current training run and start a new one, from iteration 0", then "try
-6-8 collectors", then "skip 8 collectors"; started 18:17 by `results/start-code.sh 6`): `code-1` again, the actor that
-chooses the order autoencoder's code on `vae-3`, from nothing with `rdnn-5`'s flags (`results/launch-code.sh`), with 6
-collectors of 16 games and the collector as it is since ("A faster collector", the log).  Under
-`/mnt/d/zk-learned/runs/code-2` (`ppo/` with a checkpoint every 50 iterations, `logs/ppo.out`, `replays/`, `end`,
-`begin`, `spread-floor`), its dashboard at `http://localhost:8765`.
+6-8 collectors", then "skip 8 collectors"; 2026-11-19 18:17 to 2026-11-20 00:50, ended by its hours): `code-1` again,
+the actor that chooses the order autoencoder's code on `vae-3`, from nothing with `rdnn-5`'s flags
+(`results/launch-code.sh`), with 6 collectors of 16 games and the collector as it is since ("A faster collector", the
+log).  Under `/mnt/d/zk-learned/runs/code-2` (16 GB: `ppo/` with `ckpt/it-002368.pt` and one every 50 iterations,
+`logs/ppo.out`, `replays/`).  The log has its tests, every check and what happened in it.
 
-* **Its rate** was 2,650 decisions a second in its first 9 iterations (collecting 3,350, training 3,780).  In checks
-  from `code-1`'s last checkpoint at the same iterations: 1,480 with the collector as it was and 2 collectors, 1,920
-  as it is now, 2,640 with 4 and 3,060 with 6.  A run's rate falls as its games grow old (`code-1` to five sixths).
-* **Its card and memory**: `--collector-gb 0.8 --gpu-share 0.76` (mine: a collector's process costs the card 0.4 GB
-  before its cap); a collector holds 0.23 GB and the learner 1.35, the card 4.9 GB in all, WSL 26 GB to spare.
-* **Its spread's least** falls from 0.1 to 0.03 over its six hours, by the clock (`--spread-floor 0:0.1 6:0.03
-  --spread-floor-began`).
-* **Its test at iteration 0**: no win of 128, the score 0.155, 2.2 extractors at 6 minutes for the script's 10.3.
-  Tests every 250 iterations; the log has them, and each hourly check (`code-2`).
-* **Its hourly check** is a cron job in the session that started it (`results/code-status.sh`,
-  `results/code_terms.py 5`, and D:'s free space: a checkpoint is 0.39 GB and D: had 44 GB); its watchdog and memory
-  guard are up.  `results/stop-code.sh` stops it and waits, `results/resume-code.sh` carries it on to its `end`.
+* **It didn't learn.**  The score against the script 0.155 at iteration 0, then 0.163, 0.166, 0.161, 0.162, 0.168,
+  0.158, 0.165, 0.154 and 0.153 at 250 to 2250, with 0 to 2 wins of 128 and 2.1 to 2.6 extractors at 6 minutes for the
+  script's 10: never past 1.7 SE of iteration 0's, and 0.6 SE under it at the end.  `rdnn-5` had 0.144, 0.160, 0.159
+  and 0.171 to 750 (+4.3 SE), and was ahead at 750 in the games they share.
+* **Its actor is where it began**: over 45.8M decisions the code's spread went from 1.000 to 0.974 (its least number
+  0.888) and its mean's size from 0.012 to 0.039, so it played codes drawn almost from the unit Gaussian throughout
+  (codes drawn at random scored 0.165 in the check by play), 1.8 commands a decision and 0.7 to 0.8 units told with
+  no trend.  The floor (0.1 to 0.03) never came near the spread.  The critics learnt (explained variance 0.85 for the
+  result, 0.8 to 0.9 for the economy and the leads).
+* **Its rate**: 2,020 to 2,580 decisions a second by the trainer's clock (collecting 2,050 to 2,700, training 3,700 to
+  3,950), which is 1,950 by the wall clock with its tests, 362 iterations an hour; `code-1` made 1,230 by the
+  trainer's.  In checks from `code-1`'s last checkpoint at the same iterations: 1,480 with the collector as it was
+  and 2 collectors, 1,920 as it is now, 2,640 with 4 and 3,060 with 6.
+* **Nothing broke with 6 collectors** (`--collector-gb 0.8 --gpu-share 0.76`, mine): a collector held up to 0.43 GB of
+  the card and the learner 1.34, the card 5.9 GB at most, WSL 23 GB to spare at the least.
+* **It ended 33 minutes late**, by itself: a trainer's hours and rates go by WSL's time since boot, which ran at 0.931
+  of the wall clock ("Traps").
+
+### Since it (2026-11-20): a cloned start, a flat reader, and the collectors' time; no run
+
+The log has the numbers, "After `code-2`".
+
+* **A clone of the scripts' advice plays like codes drawn at random.**  On a million decisions of the scripts' own
+  games (`code-clone/scripts-1`): by attention (`clone-1`) 144.4 nats a decision held out, the kind right 70% and the
+  roles 46%, places 630 to 720 elmos off; flat (`flat-scripts`) 156.7, 42% and 800.  By play either scores 0.15 to
+  0.16 with 2 to 3 extractors at 6 minutes for the script's 11, at a spread of 0.3, 0.1 or 0.01 alike: 93% of what it
+  says is FIGHT, where the advice is 59%.  As I read it the scripts tell a factory or a constructor once, when it's
+  idle, which the clone can't time; a recording of the clone's own play with the scripts advising (`record --actor`)
+  is built and not made (the user: "You can probably skip the second recording").
+* **A cloned actor's first updates burst**: the KL 102 and 326 at iterations 11 and 12 of a smoke at the launch file's
+  rates (2e-3 x 0.15, for an actor whose last layer starts at zero).  No lower rate tried.
+* **With an army that moves, the sim is over half a collector's time** (the flat clone, frozen; py-spy at iteration 10):
+  the sim's step 54%, the pass 16%, the Python after a step 11%, commands into orders 5%, the scripts 4%.  The rate
+  falls with the games' age, 3,200 to 3,800 decisions a second at iterations 1 to 3 and 1,000 to 1,300 at 10 and 11
+  (`code-2`, whose codes moved little: 2,700), the sim's step costing 0.6 ms a decision in games to 19 minutes and 2.5
+  in games to 75.  A third of the step was the map's coverage for the reward, now half that with the same numbers:
+  1,830 to 1,880 decisions a second over iterations 4 to 11 for 1,618.  More sim threads and a pass that sleeps for
+  the card made no difference: the 8 cores are busy, at 5.1 ms of CPU a decision (`collector_cpu_ms`).
+* **Of what the user asked for** ("proceed with moving glue to C++, one inference process and see if you can optimize
+  the policy pass"): the commands' decoding is in C++ (4.84 ms of CPU a decision for 5.06).  The Python after a step
+  (about 6% of a collector's CPU) and one inference process (under 5%, as I expect) aren't done and aren't to be (the
+  user, of both: "OK, skip both").
+* **The user's answers after that** (2026-11-20; the log, "The coverage once a decision, and a crowd that rests"):
+  * *The coverage once a decision* ("sounds fine, proceed"): 2,019 decisions a second collecting, 4.47 ms of CPU.
+  * *Of shorter games*: "consider ways to reduce the overhead of frames that are largely the same across time".  An
+    old game's step was 27.5% the units' separation, and nothing exact rests a standing crowd, because it isn't
+    standing: two in five of its units were pushed to a new place every tick, nearly all by under an elmo.  With a
+    tolerance (the user: "It should be fine to proceed with a ~5 elmo tolerance") it rests: 2,155 decisions a second
+    collecting, 4.01 ms of CPU, and the sim's step 1.54 ms a seat's decision in games to 75 minutes for 1.74 (2.48
+    before the day's work).
+  * *Cloned starts*: "skip and ignore cloned starts; it appears they don't do much".
+* **The collectors over the day** (`bench-clone.sh`: iterations 4 to 11, the frozen flat clone): 1,618 decisions a
+  second collecting, then 1,850 (the coverage cheaper), 1,889 (the decoding in C++), 2,019 (the coverage once a
+  decision) and 2,155 (the tolerance).
 
 ### Before it: `code-1`, stopped at iteration 252
 
@@ -162,7 +226,8 @@ defaults.  The log has its tests, every check and what was seen.
   `end`, 2026-11-20 01:55, starts every game anew and no watcher; carried on, it would play by the new rule, its
   kinds being the code's), or a new directory's name in `results/*rdnn*` and
   `results/start-rdnn.sh HOURS`.  For the code actor: `results/start-code.sh HOURS` starts
-  `/mnt/d/zk-learned/runs/code-2` (`results/launch-code.sh` has the trainer's flags, `rdnn-5`'s with `--size code`
+  `/mnt/d/zk-learned/runs/code-2`, which has a run now: first a new directory's name in `results/*code*`
+  (`results/launch-code.sh` has the trainer's flags, `rdnn-5`'s with `--size code`
   and 6 collectors;
   `CODER` gives another autoencoder), with `code-status.sh`, `code_terms.py N`, `stop-code.sh`, `resume-code.sh`,
   `kill-code.sh` and its watchdog and memory log, each the `rdnn` run's under a `code` name; `code-1` and `code-2` are the
@@ -180,8 +245,11 @@ defaults.  The log has its tests, every check and what was seen.
   remembered buildings as tokens, which the featurizer no longer makes.  Nothing trained before 10 loads.
 * **`policy_latent.ENCODER` still names `encoder-big`**, which doesn't load: every tool that loads an actor needs
   `--encoder` (`policy_train.py`: `--latent-encoder`), `/mnt/d/zk-learned/runs/full-4/encoder/vae-last.pt`.
-* **Recorded games** are raw and still read: `clone/army-8` (data version 7, every kind of game).  But they're by the
-  scripts before one extractor a spot, and their frames read every spot free.
+* **No recorded games are left**: `clone/army-8` went with the old data on 2026-11-20 (the user).  The cloning
+  pipeline, the frame encoder's training and `policy_parity.py corpus` each need a recording made first.
+* **Each run on D: has its last checkpoint only** (the same clean-up): none can be tested at an earlier iteration.
+* **A code actor's file says its reader**: `code-1`'s and `code-2`'s checkpoints and `clone-1` are by attention
+  (`--size code-256`); a new one is flat.  A checkpoint also says which terms its critics are for.
 * A run carried on with other reward terms keeps the critics of those it had, by name; the new ones start from nothing
   while the actor waits 10 iterations.
 * **The order autoencoder** (`/mnt/d/zk-learned/orders/vae-3/order-vae.pt`, `policy_latent.ORDER_CODER`) is of the
@@ -205,15 +273,16 @@ defaults.  The log has its tests, every check and what was seen.
 * **`sim/data/rules.json`** is made by `tools/sim_rules.py`, which needs `lupa`: it's only in `~/zksim/agent-maps-lupa`
   (add it to `PYTHONPATH`), not in `~/zkml`.  **`sim/data/maps`** is gitignored: after a pull,
   `python tools/sim_data.py maps`.
-* **Data on D:**, outside git, under `/mnt/d/zk-learned` (44 GB free on 2026-11-19, before `code-2`'s checkpoints):
+* **Data on D:**, outside git, under `/mnt/d/zk-learned` (328 GB free on 2026-11-20, after 306 GB of old data went):
   * `maps/`: the pool of 204 real (18 of them Violet Rampart) and 200 made-up maps, 31 held out, each with its `modes`.
     It loads through the map cache in 27 s, to 1.4 GB of a process's own memory (01-simulator.md, "The map cache");
-  * `clone/army-8`: 175 GB, about 8,800 script games of every kind, 100M decisions, recorded 2026-11-13;
+  * `code-clone/`: `scripts-1` (3.9 GB: a million decisions of the scripts' games through commands, with the frames'
+    latents, recorded 2026-11-20) and the actors cloned on it, `clone-1` (by attention) and `flat-scripts`;
   * `orders/`: `commands-1` (68 MB: 1.5M decisions of the scripts' commands in games of every kind, recorded
     2026-11-19) and the order autoencoders trained on it: `vae-3`, the one in use, and `vae-1`, `vae-2` and `vae-4`,
     kept for the comparison in 05;
-  * `runs/`: `code-2`, `code-1`, `rdnn-5`, `rdnn-4`, `rdnn-3`, `rdnn-2`, `rdnn-1`, `gru-1`, `full-4`, `full-3`, `full-2`, `grpo-trial`; the rest is older runs
-    that don't load, and scratch;
+  * `runs/`: `code-2`, `code-1`, `rdnn-5` to `rdnn-1`, `gru-1`, `full-4`, `full-3`, `grpo-trial`, each with its last
+    checkpoint only, and `code-smoke` (scratch: the smokes and benchmarks);
   * `parity/` (`tools/policy_parity.py`'s results), `dashboard-cache/` and `dashboard-demo/` (the dashboard's map
     pictures and icons; a made-up run directory for working on it).
 
@@ -230,8 +299,8 @@ defaults.  The log has its tests, every check and what was seen.
   (`policy_sim_env.py`, `policy_opening.py`); frames and the encoder (`frame_*.py`); the policy (`policy_model.py`,
   `policy_latent.py`, `policy_code.py`, `policy_clone_*.py`, `policy_train.py`, `policy_pipeline.py`,
   `policy_parity.py`); the scripts' commands recorded and their autoencoder (`order_data.py`, `order_vae.py`); the
-  trainer's play (`policy_graphs.py`, `policy_collectors.py`); the dashboard (`policy_dashboard.py`, `dashboard/`,
-  `policy_replay.py`).
+  code actor's cloning (`policy_code_clone.py`: `record`, `train`); the trainer's play (`policy_graphs.py`,
+  `policy_collectors.py`); the dashboard (`policy_dashboard.py`, `dashboard/`, `policy_replay.py`).
 * **`results/`** (never committed; on this machine only): the runs' launch files and helpers.  For the `rdnn` runs:
   `start-rdnn.sh HOURS` (from nothing, with its guard, memory log, watchdog and dashboard), `launch-rdnn.sh` (the
   trainer's flags), `rdnn-status.sh` and `rdnn_terms.py N` (no torch: safe beside it), `stop-rdnn.sh`,
@@ -247,7 +316,12 @@ defaults.  The log has its tests, every check and what was seen.
   name `code-2` now.  `faster/` has the collector's checks: `check-code.sh TREE NAME N` carries `code-1`'s last
   checkpoint on N iterations by a tree's trainer (set two side by side with `check_compare.py`), `env_ab.sh` plays the
   env's bookkeeping in two trees and says whether the numbers are the same, `spy-one.sh` (as root) and
-  `profile_report.py` say where a collector's time goes.
+  `profile_report.py` say where a collector's time goes.  Since 2026-11-20: `bench-clone.sh NAME` (the trainer with the
+  flat clone frozen, its rates and CPU a decision), `sim-phases.sh` (the sim's step by phase, from a profiling build,
+  while an actor plays), `lib-ab.sh keep`, then `lib-ab.sh STEPS` (a build of the tree against the one kept, every
+  number), `build.sh` (the tree into `~/zksim/build`), `t2.sh [TESTS]` (that, then a few test files on one process),
+  `dash_seeds.py FIRST LAST` (how the dashboard tests' scripted game ends, seed by seed).  For the cloned start: `clone-record.sh OUT DECISIONS [ACTOR]`,
+  `clone-train.sh OUT DATA...` and `clone-test.sh NAME ACTOR [SPREAD]` (128 1v1s against the script).
 * **Tests**: `tests/policy/`, `tests/test_*.py`, `sim/tests/`, run as `pytest.ini` says.  None needs the engine.
 * **Engine games**: `zk-startup.ps1`, `zk-maps.ps1`, `maps.md`, `README.md`.
 
@@ -267,6 +341,11 @@ In WSL, from `/mnt/c/Users/Thoma/Documents/sources/zk-ArenaAI`, with `PYTHONPATH
     bash results/smoke-code.sh 3                       # the code actor's trainer for 3 iterations (the pool and the card)
     bash results/start-code.sh 24                      # a run of the code actor from nothing, as code-2 (on the user's word)
     bash results/faster/check-code.sh TREE NAME 8      # code-1's last checkpoint carried on 8 iterations by a tree's trainer (the card)
+    bash results/clone-record.sh OUT 1000000           # the scripts' advice with the frames' latents (the pool and the card; 15 minutes)
+    bash results/clone-train.sh OUT DATA               # an actor cloned on it (the card; STEPS, SPREAD, INIT)
+    bash results/clone-test.sh NAME OUT/actor.pt       # that actor's 128 1v1s against the script, beside code-2's iteration 0
+    bash results/faster/bench-clone.sh NAME            # the collectors' rate and CPU a decision with an army that moves (5 minutes)
+    bash results/faster/lib-ab.sh keep; bash results/faster/lib-ab.sh 6000      # a change to the sim: the tree before, then every number against it
     bash results/code-status.sh                        # where it stands; no torch
     ~/zkml/bin/python tools/policy_pipeline.py --root /mnt/d/zk-learned/runs/NAME --train-encoder \
         --data /mnt/d/zk-learned/clone/NEW [--dry-run]
@@ -280,8 +359,8 @@ Recording, cloning and the clone's eval are in 03-training.md ("Script data", "C
 and how it plays in "Playing".  A `stop` file in a trainer's run directory ends it at its next report, and the same
 command resumes it.
 
-**The tests** (859 pass, 4 of them need CUDA and are skipped without it) run on 8 processes, a file's tests in one
-process, in about 60 s; `--durations=20` shows what's slow.  The user wants the suite lean: no redundant, sure-to-pass
+**The tests** (863 pass, 4 of them need CUDA and are skipped without it) run on 8 processes, a file's tests in one
+process, in 60 to 120 s; `--durations=20` shows what's slow.  The user wants the suite lean: no redundant, sure-to-pass
 or slow tests.
 
 In the engine (Windows), recording raw frames from a game: `$env:ZKBOT_FLAGS='rawframe'`, then
@@ -290,24 +369,25 @@ README.md has the rules for engine games: headless at max speed, windowed only w
 
 ## Next
 
-0. **`code-2`, the 6-hour trial going**: its hourly checks, and at its end (00:17) its tests beside `code-1`'s and
-   `rdnn-5`'s at the same iterations, what its spread and its commands did, its rate, and whether it learned by the
-   log's rule ("Reading a test").  Then, on the user's word, a longer run (`results/*code*` given a new directory's
-   name, `start-code.sh HOURS`).  If collecting is to be faster still: `--pass-seats` past 2 for the team games, 8
-   collectors on 128 games, and what a pass copies that could be collated in place.
+0. **A run of the flat code actor from nothing**, on the user's word.  Nothing built since `code-2` has had one: the
+   flat reader, the three critics, the coverage once a decision, the tolerance, the collectors as they are.  Not from
+   a clone (the user: "skip and ignore cloned starts").  What's left of an old game's cost, if more is wanted (mine,
+   not asked for; the log has the shares): the frames a step makes that no one reads between decisions, one env step
+   a decision for six, and units at rest left out of the AI and the firing as the separation leaves them.
    Open, put to the user: a site's status still says "enemy" of a spot from an extractor only remembered.
 1. **If the `rdnn` runs learn no better than `gru-1`**: the GRU with the memory told as a vector and the same rates,
    which separates the vector and the rates from the RDNN; and the missing arms of the paper's task (the log,
    `rdnn-1`).
-2. **To set a run beside the older ones**, test their checkpoints anew against the script as it is (`gru-1` and
-   `rdnn-1` keep one every 20 iterations, none of iteration 0); it needs the card, so no run going.
+2. **To set a run beside the older ones**, only each one's last checkpoint is left to test anew against the script as
+   it is; it needs the card, so no run going.
 3. **Why the clone stops expanding** (mine, put to the user and not answered).  Held out, `full-4`'s clone gets the
    kind right for 83% of the script's builds (97-100% for the other orders), and a whole build costs 7.5 nats against
-   0.3-2.4 for the rest (`clone/log.jsonl`): split that by type, place and offset, and by what's built.
+   0.3-2.4 for the rest (`clone/log.jsonl`): split that by type, place and offset, and by what's built.  It needs a
+   recording, and none is left.
 4. **The bot's inference in C++** (02-policy.md, "Deployment"; the nets in onnxruntime, nothing to install, the user).
-   Built: libzkpolicy has the type table, the featurizer and the actions, bit for bit with the Python, and the RL
-   trainer featurizes through it.  Next: cloning's samples and frame data and the orders' encoding and decoding through
-   it, then the map bundle.  The bits match on glibc's libm only, so the bot on Windows will need the same.
+   Built: libzkpolicy has the type table, the featurizer, the actions and the commands' decoding, bit for bit with the
+   Python, and the RL trainer featurizes and decodes through it.  Next: cloning's samples and frame data and the old
+   orders' encoding and decoding through it, the commands' encoding, then the map bundle.  The bits match on glibc's libm only, so the bot on Windows will need the same.
 5. **The engine hand-off**: the rest of item 4; decoded orders sent as commands; the opening and the economy script in
    the engine; the checks listed in 02-policy.md, "Not yet checked live".
 6. **The user's open questions** (`docs/model.md`, "Open questions"), and my unconfirmed choices (the log).
@@ -320,7 +400,8 @@ README.md has the rules for engine games: headless at max speed, windowed only w
   trainer for the run's.
 * **A script that's running**: bash reads a script as it goes, so an edit to `results/launch-*.sh` during its run is run
   from wherever bash had got to.  Stop the run first (`results/stop-rdnn.sh` waits for the launch file too).  The tools'
-  Python is safe to edit beside a run only in that its modules are loaded already.
+  Python is safe to edit beside a run only in that its modules are loaded already.  A smoke or a benchmark runs the
+  launch file too: look for `[l]aunch-code`, `[s]moke-code` and `[p]olicy_train` before an edit (2026-11-20).
 * **A restart starts every game anew**: a run's games are young again for an hour, and the KL can burst 10 to 14
   iterations after.  If libzksim changed, the map cache is made again first (about 2 minutes).  A copy carried on needs
   `--decisions` past the checkpoint's, or it ends at once.  The trainer appends to `metrics.jsonl`, `minibatches.jsonl`
@@ -366,10 +447,21 @@ README.md has the rules for engine games: headless at max speed, windowed only w
 * **Line endings**: several files are CRLF; edit them without changing that.  `git status` inside WSL shows files as
   modified that aren't: use Windows git.
 * **Adding maps to the pool** needs the engine (`sim_engine.py facts` starts it six times a map): 01-simulator.md, "Data".
+* **A collector's rate goes by what the actor does.**  One whose army moves makes a third of the decisions a second of
+  one whose codes are random by iteration 10, the sim's step being over half its time then: a change to the collectors
+  is measured by `results/faster/bench-clone.sh` and its `collector_cpu_ms`, not by an untrained actor's smoke, and two
+  such runs are within 3% of each other.
+* **An undo is an edit back**: `git checkout` of a file gives it CRLF here (`core.autocrlf`), as on 2026-11-19 and again
+  on 2026-11-20.
 * **A smoke's rate isn't a run's.**  A run's decisions a second fall by half over its first 40 iterations, as its games
   grow old (`rdnn-5`: 1,100 at iterations 2 and 3, 890 at 8 to 20, 520 over seven hours).  Set two actors side by side
   at the same iterations, and plan nothing by a run's iterations an hour before it has run: on 2026-11-19 a smoke's
   first three were read as four times `rdnn-5`'s rate, and a schedule laid by them was two to three times out.
+* **WSL's time since boot runs slow**: 0.931 of the wall clock on 2026-11-20, beside a run and idle (`sleep 45` took
+  48.3 s of `date`; `results/faster/clock.sh`; WSL up since 2026-11-18 16:48, a restart not tried).  A trainer's
+  `--hours` and its decisions a second go by it (`time.perf_counter`): `code-2`'s six hours were 6 h 27 min, and its
+  rates are 7% over the wall clock's.  The `end` file, the watchdog and the spread's floor go by the wall clock, so
+  a run outlasts its watchdog by that much.
 * **Two checks from one checkpoint aren't the same games**: they draw differently from the first pass on, and a few
   percent between their rates is nothing.  Set them side by side over the same iterations, and read a profile
   (`results/faster/spy-one.sh`) for what a change did.
@@ -381,4 +473,10 @@ README.md has the rules for engine games: headless at max speed, windowed only w
   spilled and the machine's memory filled.  The same for a timing or a scratch script.
 * **An order autoencoder's file and the commands go together**: a change to `selections.KINDS`, the roles or `RADII`
   makes every saved one unreadable (`order_vae.load` says so), and every `--size code` checkpoint with it.
+* **Two dashboard tests pin a scripted game's end** (`SimEnv(1, 20, ["scripts"], units=6)`: won by team 0 at 3:55).  A
+  change to how the sim plays moves it: on 2026-11-20 seed 15's game went past the limit.  `results/faster/dash_seeds.py`
+  lists how each seed's ends.
+* **A standing crowd isn't the same from tick to tick** unless something makes it so: before the separation's
+  tolerance two in five of its units moved every tick.  Count what a cache would skip before building it
+  (2026-11-20: the first skip there saved nothing).
 * **Never committed**: `results/` and `.vscode/`.

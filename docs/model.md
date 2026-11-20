@@ -613,6 +613,24 @@ flowchart LR
 * **6,414,992 trained parameters** (the RDNN actor: 9,871,219): the RDNN 2.6M, the queries' two blocks 1.6M, the
   memory's reading of the latents 1.0M, the block among the latents 0.8M.  Frozen beside them: the frame encoder's
   2,893,776 and the order autoencoder's 3,283,489.
+* **Since 2026-11-20 that reader is `--size code-256`, and `--size code` reads the latents flat** (the user: "32 -> 256
+  linear is too small", then "proceed with flat 2048 -> 312 (maybe a few more layers after to pad back to 4.7M)";
+  `Size.reader`, `policy_code.Layer`).  No block among the latents, no queries and no attention:
+
+  | Layer | Size |
+  |---|---|
+  | The frame's latents, one row | 64 x 32 = 2,048 |
+  | A linear layer, with the memory's vector and what the seat is told added | 2,048 to 312 |
+  | 5 layers, each x + W2 gelu(W1 LayerNorm(x)) | 312 to 1,248 to 312 |
+  | A LayerNorm and a linear layer: the mean | 312 to 128 (8 x 16) |
+  | The memory, as before: an RDNN of 1,024 units, its state 2,048 | reads the 2,048 latents and the last code |
+
+  8,656,576 trained parameters: the reader 4.5M (0.64M its first layer, 0.78M each of the five), the RDNN 2.6M, the
+  memory's reading of the latents 1.0M.  On the cloning data it fits a little worse than the reader by attention, held
+  out and in training, and plays the same (05-order-autoencoder.md, "A cloned start").
+* **The critics** are one head a term on the memory's state and the flat latents (4,096 to 256 to 256 to 51 bins).
+  Since 2026-11-20 a run has them for the terms `--critics` names, three in `launch-code.sh` (the user: "keep only the
+  result and average metal/value critics"): `result`, `score` and `economy`.
 
 ## Open questions (the user's)
 

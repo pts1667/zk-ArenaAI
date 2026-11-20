@@ -24,7 +24,7 @@
 extern "C" {
 #endif
 
-#define ZKP_ABI_VERSION 4
+#define ZKP_ABI_VERSION 5
 
 int zkp_abi_version(void);
 
@@ -126,6 +126,9 @@ typedef struct {
  * offset (actions.FIELDS).  decode writes at most `controllable` orders and returns how many, or -1 - i for the first unit i whose
  * choices point past the tensors (where actions.decode raises). */
 int64_t zkp_decode(const void* table, const void* bundle, const zkp_tensors* t, const int64_t* decision, zkp_order* out);
+/* selections.decode: `n` commands (selections.COMMAND_DTYPE: 26 bytes each, packed) to at most `controllable` orders, a unit
+ * one at most.  Returns how many, or -1 - k for the first command k whose kind, radius, portion or extent is none of theirs. */
+int64_t zkp_decode_commands(const void* table, const void* bundle, const zkp_tensors* t, const void* commands, int64_t n, zkp_order* out);
 /* Returns how many orders couldn't be put in the policy's terms. */
 int64_t zkp_encode(const void* table, const void* bundle, const zkp_tensors* t, const zkp_order* orders, int64_t n, int64_t* decision);
 /* fz.fine_point: x, z. */

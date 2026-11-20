@@ -35,7 +35,7 @@ if str(ROOT / "bots") not in sys.path:
 from zkbot import units as bot_units  # noqa: E402
 from zkbot.policy import actions as act, bundle as bd, featurize as fz, groups as gr, rawframe as rf, tables  # noqa: E402
 
-ABI_VERSION = 4
+ABI_VERSION = 5
 TABLE_MAGIC = b"ZKPTABLE"
 TABLE_VERSION = 1
 TABLE_FILE = ROOT / "bots" / "zkbot" / "data" / "policy_table.bin"
@@ -114,6 +114,8 @@ def lib() -> ct.CDLL:
         L.zkp_decode.argtypes = [vp, vp, ct.POINTER(TensorsArgs), vp, vp]
         L.zkp_encode.restype = i64
         L.zkp_encode.argtypes = [vp, vp, ct.POINTER(TensorsArgs), vp, i64, vp]
+        L.zkp_decode_commands.restype = i64
+        L.zkp_decode_commands.argtypes = [vp, vp, ct.POINTER(TensorsArgs), vp, i64, vp]
         L.zkp_fine_point.argtypes = [vp, ct.POINTER(TensorsArgs), i64, i64, vp]
         L.zkp_world_positions.argtypes = [vp, i64, i64, i64, f64, f64, vp, vp]
         L.zkp_to_slots.restype = i64
@@ -358,6 +360,22 @@ def decode(decision: act.Decision, t: fz.Tensors, bundle: bd.Bundle, unit_x: np.
     got = lib().zkp_decode(_table(table).ptr, _bundle(bundle).ptr, ct.byref(args), _ptr(d), _ptr(out))
     if got < 0:
         raise IndexError(f"decode: unit {-1 - got}'s choices point past the tensors")
+    return [act.Order(uid, kind, x, z, target, radius, roles) for uid, kind, x, z, target, radius, roles in out[:got].tolist()]
+
+
+def decode_commands(commands: np.ndarray, t: fz.Tensors, bundle: bd.Bundle, unit_x: np.ndarray, unit_z: np.ndarray,
+                    table: tables.TypeTable | Table | None = None) -> list[act.Order]:
+    """selections.decode's drop-in: a decision's commands (selections.COMMAND_DTYPE) to its orders."""
+    if not len(commands):
+        return []
+    args, held = _tensors_args(t, unit_x, unit_z)
+    c = np.ascontiguousarray(commands)
+    if c.dtype.itemsize != 26:
+        raise TypeError(f"decode_commands: commands of {c.dtype.itemsize} bytes, not selections.COMMAND_DTYPE's 26")
+    out = np.zeros(max(t.controllable, 1), ORDER_DTYPE)
+    got = lib().zkp_decode_commands(_table(table).ptr, _bundle(bundle).ptr, ct.byref(args), _ptr(c), len(c), _ptr(out))
+    if got < 0:
+        raise IndexError(f"decode_commands: command {-1 - got}'s kind, radius, portion or extent is none of theirs")
     return [act.Order(uid, kind, x, z, target, radius, roles) for uid, kind, x, z, target, radius, roles in out[:got].tolist()]
 
 

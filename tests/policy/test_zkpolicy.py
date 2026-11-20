@@ -11,8 +11,8 @@ import pytest
 ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 sys.path[:0] = [str(ROOT / "sim" / "py"), str(ROOT / "tools")]
 import zkpolicy as zp  # noqa: E402
-from policy_parity import decision_diff, orders_diff, random_decision, tensor_diff  # noqa: E402
-from zkbot.policy import actions as act, bundle as bd, featurize as fz, groups as gr, rawframe as rf, tables  # noqa: E402
+from policy_parity import decision_diff, orders_diff, random_commands, random_decision, tensor_diff  # noqa: E402
+from zkbot.policy import actions as act, bundle as bd, featurize as fz, groups as gr, rawframe as rf, selections as sel, tables  # noqa: E402
 
 DATA = ROOT / "tests" / "policy" / "data"
 # As training featurizes (the sim's kinds, the economy, the critic's units), and featurize's defaults.
@@ -44,6 +44,29 @@ def test_featurizes_as_the_python_does(golden, table_file, config):
         want = fz.featurize(frame, bundle, table, **config)
         assert not tensor_diff(want, got), (i, tensor_diff(want, got))
         assert not tensor_diff(want, zp.featurize(frame, bundle, table, **config)), i
+
+
+def test_decodes_commands_as_the_python_does(golden, table_file):
+    """A decision's commands (selections.decode) to orders, the same orders to the bit, with every kind of command said."""
+    frames, bundle = golden
+    table, rng = tables.table(), np.random.default_rng(5)
+    kinds, told = set(), 0
+    for frame in frames:
+        py, cc = fz.featurize(frame, bundle, table, **CONFIGS[0]), zp.featurize(frame, bundle, table_file, **CONFIGS[0])
+        x, z = act.world_positions(py, bundle)
+        for _ in range(6):
+            commands = random_commands(py, bundle, x, z, rng)
+            want = sel.decode(commands, py, bundle, x, z)
+            assert orders_diff(want, zp.decode_commands(commands, cc, bundle, x, z, table_file)) is None
+            kinds |= {o.kind for o in want}
+            told += len(want)
+    assert zp.decode_commands(commands[:0], cc, bundle, x, z, table_file) == []
+    with pytest.raises(IndexError):
+        bad = commands.copy()
+        bad["radius"][3] = len(sel.RADII)
+        zp.decode_commands(bad, cc, bundle, x, z, table_file)
+    # Not a test that passes on nothing: orders of most kinds came out, several a decision.
+    assert told > 6 * len(frames) and {rf.MOVE, rf.FIGHT, rf.ATTACK_UNIT, rf.ASSIST, rf.BUILD, rf.AREA_MEX} <= kinds, (told, sorted(kinds))
 
 
 def test_decodes_and_encodes_as_the_python_does(golden, table_file):

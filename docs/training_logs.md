@@ -21,7 +21,176 @@ iteration 0's (`results/paired_tests.py`); the score is `eval_fight_score`.
   `rdnn-1`'s iteration 364 was against a richer script.  Against the script as it is: `rdnn-1`'s test at 500, and all of
   `rdnn-2`'s, `rdnn-3`'s, `rdnn-4`'s and `rdnn-5`'s.
 
-## `code-2`: `code-1` again with 6 collectors and the faster collector (2026-11-19 18:17 to 2026-11-20 00:17; going)
+## After `code-2`: a cloned start, a flat reader, three critics, and where a collector's time goes (2026-11-20; no run)
+
+The user, of `code-2`'s actor that never left the unit Gaussian: "OK, proceed with suggestions 1 and 2: start the actor
+cloned, and start the spread below 1."  Then, told the layers: "32 -> 256 linear is too small; additionally, consider 2
+transformer blocks 312 wide.  I think some of the critics can be removed or are unnecessary, keep only the result and
+average metal/value critics."  Then, of reading the latents as tokens at all: "OK, proceed with flat 2048 -> 312 (maybe
+a few more layers after to pad back to 4.7M)."  Then, of collecting: "I believe that profile was outdated.  Still,
+proceed with moving glue to C++, one inference process and see if you can optimize the policy pass."  Nothing here was
+run as a training run.
+
+### A cloned start (`tools/policy_code_clone.py`, `results/clone-*.sh`)
+
+* **The recording** (`record`): the scripts' games played through commands, each decision's frame latents (as the
+  trainer's pass gives them) with the commands the scripts' advice makes; with `--actor` that actor plays and the scripts
+  only advise.  `code-clone/scripts-1`: 1,000,175 decisions of 1,910 seats' games, mirror 1v1s on the pool, in 15
+  minutes by 6 workers (0.55 GB of the card each); 2.79 commands a decision, 24% of decisions none; 3.9 GB.
+* **The cloning** (`train`): seats' games side by side, the memory carried along them; the loss is the frozen decoder's
+  reconstruction of the advice from the actor's mean with noise of up to the spread it will start at, and 0.05 of the
+  squared distance to the advice's own code.  64 games by 32 decisions a step, 3.2 to 3.5 GB of the card (128 by 64 ran
+  out of 6), 10,400 to 14,500 decisions a second.
+* **`clone-1`** (the reader by attention, 256 wide, 6.4M parameters; 6,000 steps, 18 minutes).  Held out: 144.4 nats a
+  decision (122 in training, with the noise), the places 56.3 and 63.4 of it; the kind right 70%, the roles 46%, the
+  type 4%, the count 35%, a decision whole 12.7%; a centre 631 elmos off at the median, a place 720.
+* **By play, it's no better than codes drawn at random** (128 1v1s against the script, twice each;
+  `results/clone-test.sh`; `code-2`'s iteration 0 scored 0.155 with 2.2 extractors at 6 minutes for the script's 10.3):
+
+  | Spread | Scores | Won | Extractors at 6 minutes (the script 11) |
+  |---|---|---|---|
+  | 0.3 | 0.162, 0.157 | 2, 0 | 2.76, 2.95 |
+  | 0.1 | 0.159, 0.158 | 1, 1 | 2.66, 2.46 |
+  | 0.01 | 0.151, 0.150 | 0, 0 | 2.68, 2.49 |
+
+  Paired with `code-2`'s iteration 0 the score is +0.8, +0.6 and -1.2 SE, income +3.3 to +3.6 SE.  It says 4.1 to 4.4
+  commands a decision to 3.7 to 4.2 units: 93.5% FIGHT, 5% BUILD, 1.2% ASSIST, 0.4% PRODUCE, where the advice is 59%,
+  7%, 14% and 8% (`results/faster/label_stats.py`).  So the spread isn't what holds it back.  At 0.01 one iteration of
+  the trainer had a KL of 1.37 and a gradient of 6,951.
+* **Why, as I read it** (not checked): the scripts tell a factory or a constructor once, when it falls idle; in their
+  own games that's a rare moment the clone can't time, and the FIGHTs said again at every look are most of the labels.
+  A recording of the clone's own play with the scripts advising (where an idle factory is advised at every look) was
+  begun and stopped on the user's word ("You can probably skip the second recording").
+
+### A flat reader, and three critics
+
+* **The reader** (`policy_latent.CODE_SIZE`, `Size.reader` "flat"; `policy_code.Layer`): the frame's 64 x 32 latents
+  through one linear layer to 312, the memory's vector added, 5 layers of 312 to 1,248 to 312 with a skip, a linear
+  layer to the code's mean.  8,656,576 trained parameters in the actor (6,414,992 by attention).  The one by attention
+  is `--size code-256`, for `code-1`'s and `code-2`'s checkpoints.  The two-layer way in and the 312-wide blocks asked
+  for first were built and then dropped for this.
+* **`flat-scripts`** (the same recording, steps and held-out games as `clone-1`; 12 minutes): held out 156.7 nats for
+  `clone-1`'s 144.4 (training 135.7 for 122), the roles right 42% for 46%, a decision whole 6.6% for 12.7%, a centre
+  804 elmos off for 631.  By play 1 and 0 of 128 won, 0.155 and 0.153, 1.95 to 2.0 extractors at 6 minutes: +0.1 SE of
+  `code-2`'s iteration 0.  So flat fits and generalizes a little worse on this data, and plays the same.
+* **The critics** (`--critics`, `Config.critics`; the launch file's default `result score economy`): a critic for the
+  terms named, and a term without one counts for nothing past its branch's end (`Learner.bootstrap`).  That the other
+  twelve terms stay is mine.  A checkpoint says its critics' names, and a run carried on keeps those it had.
+* **`--spread-start`**: the code's spread as a run begins (0: the actor's own, a clone's 0.3).
+* **The cloned actor's first updates burst in the trainer** (a smoke of 16 iterations from `flat-scripts`, the launch
+  file's rates): the KL 0.001 while only the critics learn, then 102, 326, 34, 37, 24 and 9 at iterations 11 to 16,
+  the mean's size 0.81 to 1.35 and 18 commands a decision by 13; the rate's scale fell by a third an iteration, too
+  late.  `--lr-start 2e-3` times 0.15 is for an actor whose last layer starts at zero.  Not tried at a lower rate.
+
+### Where a collector's time goes when an army moves
+
+The profile of 2026-11-19 was of `code-1`, whose random codes told 0.8 units a decision.  With the flat clone, frozen
+(`results/faster/bench-clone.sh`: the trainer as the launch file starts it, `--critic-warmup` past its end):
+
+* **A collector's main thread at iteration 10** (30 s of py-spy): the sim's step 54%; the policy's pass 16%
+  (featurizing 2.4%, putting together 1.5%, loading 3.7%, the wait for the card and the copy back 6.4%); the Python
+  after a step 11% (`_own` and `_leads` 6.7%, `_diversity` 1.9%); the commands into orders 5% (`selections.decode`);
+  the scripts 3.7%; the frames 1.4%; the terms 1.3%; reading the weights 2%.
+* **The rate falls with the games' age**: 3,200 to 3,800 decisions a second at iterations 1 to 3, 2,400 at 4, and
+  1,000 to 1,300 at 10 and 11, where `code-2` made 2,700.  The collectors' CPU is 5.1 ms a decision over iterations 4
+  to 11 (`collector_cpu_ms`, new: every thread of theirs).
+* **The sim's step by phase** (`results/faster/sim-phases.sh`: a build with `-DZKSIM_PROFILE=ON`, one thread, 1v1s
+  on the five training maps, the clone playing both sides): 0.62 ms a seat's decision in games to 19 minutes, 2.48 in
+  games to 75.  Movement 37 to 43% of it (the units' separation 12 to 20%), the team statistics 34%, the units' AI 9%,
+  firing 5%.  Nearly all of the statistics was the map's coverage: every finished unit's sight and radar circles
+  drawn on a grid of 64 elmos, for every team, after every step.
+* **The coverage, with the same numbers** (`World::coverage`, `team_stats`; libzksim's ABI as it was): a circle's
+  cells set a row at a time as one run of bits, the run's ends settled by the same test as before; an allyteam's
+  second team copies the first's; and a unit's runs are kept while it stands where it stood and sees as far
+  (`World::covered`).  Over 6,000 steps of 16 mixed games against a build of the tree before
+  (`results/faster/lib-ab.sh`): the statistics, the frames, the globals and the env's deltas and leads the same to the
+  bit.  The coverage is 19% of the step for 35%, and the step 0.51 ms for 0.62.  The row runs alone took it to 30%.
+* **In the trainer**: 1,830 and 1,880 decisions a second collecting over iterations 4 to 11, in two runs, for 1,618
+  before (1,967 for 1,710 over 4 to 10 in the second).
+* **What made no difference**: 4 sim threads a collector for 2 (`--sim-threads`, new: collecting 1,830 for 1,753,
+  training 3,204 for 4,212: the 8 cores are busy); and a pass that sleeps till the card is done (5.0 ms of CPU a
+  decision for 5.1; taken out again).
+* **The commands into orders in C++** (`zkp_decode_commands` in libzkpolicy, ABI 5; `zkpolicy.decode_commands`, which
+  `policy_train.decision_orders` calls): `selections.decode` as it is, the distances float32 where numpy's are.  The
+  same orders to the bit over 9 golden frames by 6 decisions of 16 random commands and 150 decisions on a frame with a
+  constructor and features, two transports, a thrower, a teleporter and its beacon and a jumper
+  (`tests/policy/test_zkpolicy.py`, `test_selections.py`; 360 more decisions by `results/faster/cmd_kinds.py`).  The
+  collectors' CPU is 4.84 ms a decision for 5.06, collecting 1,889 a second for 1,831.
+* **Not done**: the rest of the Python glue in C++ (the Python after a step is 11% of a collector's main thread, 9% of
+  it `_own`, `_leads` and `_diversity`; with the round's own bookkeeping about 10% of the collectors' CPU), one
+  inference process (the passes' wait for the card isn't CPU, so I expect under 5%), and the coverage worked out once a
+  decision, which would take most of what's left of it and is the user's to say: the map term's change would land at a
+  decision's last slot.
+
+### The coverage once a decision, and a crowd that rests
+
+The user, of what I put to them after the above (the coverage once a decision; shorter games; whether the inference
+process and the rest of the glue were still wanted; a cloned start): "1. sounds fine, proceed 2. consider ways to reduce
+the overhead of frames that are largely the same across time 3. OK, skip both 4. skip and ignore cloned starts; it
+appears they don't do much".
+
+* **The coverage once a decision** (`zk_batch_set_cover`, libzksim ABI 33; `zksim.Batch.set_cover`;
+  `SimEnv._set_cover`, `cover_every_step`): where decisions are aligned, a step works the sight and radar shares out
+  only if it's a decision's last, and gives them as they last were otherwise; a game's first step works them out either
+  way.  So the map term's change lands at a decision's last step.  With `cover_every_step` the build's numbers are
+  the reference's to the bit (`lib-ab.sh`, which plays so), and
+  `test_aligned_games_work_the_maps_coverage_out_once_a_decision` holds the rest.  The coverage is 3.9% of the sim's
+  step for 18.6% and the step 0.43 ms a seat's decision for 0.51 in games to 19 minutes; in games to 75, 5.2% and 1.74
+  ms for 2.48.  In the trainer: 2,019 decisions a second collecting for 1,889, the collectors' CPU 4.47 ms a decision
+  for 4.84.
+* **Where an old game's step goes after it** (games to 75 minutes, the clone at its spread of 0.3, a profiling build):
+  movement 60.5% (the units' separation 27.5%, the frames of a move 8.3%, whether a unit walks 6.8%), the units' AI
+  11.6%, firing 7.1%, the statistics 6.2%, the frames emitted 3.5%, the fog 3.2%, the grid 2.6%.  The phases timed
+  once a unit carry the timer's own cost.
+* **Nothing exact rests a standing crowd.**  A unit that overlapped no one, left out of the separation until it moved
+  or a unit of the grid cells it looks through did: the separation 27.9% of the step for 27.5%.  Counted, in games of
+  37 minutes with codes near random (the clone at a spread of 1.0), a pass of the separation: 172 units with a turn,
+  59 overlapping no one, 47 pushed by less than their place can hold or nowhere they can stand, and 66 moved.  Of
+  those moved: 94% with no order and no speed; 26% by under 0.01 elmo, 69% by 0.01 to 1 and 5% by more; 9% with
+  something immobile among the 2.7 each overlapped.  So an idle crowd shuffles for good, a little at a time, and what
+  stirs keeps its neighbours looked at.  Any unit a turn would leave as it is, left out (`World::separate`, `sep_rest`
+  and `sep_stir`; the same numbers to the bit over 6,000 steps of 16 games): the step 0.82 ms for 0.85 in those
+  games, 0.49 for 0.51 in games to 19 minutes, and 0.47 for 0.49 with the clone at 0.3.  About 4%.
+* **With a tolerance it rests** (tried at 1 elmo first, a switch in a profiling build): 6 units moved a pass for 43,
+  and the step 0.43 ms for 0.51 with codes near random and for 0.49 with the clone at 0.3, in games to 19 minutes.
+  Put to the user as theirs, since it changes the sim's numbers: "It should be fine to proceed with a ~5 elmo
+  tolerance."
+* **`SEPARATION_SLACK`, 5 elmos** (`sim/src/movement.cpp`; no ABI change): two units, or a unit and a building, that
+  overlap by 5 elmos or less are let be; past it they're pushed clear of each other as before.  With it, leaving out
+  the units a turn would leave as they are gives the numbers of giving each its turn, to the bit (`lib-ab.sh`, the
+  tolerance in both builds).  In the trainer: 2,155 decisions a second collecting for 2,019, 1,959 overall for 1,806,
+  the collectors' CPU 4.01 ms a decision for 4.47.  In games to 75 minutes the sim's step is 1.54 ms a seat's
+  decision for 1.74, the separation 17.5% of it.
+* **Every game plays differently from before the tolerance.**  Two dashboard tests pinned a scripted game's end
+  (`SimEnv(1, 15, ...)`: won by team 0 at 4:08); with it that game is won at 5:01, past the tests' limit.  They pin
+  seed 20's now, won at 3:55 (`results/faster/dash_seeds.py` lists the seeds' ends).  863 tests pass.
+* **The collectors over the day** (`bench-clone.sh`, iterations 4 to 11): 1,618 decisions a second collecting; 1,850
+  with the coverage cheaper; 1,889 with the decoding in C++; 2,019 with the coverage once a decision; 2,155 with the
+  tolerance.
+* **Looked at and not built** (mine; none asked for): a finer search for the separation (a unit that looks tests 35 to
+  60 neighbours, four at a time: the search isn't the cost, the turn is); the frames a step emits that no one reads
+  between decisions (3.5% of the step, and 1.4% of a collector's main thread to take them); one env step a decision
+  for six, which would take most of the Python after a step with it and moves when a game's end and the lead rule are
+  looked at; units at rest left out of the AI and the firing.
+
+### The old data on D:
+
+The user: "What from D:\\zk-learned is safe to delete (to free up space)?", then "OK, delete the ~300gb of old data."
+306 GB went: `clone/army-8` (175 GB) and the older recordings, the runs that no longer load, and every checkpoint but
+the last of each of the 11 runs kept.  D: had 330 GB free after.  Kept: `maps/`, `orders/`, `parity/`,
+`dashboard-cache/`, `dashboard-demo/`.
+
+### Mine, and wrong on the way
+
+* I edited `results/launch-code.sh` while a smoke started from it was running; put back before the smoke ended, which
+  it did cleanly, and applied again after.
+* I told the user `parity/` was made again by its tool; its corpus is made from a recording, and `army-8` is gone.
+* Of the collectors, I told the user neither the featurizer nor the sim was where the time went, from the profile of
+  2026-11-19; with an army that moves the sim is over half.
+* `git checkout` of `tools/policy_graphs.py` (to take the sleeping wait out) gave the file CRLF; put back to LF, its
+  content the commit's.
+
+## `code-2`: `code-1` again with 6 collectors and the faster collector (2026-11-19 18:17 to 2026-11-20 00:50, its hours; nothing learnt)
 
 The user, 2026-11-19, as the collector was being made faster ("A faster collector", below): "When that is all done, stop
 the current training run and start a new one, from iteration 0, with 4 collectors for a 6-hour trial run.  parameters
@@ -47,16 +216,175 @@ of the 96 games each, on the collector as it is now.  Everything under `/mnt/d/z
 * **Iteration 0** (18:17; the test took 16 s, its games over six collectors): no win of 128, the score 0.155 ± 0.003, an
   income share of 0.287, 2.2 extractors at 6 minutes for the script's 10.3.  An untrained actor, as `code-1`'s 0.163
   was: the two differ by their draws.
+* **Iteration 250** (about 18:52; 55 s): 1 win of 128, the score 0.163 ± 0.006.  Paired with iteration 0: the score
+  +0.008 ± 0.006 (+1.3 SE), own value 4,767 to 5,221 (+2.0 SE), damage dealt +2.0 SE, income +1.5 SE (its share -1.3
+  SE), extractors 3.1 to 3.0 at 3 minutes and 2.2 to 2.0 at 6 (-0.8 SE; the script's 10.2), games 37 s longer (+2.7
+  SE).  Not learning by the rule: nothing past 2 SE.  In the 48 games it shares with them: beside `code-1`'s 250 the
+  score 0.170 for 0.150 (+1.3 SE) and damage dealt +1.9 SE; beside `rdnn-5`'s 250 the score 0.170 for 0.146 (+1.5
+  SE), extractors 3.0 for 2.4 at 3 minutes (+2.8 SE) and 2.0 for 1.9 at 6.
+* **Iteration 500** (about 19:25; 51 s): 1 win of 128, the score 0.166 ± 0.006.  Paired with iteration 0: the score
+  +0.011 ± 0.007 (+1.7 SE), own value 4,767 to 5,418 (+2.5 SE), income +2.9 SE (its share +0.3 SE), damage dealt +2.0
+  SE, value at 6 minutes +2.3 SE, extractors 3.1 to 3.1 at 3 minutes and 2.2 to 2.6 at 6 (+1.9 SE; the script's
+  10.0), games 42 s longer (+3.4 SE).  Learning by the rule on own value and income, not yet on the score.  Beside
+  `rdnn-5`'s 500 in the 48 shared games: the score 0.170 for 0.152 (+1.1 SE), extractors 3.4 for 2.9 at 3 minutes
+  (+2.7 SE) and 2.9 for 2.4 at 6 (+1.7 SE), own value and income within 1.2 SE.  Over its own 128, `rdnn-5` was at
+  0.159 from 0.144 (+4.0 SE): it started lower and stood lower.
+* **Iteration 750** (about 20:08; 54 s): 1 win of 128, the score 0.161 ± 0.006.  Paired with iteration 0: the score
+  +0.006 ± 0.007 (+1.0 SE), own value 4,767 to 4,771 (+0.0 SE), income +1.2 SE, damage dealt +1.1 SE, extractors 3.1
+  to 3.0 at 3 minutes and 2.2 to 2.2 at 6 (the script's 10.3), games 15 s longer (+1.0 SE).  Nothing past 2 SE: what
+  500 had on own value and income isn't there, so not learning by the rule.  Beside `rdnn-5`'s 750 in the 48 shared
+  games it's behind: the score 0.151 for 0.158 (-1.3 SE), own value 4,595 for 5,913 (-3.8 SE), extractors at 6
+  minutes 2.1 for 2.9 (-3.0 SE), income -1.8 SE.  Over its own 128 `rdnn-5` had 0.171 there (+4.3 SE on its 0).
+* **Iteration 1000** (about 20:48; 53 s): 2 wins of 128, the score 0.162 ± 0.008.  Paired with iteration 0: the score
+  +0.007 ± 0.009 (+0.8 SE), own value +0.8 SE, income +1.1 SE, damage dealt +0.9 SE, extractors 3.1 to 3.1 at 3
+  minutes and 2.2 to 2.1 at 6 (the script's 10.6).  Nothing past 2 SE.  `rdnn-5` ended before 1000; `rdnn-3` had
+  0.166 there from 0.151.
+* **Iteration 1250** (about 21:34; 57 s): 2 wins of 128, the score 0.168 ± 0.008, its highest.  Paired with iteration
+  0: the score +0.013 ± 0.009 (+1.5 SE), income 12,910 to 13,800 (+2.0 SE), own value +1.5 SE, value at 6 minutes
+  +1.8 SE, damage dealt +0.8 SE, extractors 3.1 to 3.2 at 3 minutes (+1.2 SE) and 2.2 to 2.3 at 6 (+0.8 SE; the
+  script's 9.9).  Income alone at 2 SE: not learning by the rule on the score, five tests in.
+* **Iteration 1500** (about 22:15; 49 s): 1 win of 128, the score 0.158 ± 0.006.  Paired with iteration 0: the score
+  +0.004 ± 0.007 (+0.5 SE), income +1.1 SE, own value +0.4 SE, damage dealt -0.3 SE, extractors 3.1 to 3.2 at 3
+  minutes and 2.2 to 2.3 at 6 (the script's 10.6).  Nothing past 1.5 SE: where it began.
+* **Iteration 1750** (about 22:56; 46 s): 1 win of 128, the score 0.165 ± 0.006.  Paired with iteration 0: the score
+  +0.010 ± 0.006 (+1.6 SE), own value 4,767 to 5,289 (+2.4 SE), its share of value +2.2 SE, value at 6 minutes +2.2
+  SE, income +1.8 SE, damage dealt +1.3 SE, extractors 3.1 to 3.1 at 3 minutes and 2.1 to 2.3 at 6 (+1.0 SE; the
+  script's 10.2), games 24 s longer (+2.2 SE).  Own value past 2 SE, as at 500; not the score.
+* **Iteration 2000** (about 23:42; 52 s): no win of 128, the score 0.154 ± 0.003.  Paired with iteration 0: the score
+  -0.001 ± 0.004 (-0.2 SE), income +1.6 SE, own value +0.3 SE, damage dealt +1.2 SE, extractors 3.1 to 3.2 at 3
+  minutes and 2.2 to 2.4 at 6 (+1.3 SE; the script's 10.1).  Nothing past 2 SE: iteration 0's score again.  Eight
+  tests after iteration 0, the score between -0.2 and +1.7 SE of it, up at one test and back at the next.
+* **Iteration 2250** (about 00:29; 46 s), the last: no win of 128, the score 0.153 ± 0.003.  Paired with iteration 0:
+  the score -0.002 ± 0.003 (-0.6 SE), income +1.3 SE, own value +0.4 SE, damage dealt +0.1 SE, value at 6 minutes
+  +2.0 SE, extractors 3.1 to 3.0 at 3 minutes and 2.2 to 2.3 at 6 (the script's 10.4).  Iteration 0's score.
+
+### What happened in it
+
+* **It didn't learn**, by the rule or by eye.  After iteration 0's 0.155 its nine tests gave 0.163, 0.166, 0.161,
+  0.162, 0.168, 0.158, 0.165, 0.154 and 0.153, with 1, 1, 1, 2, 2, 1, 1, 0 and 0 wins of 128.  The score was never
+  past 1.7 SE of iteration 0's in the same games and ended 0.6 SE under it; own value was past 2 SE at 500 and 1750
+  and income at 500 and 1250, each gone a test later; extractors at 6 minutes stayed at 2.1 to 2.6 for the script's
+  10.  `rdnn-5` was past 2 SE on the score at 250 and +4.3 SE at 750 (0.144 to 0.171), and ahead of this run at 750
+  in the games they share.
+* **Its actor is where it began.**  Over 45.8M decisions the code's spread went from 1.000 to 0.974 (its least number
+  0.888), its mean from 0.012 to 0.039 in size and the code's entropy from 181.6 nats to 178.2; a decision said 1.75
+  commands at first and 1.82 at the end, and told 0.66 to 0.82 units with no trend.  The floor, 0.1 to 0.03 over the
+  six hours, never came near the spread.  So it played codes drawn almost from the unit Gaussian throughout, and its
+  scores are those of codes drawn at random in the check by play (0.165).  The KL was 0.005 to 0.009 an iteration by
+  fifties from iteration 500 on, the rate's scale 0.9 to 1.0, and the actor's gradient norm rose from 1.2 to 3.5.
+* **Its critics learnt**: explained variance 0.8 to 0.88 for the result from iteration 600 on (none at 200), 0.8 to
+  0.9 for the economy and the leads, 0.64 to 0.78 for the score, 0.15 to 0.55 for combat, experience and the map.
+* **Its rate**: 2,020 to 2,580 decisions a second by fifties from iteration 200 on, by the trainer's clock (collecting
+  2,050 to 2,700, training 3,700 to 3,950), a little lower as the other kinds' games came in (46% of decisions at
+  the end).  By the wall clock, its tests and all: 45.84M decisions in 6 h 32 min, 1,950 a second, 362 iterations an
+  hour.
+* **It ended 33 minutes after its `end` file's time** (00:50 for 00:17), by itself.  The trainer's `--hours` goes by
+  `time.perf_counter`, WSL's time since boot, and that runs slow against the wall clock: 45.0 s of it for 48.3 s of
+  `date`, 0.931, beside the run, and the same with the machine idle after it (`results/faster/clock.sh`; the
+  `clocksource` tsc, WSL up since 2026-11-18 16:48).  `ps` has the trainer starting at 18:48:45 where the log's own
+  `date` says 18:17:18.  So six hours of the trainer's were 6 h 27 min, and **every decisions a second a trainer
+  reports is 7% over the wall clock's**: this run's, and by all signs `code-1`'s and every check of "A faster
+  collector" (the same boot), so one beside another stands.  By the wall clock go the `end` file, the watchdog (done
+  at 00:18: the run's last half hour had none) and the spread's floor (at 0.03 from 00:17).  Not tried: whether a
+  restart of WSL clears it, and what earlier boots' runs had.
+* **Nothing broke**: no traceback, fallback, split or watchdog restart in six and a half hours with 6 collectors.  A
+  collector held 0.23 to 0.43 GB of the card (its cap 0.8), the learner 1.34, the card 4.3 to 5.9 GB in all; WSL had
+  23 GB to spare at the least, a collector's own memory growing from 1.4 to 1.9 GB.  The run is 16 GB (48
+  checkpoints: one every 50 and `it-002368.pt`), and D: has 29 GB free.
+* *Why the actor didn't move: a guess of mine, not checked.*  A draw from 128 numbers at a spread of 1 is far from
+  its mean, where a place wants a code right to 0.03 to 0.1 ("The actor and the trainer"), and a group has 8
+  branches to say which way among 128 paid; the mean moved 0.04 and nothing pulls the spread down.  What to change
+  is the user's to say: the actor's start cloned from the scripts' codes (the user, of that or the unit Gaussian:
+  "either is fine"), a spread that begins well under 1, or first a look at what an update does to the mean.
 
 ### The hourly checks
 
-A cron job in the session that started it (at about 45 minutes past) runs `results/code-status.sh` and
-`results/code_terms.py 5`, and adds a line here.
+A cron job in the session that started it (at about 45 minutes past) ran `results/code-status.sh` and
+`results/code_terms.py 5`, and added a line here.
 
 * **18:19, iteration 9**: running, 10 trainer processes, the guard, the dashboard, the memory log and the watchdog up.
   2,650 decisions a second overall so far (collect 3,350, train 3,780).  1.8 commands a decision and 0.69 units told;
   the spread 1, its least 0.1.  The learner 1.35 GB of the card and a collector 0.23 of its 0.8, the card 4.9 GB in
   all and 57% busy; WSL has 26 GB to spare, the CPUs 58% idle.
+* **18:45, iteration 197** (3.65M decisions): running, 10 processes, no traceback, fallback, split or restart.  2,540
+  decisions a second over the last 50 iterations and 2,310 over the 50 before (collecting 2,650, training 3,930),
+  twice `code-1`'s 1,230.  The KL 0.001, the rate's scale 1.0.  The spread 0.994 (its least number 0.974), the floor
+  0.095, the mean's size 0.026; 1.8 commands a decision and 0.77 units told.  The critics' explained variance 0.86
+  for the economy, 0.81 to 0.89 for the leads, 0.66 for the score and 0.00 for the result (`code-1`'s was 0.5 by
+  250).  12% of ended seats in draws, the lead rule on; no other kinds yet.  The learner 1.34 GB of the card and a
+  collector 0.35 of its 0.8, the card 4.8 GB; WSL has 25 GB to spare; D: 43 GB, the run 1.0 GB with 3 checkpoints.
+  Its tests share 48 of their 128 games with `code-1`'s and `rdnn-5`'s (a test's games are dealt by collector, 16 a
+  chunk here for 48), so a comparison across the runs is of those; with its own iteration 0 it's all 128.
+* **19:45, iteration 603** (11.16M decisions): running, 10 processes, no traceback, fallback, split or restart.  2,320
+  decisions a second over the last 50 iterations and 2,490 over the 50 before (collecting 2,400 and 2,590, training
+  3,860 and 3,960); 2,110 over the run with its tests, about 410 iterations an hour.  The KL 0.006 over the last 100
+  (0.001 to 0.002 in the last 5), the rate's scale 0.95 to 0.98.  The spread 0.988 (its least number 0.952), the floor
+  0.083, the mean's size 0.031; 1.8 commands a decision and 0.82 units told.  The result's critic has come in:
+  explained variance 0.80 (0.00 at 197), 0.81 to 0.86 for the economy and the leads, 0.75 for the score, 0.71 to 0.80
+  for four of the made terms, 0.11 to 0.30 for combat, experience and the map.  The memory's state 0.93 in mean size
+  (0.35 at first), its largest number 30.  18% of ended seats in draws, the lead rule on; other kinds 2% of
+  decisions.  The replays at 452 (4 games against the script, none won): 1.2 extractors at 6 minutes for 10.2, metal
+  floating a third of the time.  The learner 1.34 GB of the card and a collector 0.39 of its 0.8 (0.23 at the start,
+  0.35 at 197: rising still, slowly), the card 5.4 GB; WSL has 25 GB to spare, a collector's own memory 1.5 GB (1.41
+  at 18:28).  D: 40 GB, the run 4.0 GB with 12 checkpoints: about 17 GB by its end.
+* **20:45, iteration 983** (18.35M decisions): running, 10 processes, no traceback, fallback, split or restart.  2,380
+  decisions a second over the last 50 iterations and 2,110 over the 50 before (collecting 2,500 and 2,200, training
+  3,850 and 3,770); 380 iterations in the hour.  The KL 0.005 and 0.009 by fifties (0.001 to 0.003 in the last 5),
+  the rate's scale 0.99 and 0.91.  The spread 0.986 (its least number 0.945), the floor 0.071, the mean's size 0.033;
+  1.8 commands a decision and 0.74 units told (0.82 an hour before).  The critics' explained variance 0.83 for the
+  result, 0.84 to 0.85 for the economy and the leads, 0.77 for the score, 0.31 to 0.37 for combat, experience and
+  the map.  The memory's state 1.02 in mean size, its largest number 28.  12% of ended seats in draws, the lead rule
+  on; other kinds 11% of decisions (free-for-alls, chicken and team games ending).  The replays at 879 (4 games
+  against the script, none won): 3.0 extractors at 6 minutes for 9.0, metal floating 45% of the time.  The learner
+  1.34 GB of the card and a collector 0.39 of its 0.8 (level), the card 5.5 GB; WSL has 24 GB to spare, a collector's
+  own memory 1.5 to 1.75 GB (the other kinds' games).  D: 38 GB, the run 6.4 GB with 19 checkpoints.
+* **21:45, iteration 1312** (24.82M decisions): running, 10 processes, no traceback, fallback, split or restart.  2,060
+  decisions a second over the last 50 iterations and 2,030 over the 50 before (collecting 2,150 and 2,050, training
+  3,680 and 3,840); 329 iterations in the hour, the other kinds' games now 20% of decisions (10% an hour before).
+  The KL 0.008 and 0.007 by fifties, with a burst of 0.035 at 1308 (0.0002 to 0.002 in the three after), the rate's
+  scale 0.90 to 0.92; the actor's gradient norm 3.5 (1.2 at 197, 1.6 at 603, 2.3 at 983).  The spread 0.982 (its
+  least number 0.924), the floor 0.060, the mean's size 0.035; 1.8 commands a decision and 0.81 units told.  The
+  critics' explained variance 0.80 for the result, 0.84 to 0.87 for the economy and the leads, 0.75 for the score,
+  0.52 for the map, 0.44 for experience, 0.24 for combat.  The memory's state 1.06 in mean size, its largest number
+  25.  10% of ended seats in draws, the lead rule on.  The replays at 1252 (4 games against the script, none won):
+  3.5 extractors at 6 minutes for 6.8, no constructor of its own at any time, metal floating 30% of the time.  The
+  learner 1.34 GB of the card and a collector 0.39 of its 0.8, the card 5.0 GB; WSL has 24 GB to spare, a collector's
+  own memory 1.6 to 1.8 GB.  D: 36 GB, the run 8.7 GB with 26 checkpoints: about 15 GB by its end, near iteration
+  2,100.
+* **22:45, iteration 1691** (32.16M decisions): running, 10 processes, no traceback, fallback, split or restart.  2,580
+  decisions a second over the last 50 iterations and 2,090 over the 50 before (collecting 2,700 and 2,180, training
+  3,910 and 3,830); 379 iterations in the hour, the other kinds' games 29% of decisions (free-for-alls ending in 28
+  of the last 50 iterations).  The KL 0.008 and 0.007 by fifties, the rate's scale 0.93 and 0.89; the actor's
+  gradient norm 2.5.  The spread 0.979 (its least number 0.911), the floor 0.048, the mean's size 0.037; 1.8 commands
+  a decision and 0.67 units told (0.81 an hour before).  The critics' explained variance 0.86 for the result, 0.78 to
+  0.80 for the economy and the leads, 0.64 for the score, 0.34 for the map and experience, 0.17 for combat.  The
+  memory's state 1.09 in mean size, its largest number 22.  20% of ended seats in draws, the lead rule on.  The
+  replays at 1657 (4 games against the script, none won): 1.8 extractors at 6 minutes for 10.0, no constructor of
+  its own, metal floating 26% of the time.  The learner 1.32 GB of the card and a collector 0.43 of its 0.8, the
+  card 5.0 GB; WSL has 24 GB to spare.  D: 33 GB, the run 11 GB with 33 checkpoints.
+* **23:45, iteration 2017** (38.73M decisions), half an hour from its end: running, 10 processes, no traceback,
+  fallback, split or restart.  2,050 decisions a second over the last 50 iterations and 2,120 over the 50 before
+  (collecting 2,120 and 2,220, training 3,760 and 3,780); 326 iterations in the hour, the other kinds' games 37% of
+  decisions.  The KL 0.009 by fifties (0.001 to 0.002 in the last 5), the rate's scale 0.90 to 0.92; the actor's
+  gradient norm 3.1.  The spread 0.977 (its least number 0.907), the floor 0.036, the mean's size 0.039; 1.8 commands
+  a decision and 0.76 units told.  The critics' explained variance 0.88 for the result, 0.80 to 0.90 for the economy
+  and the leads, 0.67 for the score, 0.22 to 0.28 for combat, experience and the map.  The memory's state 1.12 in
+  mean size, its largest number 19.  23% of ended seats in draws, the lead rule on.  The replays at 2017 (4 games
+  against the script, none won): 1.5 extractors at 6 minutes for 9.8, metal floating 31% of the time.  The learner
+  1.34 GB of the card and a collector 0.43 of its 0.8, the card 5.9 GB; WSL has 24 GB to spare.  D: 31 GB, the run
+  14 GB with 40 checkpoints.
+* **00:45, iteration 2339** (45.27M decisions), 28 minutes past its `end` file's time and still running ("What
+  happened in it" has why): 10 processes, no traceback, fallback or split, the watchdog done at 00:18.  2,150
+  decisions a second over the last 50 iterations and 2,020 over the 50 before (collecting 2,270 and 2,100, training
+  3,790 and 3,780); 322 iterations in the hour, the other kinds' games 45% of decisions.  The KL 0.008, the rate's
+  scale 0.92 to 0.96; the actor's gradient norm 3.4.  The spread 0.974 (its least number 0.888), the floor 0.030, the
+  mean's size 0.039; 1.8 commands a decision and 0.66 units told.  The critics' explained variance 0.86 for the
+  result, 0.83 to 0.89 for the economy and the leads, 0.78 for the score, 0.50 for the map, 0.40 for experience,
+  0.24 for combat.  33% of ended seats in draws, the lead rule on.  The learner 1.32 GB of the card and a collector
+  0.43 of its 0.8, the card 5.9 GB; WSL has 23 GB to spare.  D: 29 GB, the run 16 GB with 46 checkpoints.
+* **00:50, iteration 2368: ended** by its hours (45,835,107 decisions; `ppo/ckpt/it-002368.pt`), its launch file with
+  it.  The memory log stopped by hand; the dashboard and the memory guard left up.  After it the card holds 1.1 GB
+  and WSL has 38 GB.  The cron job deleted.
 
 ## A faster collector (2026-11-19, between `code-1` and `code-2`)
 
@@ -1130,6 +1458,23 @@ A line or two each, from 2026-11-18 05:23; the times are local.
 ## My choices the user hasn't confirmed
 
 Each is a constant or a flag, easy to change.
+
+* **In what was built after `code-2`** (2026-11-20; above).  The user's: a cloned start, a spread that starts below 1,
+  the flat reader of 2,048 to 312 with layers after it to about 4.7M, critics for the result, the value and the
+  income alone.  Mine:
+  * **the cloning** (`tools/policy_code_clone.py`): the recording's games (mirror 1v1s on the pool, the scripts' advice
+    played through commands, a decision's first 16); the loss (the decoder's reconstruction of the advice from the mean
+    with noise of a uniform share of the spread, and 0.05 of the squared distance to the advice's own code); a spread
+    of 0.3 for a clone; 64 games by 32 decisions a step at 5e-4;
+  * **the flat reader**: 5 layers after the first (4.5M with it; 6 would be 5.3M), each four times as wide in the
+    middle with a LayerNorm before it, the memory's vector added once after the first layer;
+  * **the critics**: that the terms without one stay as rewards, each judged on its branch's stretch alone;
+  * **the collectors**: `collector_cpu_ms` as the measure of a change, `--sim-threads` left at its default;
+  * **the coverage once a decision** (the user's): that it's a decision's last step, only where decisions are aligned,
+    and that a game's first step works it out whatever the batch was told;
+  * **the tolerance** (the user's, "~5 elmo"): 5.0 exactly, for a building as for a unit, and that past it two are
+    pushed clear of each other rather than back to 5; the units left out of the separation on top of it;
+  * **the dashboard tests' game**: seed 20 for 15.
 
 * **In what was built after `rdnn-5`** (2026-11-19; docs/learned-policy/06-select-then-command.md and
   05-order-autoencoder.md, each ending with a list for the user to decide).  The user's: selection before a command,

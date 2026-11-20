@@ -40,7 +40,7 @@ sys.path.insert(0, str(ROOT / "sim" / "py"))
 sys.path.insert(0, str(ROOT / "bots"))
 import zkpolicy as zp  # noqa: E402
 from zkbot import catalog, units as bot_units  # noqa: E402
-from zkbot.policy import actions as act, bundle as bd, featurize as fz, groups as gr, rawframe as rf, tables  # noqa: E402
+from zkbot.policy import actions as act, bundle as bd, featurize as fz, groups as gr, rawframe as rf, selections as sel, tables  # noqa: E402
 
 KINDS = ("1v1", "teams", "ffa", "chicken")
 
@@ -91,6 +91,29 @@ def decision_diff(a: act.Decision, b: act.Decision) -> str | None:
         if x.shape != y.shape or not np.array_equal(x, y):
             return f"{f}: {x.tolist()[:8]} != {y.tolist()[:8]}"
     return None
+
+
+def random_commands(t: fz.Tensors, bundle, x: np.ndarray, z: np.ndarray, rng: np.random.Generator, n: int = 16) -> np.ndarray:
+    """Commands of every kind, most of them aimed where there's something: circles round the side's own units, of their roles
+    (and sometimes any), places by a unit, a feature or anywhere, and a type that may or may not be one of theirs."""
+    c = np.zeros(n, sel.COMMAND_DTYPE)
+    roles = sel.unit_roles(t)
+    spots = [(float(x[i]), float(z[i])) for i in range(len(x))] + [(float(p[0]), float(p[1])) for p in t.feat_pos]
+    for i in range(n):
+        mine = {int(r) for r in rng.choice(roles, int(rng.integers(1, 4)))} if len(roles) else set()
+        c["roles"][i] = sum(1 << r for r in mine) | (int(rng.integers(0, 2**19)) if rng.random() < 0.3 else 0)
+        u = int(rng.integers(0, t.controllable)) if t.controllable else 0
+        cx, cz = (float(x[u]), float(z[u])) if t.controllable and rng.random() < 0.8 else (rng.random() * bundle.map_w, rng.random() * bundle.map_h)
+        px, pz = spots[int(rng.integers(0, len(spots)))] if spots and rng.random() < 0.7 else (rng.random() * bundle.map_w, rng.random() * bundle.map_h)
+        jitter = rng.normal(0.0, 40.0, 4) * (rng.random() < 0.5)
+        c["cx"][i], c["cz"][i] = np.clip((cx + jitter[0]) / bundle.map_w, 0, 1), np.clip((cz + jitter[1]) / bundle.map_h, 0, 1)
+        c["x"][i], c["z"][i] = np.clip((px + jitter[2]) / bundle.map_w, 0, 1), np.clip((pz + jitter[3]) / bundle.map_h, 0, 1)
+        c["radius"][i], c["portion"][i] = rng.integers(0, len(sel.RADII)), rng.integers(0, len(sel.PORTIONS))
+        c["kind"][i] = sel.KINDS[int(rng.integers(0, len(sel.KINDS)))]
+        can = np.flatnonzero(t.ptr_produce.any(0))
+        c["type"][i] = can[int(rng.integers(0, len(can)))] if len(can) and rng.random() < 0.7 else rng.integers(-1, t.ptr_produce.shape[1] + 1)
+        c["extent"][i] = rng.integers(-1, len(sel.RADII))
+    return c
 
 
 def random_decision(t: fz.Tensors, rng: np.random.Generator) -> act.Decision:

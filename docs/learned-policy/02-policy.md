@@ -64,7 +64,7 @@ numba, giving the same tensors to the bit as the numpy it replaced.  Without num
   seen once and now out of sight stays a record of the raw frame (`knowledge` 2, standing or dead, till its place is seen
   empty), and the featurizer gives the nets none of it: no token, no count in its region, and so none of its firepower in
   the eight sectors a token near it reads.  A privileged critic has it among its hidden units, with how long ago it was
-  seen.  In Python and libzkpolicy alike (ABI 4).
+  seen.  In Python and libzkpolicy alike (since ABI 4).
   * **What's still remembered is who holds a metal spot**: a site's status goes by the extractors a seat knows of, a
     remembered one too, till the spot is seen free (`SimEnv.site_status`).  The policy's extractors are placed by it, and
     the sim would stand one on a spot the enemy holds out of sight, and pay it.
@@ -257,7 +257,10 @@ them yet.
   * `featurize.py` and `featurize_kernels.py`: a raw frame (`rawframe.hpp`'s records), a map bundle's arrays and the table to
     every field of `fz.Tensors`, the masks and the critic's hidden units among them;
   * `actions.py` and `groups.py`: `decode`, `encode`, `fine_point`, `world_positions`, `to_slots`, `to_decision`, and the
-    groups' `bucket` and `expand`.
+    groups' `bucket` and `expand`;
+  * `selections.py`'s `decode` (`zkp_decode_commands`, `zkpolicy.decode_commands`; since ABI 5, 2026-11-20): a decision's
+    commands to its orders, which the trainer's collectors call (it was 5% of a collector's time in Python).  Not its
+    `encode`, which only the recorders use.
 
   Not in it: the bundle builder (a bundle's arrays are handed in), the nets, the decision loop, the engine side.
 * **The type table is a flat file Python writes**, `bots/zkbot/data/policy_table.bin` (444 KB): `tables.TypeTable`'s arrays

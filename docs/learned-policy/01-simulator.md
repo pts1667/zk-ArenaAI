@@ -16,7 +16,7 @@ This builds three libraries in `~/zksim/build` (`ZKSIM_LIB` overrides where they
 
 | Library | What | Python side |
 |---|---|---|
-| `libzksim.so` | the sim (`sim/src`, `sim/include/zksim`, C ABI in `capi.h`, ABI 32) | `sim/py/zksim.py` (`Batch`), `sim/py/zknav.py` (routes) |
+| `libzksim.so` | the sim (`sim/src`, `sim/include/zksim`, C ABI in `capi.h`, ABI 33) | `sim/py/zksim.py` (`Batch`), `sim/py/zknav.py` (routes) |
 | `libzkscripts.so` | the army and economy scripts (`sim/scripts`, `zkscripts.h`, ABI 17) | `tools/policy_scripts_cpp.py` |
 | `libzkrecord.so` | the game recorder (`sim/record`, `zkrecord.h`, ABI 2), needs `libzstd-dev` | `sim/py/zkrecord.py` |
 
@@ -140,7 +140,11 @@ Tags in this section: what's left out is listed under "Known gaps", and what was
 * Top speed, acceleration and braking as the engine integrates them.  Turn rate, and slope and depth speed per move class from
   `CMoveMath`.  Speed on a slope is directional: going downhill isn't slowed.
 * Six move classes (kbot, tank, spider, amph, hover, ship), from each unit's `smClass`, depth and `maxSlope`.
-* Units are spheres, kept apart by separation, and may push enemies.  A unit stops up to about 50 elmos short of a move goal.
+* Units are spheres, kept apart by separation, and may push enemies.  Two that overlap by 5 elmos or less are let be
+  (`SEPARATION_SLACK`; the user, 2026-11-20), and past that are pushed clear of each other: pushed for any overlap at
+  all, a standing crowd shuffled for good, two in five of its units moved every tick and nearly all by under an elmo.
+  A unit the separation would leave as it is has no turn in it until it has moved or a unit of the grid cells it looks
+  through has (`World::separate`, `sep_rest`): the same numbers as giving each its turn, to the bit.  A unit stops up to about 50 elmos short of a move goal.
 * **Re-ordering costs what it does in the engine.**  A plain move order stops the unit until its next slow update (every 15
   frames).  That includes an order given up to 2 frames before the update.  A fight order costs nothing.
 * **Routes are made at export, and nothing is pathfound at run time.**  Each `terrain.py` region is cut per move class into
@@ -453,7 +457,13 @@ order: never an ally's.  Roles are the bot catalog's (`zkbot.policy.groups`).  G
   * `[7]` and `[8]` the share of the map its allyteam has in sight and in radar, split evenly among the allyteam's teams so
     that they sum to it: circles of its finished units' ground sight and radar (not a radar whose upkeep went unpaid) on a
     grid of 64 elmos (`ZK_COVER_CELL`), a cell counting when its centre is in one.  Terrain isn't looked at, so what a
-    hill hides counts as seen.
+    hill hides counts as seen.  Worked out by a step unless the batch is told not to (`zk_batch_set_cover`, ABI 33;
+    a game's first step works it out either way), and as it last was otherwise: `SimEnv` has it worked out at a
+    decision's last step where decisions are aligned (`cover_every_step`: after every step; the user, 2026-11-20), so
+    the map term's change lands there.  How (`World::coverage`): a circle's cells a row at a time, each
+    row one run of bits whose ends the cell-by-cell test settles; a unit's runs kept while it stands where it stood
+    and sees as far; an allyteam's second team copying the first's.  The numbers are those of testing every cell of
+    every circle, which was a third of a step's time (2026-11-20); it's now a fifth where an army moves.
   * `[9]` the part of `[4]` its army did, and `[10]` the metal put into its army, the dead's too (cost x build progress).
     The army is what's mobile and armed but not a commander, a builder or a missile.  A shot or blast says which unit it's
     from; a fire or a death's blast doesn't, so it's no army's.  Zero-K's experience is a unit's `[9]` over its cost; these
@@ -950,5 +960,6 @@ What's left out on purpose, so it isn't mistaken for modelled:
   counting at 36 minutes, and the global time feature (frame / 36,000) reaches 4.0 at 80 minutes, where it was made for 20.
 * **Teams:** allies share income, overdrive and overflow only ("Economy"): units can't be given, and there's no pooled
   storage.
+* **Separation:** units overlap by up to 5 elmos ("Movement"), which hasn't been set beside the engine's own slack.
 * **Chicken defense:** the simplifications listed under it.  A chicken counts as costing 1 in the policy's type table, so
   probes of enemy value undercount them.

@@ -56,6 +56,37 @@ def test_a_command_selects_its_roles_in_its_circle_or_the_nearest_and_whoever_ob
         **{u: (rf.FIGHT, round(0.25 * w), round(0.75 * h)) for u in (1, 2, 3)}, 4: (rf.MOVE, round(0.75 * w), round(0.25 * h))}
 
 
+def test_the_library_decodes_the_rarer_kinds_as_the_python_does(small_map, table):
+    """libzkpolicy's zkp_decode_commands against selections.decode where the golden frames have no such unit
+    (test_zkpolicy.py has the rest): a reclaim by its features, a load by one transport, a throw as far as it reaches, a
+    beacon placed and waited at, a jump."""
+    import zkpolicy as zp
+    from policy_parity import orders_diff, random_commands
+
+    ready = BUSY | rf.JUMP_READY
+    (ax, az), (bx, bz) = (tuple(float(v) for v in small_map.centre[i]) for i in (0, 1))
+    units = make_units(*({"uid": u, "x": ax + 40.0 * u, "z": az + 60.0, "flags": IDLE} for u in range(1, 4)),
+                       *({"uid": 10 + u, "name": "cloakcon", "x": ax - 50.0 * u, "z": az, "flags": IDLE} for u in range(2)),
+                       {"uid": 20, "name": "gunshiptrans", "x": ax, "z": az - 80.0}, {"uid": 21, "name": "gunshiptrans", "x": ax + 300.0, "z": az},
+                       {"uid": 30, "name": "amphlaunch", "x": ax + 60.0, "z": az, "flags": ready},
+                       {"uid": 31, "name": "amphtele", "x": ax - 20.0, "z": az + 30.0}, {"uid": 32, "name": "tele_beacon", "x": bx, "z": bz},
+                       {"uid": 33, "name": "jumpraid", "x": ax + 20.0, "z": az - 30.0, "flags": ready},
+                       {"uid": 40, "name": "cloakriot", "side": ENEMY, "x": bx + 100.0, "z": bz}, {"uid": 41, "side": ENEMY, "x": ax + 500.0, "z": az})
+    features = np.zeros(3, rf.FEATURE_DTYPE)
+    features["feat_id"], features["x"], features["z"], features["metal"] = (7, 8, 9), (ax - 150.0, ax + 400.0, bx), (az + 100.0, az, bz + 90.0), 50.0
+    frame = make_frame(units)
+    frame.features = features
+    t = fz.featurize(frame, small_map, table, enabled_kinds=EVERY, economy=True)
+    x, z = actions.world_positions(t, small_map)
+    rng, kinds = np.random.default_rng(11), set()
+    for _ in range(150):
+        commands = random_commands(t, small_map, x, z, rng)
+        want = sel.decode(commands, t, small_map, x, z)
+        assert orders_diff(want, zp.decode_commands(commands, t, small_map, x, z, table)) is None
+        kinds |= {o.kind for o in want}
+    assert {rf.RECLAIM, rf.LOAD, rf.THROW, rf.PLACE_BEACON, rf.WAIT_AT_BEACON, rf.JUMP, rf.BUILD, rf.ASSIST} <= kinds, sorted(kinds)
+
+
 def test_orders_given_unit_by_unit_come_back_from_the_commands_that_say_them(small_map, table):
     solar, raider = table.names.index("energysolar"), table.names.index("cloakraid")
     units = make_units(*({"uid": u, "x": x, "z": 500.0, "flags": IDLE} for u, x in ((1, 500.0), (2, 480.0), (3, 520.0))),

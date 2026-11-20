@@ -560,6 +560,11 @@ class SimEnv:
         # slots waits, ended and untouched, for the next to start afresh: so each game's own count, which its scripts and opening go
         # by, is as before.  The diversity bonus is then counted once a decision, at the last slot it covers.
         self.align = False
+        # Where decisions are aligned, the map's coverage (the sight and radar shares the map term reads) is worked out at a
+        # decision's last step and is as it was between, so the term's change lands there (the user, 2026-11-20: worked out
+        # after every step it was a third of the sim's time, for a reward a decision gets once).  True: after every step.
+        self.cover_every_step = False
+        self._covering = True               # what the batch was last told (zksim.Batch.set_cover)
         self.slot = 0                       # steps since begin
         self.waiting = np.zeros(games, bool)    # ended, waiting for such a slot to start afresh
         # Ended games wait, as they are, for the caller to start them afresh (`restart`) or copy another over them (`copy_game`):
@@ -1444,7 +1449,15 @@ class SimEnv:
             counts.append(sum(len(p) for p in mine))
         return np.concatenate(parts), np.concatenate(([0], np.cumsum(counts))).astype(np.int32)
 
+    def _set_cover(self) -> None:
+        """Tells the batch whether the step about to be taken works out the map's coverage (`cover_every_step`)."""
+        on = self.cover_every_step or not self.align or (self.slot + 1) % self.act_every == 0
+        if on != self._covering:
+            self.batch.set_cover(on)
+            self._covering = on
+
     def step(self, progress: float) -> None:
+        self._set_cover()
         if self.cpp is not None:
             all_orders, offsets, groups, group_offsets = self._scripts_cpp()
             self.batch.step(all_orders, offsets, ticks=self.ticks, groups=groups, group_offsets=group_offsets)

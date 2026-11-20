@@ -165,7 +165,7 @@ class _Serving:
         return {"collector_reserved_gb": torch.cuda.max_memory_reserved() / 2**30} if self.device == "cuda" else {}
 
     def collect(self, want: int, progress: float, games_now: dict, advising: bool, resign: tuple = (False, None)) -> None:
-        began = time.perf_counter()
+        began, cpu = time.perf_counter(), time.process_time()
         self.play.read(self.nets)
         weights = fingerprint(self.nets)
         self.shell.progress, self.shell.economy_share, self.shell.advising = progress, games_now["policy_economy_share"], advising
@@ -173,8 +173,9 @@ class _Serving:
         self.collector.measuring, self.collector.resign_at = resign
         segments, tally = self.collector.collect_tally(want)
         segments = [replace(s, bundle=self.index[id(s.bundle)]) for s in segments]
+        # cpu: this process's, the sim's threads and the featurizer's with it: what a decision costs where the cores are all busy.
         self.conn.send(("collected", {"segments": segments, "tally": tally, "seconds": time.perf_counter() - began, "weights": weights,
-                                      **self._memory()}))
+                                      "cpu": time.process_time() - cpu, **self._memory()}))
 
     def evaluate(self, opponent: str, games: int, seed: int, economy: float, replays: dict | None, kind: str = "1v1") -> None:
         self.test.read(self.nets)
@@ -253,7 +254,7 @@ class Collectors:
         nets = self._nets(learner, learner.player)
         self.play, self.test = Weights(nets), Weights(nets)
         self.play.write(nets)
-        threads = max(2, (os.cpu_count() or 16) // self.count)
+        threads = self.cfg.sim_threads or max(2, (os.cpu_count() or 16) // self.count)
         for k, games in enumerate(split(self.cfg.games, self.count)):
             self._send(k, ("start", {"size": asdict(learner.actor.size), "vocabulary": learner.vocabulary, "games": games, "seed": seed_of(seed, k),
                                  "iteration": learner.iteration, "play": self.play, "test": self.test, "threads": threads, "device": device,
@@ -283,6 +284,8 @@ class Collectors:
         metrics = pt.Tally.merge([part["tally"] for part in parts]).metrics()
         seconds = [part["seconds"] for part in parts]
         metrics["collector_seconds_min"], metrics["collector_seconds_max"] = min(seconds), max(seconds)
+        # The collectors' CPU time for a decision, in ms, every thread of theirs counted.
+        metrics["collector_cpu_ms"] = 1e3 * sum(part["cpu"] for part in parts) / max(sum(len(s.steps) for part in parts for s in part["segments"]), 1)
         # Half of the last and half of before: which games a collector has changes over several collections, not one.
         now = [sum(len(s.steps) for s in part["segments"]) / max(part["seconds"], 1e-6) for part in parts]
         self.rates = [r if not old else 0.5 * (r + old) for r, old in zip(now, self.rates)]

@@ -140,6 +140,10 @@ class Config:
     # carried on after it included, as a run's end is (results/start-code.sh).  0: its points are iterations.  A run's
     # iterations an hour aren't known when it starts: they fall by half as its games grow old.
     spread_floor_began: float = 0.0
+    # With --size code: the spread of the code's Gaussian as a run starts (the user, 2026-11-20: "start the spread below 1"),
+    # every number of the code's alike, which it learns from there on.  0: the actor's own, a new one's the unit Gaussian's 1
+    # and a clone's what it was trained to play at (policy_code_clone.py).  A run carried on has its checkpoint's.
+    spread_start: float = 0.0
     maps: str = ""                  # a map pool (tools/map_gen.py), its held-out maps left out; "" for the five training maps
     variants: bool = False          # each side's army script draws its knobs (policy_variants.py)
     critic_bins: int = 0            # above 0, the critic's value is a distribution over this many, trained by HL-Gauss
@@ -148,6 +152,10 @@ class Config:
     # 03-training.md, "Reward"): ("blend", 1.0) alone is the one reward, the shaping fading into the result by beta.
     terms: tuple[tuple[str, float], ...] = (("blend", 1.0),)
     critic_rewarm: int = 10         # after a resume that changed the terms, iterations where only the critic learns: its heads start afresh
+    # Under bootstrapped GRPO, the terms that have a critic (the user, 2026-11-20: "keep only the result and average
+    # metal/value critics").  A term without one is judged on its branch's stretch alone, with nothing for what comes after
+    # the stretch (`Learner.bootstrap`), as every term was before `bootstrap`.  (): every term has one.
+    critics: tuple[str, ...] = ()
     entropy_floor: float = 0.3      # ENTROPY_FLOOR: a head below this share of its maximum entropy gets more bonus.  A clone's heads
                                     # all are, so from a clone it's 0, and the KL to the clone keeps its spread instead
     critic_warmup: int = 0          # iterations at the start where only the critic learns: the actor stays as it was
@@ -205,6 +213,7 @@ class Config:
                                     # this process, where a second thread would use the GPU during a capture
     collectors: int = 0             # processes that play the games, each its share of them, and the tests (policy_collectors.py);
                                     # 0: this process plays
+    sim_threads: int = 0            # the sim's threads in each collector, and its C++ scripts'; 0: the CPUs over the collectors, 2 at least
     collector_gb: float = 1.0       # the GPU memory each collector may hold, out of gpu_share.  The learner's training needs about
                                     # 4.5 GB of the rest (at 4 x 1.5 it had 2.6 GB, and ran out); a collector of 16 games ran out at
                                     # 0.5 (2026-11-10), and at 0.75 in full-2's first iterations of mixed games, as its frames grew
@@ -603,18 +612,26 @@ class Learner:
                 self.reference = copy.deepcopy(self.actor).eval()
                 for p in self.reference.parameters():
                     p.requires_grad_(False)
+        if self.coded and cfg.spread_start > 0.0:       # before the tests' average of the weights is made of them
+            with torch.no_grad():
+                self.actor.code_log_std.fill_(math.log(cfg.spread_start))
+        self.term_names = tuple(name for name, _ in cfg.terms)
+        self.term_weights = np.array([w for _, w in cfg.terms])
+        # The terms with a critic and their places among the terms (Config.critics): all of them, or bootstrapped GRPO's few.
+        if cfg.critics and (not (cfg.group and cfg.bootstrap) or cfg.resign or not set(cfg.critics) <= set(self.term_names)):
+            raise ValueError(f"--critics names terms among --terms, under bootstrapped GRPO (--group, --bootstrap) without --resign: {cfg.critics}")
+        self.critic_names = tuple(name for name in self.term_names if not cfg.critics or name in cfg.critics)
+        self.critic_at = [self.term_names.index(name) for name in self.critic_names]
         # GRPO has none, a branch's group standing in for it (GroupCollector), but bootstrapped (Config.bootstrap).
         if cfg.critic_size == "memory":
             # A small critic a term, reading the actor's own latents and its GRU's state (policy_model.MemoryCritic).
             if not (self.actor.gru and cfg.group and cfg.bootstrap) or cfg.resign:
                 raise ValueError("--critic-size memory reads the actor's GRU (--size gru, or rdnn), in bootstrapped GRPO (--group, --bootstrap), without --resign")
             self.critic = pm.MemoryCritic(self.actor.encoder.tokens * self.actor.encoder.latent + self.actor.gru, bins=cfg.critic_bins,
-                                          span=cfg.critic_span, terms=len(cfg.terms)).to(device)
+                                          span=cfg.critic_span, terms=len(self.critic_names)).to(device)
         else:
-            self.critic = None if cfg.group and not cfg.bootstrap else pm.Critic(self.vocabulary, bins=cfg.critic_bins, span=cfg.critic_span, terms=len(cfg.terms),
+            self.critic = None if cfg.group and not cfg.bootstrap else pm.Critic(self.vocabulary, bins=cfg.critic_bins, span=cfg.critic_span, terms=len(self.critic_names),
                                                                                  **pm.CRITIC_SIZES[cfg.critic_size]).to(device)
-        self.term_names = tuple(name for name, _ in cfg.terms)
-        self.term_weights = np.array([w for _, w in cfg.terms])
         if cfg.resign and not (cfg.group and cfg.bootstrap and "result" in self.term_names):
             raise ValueError("--resign reads the critic's result: it needs --group, --bootstrap and the result term")
         self.lineages: collections.deque = collections.deque(maxlen=RESIGN_WINDOW)     # played-out games: (least value, not lost)
@@ -901,17 +918,17 @@ class Learner:
         value_loss = torch.zeros((), device=device)
         if self.critic is not None:
             # Each term's head as if it were the only one: their losses add up.
-            ret = torch.as_tensor(np.stack([np.broadcast_to(s.ret, (self.critic.terms,)) for s in steps]), device=device, dtype=torch.float32)
+            ret = torch.as_tensor(np.stack([np.broadcast_to(s.ret, (len(self.term_names),)) for s in steps])[:, self.critic_at], device=device, dtype=torch.float32)
             per_term = (self.critic.hl_gauss(value, ret) if self.critic.bins else (value - ret).pow(2)).sum(0) / decisions
             value_loss = per_term.sum()
             note("loss_value", float(value_loss.detach()))
             if cfg.group:       # for each term's explained variance (`train`), as the collector gives it under PPO
                 with torch.no_grad():
                     guess = (value.float().softmax(-1) * self.critic.centres).sum(-1) if self.critic.bins else value.float()
-                    for name, x in zip(self.term_names, (guess - ret).square().mean(0).tolist()):
+                    for name, x in zip(self.critic_names, (guess - ret).square().mean(0).tolist()):
                         note(f"value_error_{name}", x, decisions)
             if len(per_term) > 1:
-                for name, x in zip(self.term_names, per_term.detach().tolist()):
+                for name, x in zip(self.critic_names, per_term.detach().tolist()):
                     note(f"loss_value_{name}", x)
         entropy_loss = torch.zeros((), device=device)
         for h in self.heads:
@@ -1091,8 +1108,8 @@ class Learner:
         if len(scales) > 1:
             out.update({f"{'term' if cfg.group else 'return'}_scale_{name}": float(x) for name, x in zip(self.term_names, scales)})
         out.update(self.end_stats)
-        for i, name in enumerate(self.term_names if f"value_error_{self.term_names[0]}" in out else ()):
-            out[f"explained_variance{'_' + name if i else ''}"] = 1.0 - out[f"value_error_{name}"] / max(float(self.return_var[i]), 1e-8)
+        for i, name in enumerate(self.critic_names if f"value_error_{self.critic_names[0]}" in out else ()):
+            out[f"explained_variance{'_' + name if i else ''}"] = 1.0 - out[f"value_error_{name}"] / max(float(self.return_var[self.critic_at[i]]), 1e-8)
         self.follow_kl(out.get("kl"))
         if log is not None:
             log.close()
@@ -1125,11 +1142,15 @@ class Learner:
         stretch's end (`Step.rest`, GroupCollector._judge) and the critic's value of where the branch ended, discounted to it.
         Its advantages are that, the economy less the income balance when it was taken (Config.economy_change), less the
         group's mean of the same from the same moment, a branch with no decision then counting 0, as the collector judges them
-        unbootstrapped; each group's spreads (weigh_groups) are of the same at its stretch's start."""
+        unbootstrapped; each group's spreads (weigh_groups) are of the same at its stretch's start.  A term without a critic
+        (Config.critics) has nothing where the branch ended: its return is the stretch's alone."""
         ends = {seg.branch: (seg.end, seg.bundle, seg.names, seg.end_history) for seg in segments if seg.end is not None}
-        values = dict(zip(ends, self.values_of([e[:3] for e in ends.values()], [e[3] for e in ends.values()])))
+        values = {}
+        for branch, value in zip(ends, self.values_of([e[:3] for e in ends.values()], [e[3] for e in ends.values()])):
+            values[branch] = np.zeros(len(self.term_names), value.dtype)        # nothing for a term without a critic (Config.critics)
+            values[branch][self.critic_at] = value
         self.end_stats = {}
-        if values and "result" in self.term_names:
+        if values and "result" in self.critic_names:
             # How much play is spent where the critic already calls the game lost: each valued end, by its branch's decisions.
             at = self.term_names.index("result")
             counts: dict[int, int] = {}
@@ -1324,7 +1345,7 @@ class Learner:
         torch.save({"actor": self.actor.state_dict(), **critic, "optimizer": self.optimizer.state_dict(), **ema, **muon,
                     "size": asdict(self.actor.size),
                     "iteration": self.iteration, "decisions": self.decisions, "entropy_coef": self.entropy_coef, "lr_scale": self.lr_scale,
-                    "terms": list(self.term_names), "warm_until": self.warm_until,
+                    "terms": list(self.term_names), "critics": list(self.critic_names), "warm_until": self.warm_until,
                     "lineages": [list(r) for r in self.lineages], "resign_at": self.resign_at,
                     "draws": list(self.draws), "lead_open": self.lead_open}, temp)
         os.replace(temp, directory / name)
@@ -1342,11 +1363,11 @@ class Learner:
                              "or bootstrapped GRPO (--bootstrap) and GRPO without, but another can start from its actor (--init)")
         # Other terms than the checkpoint's: the critic keeps what it reads, and its value heads start afresh, Adam's moments of
         # them too, while it learns them alone for a while (Config.critic_rewarm).
-        was = list(state.get("terms", ["blend"]))
-        fresh = self.critic is not None and was != list(self.term_names)
+        was = list(state.get("critics", state.get("terms", ["blend"])))     # the critic's terms: all of them, before Config.critics
+        fresh = self.critic is not None and was != list(self.critic_names)
         self.actor.load_state_dict(state["actor"])
         if self.critic is not None:
-            _load_critic(self.critic, state["critic"], fresh, was, self.term_names)
+            _load_critic(self.critic, state["critic"], fresh, was, self.critic_names)
         moments = state["optimizer"]
         if fresh and isinstance(self.critic, pm.MemoryCritic):
             # A net a term: the critic's parameters aren't those the moments were kept for.  Adam keeps the actor's, its first
@@ -1365,7 +1386,7 @@ class Learner:
         if self.ema is not None:
             self.ema.actor.load_state_dict(state.get("ema_actor", state["actor"]))
             if self.ema.critic is not None:
-                _load_critic(self.ema.critic, state.get("ema_critic", state["critic"]), fresh, was, self.term_names)
+                _load_critic(self.ema.critic, state.get("ema_critic", state["critic"]), fresh, was, self.critic_names)
         self.iteration, self.decisions = state["iteration"], state["decisions"]
         self.warm_until = self.iteration + self.cfg.critic_rewarm if fresh else state.get("warm_until", self.cfg.critic_warmup)
         # With no floor (Config.entropy_floor 0) no bonus rises above the base, which may have changed since.
@@ -1495,7 +1516,8 @@ def decision_orders(out: dict, k: int, t: fz.Tensors, bundle: bd.Bundle, command
     actions decoded."""
     x, z = act.world_positions(t, bundle)
     if commands is not None:
-        return sel.decode(commands[k], t, bundle, x, z)
+        # selections.decode in C++, the same orders to the bit (tests/policy/test_zkpolicy.py): it was 5% of a collector's time.
+        return zkpolicy.decode_commands(commands[k], t, bundle, x, z, tables.table())
     return act.decode(act.to_decision(act.Slots(*(out[h][k] for h in act.SLOT_FIELDS)), t.controllable), t, bundle, x, z)
 
 
@@ -2498,6 +2520,9 @@ def main() -> None:
                     help="with --size code: the least spread of the code's Gaussian, by iteration, as --kl-fade, or by the hours "
                          "since --spread-floor-began: 0:0.1 6:0.03 then falls from a tenth of the unit Gaussian's to 0.03 over "
                          "a run's 6 hours (default: %(default)s)")
+    ap.add_argument("--spread-start", type=float, default=Config.spread_start,
+                    help="with --size code: the spread of the code's Gaussian as the run starts, a share of the unit Gaussian's; "
+                         "0: the actor's own (1, or a clone's)")
     ap.add_argument("--spread-floor-began", type=float, default=Config.spread_floor_began, metavar="EPOCH",
                     help="when the run began, in seconds of the epoch (date +%%s): --spread-floor's points are hours since; 0: iterations")
     ap.add_argument("--kinds", nargs="+", default=[f"{k}:{w:g}" for k, w in Config.kinds], metavar="KIND:WEIGHT",
@@ -2542,6 +2567,8 @@ def main() -> None:
     ap.add_argument("--critic-bins", type=int, default=0, help="HL-Gauss bins for the critic (C6); 0 for one number")
     ap.add_argument("--critic-span", type=float, default=Config.critic_span)
     ap.add_argument("--entropy-floor", type=float, default=Config.entropy_floor, help="0 from a clone: no head's bonus rises")
+    ap.add_argument("--critics", nargs="*", default=list(Config.critics), metavar="TERM",
+                    help="under bootstrapped GRPO, the terms with a critic; the rest are judged on their stretch alone.  Without it, every term")
     ap.add_argument("--critic-warmup", type=int, default=0, help="iterations where only the critic learns")
     ap.add_argument("--critic-size", choices=tuple(pm.CRITIC_SIZES), default=Config.critic_size, help="small: beside a small actor (--size gru)")
     ap.add_argument("--terms", nargs="+", default=[f"{k}:{w:g}" for k, w in Config.terms], metavar="TERM:WEIGHT",
@@ -2613,6 +2640,7 @@ def main() -> None:
     ap.add_argument("--graphs", action=argparse.BooleanOptionalAction, default=Config.graphs, help="play each forward pass as a CUDA graph")
     ap.add_argument("--collectors", type=int, default=Config.collectors, help="processes that play the games and the tests; 0: this one")
     ap.add_argument("--collector-gb", type=float, default=Config.collector_gb, help="the GPU memory each collector may hold")
+    ap.add_argument("--sim-threads", type=int, default=Config.sim_threads, help="the sim's threads in each collector; 0: the CPUs over the collectors, 2 at least")
     ap.add_argument("--pass-seats", type=int, default=Config.pass_seats,
                     help="how many seats a game a collector's forward pass takes: 2 decides both sides of a 1v1 against itself at once, in twice the memory")
     ap.add_argument("--check-repro", action="store_true")
@@ -2635,6 +2663,8 @@ def main() -> None:
             ap.error(f"--{name.replace('_', '-')}'s iterations must rise")
     if any(not 0.0 < s <= 1.0 for _, s in fades["spread_floor"]):
         ap.error("--spread-floor's spreads are shares of the unit Gaussian's, above 0 and 1 at most")
+    if not 0.0 <= args.spread_start <= 1.0:
+        ap.error("--spread-start is a share of the unit Gaussian's spread, 1 at most (0: the actor's own)")
     import policy_sim_env
     try:
         kinds = policy_sim_env.parse_kinds(args.kinds)
@@ -2651,16 +2681,16 @@ def main() -> None:
 
     cfg = Config(terms=terms, critic_rewarm=args.critic_rewarm, seed=args.seed, decisions=args.decisions, games=args.games, iteration=args.iteration, passes=args.passes, ema=args.ema,
                  segment=args.segment, token_budget=args.token_budget, data_workers=args.workers, featurize_threads=args.featurize_threads, concurrent=args.concurrent,
-                 decide_every=args.decide_every, hours=args.hours, eval_every=args.eval_every, checkpoint_every=args.checkpoint_every, spread_floor_began=args.spread_floor_began, gpu_runs=args.gpu_runs, gpu_share=args.gpu_share, empty_cache=args.empty_cache,
+                 decide_every=args.decide_every, hours=args.hours, eval_every=args.eval_every, checkpoint_every=args.checkpoint_every, spread_floor_began=args.spread_floor_began, spread_start=args.spread_start, gpu_runs=args.gpu_runs, gpu_share=args.gpu_share, empty_cache=args.empty_cache,
                  latent_encoder=args.latent_encoder, enabled_kinds=policy_sim_env.KINDS,     # what the sim obeys
                  order_coder=args.order_coder,
                  init=args.init, size=args.size, maps=args.maps, variants=args.variants, lr_start=args.lr_start, lr_end=args.lr_end, kl_target=args.kl_target, lr_scale_start=args.lr_scale_start, recurrent_lr=args.recurrent_lr, compile_memory=args.compile_memory, critic_lr=args.critic_lr, critic_muon_lr=args.critic_muon_lr, actor_muon_lr=args.actor_muon_lr,
-                 critic_bins=args.critic_bins, critic_span=args.critic_span, entropy_floor=args.entropy_floor, critic_warmup=args.critic_warmup, critic_size=args.critic_size, kl_start=args.kl_start, lead_draws=args.lead_draws, **fades,
+                 critic_bins=args.critic_bins, critic_span=args.critic_span, entropy_floor=args.entropy_floor, critic_warmup=args.critic_warmup, critics=tuple(args.critics), critic_size=args.critic_size, kl_start=args.kl_start, lead_draws=args.lead_draws, **fades,
                  clone_weight=args.clone_weight, economy_start=args.economy_start, economy_end=args.economy_end,
                  income_weight=args.income_weight, speed_weight=args.speed_weight, diversity=args.diversity, fine_sim=args.fine_sim, z=args.z,
                  objective_sigma=args.objective_sigma, explore_share=args.explore_share, explore_weight=args.explore_weight,
                  replay_hours=args.replay_hours, replay_games=args.replay_games, replays=args.replays, graphs=args.graphs,
-                 collectors=args.collectors, collector_gb=args.collector_gb, pass_seats=args.pass_seats, kinds=tuple(kinds.items()), slots=args.slots,
+                 collectors=args.collectors, collector_gb=args.collector_gb, sim_threads=args.sim_threads, pass_seats=args.pass_seats, kinds=tuple(kinds.items()), slots=args.slots,
                  test_kinds=tuple(args.test_kinds), chicken_difficulties=tuple(difficulties.items()),
                  group=args.group, horizon=tuple(args.horizon), group_scale=args.group_scale, reward_to_go=args.reward_to_go,
                  group_step=args.group_step, economy_change=args.economy_change, adv_clip=args.adv_clip, spo_bound=args.spo_bound,

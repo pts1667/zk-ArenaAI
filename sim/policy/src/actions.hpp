@@ -32,6 +32,9 @@ Point fine_point(const Bundle& b, const TensorsView& t, int64_t region, int64_t 
 int64_t decode(const Table& T, const Bundle& B, const TensorsView& t, const int64_t* decision, std::vector<Order>& out);
 // Writes the decision; returns how many orders couldn't be said.
 int64_t encode(const Table& T, const TensorsView& t, const Bundle& B, const Order* orders, int64_t n, int64_t* decision);
+// selections.decode: `n` commands (selections.COMMAND_DTYPE, 26 bytes each) to orders, a unit one at most.  How many, or
+// -1 - k for the first command k whose kind, radius, portion or extent is none of theirs.
+int64_t decode_commands(const Table& T, const Bundle& B, const TensorsView& t, const void* commands, int64_t n, std::vector<Order>& out);
 int64_t bucket(double radius);
 void expand(const Table& T, int64_t anchor, int64_t roles_mask, double radius, const UnitRecord* units, int64_t n, const int64_t* rows,
             uint8_t* out);

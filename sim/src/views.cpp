@@ -433,7 +433,7 @@ int World::emit_features(int s, FeatureRecord* out, int cap) {
     return w;
 }
 
-void World::team_stats(int t, float* out) const {
+void World::team_stats(int t, float* out, const float* ally, bool fresh) const {
     // The reward's tracked value (03-training.md, "Reward"): cost x build progress, real units only.  A chicken costs nothing; its
     // build time stands in, which for every unit that does cost something is the same as its metal cost.
     float value = 0.0f;
@@ -464,11 +464,26 @@ void World::team_stats(int t, float* out) const {
         if (army(u)) army_value += double(d.cost > 0.0f ? d.cost : d.build_time) * double(build[i]);
     }
     out[6] = float(extractors);
-    float sight = 0.0f, scan = 0.0f;
-    coverage(ally_of[t], sight, scan);
-    const float share = 1.0f / float(std::max(ally_size[ally_of[t]], 1));
-    out[7] = sight * share;
-    out[8] = scan * share;
+    if (ally) {
+        out[7] = ally[7];
+        out[8] = ally[8];
+    } else {
+        const size_t a = size_t(ally_of[t]);
+        if (cover_have.size() <= a) {
+            cover_have.resize(a + 1, 0);
+            cover_kept.resize(2 * (a + 1), 0.0f);
+        }
+        if (fresh || !cover_have[a]) {
+            float sight = 0.0f, scan = 0.0f;
+            coverage(ally_of[t], sight, scan);
+            cover_kept[2 * a] = sight;
+            cover_kept[2 * a + 1] = scan;
+            cover_have[a] = 1;
+        }
+        const float share = 1.0f / float(std::max(ally_size[ally_of[t]], 1));
+        out[7] = cover_kept[2 * a] * share;
+        out[8] = cover_kept[2 * a + 1] * share;
+    }
     out[9] = float(army_dealt[t]);
     out[10] = float(army_value);
     out[11] = float(unit_spent[t]);
@@ -480,34 +495,93 @@ bool World::army(int u) const {
 }
 
 void World::coverage(int s, float& sight, float& scan) const {
-    // Circles of each finished unit's ground sight and radar on a grid over the map, a cell counting when its centre is in one.
+    ZK_PROF(STATS_COVERAGE);
+    // Circles of each finished unit's ground sight and radar on a grid over the map, a cell counting when its centre is in one:
+    // the cells of the circle's box (the wider of the two's) where dx * dx + dz * dz <= r * r, as floats.
+    // Row by row, not cell by cell.  That sum doesn't fall as |dx| grows, however it's rounded, so a row's cells in a circle
+    // are one run round the column nearest the unit: the run's ends are guessed by a square root and settled by the test
+    // itself, and the run is set as bits.  And a unit's runs are kept (`covered`) for as long as it stands where it stood and
+    // sees as far.  The same cells as testing every one, which took a third of a step's time when it was done so for every
+    // team after every step (2026-11-20).
     const int cols = std::max(1, int(std::ceil(map->width() / ZK_COVER_CELL))), rows = std::max(1, int(std::ceil(map->depth() / ZK_COVER_CELL)));
-    std::vector<uint8_t> grid(size_t(cols) * size_t(rows), 0);      // 1: in sight, 2: in radar
+    const size_t words = (size_t(cols) + 63) / 64;
+    std::vector<uint64_t> grid(2 * words * size_t(rows), 0);        // every row's cells in sight, a bit each, then every row's in radar
+    if (covered.size() < size_t(count())) covered.resize(size_t(count()));
     for (const int u : live) {
         const size_t i = size_t(u);
         if (side[i] != s || !alive[i] || build[i] < 1.0f) continue;
         const auto& d = type_of(u);
         const float los = d.los_radius, radar = unpaid[i] ? 0.0f : d.radar_radius, reach = std::max(los, radar);
         if (!(reach > 0.0f)) continue;
-        const int c0 = std::max(0, int(std::floor((x[i] - reach) / ZK_COVER_CELL))), c1 = std::min(cols - 1, int(std::floor((x[i] + reach) / ZK_COVER_CELL)));
-        const int r0 = std::max(0, int(std::floor((z[i] - reach) / ZK_COVER_CELL))), r1 = std::min(rows - 1, int(std::floor((z[i] + reach) / ZK_COVER_CELL)));
-        for (int r = r0; r <= r1; ++r) {
-            const float dz = (float(r) + 0.5f) * ZK_COVER_CELL - z[i];
-            for (int c = c0; c <= c1; ++c) {
-                const float dx = (float(c) + 0.5f) * ZK_COVER_CELL - x[i], d2 = dx * dx + dz * dz;
-                uint8_t& cell = grid[size_t(r) * size_t(cols) + size_t(c)];
-                if (d2 <= los * los) cell |= 1u;
-                if (d2 <= radar * radar) cell |= 2u;
+        Covered& kept = covered[i];
+        if (!(kept.x == x[i] && kept.z == z[i] && kept.los == los && kept.radar == radar)) {
+            const float xi = x[i];
+            const int c0 = std::max(0, int(std::floor((xi - reach) / ZK_COVER_CELL))), c1 = std::min(cols - 1, int(std::floor((xi + reach) / ZK_COVER_CELL)));
+            const int r0 = std::max(0, int(std::floor((z[i] - reach) / ZK_COVER_CELL))), r1 = std::min(rows - 1, int(std::floor((z[i] + reach) / ZK_COVER_CELL)));
+            kept.x = xi;
+            kept.z = z[i];
+            kept.los = los;
+            kept.radar = radar;
+            kept.r0 = r0;
+            kept.rows = c0 > c1 ? 0 : std::max(0, r1 - r0 + 1);
+            if (kept.rows > kept.room) {        // its rows go at the end, with room for as many as it can have wherever it stands
+                kept.room = std::max(kept.rows, 2 * int(std::ceil(std::max(los, d.radar_radius) / ZK_COVER_CELL)) + 2);
+                kept.at = int(cover_runs.size());
+                cover_runs.resize(cover_runs.size() + 4 * size_t(kept.room));
+            }
+            const int nearest = std::clamp(int(std::floor(xi / ZK_COVER_CELL)), c0, std::max(c0, c1));     // the column whose centre is nearest in x
+            const float squared[2] = {los * los, radar * radar};
+            for (int k = 0; k < kept.rows; ++k) {
+                const int r = r0 + k;
+                const float dz = (float(r) + 0.5f) * ZK_COVER_CELL - z[i];
+                int16_t* runs = cover_runs.data() + size_t(kept.at) + 4 * size_t(k);
+                for (int which = 0; which < 2; ++which) {
+                    const float r2 = squared[which];
+                    const auto in = [&](int c) {
+                        const float dx = (float(c) + 0.5f) * ZK_COVER_CELL - xi;
+                        return dx * dx + dz * dz <= r2;
+                    };
+                    runs[2 * which] = 1;
+                    runs[2 * which + 1] = 0;
+                    if (!in(nearest)) continue;     // then no cell of the row is
+                    const float half = std::sqrt(std::max(0.0f, r2 - dz * dz));
+                    int lo = std::clamp(int(std::floor((xi - half) / ZK_COVER_CELL)), c0, nearest);
+                    int hi = std::clamp(int(std::floor((xi + half) / ZK_COVER_CELL)), nearest, c1);
+                    while (lo < nearest && !in(lo)) ++lo;
+                    while (lo > c0 && in(lo - 1)) --lo;
+                    while (hi > nearest && !in(hi)) --hi;
+                    while (hi < c1 && in(hi + 1)) ++hi;
+                    runs[2 * which] = int16_t(lo);
+                    runs[2 * which + 1] = int16_t(hi);
+                }
             }
         }
+        const int16_t* runs = cover_runs.data() + (kept.rows ? size_t(kept.at) : 0);
+        for (int k = 0; k < kept.rows; ++k, runs += 4)
+            for (int which = 0; which < 2; ++which) {
+                const int lo = runs[2 * which], hi = runs[2 * which + 1];
+                if (hi < lo) continue;
+                uint64_t* row = grid.data() + (size_t(which) * size_t(rows) + size_t(kept.r0 + k)) * words;
+                const size_t w0 = size_t(lo) >> 6, w1 = size_t(hi) >> 6;
+                const uint64_t first = ~uint64_t(0) << (lo & 63), last = ~uint64_t(0) >> (63 - (hi & 63));
+                if (w0 == w1) {
+                    row[w0] |= first & last;
+                } else {
+                    row[w0] |= first;
+                    for (size_t w = w0 + 1; w < w1; ++w) row[w] = ~uint64_t(0);
+                    row[w1] |= last;
+                }
+            }
     }
     size_t seen = 0, scanned = 0;
-    for (const uint8_t cell : grid) {
-        seen += cell & 1u;
-        scanned += (cell >> 1) & 1u;
+    const size_t plane = words * size_t(rows);
+    for (size_t w = 0; w < plane; ++w) {
+        seen += size_t(__builtin_popcountll(grid[w]));
+        scanned += size_t(__builtin_popcountll(grid[plane + w]));
     }
-    sight = float(seen) / float(grid.size());
-    scan = float(scanned) / float(grid.size());
+    const size_t cells = size_t(cols) * size_t(rows);
+    sight = float(seen) / float(cells);
+    scan = float(scanned) / float(cells);
 }
 
 }  // namespace zk

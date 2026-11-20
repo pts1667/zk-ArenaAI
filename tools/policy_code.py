@@ -9,6 +9,10 @@ does, to carry the commands out, and the frame encoder did, to make the latents.
               └─► memory ◄── the last code                               ▲                           + a learnt spread
                     └────────────── its vector ───────────────────────────┘
 
+That's the reader by attention, code-1's and code-2's (`Size.reader` "tokens").  The one since (the user, 2026-11-20:
+"proceed with flat 2048 -> 312 (maybe a few more layers after to pad back to 4.7M)") has no attention: the latents flat
+through a linear layer, the memory's vector added, a few plain layers (`Layer`) and a linear layer to the mean.
+
 It keeps the names of LatentActor's memory path that the trainer calls (`decide`, `acted`, `segments`, `memory_at`,
 `initial_state`, `record`, `gru`, `memory`), so the collectors, the critics of the memory and GRPO go on as they are.
 What differs is what a decision is: one code, with one probability.  `policy_latent.make` gives one for a size with an
@@ -20,6 +24,7 @@ import math
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 import order_vae
 import policy_latent as pl
@@ -29,6 +34,17 @@ import policy_model as pm
 # it unless the trainer says another (`CodeActor.log_std_least`, policy_train.Config.spread_floor).
 LOG_STD_LEAST = math.log(0.1)
 LOG_STD_MOST = 0.0
+
+
+class Layer(nn.Module):
+    """A layer of the flat reader: x + W2 gelu(W1 LayerNorm(x)), the middle four times as wide."""
+
+    def __init__(self, d: int):
+        super().__init__()
+        self.ln, self.up, self.down = nn.LayerNorm(d), nn.Linear(d, 4 * d), nn.Linear(4 * d, d)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + self.down(F.gelu(self.up(self.ln(x)), approximate="tanh"))
 
 
 class CodeActor(nn.Module):
@@ -42,13 +58,18 @@ class CodeActor(nn.Module):
         self.codes, self.latent = self.decoder.cfg.codes, self.decoder.cfg.latent
         self.code = self.codes * self.latent
         d = self.d
-        self.latent_in = nn.Linear(encoder.latent, d)
-        self.slots = nn.Parameter(torch.randn(encoder.tokens, d) / math.sqrt(d))        # which latent token this is
+        self.flat = size.reader == "flat"
         self.z_in = nn.Linear(pl.Z_DIM, d)                                              # the objective a seat is told: nothing at first
         nn.init.zeros_(self.z_in.weight)
         nn.init.zeros_(self.z_in.bias)
-        self.frame_blocks = nn.ModuleList(pm.Block(d, size.heads) for _ in range(size.layers))
-        self.lnf = nn.LayerNorm(d)
+        if self.flat:       # every latent at once, as the memory and the critics read them
+            self.frame_in = nn.Linear(encoder.tokens * encoder.latent, d)
+            self.layers = nn.ModuleList(Layer(d) for _ in range(size.layers))
+        else:
+            self.latent_in = nn.Linear(encoder.latent, d)
+            self.slots = nn.Parameter(torch.randn(encoder.tokens, d) / math.sqrt(d))    # which latent token this is
+            self.frame_blocks = nn.ModuleList(pm.Block(d, size.heads) for _ in range(size.layers))
+            self.lnf = nn.LayerNorm(d)
         units = size.gru // 2 if size.memory == "rdnn" else size.gru
         wide = units // 2
         self.mem_units = units
@@ -57,10 +78,11 @@ class CodeActor(nn.Module):
         self.mem_ln = nn.LayerNorm(wide)
         self.memory = pl.RDNNCell(wide, units) if size.memory == "rdnn" else nn.GRUCell(wide, size.gru)
         self.mem_out = nn.Linear(units, d)
-        self.code_queries = nn.Parameter(torch.randn(self.codes, d) / math.sqrt(d))
-        self.code_blocks = nn.ModuleList(pl.PlanBlock(d, size.heads) for _ in range(size.plan_layers))
+        if not self.flat:
+            self.code_queries = nn.Parameter(torch.randn(self.codes, d) / math.sqrt(d))
+            self.code_blocks = nn.ModuleList(pl.PlanBlock(d, size.heads) for _ in range(size.plan_layers))
         self.code_ln = nn.LayerNorm(d)
-        self.code_mean = nn.Linear(d, self.latent)
+        self.code_mean = nn.Linear(d, self.code if self.flat else self.latent)
         # At first every code is the unit Gaussian's, whatever the frame: what the autoencoder was pulled towards.
         nn.init.zeros_(self.code_mean.weight)
         nn.init.zeros_(self.code_mean.bias)
@@ -106,6 +128,13 @@ class CodeActor(nn.Module):
     def mean(self, latents: torch.Tensor, state: torch.Tensor, z: torch.Tensor | None) -> torch.Tensor:
         """N x K x latent: each decision's code's mean, from its frame's latents (N x tokens x latent) and its memory's state."""
         added = self.z_in.bias[None] if z is None else self.z_in(z.to(self.z_in.weight.dtype))
+        if self.flat:
+            x = self.frame_in(latents.flatten(1)) + added
+            x = x + self.mem_out(state[:, :self.mem_units]).to(x.dtype)
+            for layer in self.layers:
+                x = layer(x)
+            with torch.autocast(x.device.type, enabled=False):      # in float32, as below
+                return self.code_mean(self.code_ln(x.float())).unflatten(1, (self.codes, self.latent))
         x = self.latent_in(latents) + self.slots + added[:, None]
         everyone = torch.ones(x.shape[:2], dtype=torch.bool, device=x.device)
         for block in self.frame_blocks:

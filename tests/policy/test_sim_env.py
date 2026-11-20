@@ -565,6 +565,35 @@ def test_nothing_on_either_side_is_no_lead():
     assert np.all(env.result == 0.0)
 
 
+def test_aligned_games_work_the_maps_coverage_out_once_a_decision():
+    """Where decisions are aligned, the sight and radar shares the map term reads are worked out at a decision's last step and
+    are as they were between: there, the numbers of an env that works them out after every step, and nothing else of a
+    step's statistics differs."""
+    def play(every: bool) -> list:
+        env = se.SimEnv(3, 4, ["scripts"], threads=2)
+        env.act_every, env.align, env.cover_every_step = 6, True, every
+        env.begin()
+        kept = []
+        for _ in range(48):
+            env.step(0.0)
+            env.finished_seats()
+            kept.append((env.batch.stats.copy(), env.batch.counts.copy(), env.balance_delta.copy()))
+        return kept
+
+    each, once = play(True), play(False)
+    cover = [se.SIGHT_STAT, se.RADAR_STAT]
+    rest = [i for i in range(each[0][0].shape[2]) if i not in cover]
+    moved = 0
+    for k, ((a, counts_a, _), (b, counts_b, delta)) in enumerate(zip(each, once)):
+        assert np.array_equal(a[:, :, rest], b[:, :, rest]) and np.array_equal(counts_a, counts_b)
+        if (k + 1) % 6 == 0:
+            assert np.array_equal(a[:, :, cover], b[:, :, cover])
+        elif k:
+            assert np.array_equal(b[:, :, cover], once[k - 1][0][:, :, cover]) and not delta[:, :, se.BALANCE_TERMS.index("map")].any()
+        moved += int(k > 0 and not np.array_equal(a[:, :, cover], each[k - 1][0][:, :, cover]))
+    assert moved > 12 and each[-1][0][:, :, cover].any()       # worked out after every step, the shares move step by step
+
+
 def test_aligned_games_all_decide_on_the_same_slots_and_an_ended_one_waits_for_the_next():
     """SimEnv.align: games ending between decision slots (here at their 9th step, every 6 slots a decision) start afresh only on the
     next decision slot, so every live game's own count, which its scripts go by, stays on the same slots as the others'."""

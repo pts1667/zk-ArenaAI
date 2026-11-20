@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define ZK_ABI_VERSION 32
+#define ZK_ABI_VERSION 33
 #define ZK_RECLAIM_RADIUS 32.0f   /* elmos: the least area a reclaim order has, and all one round a feature has */
 #define ZK_WARD_TARGETS 4
 #define ZK_MAX_MOUNTS 8
@@ -540,6 +540,10 @@ void* zk_batch_world(void* batch, int g);
 void zk_batch_copy_game(void* batch, int src, int dst);
 /* zk_world_set_roles for every game, now and after any reset. */
 void zk_batch_set_roles(void* batch, const int32_t* role_of_type, int n_types);
+/* Whether a step works out ZK_STATS [7] and [8], the map's coverage, from the next step on (at first it does).  A step that
+   doesn't gives them as they last were, and a game's first step works them out either way: for a caller that reads them once
+   every several steps, a third of whose time they were (2026-11-20). */
+void zk_batch_set_cover(void* batch, int on);
 /* zk_world_set_reveal for every game, now and after any reset. */
 void zk_batch_set_reveal(void* batch, int on);
 /* Chicken defense in game g (zk_world_chickens): after zk_batch_reset and before the game's next step. */

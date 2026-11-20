@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <limits>
 
 #include "npy.hpp"
@@ -418,6 +419,163 @@ void expand(const Table& T, int64_t anchor, int64_t roles_mask, double radius, c
         const bool near = dx * dx + dz * dz <= r * r;
         out[k] = u.uid == anchor || (moves && finished && in_mask && near);
     }
+}
+
+// selections.py: a decision's commands, each a selection and what it's told, to plain orders --------------------------------------
+
+namespace {
+
+constexpr int COMMAND_RADII = 1 + GROUP_COUNT;      // selections.RADII: 0, the one unit nearest the middle, then the groups' radii
+constexpr double PORTIONS[3] = {1.0, 0.5, 0.25};
+constexpr double RECLAIM_LEAST = 32.0;
+
+// selections.COMMAND_DTYPE, which numpy packs.
+#pragma pack(push, 1)
+struct Command {
+    uint32_t roles;
+    int8_t radius, portion, kind, extent;
+    int16_t type;
+    float cx, cz, x, z;
+};
+#pragma pack(pop)
+static_assert(sizeof(Command) == 26, "selections.COMMAND_DTYPE is 26 bytes");
+
+double command_radius(int64_t at) { return at == 0 ? 0.0 : GROUP_RADII[at - 1]; }
+bool placed(int64_t k) {
+    return k == MOVE || k == FIGHT || k == ATTACK_UNIT || k == MANUAL_FIRE || k == BUILD || k == ASSIST || k == RECLAIM || k == LOAD ||
+           k == UNLOAD || k == JUMP || k == THROW || k == PLACE_BEACON || k == WAIT_AT_BEACON || k == AREA_MEX;
+}
+bool aimed(int64_t k) { return k == ATTACK_UNIT || k == MANUAL_FIRE || k == ASSIST || k == LOAD; }
+
+// bundle.Bundle.region_at of one point, given as Python floats.
+int64_t region_at(const Bundle& B, double x, double z) {
+    const int64_t i = std::clamp<int64_t>(to_i32(z / B.cell_d), 0, B.label_h - 1), j = std::clamp<int64_t>(to_i32(x / B.cell_d), 0, B.label_w - 1);
+    return B.label[i * B.label_w + j];
+}
+
+// Keeps those of `chosen` that `keep` says, in their order: chosen[mask[chosen]].
+template <class F>
+void keep_those(std::vector<int64_t>& chosen, F keep) {
+    chosen.erase(std::remove_if(chosen.begin(), chosen.end(), [&](int64_t i) { return !keep(i); }), chosen.end());
+}
+
+// selections.selected: the controllable units a command selects, the nearest to its circle's middle first.  The distances
+// are float32, as numpy has a float32 array less a Python float.
+void selected(const Command& c, const Table& T, const Bundle& B, const TensorsView& t, const std::vector<uint8_t>& free, std::vector<float>& away,
+              std::vector<int64_t>& out) {
+    out.clear();
+    const int64_t n = t.controllable;
+    const float mx = float(double(c.cx) * B.map_w_d), mz = float(double(c.cz) * B.map_h_d);
+    away.resize(size_t(n));
+    bool any = false;
+    for (int64_t i = 0; i < n; ++i) {
+        const bool of_roles = ((c.roles >> T.role[size_t(t.unit_name[i])]) & 1u) == 1u && free[size_t(i)];
+        away[size_t(i)] = of_roles ? ::hypotf(t.unit_x[i] - mx, t.unit_z[i] - mz) : std::numeric_limits<float>::infinity();
+        any = any || of_roles;
+    }
+    if (!any) return;
+    if (c.radius != 0) {
+        const float radius = float(command_radius(c.radius));
+        for (int64_t i = 0; i < n; ++i)
+            if (away[size_t(i)] <= radius) out.push_back(i);
+    }
+    if (out.empty()) {      // a radius of 0, or none in the circle: the nearest, the first of those as near
+        int64_t best = 0;
+        for (int64_t i = 1; i < n; ++i)
+            if (away[size_t(i)] < away[size_t(best)]) best = i;
+        out.push_back(best);
+        return;
+    }
+    std::stable_sort(out.begin(), out.end(), [&](int64_t a, int64_t b) { return away[size_t(a)] < away[size_t(b)]; });
+    out.resize(size_t(std::ceil(PORTIONS[c.portion] * double(out.size()))));
+}
+
+}  // namespace
+
+int64_t decode_commands(const Table& T, const Bundle& B, const TensorsView& t, const void* commands, int64_t n, std::vector<Order>& out) {
+    const int64_t C = t.controllable, E = t.enemies;
+    std::vector<uint8_t> free(size_t(C), 1);
+    std::vector<float> away;
+    std::vector<int64_t> chosen;
+    out.clear();
+    for (int64_t k = 0; k < n; ++k) {
+        Command c;
+        std::memcpy(&c, static_cast<const uint8_t*>(commands) + size_t(k) * sizeof(Command), sizeof(Command));
+        const int64_t kind = c.kind;
+        if (kind < 0 || kind >= KIND_COUNT || c.radius < 0 || c.radius >= COMMAND_RADII || c.portion < 0 || c.portion > 2 || c.extent >= COMMAND_RADII)
+            return -1 - k;
+        selected(c, T, B, t, free, away, chosen);
+        keep_those(chosen, [&](int64_t i) { return t.kind_mask[i * KIND_COUNT + kind] != 0; });
+        if (chosen.empty()) continue;
+        double x = double(c.x) * B.map_w_d, z = double(c.z) * B.map_h_d, radius = 0.0;
+        int64_t target = -1;
+        // A place as numpy takes it against float32 positions: the Python float as a float32.
+        const auto nearest = [&](double px, double pz, int64_t token) { return ::hypotf(t.unit_x[token] - float(px), t.unit_z[token] - float(pz)); };
+        if (kind == UNLOAD || kind == JUMP || kind == THROW || kind == PLACE_BEACON) {
+            const int64_t region = region_at(B, x, z);
+            if (region < 0) continue;       // a place in no region: nobody's to go to
+            const uint8_t* mask = kind == PLACE_BEACON ? t.ptr_region : t.ptr_jump;
+            keep_those(chosen, [&](int64_t i) { return mask[i * t.regions + region] != 0; });
+        } else if (aimed(kind)) {
+            // The enemy token any of them can be aimed at that's nearest the place, the first of those as near.
+            const uint8_t* legal = t.ptr_enemy + int64_t(pointer_of(kind)) * C * E;
+            int64_t e = -1;
+            float best = 0.0f;
+            for (int64_t j = 0; j < E; ++j) {
+                if (std::none_of(chosen.begin(), chosen.end(), [&](int64_t i) { return legal[i * E + j] != 0; })) continue;
+                const float d = nearest(x, z, t.enemy_tokens[j]);
+                if (e < 0 || d < best) e = j, best = d;
+            }
+            if (e < 0) continue;
+            keep_those(chosen, [&](int64_t i) { return legal[i * E + e] != 0; });
+            const int64_t token = t.enemy_tokens[e];
+            x = double(t.unit_x[token]);
+            z = double(t.unit_z[token]);
+            target = t.uids[token];
+            if (kind == LOAD) {     // one thing is one transport's load: the nearest that can lift it
+                int64_t one = chosen[0];
+                for (const int64_t i : chosen)
+                    if (nearest(x, z, i) < nearest(x, z, one)) one = i;
+                chosen.assign(1, one);
+            }
+        } else if (kind == BUILD || kind == PRODUCE) {
+            const int64_t p = c.type;
+            if (p < 0 || p >= t.producible) continue;
+            keep_those(chosen, [&](int64_t i) { return t.ptr_produce[i * t.producible + p] != 0; });
+            target = T.producible[size_t(p)];
+            if (kind == PRODUCE) x = z = 0.0;
+        } else if (kind == RECLAIM || kind == AREA_MEX) {
+            radius = std::max(command_radius(std::max<int64_t>(c.extent, 0)), RECLAIM_LEAST);
+            if (kind == RECLAIM) {      // only where a feature in sight lies in the area
+                bool any = false;
+                for (int64_t f = 0; f < t.features && !any; ++f)
+                    any = ::hypotf(t.feat_pos[2 * f] - float(x), t.feat_pos[2 * f + 1] - float(z)) <= float(radius);
+                if (!any) continue;
+            }
+        } else if (kind == WAIT_AT_BEACON) {
+            // The beacon of ours nearest the place that any of them can walk to; each that can, goes.
+            const auto ok = [&](int64_t i, int64_t b) { return t.beacon_regions[b] >= 0 && t.ptr_wait[i * t.regions + t.beacon_regions[b]] != 0; };
+            int64_t at = -1;
+            float best = 0.0f;
+            for (int64_t b = 0; b < t.beacons; ++b) {
+                if (std::none_of(chosen.begin(), chosen.end(), [&](int64_t i) { return ok(i, b); })) continue;
+                const float d = nearest(x, z, t.own_beacons[b]);
+                if (at < 0 || d < best) at = b, best = d;
+            }
+            if (at < 0) continue;
+            keep_those(chosen, [&](int64_t i) { return ok(i, at); });
+            target = t.uids[t.own_beacons[at]];
+            x = z = 0.0;
+        } else if (!placed(kind)) {
+            x = z = 0.0;
+        }
+        for (const int64_t i : chosen) {
+            free[size_t(i)] = 0;
+            const Point at = kind == THROW ? within_throw(T, t, i, {x, z}) : Point{x, z};
+            out.push_back({t.uids[i], kind, at.x, at.z, target, radius, 0});
+        }
+    }
+    return int64_t(out.size());
 }
 
 }  // namespace zkp
